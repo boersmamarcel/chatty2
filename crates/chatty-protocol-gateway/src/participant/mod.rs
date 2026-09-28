@@ -18,6 +18,8 @@
 //!   and the way back down to a task parked on a question (AGE-306).
 //! * [`calls`] — the calls a worker makes over its connection, and the
 //!   root's direct handle, run as the node that made them (BI-4).
+//! * [`spawn_context`] — where a spawned worker starts: derived from, and
+//!   clamped to, the calling node's own context (BI-5).
 //! * [`listener`] — broker-made connections, the rule that a closed one
 //!   deregisters its participant and fails its open tasks, and the shared
 //!   socket that refuses every registration.
@@ -31,6 +33,7 @@ mod budget;
 mod calls;
 mod protocol;
 mod registry;
+pub mod spawn_context;
 mod virtual_agent;
 
 pub use budget::{DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit};
@@ -63,4 +66,5 @@ pub use listener::{LocalConnection, bind, open_connection, serve, serve_connecti
 #[cfg(unix)]
 pub use runner::{
     EvidenceFactory, LocalRunner, PARTICIPANT_FD, Worker, WorkerWorkspace, WorkspaceFactory,
+    WorkspaceRequest,
 };

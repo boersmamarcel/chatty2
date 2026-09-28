@@ -17,6 +17,16 @@
 //! leader's task reaps its whole subtree: each hop's worker dies with the
 //! call that started it, and its own calls die with its connection.
 //!
+//! A worker the call starts is spawned with a [`SpawnContext`] the broker
+//! sets from the caller's own (BI-5): a sub-leader's child gets its tree
+//! under the sub-leader's and its branch off the sub-leader's, and may call
+//! only what the sub-leader may. A context the call brings is clamped to the
+//! caller's; see [`super::spawn_context`].
+//!
+//! A callee's question travels back to whoever made the call, over the
+//! root's direct handle or a worker's connection alike, so a question climbs
+//! every hop to the root's human (AGE-306, BI-5).
+//!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, and every refused call one refusal row. `list_agents` reads the
 //! directory and is not an edge between two nodes, so it writes none.
@@ -26,7 +36,7 @@ use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
     AgentOrigin, CallError, CallEvent, CallRequest, CallStream, ConversationScope, EdgeKind,
-    EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, Transport,
+    EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, SpawnContext, Transport,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -34,6 +44,7 @@ use tracing::{debug, info, warn};
 
 use super::protocol::{DelegatedTask, TaskInput, TaskState};
 use super::registry::{ParticipantRegistry, ROOT_SCOPE, TaskUpdate};
+use super::spawn_context;
 use super::virtual_agent::VirtualAgent;
 use crate::handlers::a2a_participant;
 
@@ -122,10 +133,14 @@ impl BrokerCalls {
             bytes: params.prompt.len() as u64,
             outcome: None,
         };
-        // Only the root can be asked a question from here: its tool holds a
-        // direct handle to answer through. A worker's connection carries no
-        // answer back down yet (BI-5 relays questions across hops).
-        let answerable = caller == Caller::Root;
+        // A worker the call starts gets its context from the caller's own
+        // (BI-5); a context that reaches outside it ends the call here.
+        let spawn = match runner.as_ref() {
+            Some(runner) if !registry.is_registered(&params.agent) => {
+                self.spawn_context(&caller, runner.as_ref(), params.spawn_context)
+            }
+            _ => Ok(None),
+        };
         let task = DelegatedTask::new(params.prompt).with_caller(match &caller {
             Caller::Root => None,
             Caller::Node(name) => Some(name.clone()),
@@ -133,6 +148,15 @@ impl BrokerCalls {
         let agent = params.agent;
 
         async_stream::stream! {
+            let task = match spawn {
+                Ok(context) => task.with_spawn_context(context),
+                Err(error) => {
+                    warn!(caller = %caller.name(), agent = %agent, %error, "Refused a spawn context");
+                    edge.refused(&error.to_string());
+                    yield Err(error);
+                    return;
+                }
+            };
             let running = if registry.is_registered(&agent) {
                 a2a_participant::submit(&registry, &agent, task)
                     .ok_or_else(|| format!("participant '{agent}' is no longer connected"))
@@ -186,27 +210,14 @@ impl BrokerCalls {
                             break;
                         }
                         match (state, input) {
-                            (TaskState::InputRequired, Some(input)) if answerable => {
+                            // Back to whoever called, root or worker: a
+                            // worker re-asks it on its own store, which
+                            // parks its own task toward its caller.
+                            (TaskState::InputRequired, Some(input)) => {
                                 yield Ok(CallEvent::InputRequired {
                                     task: running.task_id.clone(),
                                     request: json!(input),
                                 });
-                            }
-                            (TaskState::InputRequired, Some(input)) => {
-                                let asked = input
-                                    .questions
-                                    .first()
-                                    .map(|q| q.question.clone())
-                                    .unwrap_or_else(|| "a question".to_string());
-                                end = Some((
-                                    TaskState::Failed,
-                                    Some(format!(
-                                        "'{agent}' asked a question ({asked}), and a question \
-                                         cannot yet be relayed back over a worker's connection"
-                                    )),
-                                    None,
-                                ));
-                                break;
                             }
                             (TaskState::Working, _) => {
                                 if let Some(step) = message {
@@ -234,6 +245,37 @@ impl BrokerCalls {
             // `running` is dropped here, which reaps a spawned worker.
         }
         .boxed()
+    }
+
+    /// The context a worker spawned for `caller` as `target` starts from:
+    /// derived from the caller's own when the call brings none, clamped to
+    /// it when it does (invariant 6). A node no runner recorded a context
+    /// for is the root's.
+    ///
+    /// A virtual agent outside the caller's roster is refused: a sub-leader
+    /// reaches only what it was given.
+    fn spawn_context(
+        &self,
+        caller: &Caller,
+        target: &dyn VirtualAgent,
+        requested: Option<SpawnContext>,
+    ) -> Result<Option<SpawnContext>, CallError> {
+        let own = match caller {
+            Caller::Node(name) => self.registry.node_context(name),
+            Caller::Root => None,
+        }
+        .unwrap_or_else(|| spawn_context::root(&self.runners, target));
+        if !own.roster.iter().any(|name| name == target.agent_name()) {
+            return Err(CallError::Refused(format!(
+                "'{}' is not on {}'s roster",
+                target.agent_name(),
+                caller.name()
+            )));
+        }
+        match requested {
+            None => Ok(Some(spawn_context::derive(&own, target))),
+            Some(requested) => spawn_context::clamp(requested, &own, target).map(Some),
+        }
     }
 
     /// Log a call refused before it reached anyone.

@@ -26,5 +26,5 @@ pub use origin::AgentOrigin;
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
     CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome, InvokeAgentParams,
-    SendMessageParams, Transport,
+    SendMessageParams, SpawnContext, Transport,
 };

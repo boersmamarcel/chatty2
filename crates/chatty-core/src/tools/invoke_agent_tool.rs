@@ -690,6 +690,7 @@ impl InvokeAgentTool {
             prompt: prompt.to_string(),
             handle: None,
             include_trace,
+            spawn_context: None,
         });
         let mut stream = transport.call(request).await.map_err(|e| {
             let err_text = format!("\u{26a0}\u{fe0f} Failed to invoke agent '{agent}': {e}");

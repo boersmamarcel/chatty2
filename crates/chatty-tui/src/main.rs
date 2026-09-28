@@ -373,6 +373,10 @@ struct Cli {
     /// A worker is a `chatty-tui` process next to this one; when the
     /// workspace is a git repository each worker gets its own `git
     /// worktree`, as on the desktop. Unix only.
+    ///
+    /// Only a root process starts a broker (ADR-0020, BI-5): inside a
+    /// worker (--participant-fd) this means "use my connection", which a
+    /// worker does anyway, and starts nothing.
     #[arg(long)]
     broker: bool,
 
@@ -688,7 +692,8 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // need, so nothing is bound and no task is spawned until a delegation
     // actually asks for one.
     // `--team` implies `--broker`: a team is nothing without its workers.
-    let run_broker = cli.broker || cli.team.is_some();
+    // A worker never starts one (BI-5): it delegates over its connection.
+    let run_broker = starts_a_broker(&cli);
     // The roster's specs: the team's, else the names module settings list.
     let broker_agents = match team.as_ref() {
         Some(team) => team.agents.clone(),
@@ -935,6 +940,13 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     }
 
     result
+}
+
+/// Whether this process starts a broker: a root run with `--broker` or
+/// `--team`. Only a root process starts one (ADR-0020, BI-5); inside a
+/// worker `--broker` means "use my connection", which it does anyway.
+fn starts_a_broker(cli: &Cli) -> bool {
+    (cli.broker || cli.team.is_some()) && cli.participant_fd.is_none()
 }
 
 /// The agent spec this process runs as (AGE-614): `--agent <name>`, a
@@ -1891,6 +1903,31 @@ mod cli_smoke_tests {
         assert!(Cli::try_parse_from(["chatty-tui", "--broker"]).is_ok());
         assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--headless", "-m", "hi"]).is_ok());
         assert!(Cli::try_parse_from(["chatty-tui", "--broker", "--pipe"]).is_ok());
+    }
+
+    /// BI-5: only a root process starts a broker. `--broker` in a worker
+    /// is its connection, and starts nothing.
+    #[test]
+    fn one_broker_per_root_a_worker_with_broker_starts_none() {
+        use crate::starts_a_broker;
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["chatty-tui"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).expect("the flags parse")
+        };
+        assert!(starts_a_broker(&parse(&[
+            "--broker",
+            "--headless",
+            "-m",
+            "hi"
+        ])));
+        assert!(starts_a_broker(&parse(&["--team", "coder-reviewer"])));
+        assert!(!starts_a_broker(&parse(&["--headless", "-m", "hi"])));
+        assert!(!starts_a_broker(&parse(&[
+            "--broker",
+            "--participant-fd",
+            "3"
+        ])));
     }
 
     /// AGE-407: `--team <id>` is valid with `--headless`, `--pipe` and the

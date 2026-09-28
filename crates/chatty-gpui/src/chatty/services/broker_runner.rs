@@ -23,7 +23,7 @@ use chatty_core::services::worker_tree;
 use chatty_core::tools::worker_executable;
 use chatty_protocol_gateway::participant::{
     EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
-    WorkspaceFactory,
+    WorkspaceFactory, WorkspaceRequest,
 };
 use tracing::{info, warn};
 
@@ -72,11 +72,10 @@ pub fn local_runners(
             let mut runner = LocalRunner::new(worker_executable(), registry.clone())
                 .with_agent_name(spec.name)
                 .with_description(spec.description)
-                .with_args(spec.args);
-            if let Some(root) = workspace_dir.clone() {
-                runner = runner
-                    .with_workspace_factory(worktree_factory(root, spec.verification.clone()));
-            }
+                .with_args(spec.args)
+                .with_workspace_root(workspace_dir.clone())
+                .with_verification(spec.verification)
+                .with_workspace_factory(worktree_factory());
             if let Some((endpoint, _)) = spec.endpoint {
                 runner = runner.with_endpoint_budget(endpoint, budget.clone());
             }
@@ -85,22 +84,36 @@ pub fn local_runners(
         .collect()
 }
 
-/// Give each worker its own `git worktree`, commit what it leaves behind,
-/// and report what that was (AGE-406). `verification` is the team's command
-/// for *this* agent, already `None` for a profile with no shell.
-fn worktree_factory(workspace_root: String, verification: Option<String>) -> WorkspaceFactory {
-    Arc::new(move |worker: String| {
-        let workspace_root = workspace_root.clone();
-        let verification = verification.clone();
+/// Give each worker its own `git worktree` under the tree its spawn
+/// context names — the root's workspace, or a sub-leader's own tree, on a
+/// branch off the sub-leader's (BI-5) — commit what it leaves behind, and
+/// report what that was (AGE-406). The verification command is the team's
+/// for *this* agent, already `None` for a profile with no shell. Identical
+/// to chatty-tui's `participant::broker::worktree_factory`.
+fn worktree_factory() -> WorkspaceFactory {
+    Arc::new(|request: WorkspaceRequest| {
         Box::pin(async move {
-            let Some((cwd, evidence, on_exit)) =
-                worker_tree::create_with_commit_hook(&workspace_root, &worker, verification)
-                    .await?
+            let Some(root) = request.workspace_root else {
+                return Ok(None);
+            };
+            let Some(worker_tree::IsolatedWorker {
+                cwd,
+                branch,
+                evidence,
+                on_exit,
+            }) = worker_tree::create_with_commit_hook(
+                &root,
+                &request.worker,
+                request.base_branch.as_deref(),
+                request.verification,
+            )
+            .await?
             else {
                 return Ok(None);
             };
             Ok(Some(WorkerWorkspace {
                 cwd,
+                branch: Some(branch),
                 evidence: Some(Box::new(move || {
                     Box::pin(async move {
                         evidence().await.map(|found| TaskEvidence {

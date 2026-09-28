@@ -64,6 +64,25 @@
 //! broker cancels every call still in flight on it, which reaps the
 //! workers those calls started.
 //!
+//! # A question on a call (BI-5, AGE-637)
+//!
+//! A callee that asks a question parks its task (below); the broker tells
+//! the calling worker with `call_input_required`, naming the call and the
+//! parked task, and the worker's answer goes back up as `call_input` with
+//! the same `input` shape an `input` frame carries. The broker delivers it
+//! only to a task parked on that call, so a worker can answer its own
+//! callees and nobody else's. This is what lets a grandchild's `ask_user`
+//! climb to the root's human and its answer come back down, however many
+//! workers sit in between: each hop re-asks the question on its own
+//! clarification store, which parks its own task toward its caller.
+//!
+//! ```text
+//! broker      → {"v":2,"type":"call_input_required","id":1,"task":"task-…",
+//!                "request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}
+//! participant → {"v":2,"type":"call_input","id":1,"task":"task-…",
+//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}
+//! ```
+//!
 //! # A parked task
 //!
 //! A worker that asks a question (`ask_user`) parks its task in
@@ -80,7 +99,7 @@
 //! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
 //! ```
 
-use chatty_fabric::{CallError, CallRequest, ConversationScope, NodeName};
+use chatty_fabric::{CallError, CallRequest, ConversationScope, NodeName, SpawnContext};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -266,6 +285,10 @@ pub struct DelegatedTask {
     /// terminal status (RC-0, AGE-649). Opt-in and off by default, so an
     /// ordinary task's frames are unchanged.
     pub capture_conversation: bool,
+    /// Where the worker is spawned and what it may reach (BI-5), already
+    /// clamped by the broker. `None` leaves a runner to its own defaults:
+    /// the root's workspace and settings.
+    pub spawn_context: Option<SpawnContext>,
 }
 
 /// The header a broker worker's `invoke_agent` puts its caller token in, on
@@ -283,7 +306,14 @@ impl DelegatedTask {
             bearer: None,
             caller: None,
             capture_conversation: false,
+            spawn_context: None,
         }
+    }
+
+    /// The context the worker is spawned with (BI-5).
+    pub fn with_spawn_context(mut self, context: Option<SpawnContext>) -> Self {
+        self.spawn_context = context;
+        self
     }
 
     pub fn with_caller(mut self, caller: Option<String>) -> Self {
@@ -397,6 +427,16 @@ pub enum ParticipantFrame {
         #[serde(flatten)]
         request: CallRequest,
     },
+    /// The answer to a question a callee of call `id` asked
+    /// ([`BrokerFrame::CallInputRequired`]): `task` is the callee's parked
+    /// task, `input` the same shape an [`BrokerFrame::Input`] carries
+    /// (BI-5).
+    #[serde(rename = "call_input")]
+    CallInput {
+        id: u64,
+        task: String,
+        input: TaskInput,
+    },
 }
 
 /// A frame from the broker to a participant.
@@ -430,6 +470,11 @@ pub enum BrokerFrame {
         bearer: Option<TaskBearer>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         capture_conversation: bool,
+        /// The context this worker was spawned with (BI-5): its workspace
+        /// root, base branch, roster, verification command and endpoint.
+        /// Absent on the wire for a task given without one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_context: Option<SpawnContext>,
     },
     /// The caller went away. Stop working on `taskId`; no reply is required.
     #[serde(rename_all = "camelCase")]
@@ -447,6 +492,15 @@ pub enum BrokerFrame {
     /// Call `id` could not be carried out, and is over.
     #[serde(rename = "call_error")]
     CallError { id: u64, error: CallError },
+    /// A callee of call `id` parked its task `task` on a question
+    /// (`request`, an [`InputRequest`] as JSON). The call stays open; answer
+    /// with [`ParticipantFrame::CallInput`] (BI-5).
+    #[serde(rename = "call_input_required")]
+    CallInputRequired {
+        id: u64,
+        task: String,
+        request: Value,
+    },
 }
 
 #[cfg(test)]
@@ -561,6 +615,7 @@ mod tests {
             text: "do it".into(),
             bearer: None,
             capture_conversation: false,
+            spawn_context: None,
         })
         .unwrap();
         assert_eq!(json["type"], "task");
@@ -583,6 +638,7 @@ mod tests {
             text: "do it".into(),
             bearer: Some(TaskBearer::new("eyJ.token")),
             capture_conversation: false,
+            spawn_context: None,
         })
         .unwrap();
         assert_eq!(json["bearer"], "eyJ.token");
@@ -611,6 +667,7 @@ mod tests {
             text: "do it".into(),
             bearer: None,
             capture_conversation: true,
+            spawn_context: None,
         })
         .unwrap();
         assert_eq!(json["captureConversation"], true);
@@ -633,6 +690,7 @@ mod tests {
             text: "x".into(),
             bearer: Some(TaskBearer::new("secret-token")),
             capture_conversation: false,
+            spawn_context: None,
         };
         let printed = format!("{frame:?}");
         assert!(!printed.contains("secret-token"), "{printed}");
@@ -714,6 +772,7 @@ mod tests {
                 prompt: "review it".into(),
                 handle: None,
                 include_trace: false,
+                spawn_context: None,
             }),
         })
         .unwrap();

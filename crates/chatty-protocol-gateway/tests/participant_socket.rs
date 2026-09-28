@@ -885,7 +885,9 @@ const EVIDENCE_BLOCK: &str = "\n\n```evidence\nbranch: sub-agent/local-agent-0\n
 /// tests, and both ends together are `chatty-tui`'s
 /// `participant::equivalence`.
 async fn start_evidence_runner() -> (tempfile::TempDir, String) {
-    use chatty_protocol_gateway::participant::{LocalRunner, TaskEvidence, WorkerWorkspace};
+    use chatty_protocol_gateway::participant::{
+        LocalRunner, TaskEvidence, WorkerWorkspace, WorkspaceRequest,
+    };
 
     let dir = tempfile::tempdir().expect("a temp dir for the worker");
     let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
@@ -899,11 +901,12 @@ async fn start_evidence_runner() -> (tempfile::TempDir, String) {
     let runner = LocalRunner::new("/bin/sh", participants.clone())
         .with_args(["-c", ANSWERING_WORKER])
         .with_registration_timeout(Duration::from_secs(5))
-        .with_workspace_factory(Arc::new(move |_worker: String| {
+        .with_workspace_factory(Arc::new(move |_request: WorkspaceRequest| {
             let cwd = cwd.clone();
             Box::pin(async move {
                 Ok(Some(WorkerWorkspace {
                     cwd,
+                    branch: None,
                     evidence: Some(Box::new(|| {
                         Box::pin(async {
                             Some(TaskEvidence {

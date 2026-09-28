@@ -11,14 +11,22 @@
 //! conflict the leader can see, rather than a last-writer-wins result neither
 //! of them reported.
 //!
-//! The participant name is unique per broker socket, but branches and
-//! worktree paths live in one repository shared by every broker on it: a
-//! sub-leader started with `--broker` names its workers from a counter of
-//! its own, and a leftover tree from an earlier run keeps its branch
+//! The participant name is unique per root process's broker, but branches
+//! and worktree paths live in one repository shared by every root process
+//! on it, and a leftover tree from an earlier run keeps its branch
 //! (AGE-402). So the name is taken as a wish: when `sub-agent/<name>` or the
 //! directory already exists, the tree is `<name>-2`, `<name>-3`, … instead.
 //! The evidence envelope the leader receives names the branch actually
 //! created.
+//!
+//! # Nested trees (BI-5)
+//!
+//! A sub-leader's worker gets its tree under the sub-leader's own tree, on
+//! a branch that starts at the sub-leader's branch, and its evidence diffs
+//! against that branch: the grandchild's envelope shows the grandchild's
+//! commits and nothing its sub-leader did. The root broker passes both in
+//! from the spawn context; a worker spawned for the root starts at the
+//! workspace's `HEAD` and is measured against the default branch.
 //!
 //! # What the leader is told
 //!
@@ -61,6 +69,9 @@ pub struct WorkerTree {
     /// Absolute path — the worker's `cwd` and the root its tools are
     /// confined to.
     pub path: PathBuf,
+    /// The branch it started from and is measured against: its
+    /// sub-leader's (BI-5). `None` measures against the default branch.
+    pub base: Option<String>,
 }
 
 /// Monotonic suffix so two workers started in the same millisecond cannot
@@ -95,8 +106,13 @@ const MAX_NAME_ATTEMPTS: u32 = 1000;
 /// does not exist (AGE-402). The tree's name is `name` unless the repository
 /// already has that branch or directory — another broker's worker, or a
 /// tree left from an earlier run — in which case it is the first free
-/// `name-N`.
-pub async fn create(workspace_root: &str, name: &str) -> Result<Option<WorkerTree>> {
+/// `name-N`. Its branch starts at `base` — the sub-leader's branch, for a
+/// sub-leader's worker (BI-5) — or at the workspace's `HEAD`.
+pub async fn create(
+    workspace_root: &str,
+    name: &str,
+    base: Option<&str>,
+) -> Result<Option<WorkerTree>> {
     let git = match GitService::new(workspace_root).await {
         Ok(git) => git,
         Err(e) => {
@@ -110,21 +126,22 @@ pub async fn create(workspace_root: &str, name: &str) -> Result<Option<WorkerTre
         }
     };
 
-    let tree = add_worktree(&git, name)
+    let tree = add_worktree(&git, name, base)
         .await
         .with_context(|| format!("cannot isolate worker '{name}' in a worktree"))?;
     info!(worktree = %tree.path.display(), branch = %tree.branch, "Worker isolated in a worktree");
     Ok(Some(tree))
 }
 
-async fn add_worktree(git: &GitService, name: &str) -> Result<WorkerTree> {
+async fn add_worktree(git: &GitService, name: &str, base: Option<&str>) -> Result<WorkerTree> {
     let tree_name = free_worktree_name(git, name).await?;
     let branch = format!("sub-agent/{tree_name}");
-    let path = git.worktree_add(&tree_name, &branch).await?;
+    let path = git.worktree_add(&tree_name, &branch, base).await?;
     Ok(WorkerTree {
         name: tree_name,
         branch,
         path,
+        base: base.map(str::to_string),
     })
 }
 
@@ -237,7 +254,8 @@ const VERIFICATION_TAIL_LINES: usize = 20;
 pub struct Evidence {
     /// The branch the worker's output was committed to.
     pub branch: String,
-    /// What it is measured against: `main` or `master`.
+    /// What it is measured against: its sub-leader's branch (BI-5), else
+    /// `main` or `master`.
     pub base: String,
     /// How many commits the branch carries that the base does not. Never
     /// zero — an envelope with no commits is not produced at all.
@@ -307,8 +325,10 @@ impl Evidence {
 /// (AGE-406), and the commit-on-exit fallback for a task that never got
 /// there (AGE-376).
 ///
-/// `verification` is the team's command, already filtered by the caller for
-/// a worker whose profile has no shell.
+/// `base` is the branch the tree starts from and is measured against — the
+/// sub-leader's, for its worker (BI-5). `verification` is the team's
+/// command, already filtered by the caller for a worker whose profile has
+/// no shell.
 ///
 /// Both hooks commit, and only the first one to run does: the envelope has
 /// to be collected *after* the commit or its commit count and diff stat are
@@ -317,12 +337,14 @@ impl Evidence {
 pub async fn create_with_commit_hook(
     workspace_root: &str,
     worker: &str,
+    base: Option<&str>,
     verification: Option<String>,
-) -> Result<Option<(PathBuf, EvidenceHook, ExitHook)>> {
-    let Some(tree) = create(workspace_root, worker).await? else {
+) -> Result<Option<IsolatedWorker>> {
+    let Some(tree) = create(workspace_root, worker, base).await? else {
         return Ok(None);
     };
     let cwd = tree.path.clone();
+    let branch = tree.branch.clone();
     let tree = Arc::new(tree);
     let committed = Arc::new(AtomicBool::new(false));
 
@@ -346,7 +368,23 @@ pub async fn create_with_commit_hook(
             commit_once(&tree, &committed).await;
         });
     });
-    Ok(Some((cwd, evidence, on_exit)))
+    Ok(Some(IsolatedWorker {
+        cwd,
+        branch,
+        evidence,
+        on_exit,
+    }))
+}
+
+/// A worker's tree as [`create_with_commit_hook`] made it.
+pub struct IsolatedWorker {
+    /// The worker's `cwd`.
+    pub cwd: PathBuf,
+    /// The branch its output is committed to: what its own workers start
+    /// from (BI-5).
+    pub branch: String,
+    pub evidence: EvidenceHook,
+    pub on_exit: ExitHook,
 }
 
 /// [`commit`], unless something already did.
@@ -372,7 +410,10 @@ pub async fn collect(tree: &WorkerTree, verification: Option<&str>) -> Option<Ev
         }
     };
 
-    let base = git.default_branch().await?;
+    let base = match tree.base.clone() {
+        Some(base) => base,
+        None => git.default_branch().await?,
+    };
     let commits = git.commits_ahead(&base, &tree.branch).await.unwrap_or(0);
     if commits == 0 {
         info!(branch = %tree.branch, "Worker left no commits; no evidence envelope");
@@ -541,7 +582,7 @@ mod tests {
     #[tokio::test]
     async fn a_non_git_workspace_falls_back_rather_than_failing() {
         let dir = tempfile::tempdir().unwrap();
-        let result = create(&dir.path().to_string_lossy(), "w1").await;
+        let result = create(&dir.path().to_string_lossy(), "w1", None).await;
         assert!(
             matches!(result, Ok(None)),
             "no repository means no isolation, not a failed delegation"
@@ -576,15 +617,15 @@ mod tests {
         dir
     }
 
-    /// AGE-402: two brokers on one repository both name their first worker
-    /// `local-coder-0`. Both get a tree and a branch of their own.
+    /// AGE-402: two root processes on one repository both name their first
+    /// worker `local-coder-0`. Both get a tree and a branch of their own.
     #[tokio::test]
     async fn the_same_worker_name_twice_gets_two_branches() {
         let dir = repo().await;
         let root = dir.path().to_string_lossy().to_string();
 
-        let first = create(&root, "local-coder-0").await.unwrap().unwrap();
-        let second = create(&root, "local-coder-0").await.unwrap().unwrap();
+        let first = create(&root, "local-coder-0", None).await.unwrap().unwrap();
+        let second = create(&root, "local-coder-0", None).await.unwrap().unwrap();
 
         assert_eq!(first.branch, "sub-agent/local-coder-0");
         assert_eq!(second.branch, "sub-agent/local-coder-0-2");
@@ -592,26 +633,38 @@ mod tests {
         assert!(first.path.is_dir() && second.path.is_dir());
     }
 
-    /// The nested shape from the issue: a sub-leader's broker runs inside
-    /// its own worktree and names its worker the same as the top leader
-    /// does. Branches are repository-wide, so the nested one must yield.
+    /// BI-5: a sub-leader's worker gets its tree under the sub-leader's, on
+    /// a branch that starts at the sub-leader's tip, and its evidence diffs
+    /// against the sub-leader's branch — so it shows the worker's commit
+    /// and not the one the sub-leader made before delegating.
     #[tokio::test]
-    async fn a_nested_broker_does_not_take_the_top_level_branch() {
+    async fn a_nested_tree_starts_at_its_sub_leaders_branch_and_diffs_against_it() {
         let dir = repo().await;
         let root = dir.path().to_string_lossy().to_string();
 
-        let lead = create(&root, "local-lead-0").await.unwrap().unwrap();
+        let lead = create(&root, "local-lead-0", None).await.unwrap().unwrap();
+        std::fs::write(lead.path.join("lead.txt"), "lead\n").unwrap();
+        git(&["add", "lead.txt"], &lead.path).await;
+        git(&["commit", "-q", "-m", "lead"], &lead.path).await;
+
         let nested_root = lead.path.to_string_lossy().to_string();
-        let nested = create(&nested_root, "local-coder-0")
+        let nested = create(&nested_root, "local-coder-0", Some(&lead.branch))
             .await
             .unwrap()
             .unwrap();
-        let top = create(&root, "local-coder-0").await.unwrap().unwrap();
-
-        assert_eq!(nested.branch, "sub-agent/local-coder-0");
         assert!(nested.path.starts_with(&lead.path));
-        assert_eq!(top.branch, "sub-agent/local-coder-0-2");
-        assert!(top.path.starts_with(dir.path()) && !top.path.starts_with(&lead.path));
+        assert!(
+            nested.path.join("lead.txt").exists(),
+            "the tree starts at the sub-leader's tip"
+        );
+        std::fs::write(nested.path.join("coder.txt"), "coder\n").unwrap();
+        commit(&nested, "coder").await;
+
+        let evidence = collect(&nested, None).await.expect("one commit");
+        assert_eq!(evidence.base, lead.branch);
+        assert_eq!(evidence.commits, 1);
+        assert!(evidence.diff_stat.contains("coder.txt"), "{evidence:?}");
+        assert!(!evidence.diff_stat.contains("lead.txt"), "{evidence:?}");
     }
 
     /// A tree left behind by an earlier run — same name, its branch still
@@ -621,7 +674,7 @@ mod tests {
         let dir = repo().await;
         let root = dir.path().to_string_lossy().to_string();
 
-        let earlier = create(&root, "local-coder-0").await.unwrap().unwrap();
+        let earlier = create(&root, "local-coder-0", None).await.unwrap().unwrap();
         // The directory is gone but the branch remains, as after a manual
         // `rm -rf` of `.chatty/worktrees`.
         git(
@@ -634,7 +687,7 @@ mod tests {
             dir.path(),
         )
         .await;
-        let again = create(&root, "local-coder-0").await.unwrap().unwrap();
+        let again = create(&root, "local-coder-0", None).await.unwrap().unwrap();
         assert_eq!(again.branch, "sub-agent/local-coder-0-2");
     }
 
@@ -645,7 +698,7 @@ mod tests {
         let dir = repo().await;
         let root = dir.path().to_string_lossy().to_string();
 
-        let err = create(&root, "../escape").await.unwrap_err();
+        let err = create(&root, "../escape", None).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("cannot isolate worker '../escape'"),
             "{err:#}"
@@ -668,7 +721,7 @@ mod tests {
     #[tokio::test]
     async fn a_worker_that_committed_gets_an_envelope_with_its_diff_and_verification() {
         let dir = repo().await;
-        let tree = create(&dir.path().to_string_lossy(), "local-coder-0")
+        let tree = create(&dir.path().to_string_lossy(), "local-coder-0", None)
             .await
             .unwrap()
             .unwrap();
@@ -703,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn a_worker_that_committed_nothing_gets_no_envelope() {
         let dir = repo().await;
-        let tree = create(&dir.path().to_string_lossy(), "local-reviewer-0")
+        let tree = create(&dir.path().to_string_lossy(), "local-reviewer-0", None)
             .await
             .unwrap()
             .unwrap();
@@ -726,7 +779,7 @@ mod tests {
         git(&["add", "."], dir.path()).await;
         git(&["commit", "-q", "-m", "init"], dir.path()).await;
 
-        let tree = create(&dir.path().to_string_lossy(), "local-coder-0")
+        let tree = create(&dir.path().to_string_lossy(), "local-coder-0", None)
             .await
             .unwrap()
             .unwrap();
@@ -744,7 +797,12 @@ mod tests {
     async fn the_hook_commits_before_it_collects_and_the_exit_hook_does_not_commit_twice() {
         let dir = repo().await;
         let root = dir.path().to_string_lossy().to_string();
-        let (cwd, evidence, on_exit) = create_with_commit_hook(&root, "local-coder-0", None)
+        let IsolatedWorker {
+            cwd,
+            evidence,
+            on_exit,
+            ..
+        } = create_with_commit_hook(&root, "local-coder-0", None, None)
             .await
             .unwrap()
             .unwrap();
@@ -763,6 +821,7 @@ mod tests {
                 name: "local-coder-0".into(),
                 branch: "sub-agent/local-coder-0".into(),
                 path: cwd,
+                base: None,
             },
             None,
         )
