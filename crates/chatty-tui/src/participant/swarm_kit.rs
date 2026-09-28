@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chatty_core::agent_spec::AgentSpec;
-use chatty_core::models::token_usage::TokenUsage;
+use chatty_core::models::token_usage::{PriceBook, TokenPricing, TokenUsage};
 use chatty_core::services::install_progress_channel;
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::settings::models::ModuleSettingsModel;
@@ -84,6 +84,9 @@ pub(crate) struct AgentDef {
     pub profile: Option<&'static str>,
     /// The JSON Schema the team names for this role's handoff (TD-2).
     pub handoff: Option<serde_json::Value>,
+    /// The model's prices, in the kit's models file and its price book
+    /// (DP-3); unpriced when `None`.
+    pub pricing: Option<TokenPricing>,
 }
 
 impl AgentDef {
@@ -96,6 +99,7 @@ impl AgentDef {
             spec: None,
             profile: None,
             handoff: None,
+            pricing: None,
         }
     }
 
@@ -110,6 +114,12 @@ impl AgentDef {
     /// Name a handoff schema for this role, as a team's `handoffs` does.
     pub fn with_handoff(mut self, schema: serde_json::Value) -> Self {
         self.handoff = Some(schema);
+        self
+    }
+
+    /// Price this agent's model at `pricing` (DP-3).
+    pub fn priced(mut self, pricing: TokenPricing) -> Self {
+        self.pricing = Some(pricing);
         self
     }
 
@@ -141,6 +151,8 @@ pub(crate) struct SwarmKit {
     pub ndjson: FakeDaemon,
     roster: Vec<String>,
     broker: Option<Broker>,
+    /// The roster's priced models (DP-3).
+    prices: PriceBook,
     root: tempfile::TempDir,
 }
 
@@ -197,14 +209,27 @@ impl SwarmKit {
                     Endpoint::Sse => ProviderType::OpenRouter,
                     Endpoint::Ndjson => ProviderType::Ollama,
                 };
-                ModelConfig::new(
+                let mut model = ModelConfig::new(
                     agent.model.clone(),
                     agent.model.clone(),
                     provider,
                     agent.model.clone(),
-                )
+                );
+                if let Some(pricing) = agent.pricing {
+                    model.cost_per_million_input_tokens = Some(pricing.input_per_million);
+                    model.cost_per_million_output_tokens = Some(pricing.output_per_million);
+                    model.cost_per_million_cache_read_tokens = pricing.cache_read_per_million;
+                    model.cost_per_million_cache_write_tokens = pricing.cache_write_per_million;
+                }
+                model
             })
             .collect();
+        let mut prices = PriceBook::default();
+        for model in &models {
+            if let Some(pricing) = model.token_pricing() {
+                prices.insert(model.model_ref(), pricing);
+            }
+        }
         // Each agent is a spec in the kit's data directory, where a
         // sub-leader's own broker finds the roster module settings name.
         let specs: Vec<AgentSpec> = roster
@@ -280,12 +305,13 @@ impl SwarmKit {
                 schema,
             });
         }
-        let broker = Broker::start_at(
+        let broker = Broker::start_priced_at(
             base.join("run").join("participants.sock"),
             executable,
             module_settings.default_endpoint_budget,
             specs,
             Some(workspace.to_string_lossy().into_owned()),
+            Some(prices.clone()),
         )
         .await
         .expect("the root broker starts");
@@ -295,8 +321,15 @@ impl SwarmKit {
             ndjson,
             roster: roster.into_iter().map(|a| a.name).collect(),
             broker: Some(broker),
+            prices,
             root,
         }
+    }
+
+    /// The price book of the roster's models, as a root prices its
+    /// callees' usage with it (DP-3).
+    pub fn price_book(&self) -> PriceBook {
+        self.prices.clone()
     }
 
     /// The workspace every worker's tree is made under.
@@ -1821,6 +1854,7 @@ async fn spawn_context_is_clamped() {
                         handle: None,
                         include_trace: false,
                         spawn_context: Some(context),
+                        remaining: Default::default(),
                     }))
                     .await
                     .expect("the call goes out");

@@ -15,11 +15,12 @@ use crate::services::a2a_client::{
 use crate::services::fabric_transport::progress_from_value;
 use crate::services::handoff::{HandoffLedger, HandoffReport};
 use crate::services::lazy_broker::LazyBroker;
+use crate::services::run_budget::RunBudget;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use chatty_fabric::{
     AgentOrigin, CallError, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Refusal,
-    Transport,
+    Remaining, Transport,
 };
 
 /// The agent name the broker publishes for "a chatty agent in its own
@@ -205,6 +206,13 @@ pub struct InvokeAgentTool {
     /// delegation starts. `None` — the desktop, chatty-tui, any leader
     /// without a cap — means no check at all.
     spend_gate: Option<Arc<dyn SpendGate>>,
+    /// What this run has left to hand its callees (DP-3). Every call over
+    /// the fabric says it, so the broker narrows the callee's budget with
+    /// it; a call that goes around the broker is refused here once a limit
+    /// is spent. A delegation's usage lines are recorded on it as it ends.
+    /// `None` — a host that tracks no budget — says nothing and refuses
+    /// nothing.
+    run_budget: Option<RunBudget>,
     /// A broker that has not necessarily started yet (BI-2, AGE-634): the
     /// production desktop/chatty-tui wiring hands this in, and the first
     /// local delegation actually starts it.
@@ -231,6 +239,7 @@ impl InvokeAgentTool {
             warn_outside_fleet: false,
             clarifications: None,
             spend_gate: None,
+            run_budget: None,
             lazy_broker: None,
             transport: None,
             handoff_ledger: None,
@@ -304,6 +313,35 @@ impl InvokeAgentTool {
     pub fn with_spend_gate(mut self, gate: Arc<dyn SpendGate>) -> Self {
         self.spend_gate = Some(gate);
         self
+    }
+
+    /// Hand callees what this run has left, and record what they spent
+    /// (DP-3).
+    pub fn with_run_budget(mut self, budget: RunBudget) -> Self {
+        self.run_budget = Some(budget);
+        self
+    }
+
+    /// What this run has left now; unlimited without a budget.
+    fn remaining(&self) -> Remaining {
+        self.run_budget
+            .as_ref()
+            .map(RunBudget::remaining)
+            .unwrap_or_default()
+    }
+
+    /// Refuse a delegation that goes around the broker when this run's
+    /// budget is spent, as the broker refuses one over the fabric.
+    fn check_budget(&self, agent: &str) -> Result<(), InvokeAgentError> {
+        self.remaining().check().map_err(|refusal| {
+            warn!(agent = %agent, %refusal, "Refusing to delegate: the run's budget is spent");
+            self.send_progress(InvokeAgentProgress::Finished {
+                success: false,
+                result: Some(format!("\u{26a0}\u{fe0f} {refusal}")),
+                usage: Vec::new(),
+            });
+            InvokeAgentError::Refused(refusal)
+        })
     }
 
     /// Warn before handing a prompt to an agent outside this user's fleet
@@ -442,6 +480,7 @@ impl Tool for InvokeAgentTool {
                 )));
             }
 
+            self.check_budget(&agent_name)?;
             info!(agent = %agent_name, url = %config.url, "Invoking remote A2A agent");
             self.warn_if_outside_the_fleet(&agent_name, AgentOrigin::RemoteConfigured, &config.url);
             self.send_progress(InvokeAgentProgress::Started {
@@ -471,6 +510,8 @@ impl Tool for InvokeAgentTool {
                     "Agent '{local}' needs a broker connection, which is not available here."
                 )));
             };
+            // The broker checks what is left against the chain and
+            // refuses a spent budget itself, with an edge-log row.
             info!(agent = %local, "Delegating to a local worker over the fabric");
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: local.to_string(),
@@ -645,6 +686,7 @@ impl InvokeAgentTool {
             handle: None,
             include_trace,
             spawn_context: None,
+            remaining: self.remaining(),
         });
         let mut stream = transport.call(request).await.map_err(|e| {
             let err_text = format!("\u{26a0}\u{fe0f} Failed to invoke agent '{agent}': {e}");
@@ -781,6 +823,11 @@ impl InvokeAgentTool {
         handoff: HandoffReport,
         messages: Vec<String>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
+        // What the callee spent is this run's spend (AGE-415), priced on
+        // read at the models it names (DP-3).
+        if let Some(budget) = self.run_budget.as_ref() {
+            budget.spend().record(usage.iter().cloned());
+        }
         let response = response.trim().to_string();
         let handoff_value = if success { handoff.handoff } else { None };
         if let Some(ledger) = self.handoff_ledger.as_ref() {

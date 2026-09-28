@@ -64,6 +64,9 @@ pub mod plugin_llm;
 #[cfg(feature = "pptx")]
 pub mod pptx_render;
 pub mod project_instructions;
+/// What a run has left to hand its callees: turns, time and dollars
+/// (PL-S2 DP-3).
+pub mod run_budget;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
@@ -72,8 +75,9 @@ pub mod skill_service;
 /// Test-only: enable `chatty-core/test-support` from a dev-dependency.
 #[cfg(any(test, feature = "test-support"))]
 pub mod spec_goldens;
-/// The hosted per-user spend cap `invoke_agent` asks before delegating
-/// (AGE-416 / ADR-0010). chatty2 ships the trait; hive implements it.
+/// The spend gates `invoke_agent` asks before delegating: the hosted
+/// per-user cap (AGE-416 / ADR-0010; chatty2 ships the trait, hive
+/// implements it) and a task's own dollar budget, `LocalSpendGate` (DP-3).
 pub mod spend_gate;
 pub mod ssrf_guard;
 /// Scripted stream fixtures for the frontends' characterization tests (AGE-191).
@@ -126,8 +130,9 @@ pub use message_helpers::{
 };
 #[cfg(feature = "pdf")]
 pub use pdf_thumbnail::cleanup_thumbnails;
+pub use run_budget::RunBudget;
 pub use skill_service::SkillService;
-pub use spend_gate::{CapExceeded, SpendGate};
+pub use spend_gate::{CapExceeded, LocalSpendGate, SpendGate};
 #[cfg(any(test, feature = "test-support"))]
 pub use stream_fixtures::{
     Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,
