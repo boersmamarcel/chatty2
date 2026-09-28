@@ -1745,7 +1745,7 @@ async fn spawn_context_is_clamped() {
     const HELPER: &str = "kit-helper";
     let kit = SwarmKit::start(
         vec![
-            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse),
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
             AgentDef::new(HELPER, "kit/helper", Endpoint::Ndjson),
         ],
         Script::new(),
@@ -1753,7 +1753,9 @@ async fn spawn_context_is_clamped() {
     )
     .await;
     let registry = kit.participants();
-    let connection = open_connection(&registry, "rogue").expect("a connection");
+    // A node of a spec that may call the helper (PL-S2), so the broker gets
+    // as far as the context it brings.
+    let connection = open_connection(&registry, LEAD).expect("a connection");
     let name = connection.name.clone();
     connection.worker_end.set_nonblocking(true).unwrap();
     let worker = WorkerConnection::connect(

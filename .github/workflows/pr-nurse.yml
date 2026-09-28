@@ -294,12 +294,25 @@ jobs:
             fi
             # The session may not `git add`, so the index still lists the
             # conflicted paths as unmerged until we stage the resolved tree.
-            git add -A
+            # Stage tracked paths only: files main added are already staged by
+            # the merge, and anything untracked is the session's scratch.
+            DROPPED="$(git ls-files --others --exclude-standard | tr '\n' ' ')"
+            git clean -fdq
+            git add -u
             if [ -n "$(git ls-files -u)" ]; then
               hand_over "unmerged index entries remain: $(git ls-files -u | awk '{print $4}' | sort -u | tr '\n' ' ')"
             fi
             git commit -m "nurse: merge main into $BRANCH (#$PR)"
           else
+            # New files are kept only under source, test and docs trees; any
+            # other untracked file is the session's scratch and is dropped.
+            DROPPED=""
+            for f in $(git ls-files --others --exclude-standard); do
+              case "$f" in
+                crates/*|docs/*|scripts/*) ;;
+                *) rm -f -- "$f"; DROPPED="$DROPPED $f" ;;
+              esac
+            done
             changed="$(git status --porcelain | awk '{print $2}')"
             [ -n "$changed" ] || hand_over "no change produced"
             if printf '%s\n' $changed | grep -Eq "$FORBIDDEN"; then
@@ -310,4 +323,4 @@ jobs:
           fi
 
           git push origin "HEAD:$BRANCH"
-          gh pr comment "$PR" --repo "$REPO" --body "**PR nurse:** pushed \`$(git rev-parse --short HEAD)\` to $REASON. CI reruns on the new head; auto-merge lands it when green. Attempt $(attempts) of $NURSE_MAX_ATTEMPTS."
+          gh pr comment "$PR" --repo "$REPO" --body "**PR nurse:** pushed \`$(git rev-parse --short HEAD)\` to $REASON. CI reruns on the new head; auto-merge lands it when green. Attempt $(attempts) of $NURSE_MAX_ATTEMPTS.${DROPPED:+ Dropped scratch files: \`$DROPPED\`.}"

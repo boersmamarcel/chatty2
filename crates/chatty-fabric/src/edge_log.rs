@@ -147,7 +147,12 @@ mod tests {
             .unwrap();
         let mut tasks = TaskTable::new();
         let run = tasks
-            .open(root.id(), coder.id(), None, vec!["leader-0".into()])
+            .open(
+                Some(root.id()),
+                coder.id(),
+                None,
+                crate::CallChain::root("t-1"),
+            )
             .unwrap();
 
         let mut log = EdgeLog::open_for_pid(data.path(), GOLDEN_PID).unwrap();

@@ -559,6 +559,13 @@ pub fn refresh_runtime(cx: &mut App) {
                             })
                             .unwrap_or((None, Vec::new()));
                         gateway_workspace = resolved_workspace.clone();
+                        // A node's call is checked against the roster's
+                        // specs before anything is spawned (PL-S2).
+                        gateway = gateway.with_call_policy(Arc::new(
+                            chatty_core::services::delegation_policy::SpecPolicy::for_agents(
+                                &specs,
+                            ),
+                        ));
                         for runner in broker_runner::local_runners(
                             participants,
                             resolved_workspace.map(|dir| dir.to_string_lossy().to_string()),
