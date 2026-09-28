@@ -31,7 +31,7 @@ async fn s3_07_a2a_message_send_to_a_role_is_refused() {
     use crate::harness::Gateway;
 
     let gw = Gateway::start(vec![], vec![]).await;
-    let connection = open_connection(&gw.participants, "parts").unwrap();
+    let connection = open_connection(&gw.participants, "parts", None).unwrap();
     connection.worker_end.set_nonblocking(true).unwrap();
     let stream = tokio::net::UnixStream::from_std(connection.worker_end).unwrap();
     let card = ParticipantCard {

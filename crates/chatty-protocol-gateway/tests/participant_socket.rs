@@ -112,7 +112,7 @@ impl StubParticipant {
     /// say hello with a card that claims `spec` as its name (ignored).
     async fn connect(participants: &ParticipantRegistry, spec: &str) -> Self {
         let connection =
-            open_connection(participants, spec).expect("the broker makes a connection");
+            open_connection(participants, spec, None).expect("the broker makes a connection");
         let mut stub = Self::over(connection.worker_end, spec).await;
         let welcome = stub.next_frame().await;
         assert_eq!(welcome["type"], "welcome", "the hello is answered");
@@ -267,7 +267,7 @@ async fn nothing_registers_on_the_shared_socket() {
 #[tokio::test]
 async fn card_name_is_ignored() {
     let harness = Harness::start().await;
-    let connection = open_connection(&harness.participants, "local-coder").unwrap();
+    let connection = open_connection(&harness.participants, "local-coder", None).unwrap();
     let assigned = connection.name.clone();
     let mut stub = StubParticipant::over(connection.worker_end, "evil").await;
 
@@ -315,7 +315,7 @@ async fn v1_frame_is_refused() {
     let harness = Harness::start().await;
 
     // A v1 `register` on a broker-made connection.
-    let connection = open_connection(&harness.participants, "old-worker").unwrap();
+    let connection = open_connection(&harness.participants, "old-worker", None).unwrap();
     let name = connection.name.clone();
     connection.worker_end.set_nonblocking(true).unwrap();
     let (read, mut write) = UnixStream::from_std(connection.worker_end)

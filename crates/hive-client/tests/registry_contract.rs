@@ -14,6 +14,10 @@ use base64::Engine as _;
 use chrono::{TimeDelta, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use hive_client::models::{ListParams, UsageEvent};
+use hive_client::verify::{
+    Capabilities, HEADER_CERTIFICATE, HEADER_CERTIFICATE_SIGNATURE, HEADER_MANIFEST,
+    HEADER_MANIFEST_SIGNATURE, PublisherCertificate, SignedManifest,
+};
 use hive_client::{HiveRegistryClient, HiveSession, TokenPair, TrustLevel};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -187,50 +191,181 @@ async fn list_categories() {
 
 // ── Download ──────────────────────────────────────────────────────────────
 
-/// `GET /api/modules/{n}/{v}` with the integrity headers the registry was
+/// The four `X-Hive-*` chain headers for `wasm` published as `name@version`,
+/// certified by the root `root_seed` for the publisher `[0x0b; 32]`, the way
+/// hive-registry signs (AGE-704).
+fn chain_headers(root_seed: u8, name: &str, version: &str, wasm: &[u8]) -> Vec<(String, String)> {
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let root = SigningKey::from_bytes(&[root_seed; 32]);
+    let publisher = SigningKey::from_bytes(&[0x0b; 32]);
+    let certificate = PublisherCertificate {
+        not_before: 1_790_000_000,
+        public_key: hex::encode(publisher.verifying_key().to_bytes()),
+        publisher_id: "00000000-0000-4000-8000-000000000001".to_string(),
+    }
+    .canonical_bytes();
+    let manifest = SignedManifest {
+        capabilities: Capabilities::default(),
+        name: name.to_string(),
+        sha256: hex::encode(Sha256::digest(wasm)),
+        version: version.to_string(),
+        wit_version: "0.3.0".to_string(),
+    }
+    .canonical_bytes();
+    vec![
+        (HEADER_MANIFEST.to_string(), b64(&manifest)),
+        (
+            HEADER_MANIFEST_SIGNATURE.to_string(),
+            b64(&publisher.sign(&manifest).to_bytes()),
+        ),
+        (HEADER_CERTIFICATE.to_string(), b64(&certificate)),
+        (
+            HEADER_CERTIFICATE_SIGNATURE.to_string(),
+            b64(&root.sign(&certificate).to_bytes()),
+        ),
+    ]
+}
+
+/// The TEST-ONLY root the downloads below are certified by.
+const ROOT_SEED: u8 = 0x0a;
+
+fn root_hex(seed: u8) -> String {
+    hex::encode(
+        SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes(),
+    )
+}
+
+/// Serve `echo@0.1.0` as `wasm` under `headers`.
+async fn serve_download(server: &MockServer, wasm: &[u8], headers: Vec<(String, String)>) {
+    let mut response = ResponseTemplate::new(200)
+        .insert_header("x-trust-level", "signed")
+        .set_body_bytes(wasm.to_vec());
+    for (name, value) in headers {
+        response = response.insert_header(name.as_str(), value.as_str());
+    }
+    Mock::given(method("GET"))
+        .and(path("/api/modules/echo/0.1.0"))
+        .and(header("authorization", format!("Bearer {TOKEN}")))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+const WASM: &[u8] = b"\0asm\x0d\0\x01\0 a component";
+
+/// `GET /api/modules/{n}/{v}` with the signing-chain headers the registry was
 /// recorded sending, over bytes signed here the way the registry signs, then
 /// the versions list `finalize_download` reads the manifest from.
 #[tokio::test]
 async fn download() {
     let recorded_headers: Vec<String> =
         serde_json::from_value(recorded("download_headers")["headers"].clone()).unwrap();
-    for needed in ["x-wasm-sha256", "x-signature", "x-publisher-public-key"] {
+    for needed in [
+        HEADER_MANIFEST,
+        HEADER_MANIFEST_SIGNATURE,
+        HEADER_CERTIFICATE,
+        HEADER_CERTIFICATE_SIGNATURE,
+    ] {
         assert!(
-            recorded_headers.iter().any(|h| h == needed),
+            recorded_headers
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case(needed)),
             "the registry no longer sends {needed}"
         );
     }
 
-    let wasm = b"\0asm\x0d\0\x01\0 a component".to_vec();
-    let key = SigningKey::from_bytes(&[9; 32]);
-    let hash = hex::encode(Sha256::digest(&wasm));
-    let signature =
-        base64::engine::general_purpose::STANDARD.encode(key.sign(hash.as_bytes()).to_bytes());
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/modules/echo/0.1.0"))
-        .and(header("authorization", format!("Bearer {TOKEN}")))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("x-wasm-sha256", hash.as_str())
-                .insert_header("x-signature", signature.as_str())
-                .insert_header(
-                    "x-publisher-public-key",
-                    hex::encode(key.verifying_key().to_bytes()).as_str(),
-                )
-                .insert_header("x-trust-level", "signed")
-                .set_body_bytes(wasm.clone()),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
+    serve_download(
+        &server,
+        WASM,
+        chain_headers(ROOT_SEED, "echo", "0.1.0", WASM),
+    )
+    .await;
     serve_authed(&server, "GET", "/api/modules/echo/versions", "versions").await;
 
-    let download = signed_in(&server).download("echo", "0.1.0").await.unwrap();
-    assert_eq!(download.wasm, wasm);
-    assert_eq!(download.wasm_hash, hash);
+    let download = signed_in(&server)
+        .with_local_root_key(&root_hex(ROOT_SEED))
+        .download("echo", "0.1.0")
+        .await
+        .unwrap();
+    assert_eq!(download.wasm, WASM);
+    assert_eq!(download.wasm_hash, hex::encode(Sha256::digest(WASM)));
     assert_eq!(download.trust_level, TrustLevel::Signed);
+    assert_eq!(
+        download.publisher_public_key,
+        hex::encode(
+            SigningKey::from_bytes(&[0x0b; 32])
+                .verifying_key()
+                .to_bytes()
+        )
+    );
+    assert_eq!(download.signed_manifest.name, "echo");
     assert_eq!(download.manifest["name"], "echo");
+}
+
+/// No root key for the registry: refused before any request (no TOFU).
+#[tokio::test]
+async fn download_without_a_trusted_root_is_refused_before_any_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = signed_in(&server);
+    assert_eq!(client.root_key(), None, "CHATTY_HIVE_ROOT_KEY is set");
+    let err = client.download("echo", "0.1.0").await.unwrap_err();
+    assert!(
+        matches!(err, hive_client::ClientError::NoTrustedRoot { .. }),
+        "{err}"
+    );
+}
+
+/// A download missing any of the four chain headers is refused.
+#[tokio::test]
+async fn download_without_the_chain_headers_is_refused() {
+    for dropped in 0..4 {
+        let server = MockServer::start().await;
+        let mut headers = chain_headers(ROOT_SEED, "echo", "0.1.0", WASM);
+        let (missing, _) = headers.remove(dropped);
+        serve_download(&server, WASM, headers).await;
+        let err = signed_in(&server)
+            .with_local_root_key(&root_hex(ROOT_SEED))
+            .download("echo", "0.1.0")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains(&format!("missing {missing}")),
+            "{err}"
+        );
+    }
+}
+
+/// A self-consistent chain under a root this client does not trust, and a
+/// genuine chain for another module, are both refused.
+#[tokio::test]
+async fn download_certified_by_another_root_or_for_another_module_is_refused() {
+    for (headers, why) in [
+        (
+            chain_headers(0x42, "echo", "0.1.0", WASM),
+            "not signed by the registry root key",
+        ),
+        (
+            chain_headers(ROOT_SEED, "spin", "0.1.0", WASM),
+            "is for spin@0.1.0, not the requested echo@0.1.0",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        serve_download(&server, WASM, headers).await;
+        let err = signed_in(&server)
+            .with_local_root_key(&root_hex(ROOT_SEED))
+            .download("echo", "0.1.0")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(why), "{err}");
+    }
 }
 
 // ── Credits, usage, billing sessions ──────────────────────────────────────

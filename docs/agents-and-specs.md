@@ -262,6 +262,32 @@ not a bill: the delegation's own progress and usage still arrive as
 its wire is unchanged (`nested_events_reach_the_root_tagged`,
 `forwarding_is_bounded`, `worker_cannot_forge_tags`).
 
+**The swarm tree and its ATIF export (TB-2, AGE-664).**
+`chatty_core::services::swarm_trace::SwarmTrace` folds a turn's
+`SessionEvent`s — the root's own tool calls and usage, and every
+`SwarmEvent` batch — into a tree of `AgentNode {name, spec, model, turns,
+tool_calls, usage, status}` rooted at the turn. The root's own callee is not
+forwarded; it is built from its delegation's progress: its node from
+`Started`, its usage from `Finished`, and its tool calls from the step lines
+less those its descendants' batches account for (the steps carry the
+descendants' too). Its calls carry no id, arguments or result across the hop,
+and it is named by its spec until the edge log names its node. A frontend
+builds the tree live:
+`SwarmTrace::new()`, then `apply(&event)` for each event in order, redrawing
+when `revision()` moves. After the turn the broker's edge log rows
+(`apply_edge`, or `SwarmTrace::from_edges(rows, events)` in one call) place a
+run under the right one of two same-spec siblings and add the calls a worker
+had refused as `Refused` nodes. A run reports its usage once, with its own
+workers' already folded in (AGE-415), so a node's own spend is what it
+reported less what its children reported, per model: nobody is billed twice,
+and the nodes sum to what the root's conversation records
+(`swarm_tree_spend_sums`). `exporters::export_swarm` writes the tree as one
+ATIF document: a step per tool call with `extra.agent` naming its agent, a
+plugin tool's call (`<plugin>__<tool>`) with `extra.plugin` naming its
+plugin, and the agents with their parents and own usage — tokens per model,
+never a price — in `extra.swarm`. `swarm_tree_from_atif` reads it back into
+the same tree (`swarm_atif_round_trip`).
+
 **Spawn context: sub-leaders use the root broker (ADR-0020 invariants 5–6,
 BI-5, AGE-637).** Only a root process starts a broker. A sub-leader — a worker
 whose spec delegates in turn — is spawned with no `--broker`, and
@@ -401,9 +427,11 @@ once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
 "reason": …}`. It never starts a run and never interrupts one.
 
 - **Recipient.** The broker reads the sender from the connection and its owner
-  from the directory; `to` must be that owner's name — `root` (`ROOT_NAME`) when
-  the root asked for the worker, which the `welcome` says and the `to`
-  parameter's description repeats. A sibling, the sender itself, a name nobody
+  from the directory; `to` must be that owner's name. The owner is whoever
+  spawned the worker: the node whose `invoke_agent` started it, recorded when
+  the broker admits it, or `root` (`ROOT_NAME`) when the root asked. The
+  `welcome` says which, and the `to` parameter's description repeats it; a
+  sub-leader's workers message the sub-leader, never the root past it. A sibling, the sender itself, a name nobody
   has or a node of another conversation is `not_on_tree`; an owner that has
   ended is `recipient_ended`. Messages to a worker's live handles come with
   resumable conversations (RC-3).

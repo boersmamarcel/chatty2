@@ -275,6 +275,7 @@ impl BrokerCalls {
             chain: Vec::new(),
             bytes: 0,
             outcome: "refused: fabric: roles are reached over the worker connection".to_string(),
+            usd: None,
         };
         let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(error) = log.append(&row) {
@@ -1219,7 +1220,7 @@ mod tests {
         use super::super::protocol::{BrokerFrame, ParticipantCard};
 
         let (calls, registry) = broker(None);
-        let admitted = registry.admit("lead", AgentOrigin::Local).unwrap();
+        let admitted = registry.admit("lead", AgentOrigin::Local, None).unwrap();
         let (tx, mut outbound) = tokio::sync::mpsc::unbounded_channel();
         let lead = registry.register(admitted, ParticipantCard::default(), tx);
         let coder = registry.admit_under("coder", Some(&lead));

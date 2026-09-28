@@ -10,7 +10,7 @@
 //!
 //! Rules:
 //! - [`Download`]: what a module download (`GET /api/modules/{n}/{v}`)
-//!   returns — forwarded untouched, signature headers stripped, body
+//!   returns — forwarded untouched, signing-chain headers stripped, body
 //!   corrupted, swapped for an attacker's signed payload, another module's
 //!   download replayed, or an endless body.
 //! - [`TamperProxy::rename`]: the registry's module `real` is shown to
@@ -24,15 +24,25 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use base64::Engine as _;
 use bytes::Bytes;
 use ed25519_dalek::{Signer, SigningKey};
+use hive_client::verify::{
+    Capabilities, HEADER_CERTIFICATE, HEADER_CERTIFICATE_SIGNATURE, HEADER_MANIFEST,
+    HEADER_MANIFEST_SIGNATURE, PublisherCertificate, SignedManifest,
+};
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const HASH: &str = "x-wasm-sha256";
-const SIGNATURE: &str = "x-signature";
-const PUBLIC_KEY: &str = "x-publisher-public-key";
+/// The four headers that carry the signing chain (AGE-704).
+const CHAIN_HEADERS: [&str; 4] = [
+    HEADER_MANIFEST,
+    HEADER_MANIFEST_SIGNATURE,
+    HEADER_CERTIFICATE,
+    HEADER_CERTIFICATE_SIGNATURE,
+];
 
 /// What must be escaped inside one path segment.
 const SEGMENT: &AsciiSet = &CONTROLS.add(b' ').add(b'/').add(b'%').add(b'?').add(b'#');
@@ -43,11 +53,11 @@ pub enum Download {
     /// The registry's response, untouched.
     #[default]
     Forward,
-    /// `x-signature` and `x-publisher-public-key` removed (row 6.1).
+    /// The four `X-Hive-*` signing-chain headers removed (row 6.1).
     StripSignature,
     /// One byte of the body flipped, headers intact (row 6.3).
     CorruptBody,
-    /// Body, hash, signature and key all replaced by an attacker's own,
+    /// Body, hash and the whole signing chain replaced by an attacker's own,
     /// self-consistent set (row 6.2).
     Swap(Payload),
     /// The registry's genuine, signed download of another module version
@@ -58,34 +68,70 @@ pub enum Download {
     Huge { declared: u64, serve_at_most: u64 },
 }
 
-/// A self-consistent download: bytes, their SHA-256, and an Ed25519
-/// signature over the hash by `public_key`, in the registry's encodings.
+/// A self-consistent download: bytes and a full signing chain for them, in
+/// the registry's header encodings.
 #[derive(Clone, Debug)]
 pub struct Payload {
     pub wasm: Vec<u8>,
     pub sha256: String,
-    pub signature: String,
-    pub public_key: String,
+    /// The four `X-Hive-*` headers, name and value.
+    pub chain: Vec<(&'static str, String)>,
 }
 
 impl Payload {
-    /// `wasm` signed by a key the registry has never seen.
-    pub fn signed_by_attacker(wasm: Vec<u8>) -> Self {
-        Self::signed(wasm, &SigningKey::from_bytes(&[0x42; 32]))
+    /// `wasm` published as `name@version` under a root and a publisher key
+    /// no registry has ever used: every link verifies except the first.
+    pub fn signed_by_attacker(wasm: Vec<u8>, name: &str, version: &str) -> Self {
+        Self::signed(
+            wasm,
+            name,
+            version,
+            &SigningKey::from_bytes(&[0x42; 32]),
+            &SigningKey::from_bytes(&[0x43; 32]),
+        )
     }
 
-    /// `wasm` signed by `key` the way hive-registry signs: the signature
-    /// covers the hex SHA-256 string, base64; the key is hex.
-    pub fn signed(wasm: Vec<u8>, key: &SigningKey) -> Self {
-        use base64::Engine as _;
+    /// `wasm` published as `name@version` the way hive-registry signs
+    /// (AGE-704): `root` certifies `publisher`, which signs the manifest.
+    pub fn signed(
+        wasm: Vec<u8>,
+        name: &str,
+        version: &str,
+        root: &SigningKey,
+        publisher: &SigningKey,
+    ) -> Self {
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let sha256 = hex::encode(Sha256::digest(&wasm));
-        let signature = base64::engine::general_purpose::STANDARD
-            .encode(key.sign(sha256.as_bytes()).to_bytes());
+        let certificate = PublisherCertificate {
+            not_before: 1_790_000_000,
+            public_key: hex::encode(publisher.verifying_key().to_bytes()),
+            publisher_id: "00000000-0000-4000-8000-000000000666".to_string(),
+        }
+        .canonical_bytes();
+        let manifest = SignedManifest {
+            capabilities: Capabilities::default(),
+            name: name.to_string(),
+            sha256: sha256.clone(),
+            version: version.to_string(),
+            wit_version: "0.3.0".to_string(),
+        }
+        .canonical_bytes();
+        let chain = vec![
+            (HEADER_MANIFEST, b64(&manifest)),
+            (
+                HEADER_MANIFEST_SIGNATURE,
+                b64(&publisher.sign(&manifest).to_bytes()),
+            ),
+            (HEADER_CERTIFICATE, b64(&certificate)),
+            (
+                HEADER_CERTIFICATE_SIGNATURE,
+                b64(&root.sign(&certificate).to_bytes()),
+            ),
+        ];
         Self {
             wasm,
             sha256,
-            signature,
-            public_key: hex::encode(key.verifying_key().to_bytes()),
+            chain,
         }
     }
 }
@@ -276,8 +322,9 @@ fn tamper_download(
     let body = match rule {
         Download::Forward | Download::Replay { .. } => Body::from(body),
         Download::StripSignature => {
-            headers.remove(SIGNATURE);
-            headers.remove(PUBLIC_KEY);
+            for name in CHAIN_HEADERS {
+                headers.remove(name);
+            }
             Body::from(body)
         }
         Download::CorruptBody => {
@@ -289,8 +336,11 @@ fn tamper_download(
         }
         Download::Swap(payload) => {
             headers.insert(HASH, header(&payload.sha256));
-            headers.insert(SIGNATURE, header(&payload.signature));
-            headers.insert(PUBLIC_KEY, header(&payload.public_key));
+            for (name, value) in &payload.chain {
+                let name = axum::http::HeaderName::from_bytes(name.as_bytes())
+                    .expect("a valid header name");
+                headers.insert(name, header(value));
+            }
             Body::from(payload.wasm.clone())
         }
         Download::Huge {
@@ -361,7 +411,8 @@ fn rename_json(body: &[u8], real: &str, shown: &str) -> Option<Bytes> {
 #[cfg(test)]
 mod tests {
     //! The proxy in front of a wiremock registry: each rule does what the
-    //! S6 rows rely on. These are hermetic and run on every PR.
+    //! S6 rows rely on, and the client refuses what each one serves. These
+    //! are hermetic and run on every PR.
     use super::*;
     use hive_client::{HiveRegistryClient, TrustLevel};
     use serde_json::json;
@@ -370,25 +421,39 @@ mod tests {
 
     const WASM: &[u8] = b"\0asm\x01\0\0\0genuine module bytes";
 
-    /// A registry serving `good@1.0.0` (signed by the publisher key) and
-    /// `other@2.0.0`, with their version lists and metadata.
+    fn root() -> SigningKey {
+        SigningKey::from_bytes(&[0x0a; 32])
+    }
+
+    /// A client through `proxy` that trusts the mock registry's root.
+    fn client(proxy: &TamperProxy) -> HiveRegistryClient {
+        HiveRegistryClient::new(&proxy.url)
+            .with_local_root_key(&hex::encode(root().verifying_key().to_bytes()))
+    }
+
+    /// A registry serving `good@1.0.0` and `other@2.0.0`, each signed by the
+    /// publisher key its root certified, with their version lists.
     async fn registry() -> (MockServer, Payload) {
         let server = MockServer::start().await;
-        let genuine = Payload::signed(WASM.to_vec(), &SigningKey::from_bytes(&[7; 32]));
+        let publisher = SigningKey::from_bytes(&[0x0b; 32]);
+        let genuine = Payload::signed(WASM.to_vec(), "good", "1.0.0", &root(), &publisher);
         let other = Payload::signed(
             b"\0asm\x01\0\0\0other".to_vec(),
-            &SigningKey::from_bytes(&[7; 32]),
+            "other",
+            "2.0.0",
+            &root(),
+            &publisher,
         );
         for (name, version, payload) in [("good", "1.0.0", &genuine), ("other", "2.0.0", &other)] {
+            let mut response = ResponseTemplate::new(200)
+                .insert_header(HASH, payload.sha256.as_str())
+                .set_body_bytes(payload.wasm.clone());
+            for (header, value) in &payload.chain {
+                response = response.insert_header(*header, value.as_str());
+            }
             Mock::given(method("GET"))
                 .and(path(format!("/api/modules/{name}/{version}")))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header(HASH, payload.sha256.as_str())
-                        .insert_header(SIGNATURE, payload.signature.as_str())
-                        .insert_header(PUBLIC_KEY, payload.public_key.as_str())
-                        .set_body_bytes(payload.wasm.clone()),
-                )
+                .respond_with(response)
                 .mount(&server)
                 .await;
             Mock::given(method("GET"))
@@ -398,7 +463,7 @@ mod tests {
                         "module_name": name, "version": version, "wasm_hash": payload.sha256,
                         "wasm_size_bytes": payload.wasm.len(), "manifest": { "name": name },
                         "published_at": "2026-09-27T00:00:00Z",
-                        "signature": payload.signature, "publisher_public_key": payload.public_key,
+                        "signature": null, "publisher_public_key": null,
                     }],
                     "page": 1, "per_page": 20, "total": 1,
                 })))
@@ -408,31 +473,31 @@ mod tests {
         (server, genuine)
     }
 
+    async fn refusal(proxy: &TamperProxy) -> String {
+        client(proxy)
+            .download("good", "1.0.0")
+            .await
+            .expect_err("the download is refused")
+            .to_string()
+    }
+
     #[tokio::test]
     async fn forwards_a_download_untouched() {
         let (registry, genuine) = registry().await;
         let proxy = TamperProxy::start(&registry.uri()).await;
-        let download = HiveRegistryClient::new(&proxy.url)
-            .download("good", "1.0.0")
-            .await
-            .unwrap();
+        let download = client(&proxy).download("good", "1.0.0").await.unwrap();
         assert_eq!(download.wasm, genuine.wasm);
         assert_eq!(download.trust_level, TrustLevel::Signed);
         assert_eq!(download.manifest["name"], "good");
     }
 
     #[tokio::test]
-    async fn strips_the_signature_headers() {
+    async fn strips_the_signing_chain_headers() {
         let (registry, _) = registry().await;
         let proxy = TamperProxy::start(&registry.uri()).await;
         proxy.set_download(Download::StripSignature);
-        let download = HiveRegistryClient::new(&proxy.url)
-            .begin_download("good", "1.0.0")
-            .await
-            .unwrap();
-        assert!(download.registry_hash.is_some());
-        assert_eq!(download.signature, None);
-        assert_eq!(download.publisher_public_key, None);
+        let err = refusal(&proxy).await;
+        assert!(err.contains("missing X-Hive-Manifest"), "{err}");
     }
 
     #[tokio::test]
@@ -440,32 +505,19 @@ mod tests {
         let (registry, _) = registry().await;
         let proxy = TamperProxy::start(&registry.uri()).await;
         proxy.set_download(Download::CorruptBody);
-        let err = HiveRegistryClient::new(&proxy.url)
-            .download("good", "1.0.0")
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("hash mismatch"), "{err}");
+        let err = refusal(&proxy).await;
+        assert!(err.contains("hash mismatch"), "{err}");
     }
 
     #[tokio::test]
     async fn swaps_in_a_self_consistent_attacker_payload() {
-        let (registry, genuine) = registry().await;
+        let (registry, _) = registry().await;
         let proxy = TamperProxy::start(&registry.uri()).await;
-        let attacker = Payload::signed_by_attacker(b"\0asm\x01\0\0\0evil".to_vec());
-        proxy.set_download(Download::Swap(attacker.clone()));
-        let download = HiveRegistryClient::new(&proxy.url)
-            .begin_download("good", "1.0.0")
-            .await
-            .unwrap();
-        assert_eq!(
-            download.registry_hash.as_deref(),
-            Some(attacker.sha256.as_str())
-        );
-        assert_eq!(
-            download.publisher_public_key.as_deref(),
-            Some(attacker.public_key.as_str())
-        );
-        assert_ne!(attacker.public_key, genuine.public_key);
+        let attacker =
+            Payload::signed_by_attacker(b"\0asm\x01\0\0\0evil".to_vec(), "good", "1.0.0");
+        proxy.set_download(Download::Swap(attacker));
+        let err = refusal(&proxy).await;
+        assert!(err.contains("not signed by the registry root key"), "{err}");
     }
 
     #[tokio::test]
@@ -476,11 +528,8 @@ mod tests {
             name: "other".into(),
             version: "2.0.0".into(),
         });
-        let download = HiveRegistryClient::new(&proxy.url)
-            .download("good", "1.0.0")
-            .await
-            .unwrap();
-        assert_eq!(download.wasm, b"\0asm\x01\0\0\0other");
+        let err = refusal(&proxy).await;
+        assert!(err.contains("is for other@2.0.0"), "{err}");
     }
 
     #[tokio::test]
@@ -491,15 +540,12 @@ mod tests {
             declared: 2 << 30,
             serve_at_most: 4 << 20,
         });
-        let begun = HiveRegistryClient::new(&proxy.url)
+        let begun = client(&proxy)
             .begin_download("good", "1.0.0")
             .await
             .unwrap();
         assert_eq!(begun.total_size, 2 << 30);
-        let err = HiveRegistryClient::new(&proxy.url)
-            .download("good", "1.0.0")
-            .await
-            .unwrap_err();
+        let err = client(&proxy).download("good", "1.0.0").await.unwrap_err();
         assert!(!err.to_string().is_empty());
         assert!(
             proxy.bytes_served() <= 2 * (4 << 20),
@@ -513,10 +559,10 @@ mod tests {
         let (registry, _) = registry().await;
         let proxy = TamperProxy::start(&registry.uri()).await;
         proxy.rename("../../evil", "good");
-        let client = HiveRegistryClient::new(&proxy.url);
+        let client = client(&proxy);
         let versions = client.list_versions("../../evil").await.unwrap();
         assert_eq!(versions.items[0].module_name, "../../evil");
-        let download = client.download("../../evil", "1.0.0").await.unwrap();
-        assert_eq!(download.wasm, WASM);
+        let mut begun = client.begin_download("../../evil", "1.0.0").await.unwrap();
+        assert_eq!(begun.read_body(|_| {}).await.unwrap(), WASM);
     }
 }

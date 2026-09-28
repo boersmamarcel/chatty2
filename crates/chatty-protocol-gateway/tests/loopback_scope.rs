@@ -62,7 +62,7 @@ impl Harness {
         // A role the loopback route must refuse: a connection the broker
         // made for it, exactly as a real worker gets (ADR-0020), welcomed
         // over the v2 protocol so it is actually live in the registry.
-        let connection = open_connection(&participants, "stub-worker").expect("a connection");
+        let connection = open_connection(&participants, "stub-worker", None).expect("a connection");
         connection.worker_end.set_nonblocking(true).unwrap();
         let mut worker = UnixStream::from_std(connection.worker_end).unwrap();
         let hello = json!({

@@ -84,12 +84,14 @@ pub struct DownloadResult {
     pub wasm: Vec<u8>,
     /// Hex-encoded SHA-256 hash of `wasm`.
     pub wasm_hash: String,
-    /// Trust level determined after signature verification.
+    /// Always [`TrustLevel::Signed`](crate::verify::TrustLevel::Signed): a
+    /// download whose chain does not verify is refused, never demoted.
     pub trust_level: crate::verify::TrustLevel,
-    /// Base64-encoded Ed25519 signature (if signed).
-    pub signature: Option<String>,
-    /// Hex-encoded Ed25519 verifying key (if signed).
-    pub publisher_public_key: Option<String>,
+    /// Hex Ed25519 key of the publisher, from the root-signed certificate.
+    pub publisher_public_key: String,
+    /// The manifest the publisher signed (name, version, sha256, WIT
+    /// version, requested capabilities).
+    pub signed_manifest: crate::verify::SignedManifest,
     /// The manifest JSON from the version record.
     pub manifest: Value,
 }
@@ -106,12 +108,9 @@ pub const MAX_DOWNLOAD_BYTES: u64 = 64 << 20;
 pub struct BegunDownload {
     /// `Content-Length` from the response, or 0 if the server did not send one.
     pub total_size: u64,
-    /// `x-wasm-sha256` response header (hex-encoded SHA-256), if present.
-    pub registry_hash: Option<String>,
-    /// `x-signature` response header (Ed25519 signature), if present.
-    pub signature: Option<String>,
-    /// `x-publisher-public-key` response header, if present.
-    pub publisher_public_key: Option<String>,
+    /// The signing chain from the response's `X-Hive-*` headers, verified
+    /// by [`HiveRegistryClient::finalize_download`] once the body is read.
+    pub chain: crate::verify::ModuleChain,
     /// Streaming response body. Read it with [`BegunDownload::read_body`],
     /// which enforces [`MAX_DOWNLOAD_BYTES`].
     pub stream: std::pin::Pin<

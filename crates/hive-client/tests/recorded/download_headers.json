@@ -1,7 +1,9 @@
 {
   "headers": [
-    "x-publisher-public-key",
-    "x-signature",
+    "x-hive-certificate-signature",
+    "x-hive-manifest",
+    "x-hive-manifest-signature",
+    "x-hive-publisher-certificate",
     "x-trust-level",
     "x-wasm-sha256"
   ]

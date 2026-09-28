@@ -4,7 +4,9 @@ Open-source client library for the Hive module registry.
 
 `HiveRegistryClient` lets you browse, search, download, and verify
 Chatty modules from a Hive registry server, with transparent offline
-caching and Ed25519 signature verification.
+caching. Every download is verified against a registry root key the client
+holds, never one the registry sends; a download that does not verify, or
+comes from a registry with no trusted root key, is refused.
 
 ## Public surface
 
@@ -13,13 +15,19 @@ caching and Ed25519 signature verification.
 - [`models`] — wire types (`ListParams`, `SearchResults`, `DownloadResult`,
   `TrustLevel`, …)
 - [`cache`] — on-disk cache used transparently by the client
-- [`verify`] — Ed25519 signature verification helpers
+- [`verify`] — the signing chain: root key → publisher certificate →
+  signed manifest → the `.wasm`'s SHA-256 (mirrors hive's `hive-verify`)
+- [`trust`] — which root key a client trusts: the compiled production key
+  (empty until pinned), or `CHATTY_HIVE_ROOT_KEY` for a local (loopback)
+  registry such as the compose stack
 
 See [`src/lib.rs`](src/lib.rs) for the canonical usage example.
 
 ## Tests
 
-Unit tests cover cache eviction and signature verification;
+Unit tests cover cache eviction and chain verification;
+`tests/vectors.rs` checks the verifier against hive's byte-for-byte vectors
+(`tests/vectors/`, copied from hive's `services/hive-verify/tests/vectors/`);
 `tests/registry_contract.rs` replays every registry route the client calls
 from responses recorded off a real hive-registry (`tests/recorded/`):
 
@@ -36,3 +44,4 @@ never by hand.
 [`models`]: src/models.rs
 [`cache`]: src/cache.rs
 [`verify`]: src/verify.rs
+[`trust`]: src/trust.rs

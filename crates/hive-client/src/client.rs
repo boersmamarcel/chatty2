@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::{
     cache::Cache,
@@ -15,7 +14,8 @@ use crate::{
         ModuleMetadata, ModulePricingInfo, TokenPair, VersionList,
     },
     session::{HiveSession, send_authed},
-    verify::{self, TrustLevel, VerifyInput},
+    trust,
+    verify::{self, ModuleChain, TrustLevel},
 };
 
 /// HTTP client for the Hive module registry.
@@ -28,6 +28,9 @@ pub struct HiveRegistryClient {
     http: reqwest::Client,
     cache: Option<Cache>,
     session: Option<Arc<HiveSession>>,
+    /// The registry root public key downloads are verified against
+    /// ([`trust::trusted_root`]); `None` refuses every download.
+    root_key: Option<String>,
 }
 
 impl HiveRegistryClient {
@@ -41,17 +44,34 @@ impl HiveRegistryClient {
         Self::with_timeout_inner(base_url, timeout)
     }
 
+    /// The root key comes from [`trust::trusted_root_from_env`]: the compiled
+    /// production key, or `CHATTY_HIVE_ROOT_KEY` for a local registry.
     fn with_timeout_inner(base_url: impl Into<String>, timeout: std::time::Duration) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)
             .build()
             .unwrap_or_default();
+        let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_string(),
+            root_key: trust::trusted_root_from_env(&base_url),
+            base_url,
             http,
             cache: None,
             session: None,
         }
+    }
+
+    /// Trust `root_public_key_hex` for this registry instead of what
+    /// [`new`](Self::new) found, under the same rule as `CHATTY_HIVE_ROOT_KEY`:
+    /// honoured for a local (loopback) registry only.
+    pub fn with_local_root_key(mut self, root_public_key_hex: &str) -> Self {
+        self.root_key = trust::trusted_root(&self.base_url, Some(root_public_key_hex));
+        self
+    }
+
+    /// The root public key downloads are verified against, if any.
+    pub fn root_key(&self) -> Option<&str> {
+        self.root_key.as_deref()
     }
 
     /// Enable the offline module-list cache, persisted under `dir`.
@@ -263,7 +283,11 @@ impl HiveRegistryClient {
     /// Returns a [`BegunDownload`] whose body can be consumed chunk-by-chunk,
     /// allowing callers to report progress to the UI between each chunk.
     /// Call [`HiveRegistryClient::finalize_download`] once all bytes have been
-    /// collected to complete integrity verification and fetch the manifest.
+    /// collected to verify the signing chain and fetch the manifest.
+    ///
+    /// Refuses before any request when this client trusts no root key for
+    /// its registry, and before reading the body when the response lacks any
+    /// of the four chain headers.
     ///
     /// For a simple one-shot download without progress reporting, use
     /// [`download`][Self::download] instead.
@@ -272,6 +296,11 @@ impl HiveRegistryClient {
         name: &str,
         version: &str,
     ) -> Result<BegunDownload, ClientError> {
+        if self.root_key.is_none() {
+            return Err(ClientError::NoTrustedRoot {
+                registry: self.base_url.clone(),
+            });
+        }
         let url = format!(
             "{}/api/modules/{}/{}",
             self.base_url,
@@ -299,51 +328,43 @@ impl HiveRegistryClient {
         }
 
         let total_size = response.content_length().unwrap_or(0);
-        let registry_hash = header_str(response.headers(), "x-wasm-sha256").map(str::to_owned);
-        let signature = header_str(response.headers(), "x-signature").map(str::to_owned);
-        let publisher_public_key =
-            header_str(response.headers(), "x-publisher-public-key").map(str::to_owned);
+        let headers = response.headers();
+        let chain = ModuleChain::from_headers(
+            header_str(headers, verify::HEADER_MANIFEST),
+            header_str(headers, verify::HEADER_MANIFEST_SIGNATURE),
+            header_str(headers, verify::HEADER_CERTIFICATE),
+            header_str(headers, verify::HEADER_CERTIFICATE_SIGNATURE),
+        )
+        .map_err(|e| ClientError::SignatureInvalid(e.to_string()))?;
 
         Ok(BegunDownload {
             total_size,
-            registry_hash,
-            signature,
-            publisher_public_key,
+            chain,
             stream: Box::pin(response.bytes_stream()),
         })
     }
 
     /// Verify and finalise a download started with [`begin_download`][Self::begin_download].
     ///
-    /// Performs SHA-256 integrity check, Ed25519 signature verification, and
-    /// fetches the version manifest.  Returns the completed [`DownloadResult`].
-    ///
-    /// The `BegunDownload` value is passed only for its metadata fields
-    /// (hash/signature/key headers); its stream must already be fully consumed
-    /// before calling this method.
+    /// Verifies `chain` (the [`BegunDownload`]'s) against this client's root
+    /// key: root → publisher certificate → signed manifest → the SHA-256 of
+    /// `wasm`, and that the manifest names `name@version`. Then fetches the
+    /// version manifest. Any failure is [`ClientError::SignatureInvalid`].
     pub async fn finalize_download(
         &self,
         wasm: Vec<u8>,
-        registry_hash: Option<String>,
-        signature: Option<String>,
-        publisher_public_key: Option<String>,
+        chain: &ModuleChain,
         name: &str,
         version: &str,
     ) -> Result<DownloadResult, ClientError> {
-        let computed_hash = hex::encode(Sha256::digest(&wasm));
-        if let Some(ref expected) = registry_hash
-            && &computed_hash != expected
-        {
-            return Err(ClientError::SignatureInvalid(format!(
-                "hash mismatch: expected {expected}, got {computed_hash}"
-            )));
-        }
-
-        let trust_level = verify_ed25519(
-            &computed_hash,
-            signature.as_deref(),
-            publisher_public_key.as_deref(),
-        )?;
+        let root = self
+            .root_key
+            .as_deref()
+            .ok_or_else(|| ClientError::NoTrustedRoot {
+                registry: self.base_url.clone(),
+            })?;
+        let verified = verify::verify_download(root, chain, &wasm, name, version)
+            .map_err(|e| ClientError::SignatureInvalid(e.to_string()))?;
 
         let manifest = match self.list_versions(name).await {
             Ok(vl) => vl
@@ -357,18 +378,19 @@ impl HiveRegistryClient {
 
         Ok(DownloadResult {
             wasm,
-            wasm_hash: registry_hash.unwrap_or(computed_hash),
-            trust_level,
-            signature,
-            publisher_public_key,
+            wasm_hash: verified.manifest.sha256.clone(),
+            trust_level: TrustLevel::Signed,
+            publisher_public_key: verified.certificate.public_key,
+            signed_manifest: verified.manifest,
             manifest,
         })
     }
 
     /// Download the `.wasm` binary for a specific version.
     ///
-    /// Performs integrity (SHA-256) and signature (Ed25519) verification.
-    /// Returns [`ClientError::SignatureInvalid`] on any mismatch, and
+    /// Verifies the signing chain as [`finalize_download`][Self::finalize_download]
+    /// does. Returns [`ClientError::SignatureInvalid`] on any mismatch,
+    /// [`ClientError::NoTrustedRoot`] without a root key, and
     /// [`ClientError::TooLarge`] for a body over
     /// [`MAX_DOWNLOAD_BYTES`](crate::MAX_DOWNLOAD_BYTES).
     ///
@@ -376,22 +398,9 @@ impl HiveRegistryClient {
     /// and [`finalize_download`][Self::finalize_download] instead.
     pub async fn download(&self, name: &str, version: &str) -> Result<DownloadResult, ClientError> {
         let mut begun = self.begin_download(name, version).await?;
-        let wasm_vec = begun.read_body(|_| {}).await?;
-        let BegunDownload {
-            registry_hash,
-            signature,
-            publisher_public_key,
-            ..
-        } = begun;
-        self.finalize_download(
-            wasm_vec,
-            registry_hash,
-            signature,
-            publisher_public_key,
-            name,
-            version,
-        )
-        .await
+        let wasm = begun.read_body(|_| {}).await?;
+        self.finalize_download(wasm, &begun.chain, name, version)
+            .await
     }
 
     // ── Usage reporting ────────────────────────────────────────────────────
@@ -566,26 +575,6 @@ impl HiveRegistryClient {
 #[derive(Serialize)]
 struct RefreshTokenBody<'a> {
     refresh_token: &'a str,
-}
-
-// ── Signature verification helper ─────────────────────────────────────────
-
-fn verify_ed25519(
-    wasm_hash: &str,
-    signature: Option<&str>,
-    publisher_public_key: Option<&str>,
-) -> Result<TrustLevel, ClientError> {
-    match (signature, publisher_public_key) {
-        (Some(sig), Some(pub_key)) => {
-            let input = VerifyInput {
-                wasm_hash: wasm_hash.to_string(),
-                signature: sig.to_string(),
-                publisher_public_key: pub_key.to_string(),
-            };
-            verify::verify_module(&input).map_err(|e| ClientError::SignatureInvalid(e.to_string()))
-        }
-        _ => Ok(TrustLevel::Local),
-    }
 }
 
 // ── URL encoding helper ────────────────────────────────────────────────────

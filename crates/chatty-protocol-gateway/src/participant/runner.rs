@@ -321,11 +321,14 @@ impl LocalRunner {
         };
 
         // The broker names the node and makes its connection; the child
-        // gets the other end and nothing to claim (ADR-0020). Dropping
+        // gets the other end and nothing to claim (ADR-0020). Its owner is
+        // the calling node the broker stamped on the task (DP-2), or the
+        // root when the root called or no broker call started it. Dropping
         // `worker_end` on any early return below closes the connection,
         // which abandons the node.
+        let spawner = task.call.as_ref().and_then(|call| call.caller.as_deref());
         let LocalConnection { name, worker_end } =
-            open_connection(&self.registry, &self.agent_name)
+            open_connection(&self.registry, &self.agent_name, spawner)
                 .context("failed to make a connection for a worker")?;
         // The node's calls release its permit while they are outstanding
         // and re-acquire it before the last result is delivered (BI-6), so

@@ -1792,7 +1792,7 @@ async fn spawn_context_is_clamped() {
     let registry = kit.participants();
     // A node of a spec that may call the helper (PL-S2), so the broker gets
     // as far as the context it brings.
-    let connection = open_connection(&registry, LEAD).expect("a connection");
+    let connection = open_connection(&registry, LEAD, None).expect("a connection");
     let name = connection.name.clone();
     connection.worker_end.set_nonblocking(true).unwrap();
     let worker = WorkerConnection::connect(
@@ -2315,7 +2315,7 @@ async fn no_mid_run_delivery() {
 
     // A root-owned node sends it a message now.
     let registry = kit.participants();
-    let connection = open_connection(&registry, "courier").expect("a connection");
+    let connection = open_connection(&registry, "courier", None).expect("a connection");
     let courier = connection.name.clone();
     connection.worker_end.set_nonblocking(true).unwrap();
     let worker = WorkerConnection::connect(
@@ -2461,6 +2461,178 @@ async fn message_grants_nothing() {
     assert!(
         root.raised.try_recv().is_err(),
         "one shell call, one approval"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The spawner is the owner (TM-2b, AGE-716)
+// ---------------------------------------------------------------------------
+
+/// The `send_message` tool's `to` description as a worker's model read it:
+/// the owner its `welcome` named.
+fn names_owner(request: &RecordedRequest, owner: &str) -> bool {
+    String::from_utf8_lossy(&request.body).contains(&format!(
+        "The agent that gave you your current task is named `{owner}`"
+    ))
+}
+
+/// root → leader → worker: the broker records the node whose
+/// `invoke_agent` spawned a worker as its owner. The middle worker, spawned
+/// by the root, is the root's; the grandchild, spawned by the middle
+/// worker, is the middle worker's — and each one's `welcome` says so.
+#[tokio::test]
+async fn spawned_node_owned_by_spawner() {
+    let kit = nested_kit(reading_grandchild()).await;
+    let run = kit
+        .run_leader("ask the grandchild to read the readme")
+        .await;
+    let out = run.output.as_ref().expect("the leader's call succeeded");
+    assert!(out.success, "{out:?}");
+
+    let middle = kit.sse.requests_for(MIDDLE_MODEL);
+    assert!(
+        names_owner(&middle[0], "root"),
+        "the root spawned the middle worker"
+    );
+    let grandchild = kit.ndjson.requests_for(GRANDCHILD_MODEL);
+    assert!(
+        names_owner(&grandchild[0], &format!("{MIDDLE}-0")),
+        "the middle worker spawned the grandchild"
+    );
+}
+
+/// A worker's message reaches the sub-leader that spawned it, on the
+/// sub-leader's `invoke_agent` result; the root — the worker's grandparent,
+/// not on its tree — gets nothing, and a message addressed to it is
+/// `not_on_tree`.
+#[tokio::test]
+async fn worker_message_reaches_sub_leader() {
+    const TEXT: &str = "found the readme";
+    let middle = format!("{MIDDLE}-0");
+    let grandchild = format!("{GRANDCHILD}-0");
+    let kit = nested_kit(vec![
+        Reply::tool_call(
+            "send_message",
+            serde_json::json!({ "to": "root", "text": "skip a level" }),
+        ),
+        Reply::tool_call(
+            "send_message",
+            serde_json::json!({ "to": middle, "text": TEXT }),
+        ),
+        Reply::text("It says Chatty."),
+    ])
+    .await;
+
+    let run = kit
+        .run_leader("ask the grandchild to read the readme")
+        .await;
+    let out = run.output.as_ref().expect("the leader's call succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response, "The grandchild read it.");
+
+    let sent = kit.ndjson.requests_for(GRANDCHILD_MODEL);
+    assert_eq!(sent.len(), 3);
+    assert_eq!(
+        tool_results(&sent[2]),
+        [
+            serde_json::json!({ "status": "refused", "reason": "not_on_tree" }),
+            serde_json::json!({ "status": "pending", "id": "msg-1" }),
+        ]
+    );
+
+    let lead = kit.sse.requests_for(MIDDLE_MODEL);
+    assert_eq!(lead.len(), 3);
+    let delivered = tool_results(&lead[2]);
+    assert_eq!(
+        delivered.last().unwrap()["messages"],
+        serde_json::json!([wrapped(&grandchild, TEXT)]),
+        "delivered on the sub-leader's invoke_agent result"
+    );
+    assert_eq!(occurrences(&lead[2], TEXT), 1);
+
+    assert!(out.messages.is_empty(), "the root's result carries nothing");
+    assert!(
+        kit.broker().transport().take_run_messages().is_empty(),
+        "nothing waits for the root's next run"
+    );
+    assert_eq!(
+        message_rows(&kit),
+        [
+            (
+                grandchild.clone(),
+                "root".to_string(),
+                "skip a level".len() as u64,
+                "refused: not_on_tree".to_string()
+            ),
+            (grandchild, middle, TEXT.len() as u64, "pending".to_string()),
+        ]
+    );
+}
+
+/// A sub-leader that ends with a message waiting for it drops it with
+/// itself: its worker's message is pending when the root gives up on the
+/// sub-leader, and ending the sub-leader writes one `dropped` row for it.
+#[tokio::test]
+async fn messages_dropped_with_recipient_e2e() {
+    const TEXT: &str = "still working on it";
+    let middle = format!("{MIDDLE}-0");
+    let grandchild = format!("{GRANDCHILD}-0");
+    let kit = nested_kit(vec![
+        Reply::tool_call(
+            "send_message",
+            serde_json::json!({ "to": middle, "text": TEXT }),
+        ),
+        Reply::Delay(10_000),
+        Reply::text("It says Chatty."),
+    ])
+    .await;
+
+    let tool = kit.leader_tool();
+    let call = tokio::spawn(async move {
+        tool.call(
+            &mut ToolContext::new(),
+            InvokeAgentArgs {
+                agent: MIDDLE.to_string(),
+                prompt: "ask the grandchild to read the readme".to_string(),
+                include_trace: false,
+            },
+        )
+        .await
+    });
+    let rows_with = |outcome: &str| {
+        message_rows(&kit)
+            .into_iter()
+            .filter(|row| row.3 == outcome)
+            .collect::<Vec<_>>()
+    };
+    wait_until(
+        "the grandchild's message to wait for the sub-leader",
+        || !rows_with("pending").is_empty(),
+    )
+    .await;
+
+    // The root gives up on the sub-leader mid-run: its node ends with the
+    // message still waiting.
+    call.abort();
+    wait_until("the message to drop with the sub-leader", || {
+        !rows_with("dropped").is_empty()
+    })
+    .await;
+    let registry = kit.participants();
+    wait_until("every worker to go", || registry.names().is_empty()).await;
+
+    let row = (grandchild, middle, TEXT.len() as u64);
+    assert_eq!(
+        message_rows(&kit),
+        [
+            (row.0.clone(), row.1.clone(), row.2, "pending".to_string()),
+            (row.0, row.1, row.2, "dropped".to_string()),
+        ],
+        "one dropped row, for the one message that was waiting"
+    );
+    assert!(
+        kit.broker().transport().take_run_messages().is_empty(),
+        "nothing moved to the root"
     );
 }
 
