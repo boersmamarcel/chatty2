@@ -299,6 +299,7 @@ impl AgentClient {
             conversation_id,
             role,
             spend_gate,
+            run_budget,
             team_skill,
             handoff_ledger,
             unattended,
@@ -1389,6 +1390,11 @@ impl AgentClient {
         // (AGE-416); everyone else has no gate and no check.
         if let Some(gate) = spend_gate {
             invoke_agent_tool = invoke_agent_tool.with_spend_gate(gate);
+        }
+        // What this run has left goes with every call, and a spent budget
+        // starts none (DP-3).
+        if let Some(budget) = run_budget {
+            invoke_agent_tool = invoke_agent_tool.with_run_budget(budget);
         }
         // A `--team` leader records its roles' typed handoffs (TD-2).
         if let Some(ledger) = handoff_ledger {

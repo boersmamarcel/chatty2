@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use chatty_fabric::{CallPolicy, Refusal};
+use chatty_fabric::{CallPolicy, Refusal, Remaining};
 
 use crate::agent_spec::AgentSpec;
 
@@ -91,6 +91,17 @@ impl CallPolicy for SpecPolicy {
             },
             &self.spec(callee),
         )
+    }
+
+    /// The callee spec's `[budget]` (DP-3): `max_agent_turns` (`0` is no
+    /// cap), `max_duration` and `cap_usd`.
+    fn budget(&self, callee: &str) -> Remaining {
+        let spec = self.spec(callee);
+        Remaining {
+            turns: spec.budget.max_agent_turns.filter(|turns| *turns > 0),
+            seconds: spec.max_duration().map(|duration| duration.as_secs()),
+            usd: spec.budget.cap_usd,
+        }
     }
 }
 
@@ -284,5 +295,27 @@ mod tests {
             Ok(()),
             "an unpublished callee is exposed to anyone"
         );
+    }
+
+    /// DP-3: a callee's own budget is its spec's `[budget]`.
+    #[test]
+    fn spec_policy_reads_the_callees_own_budget() {
+        let mut worker = spec("local-worker");
+        worker.budget.max_agent_turns = Some(12);
+        worker.budget.max_duration = Some("2m".to_string());
+        worker.budget.cap_usd = Some(0.5);
+        let mut uncapped = spec("local-uncapped");
+        uncapped.budget.max_agent_turns = Some(0);
+        let policy = SpecPolicy::new([worker, uncapped]);
+        assert_eq!(
+            policy.budget("local-worker"),
+            Remaining {
+                turns: Some(12),
+                seconds: Some(120),
+                usd: Some(0.5),
+            }
+        );
+        assert!(policy.budget("local-uncapped").is_unlimited());
+        assert!(policy.budget("local-unknown").is_unlimited());
     }
 }

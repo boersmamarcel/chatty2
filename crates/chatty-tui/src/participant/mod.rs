@@ -22,6 +22,8 @@ pub mod broker;
 #[cfg(test)]
 mod broker_delegation;
 #[cfg(test)]
+mod budget_propagation;
+#[cfg(test)]
 mod call_chain;
 #[cfg(test)]
 mod delegation;
@@ -137,6 +139,9 @@ pub async fn run_participant(
                 None => task.text,
             };
             engine.set_handoff(task.handoff);
+            // It runs under the tighter of its own budget and what its
+            // caller left it (DP-3), before its clock starts.
+            engine.narrow_budget(&task.budget);
             // A question this turn asks goes up the chain as
             // `input-required`; the answer comes back down here and lands on
             // the store the turn's `ask_user` is waiting on (AGE-306).

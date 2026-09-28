@@ -634,8 +634,9 @@ an error naming the field (`extra_args` is gone), and validation reports every p
 once: bad name, unknown profile, unknown tool group, bad model reference, duplicate
 plugin, bad duration or cap. `AgentBuildContext::from_spec` is the one place a spec
 becomes what an agent is built with: the role, the execution settings narrowed by
-`disable` and `max_agent_turns` and then gated, the skills line, and a per-task
-`TaskSpendGate` from `cap_usd`. A worker receives its whole spec on its argv as
+`disable` and `max_agent_turns` and then gated, the skills line, and the run's
+`RunBudget` from `max_agent_turns` and `cap_usd` (a `LocalSpendGate`, see
+[token-tracking.md](token-tracking.md#the-local-spend-gate-dp-3)). A worker receives its whole spec on its argv as
 `--agent-json <spec>` and builds itself through that same function.
 
 | Field | Meaning |
@@ -651,7 +652,15 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. The broker asks it on every worker's `invoke_agent` before anything is spawned, then refuses a call that closes a cycle or goes deeper than 4 levels below the root; the calling model reads `Error: invoke_agent: not_listed: …`, `cycle: root → a → b → a` or `too_deep: depth 5 > max 4` (PL-S2 DP-2). |
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
-| `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation. |
+| `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation (`budget_spent: usd`). |
+
+A called agent runs under the tighter of its own `[budget]` and what its caller has left
+(PL-S2 DP-3): `turns = min(max_agent_turns, caller's turns left)`, `deadline = min(now +
+max_duration, the chain's deadline)`, `usd = min(cap_usd, caller's dollars left)`, where
+what the caller has left counts what it already spent, its callees' usage included. The
+broker refuses a call once any of them is used up, before anything is spawned, and stops a
+callee still running past its deadline (plus a tenth of the budget, 5 s to 2 min) with a
+failed result.
 | `plugins` | Optional. WASM modules whose tools this agent runs in-process — see [plugins.md](plugins.md#a-plugins-tools-as-the-agents-own). |
 
 **Roles: a profile and a preamble (ADR-0011 C11, AGE-405).** `tools.disable` removes

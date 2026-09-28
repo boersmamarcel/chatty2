@@ -26,12 +26,14 @@ use std::time::Duration;
 
 use super::tool_profile::{ToolProfile, tool_profile};
 use crate::agent_spec::{AgentSpec, PluginSpec, SpecErrors};
+use crate::models::token_usage::PriceBook;
 use crate::services::embedding_service::EmbeddingService;
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::memory_service::MemoryService;
+use crate::services::run_budget::RunBudget;
 use crate::services::shell_service::ShellSession;
 use crate::services::skill_service::SkillService;
-use crate::services::spend_gate::{SpendGate, TaskSpendGate};
+use crate::services::spend_gate::{LocalSpendGate, SpendGate};
 use crate::services::team::TeamSkill;
 use crate::services::terminal::TerminalSource;
 use crate::settings::models::ExecutionSettingsModel;
@@ -97,6 +99,12 @@ pub struct AgentBuildContext {
     /// the `hive` repo sets it, on top of [`Self::from_services`]; every
     /// other host leaves it `None`, which means no check at all.
     pub spend_gate: Option<std::sync::Arc<dyn SpendGate>>,
+    /// What this run has left to hand its callees (DP-3): `invoke_agent`
+    /// says it on every call, refuses once a limit is spent, and records its
+    /// callees' usage there. [`Self::from_spec`] makes one from the spec's
+    /// `[budget]`; a host that keeps it current (chatty-tui's headless
+    /// runner: the clock, the turns spent, its own usage) sets its own.
+    pub run_budget: Option<RunBudget>,
     /// The skill beside the team file a `--team` leader runs under (ADR-0011
     /// C13, AGE-407), served by `read_skill` ahead of the skill directories.
     /// Only chatty-tui's `--team` sets it, on top of [`Self::from_services`];
@@ -292,6 +300,8 @@ impl AgentBuildContext {
             // Only a hosted leader has a cap to ask about; hive sets it on
             // top of this base.
             spend_gate: None,
+            // A spec's budget; `from_spec` and the headless runner set it.
+            run_budget: None,
             // Only a `--team` leader has one (see `AgentBuildContext::team_skill`).
             team_skill: None,
             handoff_ledger: None,
@@ -318,17 +328,13 @@ impl AgentBuildContext {
 
 /// What running as a spec means for a host: the context the agent is built
 /// with, plus what a context does not carry because the host decides it
-/// outside the agent — which model to run, the run's wall-clock budget, and
-/// the handle the host reports the task's spend to.
+/// outside the agent — which model to run and the run's wall-clock budget.
 pub struct SpecBuild {
     pub context: AgentBuildContext,
     /// `agent.model`, for the host to resolve as it resolves `--model`.
     pub model: Option<String>,
     /// `budget.max_duration`: the `Deadline` the host's runner starts.
     pub max_duration: Option<Duration>,
-    /// `budget.cap_usd`'s gate, also installed as the context's
-    /// `spend_gate`.
-    pub task_spend: Option<TaskSpendGate>,
 }
 
 impl AgentBuildContext {
@@ -341,8 +347,9 @@ impl AgentBuildContext {
     /// the last group builds an agent with no execution tools, and
     /// `ask_user_enabled` / `instructions_dir` read the narrowed settings as
     /// every host does. `tools.profile` and `agent.preamble` become the
-    /// role, `tools.skills` a line of the preamble, `budget.cap_usd` the
-    /// spend gate, `plugins` the plugins the factory loads (PL-U2) from
+    /// role, `tools.skills` a line of the preamble, `budget.max_agent_turns`
+    /// and `budget.cap_usd` the run's budget (its `LocalSpendGate` pricing
+    /// with an empty book until the host sets one), `plugins` the plugins the factory loads (PL-U2) from
     /// `services.plugin_host`, and a non-empty `swarm.delegates_to` the
     /// delegation tools (DP-1).
     pub fn from_spec(spec: &AgentSpec, services: AgentServices) -> Result<SpecBuild, SpecErrors> {
@@ -357,16 +364,17 @@ impl AgentBuildContext {
             }
             settings
         });
-        let task_spend = spec.budget.cap_usd.map(TaskSpendGate::new);
+        let run_budget = RunBudget::new(
+            spec.budget.max_agent_turns.filter(|turns| *turns > 0),
+            LocalSpendGate::new(spec.budget.cap_usd, PriceBook::default()),
+        );
         let context = Self {
             role: AgentRole {
                 preamble: role_preamble(spec),
                 profile: spec.tools.profile.as_deref().and_then(tool_profile),
                 delegates: !spec.swarm.delegates_to.is_empty(),
             },
-            spend_gate: task_spend
-                .clone()
-                .map(|gate| Arc::new(gate) as Arc<dyn SpendGate>),
+            run_budget: Some(run_budget),
             ask_user_enabled: settings.as_ref().is_none_or(|s| s.ask_user_enabled),
             instructions_dir: settings
                 .as_ref()
@@ -382,7 +390,6 @@ impl AgentBuildContext {
             context,
             model: spec.agent.model.clone(),
             max_duration: spec.max_duration(),
-            task_spend,
         })
     }
 }
@@ -579,8 +586,14 @@ cap_usd = 2.5
                  coder-reviewer."
             )
         );
-        assert!(ctx.spend_gate.is_some());
-        assert_eq!(built.task_spend.unwrap().cap_usd(), 2.5);
+        assert!(
+            ctx.spend_gate.is_none(),
+            "the hosted monthly cap is not the spec's"
+        );
+        assert_eq!(
+            ctx.run_budget.as_ref().unwrap().spend().cap_usd(),
+            Some(2.5)
+        );
         assert_eq!(built.model.as_deref(), Some("qwen3:4b"));
         assert_eq!(built.max_duration, Some(Duration::from_secs(3600)));
         assert_eq!(ctx.local_agents, vec!["local-agent".to_string()]);

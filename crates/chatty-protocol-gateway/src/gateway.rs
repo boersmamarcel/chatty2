@@ -22,7 +22,7 @@ use crate::handlers::a2a;
 use crate::handlers::index;
 use crate::handlers::mcp::{self, SseSessions};
 use crate::participant::{BrokerCalls, DirectTransport, ParticipantRegistry, VirtualAgent};
-use chatty_fabric::{CallPolicy, EdgeLog, Transport};
+use chatty_fabric::{CallPolicy, EdgeLog, Transport, UsagePricer};
 
 // ---------------------------------------------------------------------------
 // GatewayState
@@ -151,6 +151,8 @@ pub struct ProtocolGateway {
     /// The spec rules a node's call is checked against (PL-S2); `None`
     /// checks only the call chain.
     call_policy: Option<Arc<dyn CallPolicy>>,
+    /// Prices a callee's reported usage on its edge-log row (DP-3).
+    usage_pricer: Option<Arc<dyn UsagePricer>>,
     /// Built on first use, from the virtual agents published by then.
     calls: OnceLock<Arc<BrokerCalls>>,
     routes: RouteCounter,
@@ -177,6 +179,7 @@ impl ProtocolGateway {
             runners: BTreeMap::new(),
             edges: None,
             call_policy: None,
+            usage_pricer: None,
             calls: OnceLock::new(),
             routes: RouteCounter::default(),
         }
@@ -258,6 +261,14 @@ impl ProtocolGateway {
         self
     }
 
+    /// Price what each callee reports spending on its edge-log row, or say
+    /// `unpriced` (DP-3). Set it before [`calls`](Self::calls) is first
+    /// asked for.
+    pub fn with_usage_pricer(mut self, pricer: Arc<dyn UsagePricer>) -> Self {
+        self.usage_pricer = Some(pricer);
+        self
+    }
+
     /// The broker's call path: what runs a worker's calls over its
     /// connection, installed on the participant registry the first time it
     /// is asked for. Publish every virtual agent before this — the call path
@@ -271,7 +282,8 @@ impl ProtocolGateway {
                         Arc::new(self.runners.clone()),
                         self.edges.clone(),
                     )
-                    .with_policy(self.call_policy.clone()),
+                    .with_policy(self.call_policy.clone())
+                    .with_pricer(self.usage_pricer.clone()),
                 );
                 self.participants.install_calls(&calls);
                 calls
