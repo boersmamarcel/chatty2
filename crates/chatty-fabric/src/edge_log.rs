@@ -6,8 +6,10 @@
 //! `edges-<pid>.<k>.jsonl` (the first free `k` from 1) and a new one started;
 //! rotated files are never rewritten or deleted here.
 //!
-//! Every field of [`EdgeRow`] is always written, `null` when absent, so the
-//! schema is the same on every row (`goldens/edge_log_schema.jsonl`).
+//! Every field of [`EdgeRow`] but `usd` is always written, `null` when
+//! absent, so the schema is the same on every row
+//! (`goldens/edge_log_schema.jsonl`). `usd` is only on a task row whose
+//! callee reported usage to a broker that prices it (DP-3).
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -46,6 +48,20 @@ pub struct EdgeRow {
     /// Payload size: the prompt or message body, in bytes.
     pub bytes: u64,
     pub outcome: String,
+    /// What the callee reported spending, priced by the broker's
+    /// [`UsagePricer`] (DP-3): dollars, or `unpriced` when a line's model has
+    /// no price and the dollar gate skipped it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usd: Option<String>,
+}
+
+/// Prices what a callee reported spending, for its task row's `usd` (DP-3).
+/// The fabric knows no prices: chatty-core implements this over its price
+/// book, with the same `price` the display uses.
+pub trait UsagePricer: Send + Sync {
+    /// The `usd` of a call whose callee ended with status `metadata`; `None`
+    /// when it reported no usage.
+    fn usd(&self, metadata: &serde_json::Value) -> Option<String>;
 }
 
 impl EdgeRow {
@@ -173,6 +189,7 @@ mod tests {
                 chain: vec!["leader-0".into()],
                 bytes: 42,
                 outcome: "completed".into(),
+                usd: None,
             },
             EdgeRow {
                 ts: 1_790_000_000_500,
@@ -184,6 +201,7 @@ mod tests {
                 chain: vec!["leader-0".into(), "local-coder-0".into()],
                 bytes: 17,
                 outcome: "pending".into(),
+                usd: None,
             },
             EdgeRow {
                 ts: 1_790_000_001_000,
@@ -195,6 +213,7 @@ mod tests {
                 chain: vec![],
                 bytes: 0,
                 outcome: "refused: not_on_tree".into(),
+                usd: None,
             },
         ];
         for row in &rows {
@@ -238,6 +257,7 @@ mod tests {
             chain: vec![],
             bytes: 0,
             outcome: "x".repeat(100 * 1024),
+            usd: None,
         };
         let row_len = serde_json::to_vec(&row).unwrap().len() as u64 + 1;
         let per_file = MAX_EDGE_LOG_BYTES / row_len;

@@ -20,6 +20,8 @@ use chatty_core::models::token_usage::ConversationTokenUsage;
 use chatty_core::repositories::ConversationData;
 use chatty_core::services::StreamSurface;
 use chatty_core::services::handoff::{self, HandoffContract, HandoffLedger, HandoffOutcome};
+use chatty_core::services::run_budget::RunBudget;
+use chatty_core::services::spend_gate::LocalSpendGate;
 use chatty_core::services::team::Team;
 use chatty_core::services::turn_budget::{Deadline, TurnBudget};
 use chatty_core::session::{
@@ -115,6 +117,10 @@ pub struct HeadlessRunner {
     handoff_ledger: Option<HandoffLedger>,
     /// The owner the broker's `welcome` named, set with `fabric_transport`.
     fabric_owner: Option<String>,
+    /// What the run has left to hand its callees (DP-3): its turn cap, its
+    /// clock, the tool turns and dollars it has spent. Its `invoke_agent`
+    /// reads it on every call; a delegated worker's is narrowed by its task.
+    pub(super) run_budget: RunBudget,
     /// Tests only: the budget every turn started with, in order.
     #[cfg(test)]
     pub(super) scripted_budgets: Vec<Option<TurnBudget>>,
@@ -146,7 +152,15 @@ impl HeadlessRunner {
         session.set_price_book(config.models.price_book());
         let pending_first_turn = config.team.as_ref().and_then(Team::first_turn_instruction);
         let handoff_ledger = config.team.as_ref().and_then(Team::handoff_ledger);
+        let max_agent_turns = config.execution_settings.max_agent_turns;
+        // The spec's per-task `cap_usd` (PL-D2), priced on read at the
+        // models each line names (AGE-682).
+        let run_budget = RunBudget::new(
+            (max_agent_turns > 0).then_some(max_agent_turns),
+            LocalSpendGate::new(config.spec.budget.cap_usd, config.models.price_book()),
+        );
         Self {
+            run_budget,
             session,
             execution_settings: config.execution_settings.clone(),
             transcript: Transcript::new(),
@@ -217,7 +231,24 @@ impl HeadlessRunner {
     pub(super) fn start_clock(&mut self) -> Option<Deadline> {
         self.usage.restart_clock();
         self.deadline = self.max_duration.map(Deadline::starting_now);
+        self.run_budget.start_clock(self.max_duration);
         self.deadline
+    }
+
+    /// Run under the tighter of this run's own budget and `ceiling`, what a
+    /// delegated task's caller left it (DP-3): its turns cap the run's
+    /// `max_agent_turns`, its seconds the run's clock, its dollars the
+    /// run's spend gate. Before the run starts: the clock starts with the
+    /// run.
+    pub fn narrow_budget(&mut self, ceiling: &chatty_fabric::Remaining) {
+        self.run_budget.narrow(ceiling);
+        if let Some(turns) = self.run_budget.turns() {
+            self.execution_settings.max_agent_turns = turns;
+        }
+        if let Some(seconds) = ceiling.seconds {
+            let left = std::time::Duration::from_secs(seconds);
+            self.max_duration = Some(self.max_duration.map_or(left, |own| own.min(left)));
+        }
     }
 
     /// Send the run's last pass after its time ran out mid-turn: one
@@ -436,6 +467,7 @@ impl HeadlessRunner {
             answer_file: self.answer_file,
             fabric_transport: self.fabric_transport.clone(),
             fabric_owner: self.fabric_owner.clone(),
+            run_budget: Some(self.run_budget.clone()),
             ..built.context
         })
     }
@@ -642,6 +674,8 @@ impl HeadlessRunner {
                 if !self.in_tool_turn {
                     self.in_tool_turn = true;
                     self.tool_turns_spent += 1;
+                    self.run_budget
+                        .set_turns_spent(self.tool_turns_spent as u32);
                 }
                 self.usage.update(|t| t.tool_calls += 1);
                 self.session.note_tool_started(&id, &name);
@@ -722,8 +756,17 @@ impl HeadlessRunner {
                 self.usage.update(|t| t.add_call(&call));
                 self.usage.checkpoint();
             }
-            AppEvent::TokenUsage(usage) => self.session.record_turn_usage(usage),
+            AppEvent::TokenUsage(usage) => {
+                // The run's own spend, at the model it ran on unless the
+                // line names one (DP-3).
+                let mut line = usage.clone();
+                line.model
+                    .get_or_insert_with(|| self.config.model_config.model_ref());
+                self.run_budget.record([line]);
+                self.session.record_turn_usage(usage);
+            }
             AppEvent::PluginUsage(usage) => {
+                self.run_budget.record([usage.clone()]);
                 // Spent inside a tool, on the agent's behalf: the run's
                 // spend like a delegated worker's (PL-U2).
                 self.usage.update(|t| t.add_delegated(&usage));

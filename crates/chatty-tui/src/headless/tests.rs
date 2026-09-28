@@ -1915,6 +1915,35 @@ mod runner {
         assert_eq!(runner.pass_turn_budget(false), TurnBudget::new(0));
     }
 
+    /// DP-3: a delegated worker runs under the tighter of its own budget
+    /// and what its caller left it, and hands on what it has not spent.
+    #[tokio::test]
+    async fn a_delegated_run_takes_the_tighter_budget() {
+        let secs = std::time::Duration::from_secs;
+        let (mut runner, _event_rx) = test_runner().await;
+        runner.set_max_duration(Some(secs(1800)));
+        runner.narrow_budget(&chatty_fabric::Remaining {
+            turns: Some(2),
+            seconds: Some(30),
+            usd: None,
+        });
+        assert_eq!(runner.execution_settings.max_agent_turns, 2);
+        assert_eq!(runner.max_duration, Some(secs(30)));
+        runner.narrow_budget(&chatty_fabric::Remaining {
+            turns: Some(5),
+            seconds: Some(600),
+            usd: None,
+        });
+        assert_eq!(runner.execution_settings.max_agent_turns, 2, "never raised");
+        assert_eq!(runner.max_duration, Some(secs(30)), "never raised");
+
+        runner.start_clock();
+        spend_tool_turns(&mut runner, 1);
+        let left = runner.run_budget.remaining();
+        assert_eq!(left.turns, Some(1));
+        assert!(left.seconds.is_some_and(|s| (29..=30).contains(&s)));
+    }
+
     #[test]
     fn the_grace_after_the_deadline_is_a_tenth_within_bounds() {
         let secs = std::time::Duration::from_secs;

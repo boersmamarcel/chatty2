@@ -235,6 +235,7 @@ mod tests {
             handle: None,
             include_trace: false,
             spawn_context: None,
+            remaining: Default::default(),
         })
     }
 

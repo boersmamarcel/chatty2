@@ -384,6 +384,7 @@ async fn next_task(
                 capture_conversation,
                 spawn_context,
                 handoff,
+                budget,
                 swarm_events,
             } => {
                 return Ok(Some((
@@ -393,6 +394,7 @@ async fn next_task(
                         .with_capture_conversation(capture_conversation)
                         .with_spawn_context(spawn_context)
                         .with_handoff(handoff)
+                        .with_budget(*budget)
                         .with_swarm_events(swarm_events),
                 )));
             }
@@ -466,6 +468,7 @@ mod tests {
             handle: None,
             include_trace: false,
             spawn_context: None,
+            remaining: Default::default(),
         })
     }
 
