@@ -106,6 +106,24 @@ pub trait VirtualAgent: Send + Sync {
     /// serves, so a started worker is reachable by name like any other.
     fn registry(&self) -> &ParticipantRegistry;
 
+    /// The workspace a worker spawned for the root gets its tree under
+    /// (BI-5). `None` — the default — isolates nothing.
+    fn workspace_root(&self) -> Option<&str> {
+        None
+    }
+
+    /// The team's verification command for this agent's workers, from the
+    /// root's settings (AGE-406). `None` — the default — runs none.
+    fn verification(&self) -> Option<&str> {
+        None
+    }
+
+    /// The model endpoint this agent's workers are metered on, from the
+    /// root's settings (ADR-0011 C6). `None` — the default — is unmetered.
+    fn endpoint(&self) -> Option<&str> {
+        None
+    }
+
     /// Start a worker and hand it `task`.
     ///
     /// Returns once the worker has registered and the task has been

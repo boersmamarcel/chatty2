@@ -38,10 +38,11 @@ use super::protocol::{
 };
 use chatty_fabric::{
     AgentOrigin, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState,
+    SpawnContext,
 };
 
 /// The conversation scope every node this broker admits works for, until
-/// the spawn request carries the caller's own (BI-5, AGE-637).
+/// the spawn request carries the caller's own scope.
 pub const ROOT_SCOPE: &str = "root";
 
 /// One update on an open task, as the HTTP side consumes it.
@@ -145,6 +146,10 @@ struct Inner {
     /// gateway serving this registry owns it, and a connection outliving
     /// the gateway has nothing left to call.
     calls: Weak<BrokerCalls>,
+    /// Each spawned node's own context, which its calls spawn from (BI-5):
+    /// its own tree and branch, and the roster it was given. Kept while
+    /// the node's connection is open.
+    contexts: HashMap<String, SpawnContext>,
 }
 
 /// The broker's live local participants. Cheap to clone; all clones share
@@ -193,6 +198,20 @@ impl ParticipantRegistry {
         })
     }
 
+    /// Record `name`'s own context: the tree it works in, the branch it
+    /// works on and the roster it was given (BI-5). The runner that spawned
+    /// it calls this once its tree exists; a call the node makes spawns
+    /// from here, clamped to it. Forgotten when the node's connection
+    /// closes.
+    pub fn set_node_context(&self, name: &str, context: SpawnContext) {
+        self.lock().contexts.insert(name.to_string(), context);
+    }
+
+    /// `name`'s own context, if a runner recorded one (BI-5).
+    pub fn node_context(&self, name: &str) -> Option<SpawnContext> {
+        self.lock().contexts.get(name).cloned()
+    }
+
     /// Register `node`'s connection: its worker said `hello` with `card`,
     /// and frames for it go to `outbound`. Returns the name it is served
     /// under, which is the admitted one whatever the card says.
@@ -235,7 +254,10 @@ impl ParticipantRegistry {
     /// `node`'s connection closed before it registered. Its name stays
     /// spent.
     pub fn abandon(&self, node: AdmittedNode) {
-        let _ = self.lock().directory.end(node.id);
+        let mut inner = self.lock();
+        let _ = inner.directory.end(node.id);
+        inner.contexts.remove(node.name.as_str());
+        drop(inner);
         debug!(node = %node.name, "A node's connection closed before it said hello");
     }
 
@@ -247,6 +269,7 @@ impl ParticipantRegistry {
     pub fn deregister(&self, name: &str) {
         let participant = {
             let mut inner = self.lock();
+            inner.contexts.remove(name);
             let Some(participant) = inner.participants.remove(name) else {
                 return;
             };
@@ -336,6 +359,7 @@ impl ParticipantRegistry {
                 text: task.text,
                 bearer: task.bearer,
                 capture_conversation: task.capture_conversation,
+                spawn_context: task.spawn_context,
             })
             .is_err()
         {
@@ -450,7 +474,7 @@ impl ParticipantRegistry {
             } => (task_id, TaskUpdate::Artifact { text, last_chunk }, false),
             // Calls are run by the connection loop, which owns their
             // lifetime; one reaching here was not routed and is dropped.
-            ParticipantFrame::Call { id, .. } => {
+            ParticipantFrame::Call { id, .. } | ParticipantFrame::CallInput { id, .. } => {
                 warn!(participant = %name, call = id, "A call frame outside a connection loop");
                 return true;
             }
@@ -611,6 +635,7 @@ mod tests {
             text,
             bearer,
             capture_conversation,
+            ..
         } = outbound.recv().await.unwrap()
         else {
             panic!("expected a task frame");

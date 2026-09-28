@@ -32,8 +32,11 @@
 //!
 //! The same connection carries the worker's own calls: its `invoke_agent`
 //! and `list_agents` go up as `call` frames and their replies come down
-//! beside the task's answers. [`WorkerConnection`] is a welcomed connection
-//! with a [`SocketTransport`] over it, so the worker connects first and
+//! beside the task's answers. A callee's question comes down as
+//! `call_input_required` and the worker's answer goes up as `call_input`
+//! (BI-5), so a question from any depth reaches the root's human.
+//! [`WorkerConnection`] is a welcomed connection with a [`SocketTransport`]
+//! over it, so the worker connects first and
 //! builds its agent second, handing the agent [`WorkerConnection::transport`]
 //! (connect-then-build). The read half routes each `call_*` reply to the
 //! call it names; the write half interleaves `call` frames with the task's
@@ -43,7 +46,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use chatty_core::services::fabric_transport::{CallReplies, OutboundCall, SocketTransport};
+use chatty_core::services::fabric_transport::{CallReplies, Outbound, SocketTransport};
 use chatty_core::services::{StreamError, StreamErrorKind};
 use chatty_core::session::SessionEvent;
 use chatty_fabric::Transport;
@@ -92,7 +95,7 @@ pub fn worker_card(version: &str) -> ParticipantCard {
 pub struct WorkerConnection {
     connection: ParticipantConnection,
     transport: Arc<SocketTransport>,
-    calls: mpsc::UnboundedReceiver<OutboundCall>,
+    calls: mpsc::UnboundedReceiver<Outbound>,
     replies: CallReplies,
 }
 
@@ -208,9 +211,18 @@ impl WorkerConnection {
                             continue;
                         }
                     },
-                    Some(OutboundCall { id, request }) = calls.recv() => {
-                        ParticipantFrame::Call { id, request }
-                    }
+                    Some(outbound) = calls.recv() => match outbound {
+                        Outbound::Call { id, request } => ParticipantFrame::Call { id, request },
+                        Outbound::Answer { id, task, input } => {
+                            match serde_json::from_value(input) {
+                                Ok(input) => ParticipantFrame::CallInput { id, task, input },
+                                Err(e) => {
+                                    warn!(call = id, error = %e, "Dropping an answer that is not an input frame's shape");
+                                    continue;
+                                }
+                            }
+                        }
+                    },
                     _ = &mut turn_over_rx => break,
                 };
                 if let Err(e) = writer_half.send(frame).await {
@@ -298,6 +310,9 @@ fn route_reply(replies: &CallReplies, frame: &BrokerFrame) -> bool {
         BrokerFrame::CallProgress { id, event } => replies.progress(*id, event.clone()),
         BrokerFrame::CallResult { id, result } => replies.result(*id, result.clone()),
         BrokerFrame::CallError { id, error } => replies.error(*id, error.clone()),
+        BrokerFrame::CallInputRequired { id, task, request } => {
+            replies.input_required(*id, task.clone(), request.clone())
+        }
         _ => return false,
     }
     true
@@ -360,12 +375,14 @@ async fn next_task(
                 text,
                 bearer,
                 capture_conversation,
+                spawn_context,
             } => {
                 return Ok(Some((
                     task_id,
                     DelegatedTask::new(text)
                         .with_bearer(bearer)
-                        .with_capture_conversation(capture_conversation),
+                        .with_capture_conversation(capture_conversation)
+                        .with_spawn_context(spawn_context),
                 )));
             }
             BrokerFrame::Cancel { task_id } => {
@@ -437,6 +454,7 @@ mod tests {
             prompt: "go".to_string(),
             handle: None,
             include_trace: false,
+            spawn_context: None,
         })
     }
 

@@ -430,7 +430,7 @@ mod evidence {
     use chatty_module_registry::ModuleRegistry;
     use chatty_protocol_gateway::ProtocolGateway;
     use chatty_protocol_gateway::participant::{
-        LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
+        LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace, WorkspaceRequest,
     };
     use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
     use rig_agent::tool::{Tool, ToolContext};
@@ -490,19 +490,29 @@ mod evidence {
         let runner = LocalRunner::new(executable, registry.clone())
             .with_agent_name(LOCAL_AGENT_NAME)
             .with_registration_timeout(Duration::from_secs(10))
-            .with_workspace_factory(Arc::new(move |worker: String| {
+            .with_workspace_factory(Arc::new(move |request: WorkspaceRequest| {
                 let root = root.to_string_lossy().to_string();
                 let verification = verification.clone();
                 Box::pin(async move {
-                    let (cwd, evidence, on_exit) =
-                        worker_tree::create_with_commit_hook(&root, &worker, verification)
-                            .await?
-                            .expect("the workspace is a git repository");
+                    let worker_tree::IsolatedWorker {
+                        cwd,
+                        branch,
+                        evidence,
+                        on_exit,
+                    } = worker_tree::create_with_commit_hook(
+                        &root,
+                        &request.worker,
+                        None,
+                        verification,
+                    )
+                    .await?
+                    .expect("the workspace is a git repository");
                     if edits {
                         std::fs::write(cwd.join("added.rs"), "fn added() {}\n").unwrap();
                     }
                     Ok(Some(WorkerWorkspace {
                         cwd,
+                        branch: Some(branch),
                         evidence: Some(Box::new(move || {
                             Box::pin(async move {
                                 evidence().await.map(|found| TaskEvidence {

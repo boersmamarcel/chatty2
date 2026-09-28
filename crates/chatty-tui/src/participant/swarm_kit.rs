@@ -73,8 +73,8 @@ pub(crate) struct AgentDef {
     /// fake server.
     pub model: String,
     pub endpoint: Endpoint,
-    /// Declare `swarm.delegates_to`, so the worker runs a broker of its own
-    /// and can delegate in turn.
+    /// Declare `swarm.delegates_to`: a sub-leader, which delegates in turn
+    /// over its connection to the root broker (BI-5).
     pub sub_leader: bool,
     /// The spec's `[tools] profile`, e.g. `coder`.
     pub profile: Option<&'static str>,
@@ -130,6 +130,17 @@ impl SwarmKit {
     /// `sse` and the NDJSON one from `ndjson`. The workspace holds one file,
     /// `README.md` (`# Chatty`).
     pub async fn start(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
+        Self::start_with(roster, sse, ndjson, false).await
+    }
+
+    /// As [`start`](Self::start), with the workspace a git repository on
+    /// `main` whose one commit holds `README.md`, so every worker gets a
+    /// `git worktree` of its own (BI-5).
+    pub async fn start_in_repo(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
+        Self::start_with(roster, sse, ndjson, true).await
+    }
+
+    async fn start_with(roster: Vec<AgentDef>, sse: Script, ndjson: Script, repo: bool) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
         let sse = FakeDaemon::scripted(sse);
@@ -138,6 +149,17 @@ impl SwarmKit {
         let workspace = base.join("workspace");
         std::fs::create_dir_all(&workspace).expect("workspace dir");
         std::fs::write(workspace.join("README.md"), "# Chatty\n").expect("README.md");
+        if repo {
+            for args in [
+                &["init", "-q", "-b", "main"][..],
+                &["config", "user.email", "kit@example.com"],
+                &["config", "user.name", "Kit"],
+                &["add", "README.md"],
+                &["commit", "-q", "-m", "init"],
+            ] {
+                git(&workspace, args);
+            }
+        }
 
         let providers = vec![
             ProviderConfig::new("Fake SSE".to_string(), ProviderType::OpenRouter)
@@ -194,6 +216,9 @@ impl SwarmKit {
             fetch_enabled: false,
             memory_enabled: false,
             approval_mode: ApprovalMode::AutoApproveAll,
+            // A worker commits with the git tools: its sandboxed shell
+            // cannot reach a linked worktree's repository.
+            git_enabled: repo,
             ..ExecutionSettingsModel::default()
         };
 
@@ -238,6 +263,11 @@ impl SwarmKit {
             broker: Some(broker),
             root,
         }
+    }
+
+    /// The workspace every worker's tree is made under.
+    pub fn workspace(&self) -> PathBuf {
+        self.root().join("workspace")
     }
 
     /// The temp dir everything lives under, as the workers see it.
@@ -329,6 +359,22 @@ impl Drop for SwarmKit {
             broker.shutdown();
         }
     }
+}
+
+/// `git <args>` in `dir`, which must succeed; its trimmed stdout.
+pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("git runs");
+    assert!(
+        out.status.success(),
+        "git {args:?} in {}: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 /// A `chatty-tui` that runs `real` with the kit's home and XDG dirs, so the
@@ -977,9 +1023,9 @@ const GRANDCHILD: &str = "kit-grandchild";
 const GRANDCHILD_MODEL: &str = "kit/grandchild";
 
 /// Leader → middle worker → grandchild, on separate endpoints (BI-6 owns
-/// one shared budget-1 endpoint). The middle worker is a plain worker — no
-/// `--broker` of its own (sub-leaders' brokers go in BI-5) — that reads the
-/// directory, then delegates; `grandchild` is its model's replies.
+/// one shared budget-1 endpoint). The middle worker is a plain worker that
+/// reads the directory, then delegates over its connection; `grandchild`
+/// is its model's replies.
 async fn nested_kit(grandchild: Vec<Reply>) -> SwarmKit {
     SwarmKit::start(
         vec![
@@ -1511,5 +1557,405 @@ async fn leaf_worker_has_send_message() {
     assert_eq!(
         tool_results(&requests[1]),
         [serde_json::json!({ "status": "pending", "id": "msg-1" })]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Spawn context: sub-leaders use the root broker (BI-5, AGE-637; ADR-0020
+// invariants 5 and 6)
+// ---------------------------------------------------------------------------
+
+const LEAD: &str = "kit-lead";
+const LEAD_MODEL: &str = "kit/lead";
+
+/// Invariant 5: a sub-leader's child branches from the sub-leader's branch,
+/// and its evidence diffs against that branch. The sub-leader commits
+/// `lead.txt` on its own branch (with the git tools), then delegates; the grandchild writes
+/// `grandchild.txt`. The grandchild's branch forks at the sub-leader's tip,
+/// its tree lies inside the sub-leader's, and the evidence the sub-leader
+/// reads names the sub-leader's branch as its base and shows only the
+/// grandchild's own commit.
+#[tokio::test]
+async fn grandchild_branches_from_its_subleader() {
+    let kit = SwarmKit::start_in_repo(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(GRANDCHILD, GRANDCHILD_MODEL, Endpoint::Ndjson),
+        ],
+        Script::new().route(
+            LEAD_MODEL,
+            [
+                Reply::tool_call(
+                    "write_file",
+                    serde_json::json!({ "path": "lead.txt", "content": "lead\n" }),
+                ),
+                Reply::tool_call("git_add", serde_json::json!({ "paths": ["lead.txt"] })),
+                Reply::tool_call("git_commit", serde_json::json!({ "message": "lead" })),
+                Reply::tool_call(
+                    "invoke_agent",
+                    serde_json::json!({ "agent": GRANDCHILD, "prompt": "write grandchild.txt" }),
+                ),
+                Reply::text("The grandchild wrote it."),
+            ],
+        ),
+        Script::new().route(
+            GRANDCHILD_MODEL,
+            [
+                Reply::tool_call(
+                    "write_file",
+                    serde_json::json!({ "path": "grandchild.txt", "content": "grandchild\n" }),
+                ),
+                Reply::text("Wrote grandchild.txt."),
+            ],
+        ),
+    )
+    .await;
+
+    let run = kit.run_leader("have the grandchild write a file").await;
+    let out = run
+        .output
+        .as_ref()
+        .expect("the nested delegation succeeded");
+    assert_eq!(
+        out.response.lines().next(),
+        Some("The grandchild wrote it.")
+    );
+
+    let workspace = kit.workspace();
+    let lead_branch = format!("sub-agent/{LEAD}-0");
+    let grandchild_branch = format!("sub-agent/{GRANDCHILD}-0");
+    let lead_tip = git(&workspace, &["rev-parse", &lead_branch]);
+    assert_ne!(
+        lead_tip,
+        git(&workspace, &["rev-parse", "main"]),
+        "the sub-leader committed on its own branch before it delegated"
+    );
+    assert_eq!(
+        git(
+            &workspace,
+            &["merge-base", &grandchild_branch, &lead_branch]
+        ),
+        lead_tip,
+        "the grandchild's branch forks at the sub-leader's tip, not at the root's HEAD"
+    );
+    assert_eq!(
+        git(
+            &workspace,
+            &[
+                "log",
+                "--format=%s",
+                &format!("{lead_branch}..{grandchild_branch}")
+            ]
+        )
+        .lines()
+        .count(),
+        1,
+        "the grandchild's branch carries its own commit and nothing else"
+    );
+    let lead_tree = workspace
+        .join(".chatty/worktrees")
+        .join(format!("{LEAD}-0"));
+    assert!(
+        lead_tree
+            .join(".chatty/worktrees")
+            .join(format!("{GRANDCHILD}-0"))
+            .join("grandchild.txt")
+            .is_file(),
+        "the grandchild's tree lies inside the sub-leader's"
+    );
+
+    // The evidence the sub-leader's model read: measured against its own
+    // branch, so it shows the grandchild's file and not the sub-leader's.
+    let lead_requests = kit.sse.requests_for(LEAD_MODEL);
+    assert_eq!(lead_requests.len(), 5);
+    let body = String::from_utf8_lossy(&lead_requests[4].body).replace("\\n", "\n");
+    let at = body
+        .find("```evidence")
+        .unwrap_or_else(|| panic!("the grandchild's evidence reached the sub-leader: {body}"));
+    let evidence = &body[at..at + body[at + 3..].find("```").expect("a closed block") + 6];
+    assert!(
+        evidence.contains(&format!("branch: {grandchild_branch}"))
+            && evidence.contains(&format!("base: {lead_branch}"))
+            && evidence.contains("commits: 1"),
+        "{evidence}"
+    );
+    assert!(
+        evidence.contains("grandchild.txt") && !evidence.contains("lead.txt"),
+        "the diff holds only the grandchild's own commit: {evidence}"
+    );
+}
+
+/// Invariant 6: a spawn context that reaches outside the calling node's own
+/// is refused, naming the field, and nothing is spawned. The caller is a
+/// node on a connection the root broker made, whose own context is the
+/// kit's workspace and a roster of one; it calls over the wire with a
+/// context of its own making.
+#[tokio::test]
+async fn spawn_context_is_clamped() {
+    use chatty_fabric::{CallError, CallEvent, CallRequest, InvokeAgentParams, SpawnContext};
+    use chatty_protocol_gateway::participant::{DelegatedTask, open_connection};
+    use chatty_protocol_gateway::worker::{WorkerConnection, worker_card};
+    use futures::StreamExt;
+
+    const HELPER: &str = "kit-helper";
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse),
+            AgentDef::new(HELPER, "kit/helper", Endpoint::Ndjson),
+        ],
+        Script::new(),
+        Script::new(),
+    )
+    .await;
+    let registry = kit.participants();
+    let connection = open_connection(&registry, "rogue").expect("a connection");
+    let name = connection.name.clone();
+    connection.worker_end.set_nonblocking(true).unwrap();
+    let worker = WorkerConnection::connect(
+        tokio::net::UnixStream::from_std(connection.worker_end).unwrap(),
+        worker_card("test"),
+    )
+    .await
+    .expect("welcomed");
+    let transport = worker.transport();
+    while !registry.is_registered(&name) {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    let tree = kit.workspace().to_string_lossy().into_owned();
+    registry.set_node_context(
+        &name,
+        SpawnContext {
+            workspace_root: Some(tree.clone()),
+            base_branch: None,
+            roster: vec![HELPER.to_string()],
+            verification: None,
+            endpoint: None,
+        },
+    );
+    // The context the broker would derive for the helper: the caller's own,
+    // with the root's endpoint for it. Each case widens one field.
+    let own = SpawnContext {
+        workspace_root: Some(tree),
+        base_branch: None,
+        roster: vec![HELPER.to_string()],
+        verification: None,
+        endpoint: Some(kit.ndjson.base_url()),
+    };
+    let outside = SpawnContext {
+        workspace_root: Some(kit.root().to_string_lossy().into_owned()),
+        ..own.clone()
+    };
+    let widened = SpawnContext {
+        roster: vec![HELPER.to_string(), LEAD.to_string()],
+        ..own.clone()
+    };
+    let overridden = SpawnContext {
+        endpoint: Some("http://127.0.0.1:9/v1".to_string()),
+        ..own.clone()
+    };
+
+    let (_task, _updates) = registry
+        .submit_task(&name, DelegatedTask::new("widen your context"))
+        .expect("the rogue node is connected");
+    let refusals = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = refusals.clone();
+    tokio::time::timeout(
+        DEADLINE,
+        worker.serve_one_task(move |_task, _sink, _inputs| async move {
+            for context in [outside, widened, overridden] {
+                let mut call = transport
+                    .call(CallRequest::InvokeAgent(InvokeAgentParams {
+                        agent: HELPER.to_string(),
+                        prompt: "hi".to_string(),
+                        handle: None,
+                        include_trace: false,
+                        spawn_context: Some(context),
+                    }))
+                    .await
+                    .expect("the call goes out");
+                match call.next().await {
+                    Some(Err(CallError::SpawnContextRefused { field, .. })) => {
+                        seen.lock().push(field)
+                    }
+                    Some(Ok(CallEvent::Result(result))) => panic!("accepted: {result}"),
+                    other => panic!("expected a refusal naming the field, got {other:?}"),
+                }
+            }
+            Ok(())
+        }),
+    )
+    .await
+    .expect("the calls finish")
+    .expect("the task ran");
+
+    assert_eq!(
+        *refusals.lock(),
+        ["workspace_root", "roster", "endpoint"],
+        "each widened field is refused by name"
+    );
+    assert!(
+        kit.ndjson.requests().is_empty() && registry.names() == [name],
+        "nothing was spawned for a refused context"
+    );
+}
+
+/// Usage folds across two hops through the root (AGE-415): the leader's
+/// total is the sum of what the fake servers reported for the sub-leader's
+/// and its child's model calls, and it is the total the pre-change golden
+/// recorded for the same scenario (BI-0).
+#[tokio::test]
+async fn usage_folds_across_two_hops() {
+    use chatty_core::testing::fake_model::DEFAULT_USAGE;
+
+    let scenario = kit_scenarios()
+        .into_iter()
+        .find(|s| s.name == "nested_delegation_separate_endpoints")
+        .expect("the scenario exists");
+    let (kit, run) = run_scenario(scenario).await;
+    assert!(run.output.is_ok(), "{:?}", run.output);
+
+    let usage = run
+        .progress
+        .iter()
+        .find_map(|p| match p {
+            InvokeAgentProgress::Finished { usage, .. } => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("the delegation finished");
+    let folded = (
+        usage.iter().map(|u| u.input_tokens as u64).sum::<u64>(),
+        usage.iter().map(|u| u.output_tokens as u64).sum::<u64>(),
+    );
+
+    // Every request the fake servers answered reported the default usage:
+    // the sub-leader's two and the helper's one.
+    let requests = kit.sse.requests().len() + kit.ndjson.requests().len();
+    assert_eq!(kit.sse.requests_for("kit/lead").len(), 2);
+    assert_eq!(kit.ndjson.requests_for("kit/helper").len(), 1);
+    let reported = (
+        DEFAULT_USAGE.0 * requests as u64,
+        DEFAULT_USAGE.1 * requests as u64,
+    );
+    assert_eq!(folded, reported, "the root's total is every hop's usage");
+
+    let golden =
+        std::fs::read_to_string(pre_fabric_dir().join("nested_delegation_separate_endpoints.txt"))
+            .expect("the pre-change golden");
+    assert!(
+        golden.contains(&format!("usage=[input={} output={} ", folded.0, folded.1)),
+        "the pre-change golden recorded the same total: {golden}"
+    );
+}
+
+/// Whether `pid` holds a listening socket — a TCP port or a Unix socket
+/// accepting connections — among its open descriptors.
+fn listens(pid: i32) -> bool {
+    let inodes: std::collections::HashSet<String> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .map(|dir| {
+            dir.filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+                .filter_map(|link| {
+                    let link = link.to_string_lossy().into_owned();
+                    link.strip_prefix("socket:[")?
+                        .strip_suffix(']')
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let net = |table: &str| std::fs::read_to_string(format!("/proc/{pid}/net/{table}"));
+    // `st` 0A is LISTEN; the inode is the tenth column.
+    let tcp_listening = ["tcp", "tcp6"].into_iter().any(|table| {
+        net(table).is_ok_and(|text| {
+            text.lines().skip(1).any(|line| {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                cols.get(3) == Some(&"0A") && cols.get(9).is_some_and(|i| inodes.contains(*i))
+            })
+        })
+    });
+    // Flags 00010000 is __SO_ACCEPTCON: a listening Unix socket.
+    let unix_listening = net("unix").is_ok_and(|text| {
+        text.lines().skip(1).any(|line| {
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            cols.get(3) == Some(&"00010000") && cols.get(6).is_some_and(|i| inodes.contains(*i))
+        })
+    });
+    tcp_listening || unix_listening
+}
+
+/// ADR-0020: one broker per root. While a sub-leader's child is mid-turn,
+/// the root — this test process — is the only process of the swarm that
+/// listens on anything: neither the sub-leader nor its child binds a
+/// gateway port or a participant socket, and the only socket file under the
+/// kit's runtime directory is the root's.
+#[tokio::test]
+async fn one_broker_per_root() {
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(GRANDCHILD, GRANDCHILD_MODEL, Endpoint::Ndjson),
+        ],
+        Script::new().route(
+            LEAD_MODEL,
+            [
+                Reply::tool_call("list_agents", serde_json::json!({})),
+                Reply::tool_call(
+                    "invoke_agent",
+                    serde_json::json!({ "agent": GRANDCHILD, "prompt": "take your time" }),
+                ),
+                Reply::text("Done."),
+            ],
+        ),
+        // Mid-turn long enough to look at the process tree.
+        Script::new().route(GRANDCHILD_MODEL, [Reply::Delay(1500), Reply::text("done")]),
+    )
+    .await;
+    assert!(
+        listens(std::process::id() as i32),
+        "the root holds the one broker"
+    );
+
+    let (seen, run) = tokio::join!(
+        async {
+            let deadline = std::time::Instant::now() + DEADLINE;
+            loop {
+                let pids = subtree(&kit);
+                if pids.len() >= 2 && !kit.ndjson.requests_for(GRANDCHILD_MODEL).is_empty() {
+                    let listening: Vec<i32> =
+                        pids.iter().copied().filter(|&pid| listens(pid)).collect();
+                    break (pids, listening);
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the nested run never came up: {pids:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        },
+        kit.run_leader("ask the grandchild")
+    );
+    let (pids, listening) = seen;
+    assert!(run.output.is_ok(), "{:?}", run.output);
+    assert!(pids.len() >= 2, "the sub-leader and its child were both up");
+    assert!(
+        listening.is_empty(),
+        "a worker of the swarm runs a broker of its own: {listening:?} of {pids:?}"
+    );
+
+    let mut sockets = Vec::new();
+    let mut dirs = vec![kit.root().join("run")];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "sock") {
+                sockets.push(path);
+            }
+        }
+    }
+    assert_eq!(
+        sockets,
+        [kit.socket()],
+        "only the root binds a participant socket"
     );
 }

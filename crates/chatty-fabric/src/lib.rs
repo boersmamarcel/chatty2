@@ -28,5 +28,5 @@ pub use pending::{Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYT
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
     CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome, InvokeAgentParams,
-    MessageStatus, RefusalReason, SendMessageParams, Transport,
+    MessageStatus, RefusalReason, SendMessageParams, SpawnContext, Transport,
 };

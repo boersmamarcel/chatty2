@@ -4,6 +4,13 @@
 //! — the way the desktop's module-settings controller does for the GPUI
 //! app (AGE-376).
 //!
+//! Only a root process starts one (ADR-0020, BI-5). A sub-leader — a worker
+//! whose spec delegates in turn — has no broker of its own: its calls go
+//! over the connection the root's broker made for it, and the root spawns
+//! its workers with a spawn context the root derives from the sub-leader's
+//! own (its tree, its branch, its roster), so they branch from the
+//! sub-leader's branch as they did when it ran a broker itself.
+//!
 //! This is the same wiring as chatty-gpui's `broker_runner.rs` — one
 //! virtual agent per resolved [`VirtualAgentSpec`] that spawns a child per
 //! delegated task on a connection the broker makes for it, and the shared
@@ -43,7 +50,7 @@ use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::RouteCounter;
 use chatty_protocol_gateway::participant::{
     EndpointBudget, LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace,
-    WorkspaceFactory,
+    WorkspaceFactory, WorkspaceRequest,
 };
 use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
 use tokio::net::TcpListener;
@@ -447,11 +454,10 @@ fn local_runners(
             let mut runner = LocalRunner::new(executable.clone(), registry.clone())
                 .with_agent_name(spec.name)
                 .with_description(spec.description)
-                .with_args(spec.args);
-            if let Some(root) = workspace_dir.clone() {
-                runner = runner
-                    .with_workspace_factory(worktree_factory(root, spec.verification.clone()));
-            }
+                .with_args(spec.args)
+                .with_workspace_root(workspace_dir.clone())
+                .with_verification(spec.verification)
+                .with_workspace_factory(worktree_factory());
             if let Some((endpoint, _)) = spec.endpoint {
                 runner = runner.with_endpoint_budget(endpoint, budget.clone());
             }
@@ -472,25 +478,38 @@ fn socket_path() -> PathBuf {
         .join(format!("participants-{}.sock", std::process::id()))
 }
 
-/// Give each worker its own `git worktree`, commit what it leaves behind,
-/// and report what that was (AGE-406). `verification` is the team's command
+/// Give each worker its own `git worktree` under the tree its spawn
+/// context names — the root's workspace, or a sub-leader's own tree, on a
+/// branch off the sub-leader's (BI-5) — commit what it leaves behind, and
+/// report what that was (AGE-406). The verification command is the team's
 /// for *this* agent, already `None` for a profile with no shell. Identical
 /// to chatty-gpui's `broker_runner::worktree_factory`; both wrap the same
 /// `chatty_core::services::worker_tree` logic, which is where all of it but
 /// the `WorkerWorkspace` glue lives (AGE-376).
-fn worktree_factory(workspace_root: String, verification: Option<String>) -> WorkspaceFactory {
-    Arc::new(move |worker: String| {
-        let workspace_root = workspace_root.clone();
-        let verification = verification.clone();
+fn worktree_factory() -> WorkspaceFactory {
+    Arc::new(|request: WorkspaceRequest| {
         Box::pin(async move {
-            let Some((cwd, evidence, on_exit)) =
-                worker_tree::create_with_commit_hook(&workspace_root, &worker, verification)
-                    .await?
+            let Some(root) = request.workspace_root else {
+                return Ok(None);
+            };
+            let Some(worker_tree::IsolatedWorker {
+                cwd,
+                branch,
+                evidence,
+                on_exit,
+            }) = worker_tree::create_with_commit_hook(
+                &root,
+                &request.worker,
+                request.base_branch.as_deref(),
+                request.verification,
+            )
+            .await?
             else {
                 return Ok(None);
             };
             Ok(Some(WorkerWorkspace {
                 cwd,
+                branch: Some(branch),
                 evidence: Some(Box::new(move || {
                     Box::pin(async move {
                         evidence().await.map(|found| TaskEvidence {
@@ -753,75 +772,6 @@ mod tests {
         assert_eq!(card["name"], LOCAL_AGENT_NAME);
 
         broker.shutdown();
-    }
-
-    /// AGE-402: two brokers on one repository — a top leader and a
-    /// sub-leader started with `--broker` inside its own worktree — each
-    /// name their first worker `local-coder-0` from their own counter. Each
-    /// gets a tree and a branch of its own. A third broker whose tree
-    /// cannot be made fails the delegation rather than running its worker
-    /// in the shared tree.
-    #[tokio::test]
-    async fn two_brokers_naming_the_same_worker_get_their_own_branches() {
-        let dir = tempfile::tempdir().expect("a repo dir");
-        let git = |args: &[&str], cwd: &std::path::Path| {
-            let out = std::process::Command::new("git")
-                .args(args)
-                .current_dir(cwd)
-                .output()
-                .expect("git runs");
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-        };
-        git(&["init", "-q"], dir.path());
-        git(
-            &[
-                "-c",
-                "user.email=t@example.com",
-                "-c",
-                "user.name=T",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "init",
-            ],
-            dir.path(),
-        );
-        let root = dir.path().to_string_lossy().to_string();
-
-        let top = worktree_factory(root.clone(), None);
-        let lead = top("local-lead-0".to_string())
-            .await
-            .expect("the top broker isolates its sub-leader")
-            .expect("the workspace is a repository");
-        let nested = worktree_factory(lead.cwd.to_string_lossy().to_string(), None);
-
-        let nested_coder = nested("local-coder-0".to_string())
-            .await
-            .expect("the sub-leader isolates its coder")
-            .expect("its worktree is a repository too");
-        let top_coder = top("local-coder-0".to_string())
-            .await
-            .expect("the top broker isolates its coder")
-            .expect("the workspace is a repository");
-
-        assert_ne!(nested_coder.cwd, top_coder.cwd);
-        assert!(nested_coder.cwd.ends_with("local-coder-0"));
-        assert!(
-            top_coder.cwd.ends_with("local-coder-0-2"),
-            "the top broker's coder yields the name the nested one took: {}",
-            top_coder.cwd.display()
-        );
-
-        let refused = top("../escape".to_string()).await;
-        assert!(
-            refused.is_err(),
-            "a tree that cannot be made fails the task; it never falls back to the shared tree"
-        );
     }
 
     /// Do item 4: a flag-configured leader forwards exactly its provider
