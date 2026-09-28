@@ -282,6 +282,9 @@ async fn send_task(id: Option<Value>, mut task: RunningTask) -> Response {
     while let Some(update) = task.updates.recv().await {
         match update {
             TaskUpdate::Artifact { text: chunk, .. } => text.push_str(&chunk),
+            // Only a broker call asks for these (TB-1); A2A has no place
+            // for them.
+            TaskUpdate::Event(_) => {}
             TaskUpdate::Status {
                 state: s,
                 message: m,
@@ -380,6 +383,7 @@ fn stream_task(id: Option<Value>, mut task: RunningTask) -> Response {
                 TaskUpdate::Artifact { text, last_chunk } => {
                     yield sse(&artifact_event(&id, &task_id, &text, last_chunk));
                 }
+                TaskUpdate::Event(_) => {}
                 TaskUpdate::Status { state, message, metadata, input } => {
                     let terminal = state.is_terminal();
                     // The task is finished *before* the terminal event is

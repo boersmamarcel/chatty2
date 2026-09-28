@@ -291,6 +291,9 @@ async fn reply(
                 (BrokerFrame::CallInputRequired { id, task, request }, false)
             }
             Ok(CallEvent::Result(result)) => (BrokerFrame::CallResult { id, result }, true),
+            // Only a root call hears its nested runs (TB-1); a worker's
+            // call is one of them.
+            Ok(CallEvent::Swarm(_)) => continue,
             Err(error) => (BrokerFrame::CallError { id, error }, true),
         };
         if outbound.send(frame).is_err() || last {

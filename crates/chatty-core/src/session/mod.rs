@@ -799,6 +799,9 @@ impl AgentSession {
                 // it was spent on (AGE-682).
                 self.side_usages.extend(usage.iter().cloned());
             }
+            // The handler emits these as `SessionEvent::SwarmEvent`: a
+            // nested run's events are not this delegation's row (TB-1).
+            InvokeAgentProgress::Swarm(_) => {}
         }
     }
 

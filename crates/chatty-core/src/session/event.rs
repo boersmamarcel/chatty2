@@ -94,6 +94,16 @@ pub enum SessionEvent {
     TurnMessages(Vec<Message>),
     /// Progress from a sub-agent the turn invoked.
     Delegation(InvokeAgentProgress),
+    /// What a run nested under one of the turn's delegations did: a batch
+    /// of one node's items, tagged by the broker with
+    /// `(root_task_id, node, chain)` from its own task table, never by the
+    /// worker (TB-1, AGE-663). At most one per node per
+    /// [`FORWARD_INTERVAL`](chatty_fabric::FORWARD_INTERVAL); text arrives
+    /// as its byte length only. It says what happened below the
+    /// delegation for a view of the tree; the delegation's own progress
+    /// and usage still arrive as [`Delegation`](Self::Delegation), which is
+    /// what the turn records and bills.
+    SwarmEvent(chatty_fabric::SwarmEvent),
     /// The stream ended in an error. `TurnEnded` still follows.
     Error(StreamError),
     /// The cancel flag was seen. `TurnEnded` still follows.
