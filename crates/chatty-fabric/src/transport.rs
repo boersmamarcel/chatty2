@@ -10,8 +10,10 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::Remaining;
+
 /// `invoke_agent`'s arguments as they cross the fabric.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InvokeAgentParams {
     pub agent: String,
     pub prompt: String,
@@ -27,6 +29,12 @@ pub struct InvokeAgentParams {
     /// context by the root broker and refused if it reaches outside it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_context: Option<SpawnContext>,
+    /// What the caller counts as left of its own budget (DP-3): its turns
+    /// and dollars less what it has spent, delegated usage included, and
+    /// its time as seconds. The broker only ever narrows the chain's budget
+    /// with it; absent on the wire when the caller has no limit.
+    #[serde(default, skip_serializing_if = "Remaining::is_unlimited")]
+    pub remaining: Remaining,
 }
 
 /// What a spawned worker starts from: where its tree goes, what its branch
@@ -120,7 +128,7 @@ impl std::fmt::Display for RefusalReason {
 
 /// One call. Serialises as `{"method": …, "params": …}`, the body of a v2
 /// `call` frame.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum CallRequest {
     InvokeAgent(InvokeAgentParams),
@@ -246,6 +254,7 @@ mod tests {
             handle: None,
             include_trace: false,
             spawn_context: None,
+            remaining: Default::default(),
         });
         assert_eq!(
             serde_json::to_value(&invoke).unwrap(),
@@ -329,6 +338,7 @@ mod tests {
                     handle: None,
                     include_trace: false,
                     spawn_context: None,
+                    remaining: Default::default(),
                 }))
                 .await
                 .unwrap()

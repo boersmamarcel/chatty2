@@ -100,7 +100,8 @@
 //! ```
 
 use chatty_fabric::{
-    CallChain, CallError, CallRequest, ConversationScope, HandoffContract, NodeName, SpawnContext,
+    CallChain, CallError, CallRequest, ConversationScope, HandoffContract, NodeName, Remaining,
+    SpawnContext,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -300,6 +301,11 @@ pub struct DelegatedTask {
     /// and it is not part of the task frame. `None` for a task no broker
     /// call started (an A2A request over HTTP).
     pub call: Option<CallStamp>,
+    /// What the worker may spend on this task (DP-3), as the task frame
+    /// carries it: the broker fills the frame from `call`'s chain when it
+    /// hands the task over, and a worker reads it back here. Unlimited for
+    /// a task no broker call started.
+    pub budget: Remaining,
 }
 
 /// What a broker call stamps on the task it starts (DP-2).
@@ -325,6 +331,7 @@ impl DelegatedTask {
             spawn_context: None,
             handoff: None,
             call: None,
+            budget: Remaining::default(),
         }
     }
 
@@ -332,6 +339,22 @@ impl DelegatedTask {
     pub fn with_handoff(mut self, handoff: Option<HandoffContract>) -> Self {
         self.handoff = handoff;
         self
+    }
+
+    /// The budget a worker read off its task frame (DP-3).
+    pub fn with_budget(mut self, budget: Remaining) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// The budget the task frame carries (DP-3): what the call's chain
+    /// leaves the worker now, or the task's own when no broker call started
+    /// it.
+    pub fn frame_budget(&self) -> Remaining {
+        match self.call.as_ref() {
+            Some(call) => call.chain.left_at(std::time::SystemTime::now()),
+            None => self.budget.clone(),
+        }
     }
 
     /// The run a broker call starts (DP-2).
@@ -509,6 +532,14 @@ pub enum BrokerFrame {
         /// AGE-693). Absent on the wire for a role without one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handoff: Option<HandoffContract>,
+        /// What the worker may spend on this task (DP-3): the turns,
+        /// seconds and dollars its call chain leaves it. The worker runs
+        /// under the tighter of this and its own spec's budget. Absent on the
+        /// wire when unlimited.
+        /// Boxed: the frame enum stays small for the frames that are not
+        /// a task.
+        #[serde(default, skip_serializing_if = "Remaining::is_unlimited")]
+        budget: Box<Remaining>,
     },
     /// The caller went away. Stop working on `taskId`; no reply is required.
     #[serde(rename_all = "camelCase")]
@@ -642,6 +673,7 @@ mod tests {
             capture_conversation: false,
             spawn_context: None,
             handoff: None,
+            budget: Box::default(),
         })
         .unwrap();
         assert_eq!(json["type"], "task");
@@ -666,6 +698,7 @@ mod tests {
             capture_conversation: false,
             spawn_context: None,
             handoff: None,
+            budget: Box::default(),
         })
         .unwrap();
         assert_eq!(json["bearer"], "eyJ.token");
@@ -696,6 +729,7 @@ mod tests {
             capture_conversation: true,
             spawn_context: None,
             handoff: None,
+            budget: Box::default(),
         })
         .unwrap();
         assert_eq!(json["captureConversation"], true);
@@ -711,6 +745,41 @@ mod tests {
         assert!(capture_conversation);
     }
 
+    /// DP-3: the task frame carries the budget the worker runs under, and
+    /// says nothing when there is none.
+    #[test]
+    fn a_task_frame_carries_its_budget_and_reads_one_without() {
+        let budget = Remaining {
+            turns: Some(2),
+            seconds: Some(30),
+            usd: Some(0.02),
+        };
+        let json = serde_json::to_value(BrokerFrame::Task {
+            task_id: "t".into(),
+            text: "x".into(),
+            bearer: None,
+            capture_conversation: false,
+            spawn_context: None,
+            handoff: None,
+            budget: Box::new(budget.clone()),
+        })
+        .unwrap();
+        assert_eq!(
+            json["budget"],
+            serde_json::json!({"turns": 2, "seconds": 30, "usd": 0.02})
+        );
+        let BrokerFrame::Task { budget: read, .. } = serde_json::from_value(json).unwrap() else {
+            panic!("a task frame");
+        };
+        assert_eq!(*read, budget);
+
+        let bare = serde_json::json!({"type": "task", "taskId": "t", "text": "x"});
+        let BrokerFrame::Task { budget, .. } = serde_json::from_value(bare).unwrap() else {
+            panic!("a task frame");
+        };
+        assert!(budget.is_unlimited());
+    }
+
     #[test]
     fn the_bearer_does_not_debug_print() {
         let frame = BrokerFrame::Task {
@@ -720,6 +789,7 @@ mod tests {
             capture_conversation: false,
             spawn_context: None,
             handoff: None,
+            budget: Box::default(),
         };
         let printed = format!("{frame:?}");
         assert!(!printed.contains("secret-token"), "{printed}");
@@ -802,6 +872,7 @@ mod tests {
                 handle: None,
                 include_trace: false,
                 spawn_context: None,
+                remaining: Default::default(),
             }),
         })
         .unwrap();

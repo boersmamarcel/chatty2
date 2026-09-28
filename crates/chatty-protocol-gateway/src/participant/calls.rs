@@ -65,9 +65,19 @@
 //! own spec, which decides whether it has `invoke_agent` at all, is not the
 //! broker's to know.
 //!
+//! Then the budget (DP-3): what the caller has left is its chain's budget
+//! narrowed by what the call says the caller has left of it (the caller's
+//! own count of its turns and dollars spent, delegated usage included), and
+//! a call with a limit used up ends with `budget_spent: turns|seconds|usd`
+//! before anything is spawned. The callee runs under the tighter of that and
+//! its own spec's budget, which its task frame carries. A callee still going
+//! past its deadline (plus [`deadline_grace`]) is stopped: the call ends
+//! with a failed result, never a hang.
+//!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, every `send_message` call one message row, and every refused call
-//! one refusal row. `list_agents` reads the directory and is not an edge
+//! one refusal row. A task row whose callee reported usage carries its
+//! price, or `unpriced`, when the broker has a [`UsagePricer`]. `list_agents` reads the directory and is not an edge
 //! between two nodes, so it writes none.
 
 use std::collections::{BTreeMap, HashMap};
@@ -77,8 +87,8 @@ use std::sync::{Arc, Mutex};
 use chatty_fabric::{
     AgentOrigin, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallStream, ChildCall,
     ConversationScope, EdgeKind, EdgeLog, EdgeRow, InvokeAgentOutcome, InvokeAgentParams, Message,
-    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason,
-    SendMessageParams, SpawnContext, Transport,
+    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, Remaining,
+    SendMessageParams, SpawnContext, Transport, UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -132,6 +142,9 @@ pub struct BrokerCalls {
     /// The spec rules a node's call is checked against (PL-S2); `None`
     /// checks only the chain.
     policy: Option<Arc<dyn CallPolicy>>,
+    /// Prices a callee's reported usage for its task row (DP-3); `None`
+    /// writes no price.
+    pricer: Option<Arc<dyn UsagePricer>>,
 }
 
 impl BrokerCalls {
@@ -147,12 +160,19 @@ impl BrokerCalls {
             pending: Arc::default(),
             next_message: AtomicU64::new(0),
             policy: None,
+            pricer: None,
         }
     }
 
     /// Check every node's call against `policy` before anything is spawned.
     pub fn with_policy(mut self, policy: Option<Arc<dyn CallPolicy>>) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Price each callee's reported usage on its task row with `pricer`.
+    pub fn with_pricer(mut self, pricer: Option<Arc<dyn UsagePricer>>) -> Self {
+        self.pricer = pricer;
         self
     }
 
@@ -207,6 +227,7 @@ impl BrokerCalls {
             chain: vec![caller.name().to_string()],
             bytes,
             outcome: None,
+            usd: None,
         }
         .write(EdgeKind::Message, outcome);
         status
@@ -303,6 +324,7 @@ impl BrokerCalls {
                 chain: vec![message.from_name.as_str().to_string()],
                 bytes: message.bytes() as u64,
                 outcome: None,
+                usd: None,
             }
             .write(EdgeKind::Message, "dropped".to_string());
         }
@@ -343,12 +365,13 @@ impl BrokerCalls {
             chain: caller_chain.chain.clone(),
             bytes: params.prompt.len() as u64,
             outcome: None,
+            usd: None,
         };
         if !self.runners.contains_key(&params.agent) && !self.registry.is_registered(&params.agent)
         {
             return Ok((edge, None));
         }
-        match self.check(caller, caller_chain, &params.agent) {
+        match self.check(caller, caller_chain, &params.agent, &params.remaining) {
             Ok(stamp) => Ok((edge, Some(stamp))),
             Err(refusal) => {
                 warn!(caller = %caller.name(), agent = %params.agent, %refusal, "Refused a call");
@@ -375,6 +398,17 @@ impl BrokerCalls {
             }
             _ => Ok(None),
         };
+        // When the broker stops a callee that outran its deadline (DP-3).
+        let cut = stamp
+            .as_ref()
+            .and_then(|stamp| stamp.chain.deadline)
+            .map(|deadline| {
+                let left = deadline
+                    .duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default();
+                tokio::time::Instant::now() + left + deadline_grace(left)
+            });
+        let pricer = self.pricer.clone();
         let task = DelegatedTask::new(params.prompt).with_call(stamp);
         let agent = params.agent;
         // The caller's messages ride on this call's result (delivery point
@@ -424,7 +458,25 @@ impl BrokerCalls {
 
             let mut response = String::new();
             let mut end = None;
-            while let Some(update) = running.updates.recv().await {
+            loop {
+                let update = match cut {
+                    Some(cut) => match tokio::time::timeout_at(cut, running.updates.recv()).await {
+                        Ok(update) => update,
+                        Err(_) => {
+                            warn!(agent = %agent, "A called task ran past its deadline; stopping it");
+                            end = Some((
+                                TaskState::Failed,
+                                Some("deadline: the call ran past its deadline and was stopped".to_string()),
+                                None,
+                            ));
+                            break;
+                        }
+                    },
+                    None => running.updates.recv().await,
+                };
+                let Some(update) = update else {
+                    break;
+                };
                 match update {
                     TaskUpdate::Artifact { text, .. } => {
                         if !text.is_empty() {
@@ -483,6 +535,10 @@ impl BrokerCalls {
                     None,
                 )
             });
+            edge.usd = pricer
+                .as_ref()
+                .zip(metadata.as_ref())
+                .and_then(|(pricer, metadata)| pricer.usd(metadata));
             edge.end(state);
             yield Ok(CallEvent::Result(outcome(state, response, message, metadata, messages())));
             // `running` is dropped here, which reaps a spawned worker.
@@ -513,9 +569,17 @@ impl BrokerCalls {
     }
 
     /// Whether `caller`, at `chain`, may call `agent`: the specs first (a
-    /// node's call only), then the chain's cycle and depth. The run the call
-    /// starts is stamped with the chain it runs under.
-    fn check(&self, caller: &Caller, chain: CallChain, agent: &str) -> Result<CallStamp, Refusal> {
+    /// node's call only), then the chain's cycle and depth, then its budget
+    /// narrowed by `caller_left`, what the caller says it has left (DP-3).
+    /// The run the call starts is stamped with the chain it runs under,
+    /// budget included.
+    fn check(
+        &self,
+        caller: &Caller,
+        chain: CallChain,
+        agent: &str,
+        caller_left: &Remaining,
+    ) -> Result<CallStamp, Refusal> {
         // A registered participant is addressed by its node name; the chain
         // and the policy speak in specs.
         let callee = self
@@ -531,7 +595,15 @@ impl BrokerCalls {
                 Some(name.clone())
             }
         };
-        let chain = chain.extend(&callee)?;
+        let own = self
+            .policy
+            .as_ref()
+            .map(|policy| policy.budget(&callee))
+            .unwrap_or_default();
+        let chain =
+            chain
+                .extend(&callee)?
+                .budget(caller_left, &own, std::time::SystemTime::now())?;
         Ok(CallStamp { caller, chain })
     }
 
@@ -645,6 +717,8 @@ struct EdgeGuard {
     bytes: u64,
     /// Set once the row is written.
     outcome: Option<String>,
+    /// The callee's reported usage, priced (DP-3).
+    usd: Option<String>,
 }
 
 impl EdgeGuard {
@@ -674,6 +748,7 @@ impl EdgeGuard {
             chain: self.chain.clone(),
             bytes: self.bytes,
             outcome,
+            usd: self.usd.clone(),
         };
         let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(error) = log.append(&row) {
@@ -1062,6 +1137,171 @@ mod tests {
             self.spawned.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Err(anyhow::anyhow!("nothing is spawned here")) })
         }
+    }
+
+    /// A virtual agent whose one worker takes `delay` to answer: what a
+    /// fake model that `Delay`s looks like from the broker. It records the
+    /// budget its task frame would carry and when its worker was reaped.
+    struct Slow {
+        registry: ParticipantRegistry,
+        delay: std::time::Duration,
+        budget: Arc<Mutex<Option<Remaining>>>,
+        reaped: Arc<Mutex<Option<tokio::time::Instant>>>,
+    }
+
+    struct SlowWorker {
+        reaped: Arc<Mutex<Option<tokio::time::Instant>>>,
+    }
+
+    impl super::super::virtual_agent::WorkerHandle for SlowWorker {
+        fn name(&self) -> &str {
+            "kit-slow-0"
+        }
+
+        fn task_id(&self) -> Option<&str> {
+            Some("task-slow")
+        }
+
+        fn finish(&mut self, _succeeded: bool, _metadata: Option<&Value>) {}
+    }
+
+    impl Drop for SlowWorker {
+        fn drop(&mut self) {
+            *self.reaped.lock().unwrap() = Some(tokio::time::Instant::now());
+        }
+    }
+
+    impl VirtualAgent for Slow {
+        fn agent_name(&self) -> &str {
+            "kit-slow"
+        }
+
+        fn agent_card(&self) -> super::super::protocol::ParticipantCard {
+            super::super::protocol::ParticipantCard {
+                name: "kit-slow".to_string(),
+                display_name: None,
+                description: String::new(),
+                version: String::new(),
+                skills: Vec::new(),
+            }
+        }
+
+        fn registry(&self) -> &ParticipantRegistry {
+            &self.registry
+        }
+
+        fn run_task(&self, task: DelegatedTask) -> super::super::virtual_agent::WorkerFuture<'_> {
+            *self.budget.lock().unwrap() = Some(task.frame_budget());
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let delay = self.delay;
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                let _ = tx.send(TaskUpdate::Status {
+                    state: TaskState::Completed,
+                    message: None,
+                    metadata: None,
+                    input: None,
+                });
+            });
+            let worker = SlowWorker {
+                reaped: self.reaped.clone(),
+            };
+            Box::pin(async move {
+                Ok((
+                    Box::new(worker) as Box<dyn super::super::virtual_agent::WorkerHandle>,
+                    rx,
+                ))
+            })
+        }
+    }
+
+    /// Invariant 5 (DP-3): a callee started with 30 s left whose model
+    /// takes 40 s is stopped by its deadline (plus the grace a headless run
+    /// gives its own pass), and the caller gets a failed result, not a
+    /// hang. On tokio's paused clock: no real second passes.
+    #[tokio::test(start_paused = true)]
+    async fn deadline_propagates() {
+        let data = tempfile::tempdir().unwrap();
+        let log = EdgeLog::open(data.path()).unwrap();
+        let path = log.path();
+        let registry = ParticipantRegistry::new();
+        let budget = Arc::new(Mutex::new(None));
+        let reaped = Arc::new(Mutex::new(None));
+        let slow: Arc<dyn VirtualAgent> = Arc::new(Slow {
+            registry: registry.clone(),
+            delay: std::time::Duration::from_secs(40),
+            budget: budget.clone(),
+            reaped: reaped.clone(),
+        });
+        let calls = BrokerCalls::new(
+            registry.clone(),
+            Arc::new(BTreeMap::from([("kit-slow".to_string(), slow)])),
+            Some(Arc::new(Mutex::new(log))),
+        );
+
+        let start = tokio::time::Instant::now();
+        let events: Vec<_> = calls
+            .call(
+                Caller::Root,
+                CallRequest::InvokeAgent(InvokeAgentParams {
+                    agent: "kit-slow".to_string(),
+                    prompt: "Take your time.".to_string(),
+                    handle: None,
+                    include_trace: false,
+                    spawn_context: None,
+                    remaining: Remaining {
+                        seconds: Some(30),
+                        ..Remaining::default()
+                    },
+                }),
+            )
+            .collect()
+            .await;
+        let ended = start.elapsed();
+
+        let Some(Ok(CallEvent::Result(result))) = events.last() else {
+            panic!("the call ends with a result: {events:?}");
+        };
+        let outcome: InvokeAgentOutcome = serde_json::from_value(result.clone()).unwrap();
+        assert!(!outcome.success, "{outcome:?}");
+        assert!(
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("deadline:")),
+            "{outcome:?}"
+        );
+
+        let seconds = budget.lock().unwrap().clone().unwrap().seconds;
+        assert!(
+            seconds.is_some_and(|s| (29..=30).contains(&s)),
+            "the callee's task carries the 30 s its caller had left: {seconds:?}"
+        );
+        let grace = deadline_grace(std::time::Duration::from_secs(30));
+        assert!(
+            ended <= std::time::Duration::from_secs(30) + grace,
+            "stopped by the deadline, after {ended:?}"
+        );
+        assert!(
+            ended < std::time::Duration::from_secs(40),
+            "not after the model answered"
+        );
+        let reaped = reaped.lock().unwrap().expect("the worker was reaped");
+        assert!(
+            reaped - start <= ended,
+            "the worker was reaped with the call"
+        );
+
+        assert_eq!(
+            rows(&path),
+            [(
+                EdgeKind::Task,
+                ROOT_NAME.to_string(),
+                "kit-slow-0".to_string(),
+                "Take your time.".len() as u64,
+                "failed".to_string()
+            )]
+        );
     }
 
     /// Invariant 4 (DP-2): a worker at depth 4 sends a call frame whose

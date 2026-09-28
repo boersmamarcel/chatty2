@@ -379,6 +379,7 @@ async fn next_task(
                 capture_conversation,
                 spawn_context,
                 handoff,
+                budget,
             } => {
                 return Ok(Some((
                     task_id,
@@ -386,7 +387,8 @@ async fn next_task(
                         .with_bearer(bearer)
                         .with_capture_conversation(capture_conversation)
                         .with_spawn_context(spawn_context)
-                        .with_handoff(handoff),
+                        .with_handoff(handoff)
+                        .with_budget(*budget),
                 )));
             }
             BrokerFrame::Cancel { task_id } => {
@@ -459,6 +461,7 @@ mod tests {
             handle: None,
             include_trace: false,
             spawn_context: None,
+            remaining: Default::default(),
         })
     }
 
