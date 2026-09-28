@@ -167,17 +167,8 @@ async fn get_module() {
 #[tokio::test]
 async fn list_versions() {
     let server = MockServer::start().await;
-    serve(
-        &server,
-        "GET",
-        "/api/modules/echo/versions",
-        "versions",
-    )
-    .await;
-    let versions = anonymous(&server)
-        .list_versions("echo")
-        .await
-        .unwrap();
+    serve(&server, "GET", "/api/modules/echo/versions", "versions").await;
+    let versions = anonymous(&server).list_versions("echo").await.unwrap();
     let v = &versions.items[0];
     assert_eq!(
         (v.module_name.as_str(), v.version.as_str()),
@@ -233,18 +224,9 @@ async fn download() {
         .expect(1)
         .mount(&server)
         .await;
-    serve_authed(
-        &server,
-        "GET",
-        "/api/modules/echo/versions",
-        "versions",
-    )
-    .await;
+    serve_authed(&server, "GET", "/api/modules/echo/versions", "versions").await;
 
-    let download = signed_in(&server)
-        .download("echo", "0.1.0")
-        .await
-        .unwrap();
+    let download = signed_in(&server).download("echo", "0.1.0").await.unwrap();
     assert_eq!(download.wasm, wasm);
     assert_eq!(download.wasm_hash, hash);
     assert_eq!(download.trust_level, TrustLevel::Signed);

@@ -75,11 +75,7 @@ async fn s5_01_hive_client_deserializes_every_registry_route() {
     let client = HiveRegistryClient::new(&stack.registry)
         .with_session(Arc::new(HiveSession::new(&stack.registry, Some(pair))));
     let r = client.search(ECHO).await;
-    note(
-        &mut breaks,
-        "search (GET /api/search)",
-        r,
-    );
+    note(&mut breaks, "search (GET /api/search)", r);
     let r = client.list_modules(&ListParams::default()).await;
     note(&mut breaks, "list_modules (GET /api/modules)", r);
     let r = client.get_module(ECHO).await;
@@ -91,11 +87,7 @@ async fn s5_01_hive_client_deserializes_every_registry_route() {
         r,
     );
     let r = client.list_categories().await;
-    note(
-        &mut breaks,
-        "list_categories (GET /api/categories)",
-        r,
-    );
+    note(&mut breaks, "list_categories (GET /api/categories)", r);
     let r = client.download(ECHO, SEEDED_VERSION).await;
     note(&mut breaks, "download (GET /api/modules/{n}/{v})", r);
     let r = client.get_credit_balance().await;
