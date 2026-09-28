@@ -100,7 +100,7 @@
 //! ```
 
 use chatty_fabric::{
-    CallError, CallRequest, ConversationScope, HandoffContract, NodeName, SpawnContext,
+    CallChain, CallError, CallRequest, ConversationScope, HandoffContract, NodeName, SpawnContext,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -272,7 +272,7 @@ impl std::fmt::Debug for TaskBearer {
 /// What [`BrokerFrame::Task`] carries past its id, in one value so the
 /// broker's submit path, a virtual agent's `run_task` and the worker's turn
 /// all take the same thing and a bearer cannot be dropped between them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DelegatedTask {
     pub text: String,
     /// `None` for a caller that presented no bearer — a desktop parent
@@ -290,6 +290,22 @@ pub struct DelegatedTask {
     /// AGE-693). Set by the runner of a role the team names a schema for;
     /// `None` otherwise, and then absent from the task frame.
     pub handoff: Option<HandoffContract>,
+    /// The run a broker call starts: who called and the chain the broker
+    /// built for it (DP-2). Stays with the broker, like `caller`: a runner
+    /// records it in the broker's task table before the worker can call,
+    /// and it is not part of the task frame. `None` for a task no broker
+    /// call started (an A2A request over HTTP).
+    pub call: Option<CallStamp>,
+}
+
+/// What a broker call stamps on the task it starts (DP-2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallStamp {
+    /// The calling node's name; `None` for the in-process root.
+    pub caller: Option<String>,
+    /// The caller's chain plus the callee, built from the broker's own
+    /// task table.
+    pub chain: CallChain,
 }
 
 impl DelegatedTask {
@@ -300,12 +316,19 @@ impl DelegatedTask {
             capture_conversation: false,
             spawn_context: None,
             handoff: None,
+            call: None,
         }
     }
 
     /// The handoff contract the worker's answer must meet (TD-2).
     pub fn with_handoff(mut self, handoff: Option<HandoffContract>) -> Self {
         self.handoff = handoff;
+        self
+    }
+
+    /// The run a broker call starts (DP-2).
+    pub fn with_call(mut self, call: Option<CallStamp>) -> Self {
+        self.call = call;
         self
     }
 

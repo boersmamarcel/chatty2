@@ -164,6 +164,12 @@ pub struct InvokeAgentOutcome {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    /// Messages that were waiting for the caller when this result was made
+    /// (tree messages, TM-2): each one [`wrap_message`](crate::wrap_message)ped,
+    /// oldest first. This result is their delivery point, so they are gone
+    /// from the caller's pending list; absent from the JSON when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
 }
 
 /// Why a call failed. Serialises as `{"kind": …, "message": …}`, the
@@ -181,6 +187,10 @@ pub enum CallError {
     /// Refused by policy (not on the tree, over an allowance, a cap).
     #[error("refused: {0}")]
     Refused(String),
+    /// A delegation the broker refused before anything was spawned: the
+    /// specs do not allow it, it closes a cycle, or it is too deep (PL-S2).
+    #[error(transparent)]
+    Delegation(crate::delegation::Refusal),
     #[error("cancelled: {0}")]
     Cancelled(String),
     /// The connection to the broker went away mid-call.
@@ -208,6 +218,17 @@ pub trait Transport: Send + Sync {
         Err(CallError::Failed(format!(
             "task '{task}' cannot be answered over this transport"
         )))
+    }
+
+    /// The caller is starting a new run (tree messages, TM-2): take the
+    /// messages waiting for it, [`wrap_message`](crate::wrap_message)ped and
+    /// oldest first, to prepend to the run's user turn, and give every
+    /// sender its allowance back. The root's direct handle is the one
+    /// transport with a run of its own to start; a worker's next run is its
+    /// next task, which the broker prepends them to itself. The default has
+    /// nothing waiting.
+    fn take_run_messages(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -270,6 +291,15 @@ mod tests {
             json!({"kind": "spawn_context_refused",
                    "message": {"field": "roster", "reason": "wider than the caller's"}})
         );
+        let refused = CallError::Delegation(crate::Refusal::TooDeep { depth: 5, max: 4 });
+        let json = serde_json::to_value(&refused).unwrap();
+        assert_eq!(
+            json,
+            json!({"kind": "delegation",
+                   "message": {"reason": "too_deep", "depth": 5, "max": 4}})
+        );
+        assert_eq!(serde_json::from_value::<CallError>(json).unwrap(), refused);
+        assert_eq!(refused.to_string(), "too_deep: depth 5 > max 4");
     }
 
     struct Echo;

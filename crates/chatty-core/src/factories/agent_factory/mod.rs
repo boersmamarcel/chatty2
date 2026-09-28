@@ -25,6 +25,7 @@ use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::context_shaper::ContextShaper;
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::git_service::GitService;
+use crate::services::lazy_broker::LazyBroker;
 use crate::services::search_service::CodeSearchService;
 use crate::services::shell_service::ShellSession;
 use crate::settings::models::ToolLoading;
@@ -213,6 +214,10 @@ pub struct AgentClient {
     /// Each plugin's `llm::complete` log (PL-U2), by plugin name, sorted:
     /// `stream_prompt` drains them into the turn.
     plugin_usage: Vec<(String, crate::services::plugin_llm::PluginUsage)>,
+    /// The broker this root agent delegates through, which also holds the
+    /// tree messages waiting for it (TM-2); `None` for a worker, whose
+    /// messages open its next task broker-side.
+    run_inbox: Option<std::sync::Arc<dyn LazyBroker>>,
 }
 
 impl AgentClient {
@@ -242,6 +247,16 @@ impl AgentClient {
     /// The `llm::complete` logs of this agent's plugins, by plugin name.
     pub fn plugin_usage(&self) -> &[(String, crate::services::plugin_llm::PluginUsage)] {
         &self.plugin_usage
+    }
+
+    /// The tree messages waiting for this agent, taken because its next run
+    /// is starting (TM-2, delivery point b): wrapped as untrusted data,
+    /// oldest first. Empty without a broker, or before it has started.
+    pub fn take_run_messages(&self) -> Vec<String> {
+        self.run_inbox
+            .as_ref()
+            .map(|broker| broker.take_run_messages())
+            .unwrap_or_default()
     }
 
     /// The tool groups loaded so far, when the agent was built with
@@ -296,6 +311,7 @@ impl AgentClient {
             plugins,
             plugin_host,
         } = ctx;
+        let run_inbox = lazy_broker.clone();
 
         // The spec's plugins (PL-U2): one instance each for this agent, on
         // this agent's model. A plugin that does not load fails the build —
@@ -1547,6 +1563,7 @@ impl AgentClient {
             tool_loader,
         )
         .await?;
+        agent.run_inbox = run_inbox;
         agent.plugin_usage = plugins
             .iter()
             .map(|plugin| (plugin.name.clone(), plugin.usage.clone()))

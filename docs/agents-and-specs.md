@@ -384,8 +384,23 @@ once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
   `chatty_fabric::PendingList`: at most 64 KB per recipient, and at most 8 KB
   per sender per run of the recipient. A message over either bound is
   `over_allowance` — refused whole, never truncated.
-- **Delivery** — on the recipient's next `invoke_agent` result, or at the start
-  of its next run — is TM-2's; until then accepted messages wait.
+- **Delivery** (TM-2, AGE-655) happens at exactly two points, never mid-run:
+  appended to the next `invoke_agent` result the recipient receives, as
+  `messages: [...]` in `InvokeAgentOutput` (absent when empty; a failed
+  delegation lists them after its error), or prepended to the recipient's next
+  run — the root's next human turn (`Transport::take_run_messages` via
+  `LazyBroker::take_run_messages`, kept in history with the turn), a node's
+  next task text. Each message is delivered once, as untrusted data:
+
+  ```
+  <message from="local-coder-2" untrusted="true">…</message>
+  ```
+
+  with `<` and `>` in the body escaped (`chatty_fabric::wrap_message`). A
+  message grants nothing: the recipient's tools, budget and approval policy
+  are what they were.
+- **Drops.** When the recipient ends, what is still waiting for it is dropped,
+  one edge-log `message` row per message with outcome `dropped`.
 - **Neutral description.** The description says what the tool does and names
   neither relaying nor siblings (golden:
   `crates/chatty-core/src/tools/goldens/send_message_description.txt`): the F3
@@ -580,7 +595,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
 | `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
 | `swarm.exposed` | Optional, default `true`. `false`: no other agent may call it. |
-| `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. |
+| `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. The broker asks it on every worker's `invoke_agent` before anything is spawned, then refuses a call that closes a cycle or goes deeper than 4 levels below the root; the calling model reads `Error: invoke_agent: not_listed: …`, `cycle: root → a → b → a` or `too_deep: depth 5 > max 4` (PL-S2 DP-2). |
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
 | `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation. |

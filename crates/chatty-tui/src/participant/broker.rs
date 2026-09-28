@@ -36,6 +36,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
+use chatty_core::services::delegation_policy::SpecPolicy;
 use chatty_core::services::plugin_llm::PluginLlmProvider;
 use chatty_core::services::virtual_agents::{VirtualAgentSpec, resolve_virtual_agents};
 use chatty_core::services::worker_tree;
@@ -203,7 +204,10 @@ impl Broker {
         let registry = ModuleRegistry::new(provider, ResourceLimits::default())
             .context("failed to build the module registry the broker gateway needs")?;
         let shared = Arc::new(tokio::sync::RwLock::new(registry));
-        let mut gateway = ProtocolGateway::new(shared, 0);
+        // A node's call is checked against the roster's specs before
+        // anything is spawned (PL-S2).
+        let mut gateway = ProtocolGateway::new(shared, 0)
+            .with_call_policy(Arc::new(SpecPolicy::for_agents(&specs)));
 
         let participants = gateway.participants();
         let listener = chatty_protocol_gateway::participant::bind(&socket)
@@ -437,6 +441,15 @@ impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
         if let Some(broker) = self.once.get() {
             broker.shutdown();
         }
+    }
+
+    /// The root's messages come from its broker's direct handle; a broker
+    /// that has not started yet has none (TM-2).
+    fn take_run_messages(&self) -> Vec<String> {
+        self.once
+            .get()
+            .map(|broker| broker.transport().take_run_messages())
+            .unwrap_or_default()
     }
 }
 

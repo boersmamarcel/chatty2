@@ -18,7 +18,8 @@ use crate::services::lazy_broker::LazyBroker;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use chatty_fabric::{
-    AgentOrigin, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Transport,
+    AgentOrigin, CallError, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Refusal,
+    Transport,
 };
 
 /// The agent name the broker publishes for "a chatty agent in its own
@@ -112,6 +113,13 @@ pub struct InvokeAgentOutput {
     /// the model sees otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<serde_json::Value>,
+    /// Messages that were waiting for this agent when the result came back
+    /// (tree messages, TM-2), oldest first, each wrapped as untrusted data
+    /// (`<message from="…" untrusted="true">…</message>`). This result is
+    /// where they are delivered, once; they grant nothing. Absent from the
+    /// JSON when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub messages: Vec<String>,
 }
 
 /// Error type for invoke_agent tool
@@ -133,8 +141,30 @@ pub enum InvokeAgentError {
     /// The worker's handoff failed its role's schema twice: once, and again
     /// after the one follow-up turn that listed the errors (TD-2, AGE-693).
     /// The model sees `Error: invoke_agent: handoff_invalid: <role>: …`.
-    #[error("handoff_invalid: {role}: {}", errors.join("; "))]
-    HandoffInvalid { role: String, errors: Vec<String> },
+    /// `messages` are the caller's tree messages this failed result still
+    /// delivers (TM-2), listed after the errors.
+    #[error("handoff_invalid: {role}: {}{}", errors.join("; "), delivered_after_error(messages))]
+    HandoffInvalid {
+        role: String,
+        errors: Vec<String>,
+        messages: Vec<String>,
+    },
+    /// The broker refused the delegation before anything was spawned: the
+    /// specs do not allow it, it would close a cycle, or it is too deep
+    /// (PL-S2). The text is the [`Refusal`] display — `cycle: root → a → a`,
+    /// `too_deep: depth 5 > max 4`, `not_listed: a may not call b`.
+    #[error(transparent)]
+    Refused(Refusal),
+}
+
+/// The tree messages a failed delegation still delivers (TM-2), as the
+/// tail of its error text; empty when there are none.
+fn delivered_after_error(messages: &[String]) -> String {
+    if messages.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nmessages:\n{}", messages.join("\n"))
+    }
 }
 
 /// Tool that invokes a named agent with a prompt: a remote A2A agent, or one of
@@ -587,6 +617,7 @@ impl InvokeAgentTool {
             trace,
             conversation,
             handoff,
+            Vec::new(),
         )
     }
 
@@ -652,6 +683,17 @@ impl InvokeAgentTool {
                     ));
                     break;
                 }
+                Err(CallError::Delegation(refusal)) => {
+                    // A refusal is the tool's error, not a failed task: the
+                    // model reads the typed reason, as it does `CapExceeded`.
+                    warn!(agent = %agent, %refusal, "The broker refused the delegation");
+                    self.send_progress(InvokeAgentProgress::Finished {
+                        success: false,
+                        result: Some(format!("\u{26a0}\u{fe0f} {refusal}")),
+                        usage: Vec::new(),
+                    });
+                    return Err(InvokeAgentError::Refused(refusal));
+                }
                 Err(e) => {
                     warn!(agent = %agent, error = %e, "Fabric call failed");
                     failure = Some(e.to_string());
@@ -666,6 +708,7 @@ impl InvokeAgentTool {
                 response: String::new(),
                 error: Some(reason),
                 metadata: None,
+                messages: Vec::new(),
             },
             (None, Some(Ok(outcome))) => outcome,
             (None, None) => InvokeAgentOutcome {
@@ -673,6 +716,7 @@ impl InvokeAgentTool {
                 response: String::new(),
                 error: Some("the broker ended the call without a result".to_string()),
                 metadata: None,
+                messages: Vec::new(),
             },
         };
 
@@ -706,11 +750,15 @@ impl InvokeAgentTool {
             trace,
             conversation,
             handoff,
+            outcome.messages,
         )
     }
 
     /// Report how a delegation ended, to the progress channel and to the
     /// model — the one ending both the A2A and the fabric path share.
+    /// `messages` are the caller's delivered tree messages: on the output
+    /// when the delegation succeeded, after the error when it failed, so a
+    /// failed delegation still delivers them.
     #[allow(clippy::too_many_arguments)]
     fn finish(
         &self,
@@ -722,6 +770,7 @@ impl InvokeAgentTool {
         trace: Option<String>,
         conversation: Option<serde_json::Value>,
         handoff: HandoffReport,
+        messages: Vec<String>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let response = response.trim().to_string();
         let handoff_value = if success { handoff.handoff } else { None };
@@ -740,13 +789,19 @@ impl InvokeAgentTool {
                 usage,
             });
             if let Some((role, errors)) = handoff.invalid {
-                return Err(InvokeAgentError::HandoffInvalid { role, errors });
+                return Err(InvokeAgentError::HandoffInvalid {
+                    role,
+                    errors,
+                    messages,
+                });
             }
-            return Err(InvokeAgentError::InvocationFailed(format!(
+            let mut failure = format!(
                 "Agent '{}' reported failure{}",
                 agent,
                 error_msg.map(|m| format!(": {}", m)).unwrap_or_default()
-            )));
+            );
+            failure.push_str(&delivered_after_error(&messages));
+            return Err(InvokeAgentError::InvocationFailed(failure));
         }
 
         // Emit Finished with the full result so the sub-agent trace block
@@ -777,6 +832,7 @@ impl InvokeAgentTool {
             trace,
             conversation,
             handoff: handoff_value,
+            messages,
         })
     }
 }
@@ -1204,5 +1260,92 @@ mod tests {
         // Should hit the remote disabled check, not the local path
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvokeAgentError::Disabled(_)));
+    }
+
+    /// A fabric that refuses every call with one [`Refusal`].
+    struct Refusing(Refusal);
+
+    #[async_trait::async_trait]
+    impl Transport for Refusing {
+        async fn call(&self, _req: CallRequest) -> Result<chatty_fabric::CallStream, CallError> {
+            use futures::StreamExt;
+            Ok(futures::stream::iter([Err(CallError::Delegation(self.0.clone()))]).boxed())
+        }
+    }
+
+    /// DP-2: a broker's refusal reaches the model as the tool's error, with
+    /// the exact text of each reason after the `Error: invoke_agent: `
+    /// prefix, and the typed refusal survives as the error's source.
+    #[tokio::test]
+    async fn refusal_text_golden() {
+        let s = |v: &str| v.to_string();
+        for (refusal, text) in [
+            (
+                Refusal::Cycle {
+                    chain: vec![s("coordinator"), s("reviewer")],
+                    callee: s("coordinator"),
+                },
+                "Error: invoke_agent: cycle: coordinator \u{2192} reviewer \u{2192} coordinator",
+            ),
+            (
+                Refusal::TooDeep { depth: 5, max: 4 },
+                "Error: invoke_agent: too_deep: depth 5 > max 4",
+            ),
+            (
+                Refusal::NotListed {
+                    caller: s("reviewer"),
+                    callee: s("data-coder"),
+                },
+                "Error: invoke_agent: not_listed: reviewer may not call data-coder",
+            ),
+            (
+                Refusal::NotExposed {
+                    callee: s("data-coder"),
+                },
+                "Error: invoke_agent: not_exposed: data-coder is not exposed",
+            ),
+            (
+                Refusal::CallerNotAllowed {
+                    caller: s("reviewer"),
+                    callee: s("data-coder"),
+                },
+                "Error: invoke_agent: caller_not_allowed: data-coder does not accept calls \
+                 from reviewer",
+            ),
+        ] {
+            let tool = InvokeAgentTool::new(vec![], None)
+                .with_local_agents(vec![s("data-coder")])
+                .with_transport(Arc::new(Refusing(refusal.clone())));
+            let progress = watch_progress(&tool);
+            let err = tool
+                .call(
+                    &mut ToolContext::new(),
+                    InvokeAgentArgs {
+                        agent: s("data-coder"),
+                        prompt: s("fix it"),
+                        include_trace: false,
+                    },
+                )
+                .await
+                .expect_err("the broker refused");
+            let mapped = tool.map_error(err);
+            assert_eq!(mapped.model_feedback().unwrap_or_default(), text);
+            let source = mapped
+                .downcast_ref::<InvokeAgentError>()
+                .expect("the typed error survives into the tool result");
+            assert!(
+                matches!(source, InvokeAgentError::Refused(r) if *r == refusal),
+                "{source:?}"
+            );
+            tokio::task::yield_now().await;
+            let events: Vec<_> = progress.try_iter().collect();
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(InvokeAgentProgress::Finished { success: false, .. })
+                ),
+                "the transcript's card ends failed: {events:?}"
+            );
+        }
     }
 }

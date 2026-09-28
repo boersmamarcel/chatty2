@@ -15,6 +15,7 @@
 //! chatty-core types (`InvokeAgentProgress`, conversations, usage) travel as
 //! [`serde_json::Value`]; chatty-core converts them at its edge.
 
+mod delegation;
 mod directory;
 mod edge_log;
 mod handoff;
@@ -24,13 +25,14 @@ mod permit;
 mod task_table;
 mod transport;
 
+pub use delegation::{CallChain, CallPolicy, MAX_DEPTH, Refusal, Remaining};
 pub use directory::{
     ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState, ROOT_NAME,
 };
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES};
 pub use handoff::HandoffContract;
 pub use origin::AgentOrigin;
-pub use pending::{Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES};
+pub use pending::{Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, wrap_message};
 pub use permit::{
     ChildCall, DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit, RunPermit, RunPermitState,
     WeakRunPermit,

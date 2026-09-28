@@ -245,7 +245,7 @@ async fn handoff_invalid_twice_fails_typed() {
     .expect("the delegation ends before the deadline")
     .expect_err("a second invalid handoff fails the task");
 
-    let InvokeAgentError::HandoffInvalid { role, errors } = &error else {
+    let InvokeAgentError::HandoffInvalid { role, errors, .. } = &error else {
         panic!("expected HandoffInvalid, got {error:?}");
     };
     assert_eq!(role, CODER);
