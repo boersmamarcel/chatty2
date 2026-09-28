@@ -291,8 +291,8 @@ examples.
    `git worktree` under `<workspace>/.chatty/worktrees/<name>` on a
    `sub-agent/<name>` branch (AGE-314), passed to the child via chatty-tui's
    `--workspace <DIR>` flag. `<name>` is a wish, not a guarantee: if that
-   branch or directory already exists in the repository (another broker's
-   worker, or a tree left from an earlier run), the first free `<name>-N`
+   branch or directory already exists in the repository (another root
+   process's worker, or a tree left from an earlier run), the first free `<name>-N`
    (from 2) is used instead, and the evidence envelope names the branch actually
    created (AGE-402). Worktrees are left in place after a worker exits
    (never auto-removed) and are excluded via `.git/info/exclude`, not
