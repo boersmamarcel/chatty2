@@ -773,6 +773,7 @@ fn describe(event: &SessionEvent) -> String {
             id,
             command,
             is_sandboxed,
+            ..
         } => format!("ApprovalRequested(id={id:?}, {command:?}, sandboxed={is_sandboxed})"),
         SessionEvent::ApprovalResolved { id, approved } => {
             format!("ApprovalResolved(id={id:?}, approved={approved})")

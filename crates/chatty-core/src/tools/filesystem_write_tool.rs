@@ -5,7 +5,9 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tracing::{debug, warn};
 
-use crate::models::execution_approval_store::ApprovalNotification;
+use crate::models::execution_approval_store::{
+    ApprovalDetail, ApprovalNotification, ApprovalResolution,
+};
 use crate::models::write_approval_store::{
     PendingWriteApprovals, WriteApprovalDecision, WriteApprovalRequest, WriteOperation,
 };
@@ -46,12 +48,32 @@ pub async fn request_write_approval(
     ) {
         return Ok(true);
     }
+    ask_write(pending, operation).await
+}
 
+/// Re-raise a write a delegated agent asked for on this agent's own store
+/// (AGE-646), always asking: the worker below would not have asked if its
+/// mode — the root's, mirrored down — let it through. Dropping the future
+/// withdraws the request, as [`request_relayed_execution_approval`] does.
+///
+/// [`request_relayed_execution_approval`]: crate::models::execution_approval_store::request_relayed_execution_approval
+pub async fn request_relayed_write_approval(
+    pending: &PendingWriteApprovals,
+    detail: ApprovalDetail,
+) -> Result<bool, anyhow::Error> {
+    ask_write(pending, WriteOperation::Relayed(detail)).await
+}
+
+async fn ask_write(
+    pending: &PendingWriteApprovals,
+    operation: WriteOperation,
+) -> Result<bool, anyhow::Error> {
     let id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
 
     // Get description before moving operation into request
     let description = operation.description();
+    let detail = operation.detail();
 
     let request = WriteApprovalRequest {
         id: id.clone(),
@@ -70,6 +92,7 @@ pub async fn request_write_approval(
                     id: id.clone(),
                     command: description,
                     is_sandboxed: false,
+                    detail,
                 }) {
                     warn!(approval_id = %id, error = ?e, "Failed to send write approval notification");
                 }
@@ -82,7 +105,9 @@ pub async fn request_write_approval(
 
     debug!(approval_id = %id, "Waiting for write approval");
 
-    // Wait for user decision with timeout
+    // A request nobody answered — timed out, or the waiting turn was
+    // cancelled — leaves the store and retires its card.
+    let _withdraw = WithdrawWrite { pending, id: &id };
     match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
         Ok(Ok(WriteApprovalDecision::Approved)) => {
             debug!(approval_id = %id, "Write approved");
@@ -94,18 +119,35 @@ pub async fn request_write_approval(
         }
         Ok(Err(_)) => {
             warn!(approval_id = %id, "Approval channel closed");
-            // Clean up
-            pending.lock().requests.remove(&id);
             Ok(false)
         }
         Err(_) => {
             warn!(approval_id = %id, "Write approval timed out");
-            // Clean up
-            pending.lock().requests.remove(&id);
             Err(anyhow::anyhow!(
                 "Write approval timed out after {} seconds",
                 APPROVAL_TIMEOUT.as_secs()
             ))
+        }
+    }
+}
+
+/// Takes an unanswered write request back out of the store and announces it
+/// over, so no card outlives the request.
+struct WithdrawWrite<'a> {
+    pending: &'a PendingWriteApprovals,
+    id: &'a str,
+}
+
+impl Drop for WithdrawWrite<'_> {
+    fn drop(&mut self) {
+        let mut state = self.pending.lock();
+        if state.requests.remove(self.id).is_some()
+            && let Some(tx) = &state.resolution_notifier
+        {
+            let _ = tx.send(ApprovalResolution {
+                id: self.id.to_string(),
+                approved: false,
+            });
         }
     }
 }

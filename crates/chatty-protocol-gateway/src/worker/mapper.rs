@@ -17,7 +17,7 @@
 //! | `Text` | `artifact` (a chunk, `lastChunk: false`) |
 //! | `ToolCallStarted` / `ToolCallResult` / `ToolCallError` | `status: working` with the progress line |
 //! | `ToolCallInput` | — |
-//! | `ApprovalRequested` | `status: input-required` |
+//! | `ApprovalRequested` | `status: input-required`, carrying the approval (see below) |
 //! | `ClarificationRequested` | `status: input-required`, carrying the request (see below) |
 //! | `ApprovalResolved` | `status: working` |
 //! | `Delegation` | `status: working` (a grandchild's progress) |
@@ -55,8 +55,15 @@
 //! in front of a human, or park its own task the same way if it is a worker
 //! too (ADR-0011 C7, AGE-306). The answer comes back as a
 //! [`TaskInput`](crate::participant::TaskInput) and is handed to the
-//! worker's clarification store by [`answer_clarifications`]; the tool
+//! worker's clarification store by [`answer_inputs`]; the tool
 //! result that follows is what un-parks the task.
+//!
+//! An `ApprovalRequested` goes up the same way (AGE-646): the request id is
+//! the approval's, its one question an `InputQuestion::Approval` with the
+//! kind, the command or path, a write's diff stat and — once relayed — the
+//! agent that asked. The caller re-raises it on its own approval store, and
+//! the `approve` / `deny` that comes back lands on this worker's execution
+//! or write store through [`answer_inputs`].
 //!
 //! # What A2A cannot carry
 //!
@@ -106,9 +113,17 @@
 //! under [`HANDOFF_INVALID_COUNT_METADATA_KEY`]). A task without a schema
 //! keeps none of this, so its frames are the bytes they always were.
 
-use crate::participant::{InputQuestion, InputRequest, ParticipantFrame, TaskInput, TaskState};
+use crate::participant::{
+    ApprovalAsker, ApprovalKind, InputQuestion, InputRequest, ParticipantFrame, TaskInput,
+    TaskState,
+};
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
+use chatty_core::models::execution_approval_store::{
+    self as approvals, ApprovalDecision, ApprovalDetail, ExecutionApprovalStore,
+};
 use chatty_core::models::token_usage::TokenUsage;
+use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
+use chatty_core::services::a2a_client::APPROVAL_GRANTED;
 use chatty_core::services::a2a_client::{
     CONVERSATION_METADATA_KEY, CONVERSATION_TOO_LARGE_METADATA_KEY, TRACE_METADATA_KEY,
     USAGE_METADATA_KEY, usage_metadata,
@@ -129,21 +144,72 @@ use tracing::warn;
 /// Answers for the running task, as the broker delivers them.
 pub type InputReceiver = mpsc::UnboundedReceiver<TaskInput>;
 
-/// Hand every answer the broker sends down to the store the worker's
-/// `ask_user` is waiting on, until the task is over.
+/// The stores a worker's turn waits on for its caller's answers: its
+/// `ask_user` questions and its execution and write approvals (AGE-306,
+/// AGE-646). Clones of the session's own — they share its state.
+#[derive(Clone)]
+pub struct InputStores {
+    pub clarifications: ClarificationStore,
+    pub execution_approvals: ExecutionApprovalStore,
+    pub write_approvals: WriteApprovalStore,
+}
+
+/// Hand every answer the broker sends down to the store the worker's turn
+/// is waiting on — `ask_user`'s, or the approval store a command or write
+/// is parked in — until the task is over.
 ///
 /// The embedder spawns this beside its turn: the answers arrive on the
-/// socket's read half while the turn runs, and the store is the one thing
-/// both the tool and this loop can reach.
-pub async fn answer_clarifications(mut inputs: InputReceiver, clarifications: ClarificationStore) {
+/// socket's read half while the turn runs, and the stores are the one thing
+/// both the tools and this loop can reach.
+pub async fn answer_inputs(mut inputs: InputReceiver, stores: InputStores) {
     while let Some(input) = inputs.recv().await {
         let request_id = input.request_id.clone();
-        if !clarifications.resolve(&request_id, clarification_answers(input)) {
+        let granted = input
+            .answers
+            .first()
+            .is_some_and(|a| a.answer == APPROVAL_GRANTED);
+        let answered = stores
+            .clarifications
+            .resolve(&request_id, clarification_answers(input))
+            || stores.execution_approvals.resolve(
+                &request_id,
+                if granted {
+                    ApprovalDecision::Approved
+                } else {
+                    ApprovalDecision::Denied
+                },
+            )
+            || stores.write_approvals.resolve(
+                &request_id,
+                if granted {
+                    WriteApprovalDecision::Approved
+                } else {
+                    WriteApprovalDecision::Denied
+                },
+            );
+        if !answered {
             warn!(
                 request = %request_id,
                 "The broker answered a question this worker is no longer asking"
             );
         }
+    }
+}
+
+/// An approval as it goes up the chain (AGE-646).
+fn approval_question(id: &str, detail: &ApprovalDetail) -> InputQuestion {
+    InputQuestion::Approval {
+        id: id.to_string(),
+        kind: match detail.kind {
+            approvals::ApprovalKind::Exec => ApprovalKind::Exec,
+            approvals::ApprovalKind::Write => ApprovalKind::Write,
+        },
+        command_or_path: detail.command_or_path.clone(),
+        diff_stat: detail.diff_stat.clone(),
+        asker: detail.asker.as_ref().map(|asker| ApprovalAsker {
+            agent: asker.agent.clone(),
+            chain: asker.chain.clone(),
+        }),
     }
 }
 
@@ -459,10 +525,23 @@ impl TaskMapper {
                 last_chunk: false,
             }),
 
-            SessionEvent::ApprovalRequested { command, .. } => Some(self.status(
-                TaskState::InputRequired,
-                Some(format!("approval needed: {command}")),
-            )),
+            // Parked on the approval, which goes up the chain like a
+            // question (AGE-646): the caller re-raises it on its own store.
+            SessionEvent::ApprovalRequested {
+                id,
+                command,
+                detail,
+                ..
+            } => Some(ParticipantFrame::Status {
+                task_id: self.task_id.clone(),
+                state: TaskState::InputRequired,
+                message: Some(format!("approval needed: {command}")),
+                metadata: None,
+                input: Some(InputRequest {
+                    id: id.clone(),
+                    questions: vec![approval_question(id, detail)],
+                }),
+            }),
             SessionEvent::ClarificationRequested { id, questions } => {
                 let asked = questions
                     .first()
@@ -477,7 +556,7 @@ impl TaskMapper {
                         id: id.clone(),
                         questions: questions
                             .iter()
-                            .map(|q| InputQuestion {
+                            .map(|q| InputQuestion::Question {
                                 id: q.id.clone(),
                                 question: q.question.clone(),
                                 options: q.options.clone(),
@@ -1060,7 +1139,10 @@ mod tests {
             2,
             "every question goes up, not just the first"
         );
-        assert_eq!(request.questions[1].options, vec!["eu", "us"]);
+        let InputQuestion::Question { options, .. } = &request.questions[1] else {
+            panic!("an ask_user question: {:?}", request.questions[1]);
+        };
+        assert_eq!(options, &vec!["eu", "us"]);
         assert_eq!(outcome(&mapper), TaskState::Completed, "parked, not over");
     }
 
@@ -1089,7 +1171,14 @@ mod tests {
         let request_id = notify_rx.recv().await.expect("the request is announced").id;
 
         let (inputs_tx, inputs_rx) = mpsc::unbounded_channel();
-        tokio::spawn(answer_clarifications(inputs_rx, store));
+        tokio::spawn(answer_inputs(
+            inputs_rx,
+            InputStores {
+                clarifications: store,
+                execution_approvals: ExecutionApprovalStore::new(),
+                write_approvals: WriteApprovalStore::new(),
+            },
+        ));
         inputs_tx
             .send(TaskInput {
                 request_id,
@@ -1114,13 +1203,33 @@ mod tests {
         let frame = mapper
             .map(&SessionEvent::ApprovalRequested {
                 id: "a1".into(),
-                command: "rm -rf /".into(),
+                command: "[shell] rm -rf /".into(),
                 is_sandboxed: false,
+                detail: ApprovalDetail::exec("[shell] rm -rf /"),
             })
             .unwrap();
         let (state, message) = status_of(&frame);
         assert_eq!(state, TaskState::InputRequired);
         assert!(message.unwrap().contains("rm -rf /"));
+        // It carries the approval up, keyed on the approval's own id, so
+        // the caller can re-raise it (AGE-646).
+        let ParticipantFrame::Status {
+            input: Some(input), ..
+        } = &frame
+        else {
+            panic!("an approval parks the task with its request: {frame:?}");
+        };
+        assert_eq!(input.id, "a1");
+        assert_eq!(
+            input.questions,
+            vec![InputQuestion::Approval {
+                id: "a1".into(),
+                kind: ApprovalKind::Exec,
+                command_or_path: "[shell] rm -rf /".into(),
+                diff_stat: None,
+                asker: None,
+            }]
+        );
         assert_eq!(
             outcome(&mapper),
             TaskState::Completed,

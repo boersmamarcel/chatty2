@@ -1390,6 +1390,11 @@ impl AgentClient {
         if let Some(pending) = pending_clarifications {
             invoke_agent_tool = invoke_agent_tool.with_clarifications(pending);
         }
+        // ... and its execution and write approvals on this agent's own
+        // approval stores (AGE-646), which at the root are the human's card.
+        if let (Some(execution), Some(write)) = (&pending_approvals, &pending_write_approvals) {
+            invoke_agent_tool = invoke_agent_tool.with_approvals(execution.clone(), write.clone());
+        }
         // A hosted leader asks the tenant's cap before it delegates
         // (AGE-416); everyone else has no gate and no check.
         if let Some(gate) = spend_gate {
