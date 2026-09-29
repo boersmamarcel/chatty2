@@ -1214,6 +1214,10 @@ let api_key = if incoming.as_deref() == Some(MASKED_API_KEY_SENTINEL) {
 
 **If adding a new server**: reject `****` with a clear error — there is no existing value to preserve.
 
+### TLS for Remote Endpoints (SEC-16, AGE-756)
+
+`hive_client::ensure_secure_url(url)` (`crates/hive-client/src/secure_url.rs`) is the one gate for any user-configured endpoint that carries credentials or prompts: it allows `https://` anywhere, and `http://` only for loopback and private-LAN (RFC-1918, incl. the docker bridge `172.17.0.1`) hosts; a public host over `http://` is refused with no override. It runs at call time in `A2aClient` (`fetch_agent_card`, `send_message`, streaming send, `send_task_input`), `McpConnection::connect`, `provider_builder::completion_model` (provider `base_url`), and `HiveRegistryClient` (checked once at construction, surfaced as `ClientError::InsecureUrl` before any request). A new call site that dials a configured remote URL must go through it too.
+
 ### Logging Rules
 
 Never log sensitive values. Log presence, not the key.
