@@ -56,6 +56,13 @@ pub trait LazyBroker: Send + Sync {
         Vec::new()
     }
 
+    /// Stop `node` and everything under it while the rest of the swarm
+    /// keeps running (TB-7, AGE-749); see [`Transport::cancel`]. Never
+    /// starts the broker: one that has not started runs nothing to stop.
+    fn cancel(&self, node: &str) -> anyhow::Result<()> {
+        anyhow::bail!("no broker is running '{node}'")
+    }
+
     /// Stop serving, if this ever started. A no-op otherwise (nothing to
     /// stop) — the default for a host whose lifecycle already tears the
     /// underlying gateway down some other way.
