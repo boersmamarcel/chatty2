@@ -1218,6 +1218,10 @@ let api_key = if incoming.as_deref() == Some(MASKED_API_KEY_SENTINEL) {
 
 `hive_client::ensure_secure_url(url)` (`crates/hive-client/src/secure_url.rs`) is the one gate for any user-configured endpoint that carries credentials or prompts: it allows `https://` anywhere, and `http://` only for loopback and private-LAN (RFC-1918, incl. the docker bridge `172.17.0.1`) hosts; a public host over `http://` is refused with no override. It runs at call time in `A2aClient` (`fetch_agent_card`, `send_message`, streaming send, `send_task_input`), `McpConnection::connect`, `provider_builder::completion_model` (provider `base_url`), and `HiveRegistryClient` (checked once at construction, surfaced as `ClientError::InsecureUrl` before any request). A new call site that dials a configured remote URL must go through it too.
 
+### Resolve Once, Connect to What Was Checked (AGE-537, AGE-767)
+
+A client that connects to a URL a user or agent chose must check the addresses it actually connects to, not a separate lookup: `services::ssrf_guard::GuardedResolver` is a reqwest DNS resolver that resolves each name once, applies an `AddressPolicy`, and hands the connector exactly those addresses; a lookup error or an empty answer is a refusal (fail closed). IP literals never reach a resolver, so check them up front (`check_public_url_without_lookup`, `check_a2a_url_without_lookup`), and build the client with `no_proxy()` or the proxy, not the target, is what gets resolved. `fetch` uses `http_client::open_web_client` (`public_only`). The A2A edge (`A2aClient`, ADR-0021 step 0) uses the `a2a_peer` policy (literals and `localhost`→loopback allowed, link-local never, any other name must resolve public), follows no redirects, caps SSE per event/stream/idle (`A2aLimits`), and sends only the called agent's own bearer. Tests use a `HostLookup` stub and loopback servers, never real DNS.
+
 ### Logging Rules
 
 Never log sensitive values. Log presence, not the key.
