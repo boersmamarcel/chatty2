@@ -933,8 +933,8 @@ async fn pre_fabric_goldens_replay() {
 
 /// Invariant 1: a process that did not receive a broker-made connection
 /// cannot register as any node. A same-user process dials the shared socket
-/// and claims the name the broker is about to give its first worker, the v1
-/// way and the v2 way; both are refused and closed, and the real worker —
+/// and claims the name the broker is about to give its first worker, the v1,
+/// v2 and v3 ways; each is refused and closed, and the real worker —
 /// spawned on the connection the broker made — still gets its task.
 #[tokio::test]
 async fn squatting_on_the_shared_socket_is_refused() {
@@ -948,9 +948,22 @@ async fn squatting_on_the_shared_socket_is_refused() {
     .await;
     let first_worker = format!("{WORKER}-0");
 
-    for claim in [
-        serde_json::json!({ "type": "register", "card": { "name": first_worker } }),
-        serde_json::json!({ "v": 2, "type": "hello", "card": { "name": first_worker } }),
+    // The version before this one, as an older worker would write it.
+    let previous = chatty_protocol_gateway::participant::PROTOCOL_VERSION - 1;
+    for (claim, answered) in [
+        (
+            serde_json::json!({ "type": "register", "card": { "name": first_worker } }),
+            false,
+        ),
+        (
+            serde_json::json!({ "v": previous, "type": "hello", "card": { "name": first_worker } }),
+            false,
+        ),
+        (
+            serde_json::json!({ "v": 3, "id": 1, "method": "session.hello",
+                                "params": { "card": { "name": first_worker } } }),
+            true,
+        ),
     ] {
         let stream = tokio::net::UnixStream::connect(kit.socket())
             .await
@@ -961,15 +974,23 @@ async fn squatting_on_the_shared_socket_is_refused() {
             .write_all(format!("{claim}\n").as_bytes())
             .await
             .unwrap();
-        let reply: serde_json::Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .unwrap()
-                .expect("the squatter is answered"),
-        )
-        .unwrap();
-        assert_eq!(reply["type"], "error", "{claim} is refused: {reply}");
+        // A hello is refused with an `error` for its id; a line that is not
+        // one is closed without a reply (ADR-0021).
+        if answered {
+            let reply: serde_json::Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("the squatter is answered"),
+            )
+            .unwrap();
+            assert_eq!(reply["id"], 1, "{claim} is refused: {reply}");
+            assert_eq!(
+                reply["error"]["kind"], "refused",
+                "{claim} is refused: {reply}"
+            );
+        }
         assert!(
             lines.next_line().await.unwrap().is_none(),
             "and its connection closed"

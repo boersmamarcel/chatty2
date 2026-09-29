@@ -3,8 +3,9 @@
 //! The root process holds a direct handle; a worker holds its broker-made
 //! connection (BI-4). Either way a call is one [`CallRequest`] answered by a
 //! [`CallStream`]: zero or more progress events, then exactly one result or
-//! error. These shapes are also the `call` / `call_progress` /
-//! `call_result` / `call_error` frames of participant protocol v2.
+//! error. On a worker's connection these are the `agent.invoke` /
+//! `agent.list` / `mailbox.post` requests, `req.progress`, and the request's
+//! result or error of participant protocol v3 (ADR-0021).
 
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
@@ -77,7 +78,7 @@ pub struct SendMessageParams {
     pub text: String,
 }
 
-/// What a `send_message` call returns: its `call_result`. Serialises as
+/// What a `send_message` call returns: its result. Serialises as
 /// `{"status": "pending", "id": …}` or
 /// `{"status": "refused", "reason": "not_on_tree"}`.
 ///
@@ -126,8 +127,8 @@ impl std::fmt::Display for RefusalReason {
     }
 }
 
-/// One call. Serialises as `{"method": …, "params": …}`, the body of a v2
-/// `call` frame.
+/// One call. On a worker's connection each variant is its own request
+/// method (`agent.invoke`, `agent.list`, `mailbox.post`) with these params.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum CallRequest {
@@ -165,7 +166,7 @@ pub enum CallEvent {
 }
 
 /// What `invoke_agent` returns when the callee's task ended, whether it
-/// succeeded or not: the `call_result` of an `invoke_agent` call.
+/// succeeded or not: the result of an `agent.invoke` request.
 ///
 /// A failure the callee reported (its turn failed, its worker could not
 /// start) is an outcome, not a [`CallError`]: the caller renders it exactly
@@ -202,7 +203,7 @@ pub struct InvokeAgentOutcome {
 pub const CANCELLED_BY_USER: &str = "cancelled_by_user";
 
 /// Why a call failed. Serialises as `{"kind": …, "message": …}`, the
-/// `error` of a v2 `call_error` frame.
+/// `error` of a v3 error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
 pub enum CallError {

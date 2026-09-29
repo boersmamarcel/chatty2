@@ -32,7 +32,8 @@ use tracing::{debug, info, warn};
 use serde_json::Value;
 
 use super::calls::{BrokerCalls, Caller};
-use super::limits::{MAX_FRAME_BYTES, encoded_len};
+use super::codec::BrokerCodec;
+use super::limits::MAX_FRAME_BYTES;
 use super::protocol::{
     BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
     TaskState,
@@ -111,7 +112,8 @@ impl AdmittedNode {
         self.name.as_str()
     }
 
-    /// The `welcome` frame that tells the worker who it is.
+    /// The welcome — `session.hello`'s result — that tells the worker who
+    /// it is.
     pub fn welcome(&self) -> BrokerFrame {
         BrokerFrame::Welcome {
             name: self.name.clone(),
@@ -557,7 +559,7 @@ impl ParticipantRegistry {
             handoff: task.handoff,
             swarm_events: task.swarm_events,
         };
-        if encoded_len(&frame) > MAX_FRAME_BYTES {
+        if BrokerCodec::line_len_bound(&frame) > MAX_FRAME_BYTES {
             warn!(participant = %name, task = %task_id, "Refusing a task over the worker's frame cap");
             return None;
         }
@@ -646,7 +648,7 @@ impl ParticipantRegistry {
             task_id: task_id.to_string(),
             input,
         };
-        if encoded_len(&frame) > MAX_FRAME_BYTES {
+        if BrokerCodec::line_len_bound(&frame) > MAX_FRAME_BYTES {
             return Err(AnswerError::TooLarge(task_id.to_string()));
         }
         let (name, outbound) = {
@@ -719,7 +721,9 @@ impl ParticipantRegistry {
             }
             // Calls are run by the connection loop, which owns their
             // lifetime; one reaching here was not routed and is dropped.
-            ParticipantFrame::Call { id, .. } | ParticipantFrame::CallInput { id, .. } => {
+            ParticipantFrame::Call { id, .. }
+            | ParticipantFrame::CallInput { id, .. }
+            | ParticipantFrame::CancelCall { id } => {
                 warn!(participant = %name, call = id, "A call frame outside a connection loop");
                 return true;
             }

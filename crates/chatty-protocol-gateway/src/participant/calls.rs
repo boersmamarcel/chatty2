@@ -1070,7 +1070,7 @@ fn gated(child: ChildCall, mut call: CallStream) -> CallStream {
     .boxed()
 }
 
-/// The `call_result` of an `invoke_agent` call whose task ended in `state`,
+/// The result of an `agent.invoke` request whose task ended in `state`,
 /// carrying the caller's waiting `messages`. Only a failure is a failure: a
 /// task that was cancelled from its own side reads as it does to an A2A
 /// caller.
@@ -1827,7 +1827,7 @@ mod tests {
             ),
         ] {
             let line = serde_json::json!({
-                "v": 2, "type": "call", "id": 1, "method": "invoke_agent",
+                "v": 3, "id": 1, "method": "agent.invoke",
                 "params": {
                     "agent": agent, "prompt": "go on",
                     "metadata": {"chatty": {"call": {
@@ -1836,8 +1836,10 @@ mod tests {
                 }
             })
             .to_string();
-            let super::super::protocol::ParticipantFrame::Call { request, .. } =
-                super::super::protocol::decode_frame(&line).expect("a call frame")
+            let Some(super::super::protocol::ParticipantFrame::Call { request, .. }) =
+                super::super::codec::BrokerCodec::new()
+                    .decode(&line)
+                    .expect("a call frame")
             else {
                 panic!("not a call frame");
             };

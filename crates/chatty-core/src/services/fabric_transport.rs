@@ -14,12 +14,11 @@
 //!   [`Outbound::Call`] for the connection's writer, and returns a stream fed
 //!   by whatever the broker answers under that id.
 //! - [`CallReplies`] is what the connection's reader hands the broker's
-//!   `call_progress` / `call_input_required` / `call_result` /
-//!   `call_error` frames to. Several calls can be in flight at once; each
+//!   `req.progress`, `call.input_required`, results and errors to. Several calls can be in flight at once; each
 //!   reply lands on the call its id names, whatever order they finish in.
 //! - [`SocketTransport::answer`] queues the answer to a callee's question
 //!   as an [`Outbound::Answer`], which the connection writes as a
-//!   `call_input` frame on the call that carried the question (BI-5).
+//!   `call.input` on the call that carried the question (BI-5).
 //!
 //! The gateway's worker loop (`chatty_protocol_gateway::worker`) owns both
 //! ends of the socket and does the framing.
@@ -46,7 +45,7 @@ pub enum Outbound {
     /// A call: the body of a `call` frame.
     Call { id: u64, request: CallRequest },
     /// The answer to the question call `id`'s callee parked `task` on: the
-    /// body of a `call_input` frame. `input` is `{requestId, answers}`.
+    /// params of a `call.input`. `input` is `{requestId, answers}`.
     Answer { id: u64, task: String, input: Value },
 }
 
@@ -74,8 +73,8 @@ pub struct CallReplies {
 impl SocketTransport {
     /// A transport, the queue its calls and answers go out on, and the
     /// handle replies come back in through. The caller owns the connection:
-    /// it writes each [`Outbound`] as a `call` or `call_input` frame and
-    /// hands each reply frame to [`CallReplies`].
+    /// it writes each [`Outbound`] as a request or a `call.input` and hands
+    /// each reply to [`CallReplies`].
     pub fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<Outbound>, CallReplies) {
         let (outbound, calls) = mpsc::unbounded_channel();
         let pending: Pending = Arc::default();
@@ -162,31 +161,31 @@ impl Transport for SocketTransport {
 }
 
 impl CallReplies {
-    /// A `call_progress` frame for call `id`.
+    /// `req.progress` for call `id`.
     pub fn progress(&self, id: u64, event: Value) {
         self.deliver(id, Ok(CallEvent::Progress(event)), false);
     }
 
-    /// A `call_input_required` frame: a callee of call `id` parked `task`
+    /// `call.input_required`: a callee of call `id` parked `task`
     /// on the question `request` (BI-5).
     pub fn input_required(&self, id: u64, task: String, request: Value) {
         self.parked.lock().insert(task.clone(), id);
         self.deliver(id, Ok(CallEvent::InputRequired { task, request }), false);
     }
 
-    /// A `call_input_withdrawn` frame: the question call `id`'s callee
+    /// `call.input_withdrawn`: the question call `id`'s callee
     /// parked `task` on is over without this worker's answer (TB-7).
     pub fn input_withdrawn(&self, id: u64, task: String) {
         self.parked.lock().remove(&task);
         self.deliver(id, Ok(CallEvent::InputWithdrawn { task }), false);
     }
 
-    /// A `call_result` frame: call `id` is over.
+    /// A result: call `id` is over.
     pub fn result(&self, id: u64, result: Value) {
         self.deliver(id, Ok(CallEvent::Result(result)), true);
     }
 
-    /// A `call_error` frame: call `id` failed and is over.
+    /// An error: call `id` failed and is over.
     pub fn error(&self, id: u64, error: CallError) {
         self.deliver(id, Err(error), true);
     }

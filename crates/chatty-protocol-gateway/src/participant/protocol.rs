@@ -1,192 +1,133 @@
-//! The frames a local participant and the broker exchange over the socket.
+//! What a local participant and the broker say to each other over the
+//! socket, in the broker's own terms.
 //!
-//! One JSON object per line, in both directions. Newline-delimited JSON is
-//! enough because the socket carries one participant and its tasks are
-//! multiplexed by `taskId`, so there is no framing problem a length prefix
-//! would solve — and a line is greppable in a log, which a length prefix is
-//! not.
+//! [`ParticipantFrame`] is everything a worker says and [`BrokerFrame`]
+//! everything the broker says. They are not the wire: the per-connection
+//! [`FrameCodec`](super::codec::FrameCodec) puts each one in ADR-0021's v3
+//! envelope and takes it back out (see [`super::codec`] for the envelope,
+//! the method table and the id rules). One JSON object per line, in both
+//! directions.
 //!
 //! The frames are deliberately *not* A2A: A2A is the broker's public wire
 //! format, and a child process is not a public endpoint. The broker maps
-//! between the two (see [`super::registry`]), which is the seam that lets a
-//! participant stream partial progress without minting JSON-RPC envelopes.
-//!
-//! # Version 2 (ADR-0020)
-//!
-//! Every frame, in both directions, carries `"v":2`. A frame without it is
-//! refused with an `error` frame naming v2 and the connection is closed;
-//! there is no v1 fallback. [`encode_frame`] and [`decode_frame`] are the
-//! only way frames go on or come off the wire, so the check cannot be
-//! skipped by one side.
+//! between the two (see [`super::registry`]).
 //!
 //! A connection is made by the broker, not by the worker: the broker admits
 //! a node, creates a socket pair, keeps one end and hands the other to the
 //! child it spawns. The connection *is* the identity, so the worker's
-//! `hello` names nothing — a card's `name` is ignored — and the broker's
-//! `welcome` tells the worker who it is.
+//! `session.hello` names nothing — a card's `name` is ignored — and its
+//! result tells the worker who it is.
 //!
 //! # A session
 //!
 //! ```text
-//! participant → {"v":2,"type":"hello","card":{"name":"",…}}
-//! broker      → {"v":2,"type":"welcome","name":"local-coder-0","scope":"root","owner":null}
-//! broker      → {"v":2,"type":"task","taskId":"task-…","text":"summarise foo.rs"}
-//! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"read_file"}
-//! participant → {"v":2,"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
-//! participant → {"v":2,"type":"status","taskId":"task-…","state":"completed"}
+//! participant → {"v":3,"id":1,"method":"session.hello","params":{"card":{"name":"",…}}}
+//! broker      → {"v":3,"id":1,"result":{"name":"local-coder-0","scope":"root","owner":null}}
+//! broker      → {"v":3,"id":1,"method":"task.run","params":{"taskId":"task-…","text":"summarise foo.rs"}}
+//! participant → {"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working","message":"read_file"}}
+//! participant → {"v":3,"method":"task.event","params":{"kind":"artifact","id":1,"text":"foo.rs defines…","lastChunk":false}}
+//! participant → {"v":3,"id":1,"result":{"state":"completed"}}
 //! ```
+//!
+//! Each side numbers its own requests, so the worker's hello and the
+//! broker's first `task.run` may both be `1`. A `task.event` names its
+//! task by the `task.run`'s id; the task's A2A `taskId` rides only in
+//! `task.run`'s params. The broker stops a task with `req.cancel` naming
+//! that `task.run`.
 //!
 //! # Calls (BI-4, AGE-636)
 //!
 //! A worker reaches other agents over the same connection: its
-//! `invoke_agent` and `list_agents` send a `call`, and the broker runs it
-//! as the node this connection names — the call says nothing about who is
-//! calling. Several calls can be in flight within one task; every reply
-//! carries the call's `id`, and the replies of different calls interleave
-//! in whatever order they finish.
+//! `invoke_agent`, `list_agents` and `send_message` are `agent.invoke`,
+//! `agent.list` and `mailbox.post` requests, and the broker runs each as the
+//! node this connection names — the request says nothing about who is
+//! calling. Several can be in flight within one task, and their answers
+//! interleave in whatever order they finish.
 //!
 //! ```text
-//! participant → {"v":2,"type":"call","id":1,"method":"invoke_agent",
+//! participant → {"v":3,"id":2,"method":"agent.invoke",
 //!                "params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
-//! participant → {"v":2,"type":"call","id":2,"method":"list_agents"}
-//! broker      → {"v":2,"type":"call_result","id":2,"result":[{"name":"local-reviewer","origin":"local",…}]}
-//! broker      → {"v":2,"type":"call_progress","id":1,"event":{"Step":"read_file"}}
-//! broker      → {"v":2,"type":"call_progress","id":1,"event":{"Text":"Looks good."}}
-//! broker      → {"v":2,"type":"call_result","id":1,
-//!                "result":{"success":true,"response":"Looks good.","metadata":{"usage":[…]}}}
+//! participant → {"v":3,"id":3,"method":"agent.list"}
+//! broker      → {"v":3,"id":3,"result":[{"name":"local-reviewer","origin":"local",…}]}
+//! broker      → {"v":3,"method":"req.progress","params":{"id":2,"event":{"Step":"read_file"}}}
+//! broker      → {"v":3,"method":"req.progress","params":{"id":2,"event":{"Text":"Looks good."}}}
+//! broker      → {"v":3,"id":2,"result":{"success":true,"response":"Looks good.","metadata":{"usage":[…]}}}
 //! ```
 //!
 //! `event` is an `InvokeAgentProgress` as JSON (`Step` for a line about the
 //! callee's work, `Text` for its answer as it streams). A call that cannot
-//! run at all ends with `call_error` and `error: {kind, message}`; a callee
-//! whose task failed ends with a `call_result` whose `success` is false,
-//! exactly as a failed A2A task. When the worker's connection closes, the
-//! broker cancels every call still in flight on it, which reaps the
-//! workers those calls started.
+//! run at all ends with an `error` (`{kind, message}`); a callee whose task
+//! failed ends with a result whose `success` is false, exactly as a failed
+//! A2A task. When the worker's connection closes, the broker cancels every
+//! call still in flight on it, which reaps the workers those calls started.
 //!
 //! # A question on a call (BI-5, AGE-637)
 //!
 //! A callee that asks a question parks its task (below); the broker tells
-//! the calling worker with `call_input_required`, naming the call and the
-//! parked task, and the worker's answer goes back up as `call_input` with
-//! the same `input` shape an `input` frame carries. The broker delivers it
-//! only to a task parked on that call, so a worker can answer its own
-//! callees and nobody else's. This is what lets a grandchild's `ask_user`
-//! climb to the root's human and its answer come back down, however many
-//! workers sit in between: each hop re-asks the question on its own
-//! clarification store, which parks its own task toward its caller.
+//! the calling worker with `call.input_required`, naming the request and the
+//! parked task, and the worker's answer goes back up as `call.input` with
+//! the same `input` shape `task.input` carries. The broker delivers it only
+//! to a task parked on that request, so a worker can answer its own callees
+//! and nobody else's. Each hop re-asks the question on its own
+//! clarification store, which parks its own task toward its caller, so a
+//! grandchild's `ask_user` climbs to the root's human however many workers
+//! sit in between.
 //!
 //! ```text
-//! broker      → {"v":2,"type":"call_input_required","id":1,"task":"task-…",
-//!                "request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}
-//! participant → {"v":2,"type":"call_input","id":1,"task":"task-…",
-//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}
+//! broker      → {"v":3,"method":"call.input_required","params":{"id":2,"task":"task-…",
+//!                "request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}}
+//! participant → {"v":3,"method":"call.input","params":{"id":2,"task":"task-…",
+//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}}
 //! ```
 //!
 //! A question can end without an answer: the run under it was stopped
 //! (TB-7, AGE-749), so the asker withdrew it and its task went back to
 //! `working`. The broker tells the calling worker with
-//! `call_input_withdrawn`, and the worker withdraws the copy it re-raised,
+//! `call.input_withdrawn`, and the worker withdraws the copy it re-raised,
 //! which un-parks its own task toward its caller in turn.
 //!
-//! ```text
-//! broker      → {"v":2,"type":"call_input_withdrawn","id":1,"task":"task-…"}
-//! ```
+//! These three, and `task.input_required` / `task.input` below, are interim
+//! notifications: ADR-0021's step 2 (EN-2a, EN-2b) replaces them with the
+//! `human.ask` and `human.approve` requests.
 //!
 //! # A parked task
 //!
 //! A worker that asks a question (`ask_user`) parks its task in
 //! `input-required` and says what it is waiting for; the answer comes back
-//! down as an `input` frame on the same task, and the task resumes
+//! down as `task.input` on the same `task.run`, and the task resumes
 //! (ADR-0011 C7, AGE-306).
 //!
 //! ```text
-//! participant → {"v":2,"type":"status","taskId":"task-…","state":"input-required",
-//!                "message":"Which database?",
-//!                "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
-//! broker      → {"v":2,"type":"input","taskId":"task-…",
-//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
-//! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
+//! participant → {"v":3,"method":"task.input_required","params":{"id":1,"message":"Which database?",
+//!                "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}}
+//! broker      → {"v":3,"method":"task.input","params":{"id":1,
+//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}}
+//! participant → {"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working","message":"✓ ask_user"}}
 //! ```
 //!
 //! # A nested run's events (TB-1, AGE-663)
 //!
 //! A task a worker's call started — a run nested under the root's callee —
 //! is sent with `"swarmEvents":true` when the root is listening. Its worker
-//! then reports its turns and tool events as `event` frames beside the
-//! usual ones, and the broker forwards them to the root tagged with the
-//! node and chain from its own task table (see
-//! [`chatty_fabric::SwarmEvent`]). An `event` frame names no node or chain:
+//! then reports its turns and tool events as `task.event`s of kind `swarm`
+//! beside the usual ones, and the broker forwards them to the root tagged
+//! with the node and chain from its own task table (see
+//! [`chatty_fabric::SwarmEvent`]). Such an event names no node or chain:
 //! whatever else it carries is dropped when it is parsed, and an item that
-//! is not the worker's to report (text, usage, the end) is ignored. A
-//! task without the flag gets no `event` frames, so its wire is unchanged.
+//! is not the worker's to report (text, usage, the end) is ignored. A task
+//! without the flag gets none of them.
 //!
 //! ```text
-//! broker      → {"v":2,"type":"task","taskId":"task-…","text":"read it","swarmEvents":true}
-//! participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"read_file"}
-//! participant → {"v":2,"type":"event","taskId":"task-…","event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}
+//! broker      → {"v":3,"id":2,"method":"task.run","params":{"taskId":"task-…","text":"read it","swarmEvents":true}}
+//! participant → {"v":3,"method":"task.event","params":{"kind":"swarm","id":2,"event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}}
 //! ```
 
 use chatty_fabric::{
     CallChain, CallError, CallRequest, ConversationScope, HandoffContract, NodeName, Remaining,
     SpawnContext, SwarmItem,
 };
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-/// The participant protocol's version. Every frame carries it as `v`.
-pub const PROTOCOL_VERSION: u64 = 2;
-
-/// Why a line off the socket is not a frame this build accepts.
-#[derive(Debug, thiserror::Error)]
-pub enum FrameError {
-    /// A frame without `v`: a v1 peer, or no peer of ours at all.
-    #[error("frame has no \"v\"; the participant protocol is v2 only")]
-    MissingVersion,
-    /// A frame for a version this build does not speak.
-    #[error("frame is version {0}; the participant protocol is v2 only")]
-    WrongVersion(Value),
-    /// Not JSON, not an object, or not a frame of this direction.
-    #[error("malformed frame: {0}")]
-    Malformed(String),
-}
-
-impl FrameError {
-    /// Whether the peer speaks another protocol version, which ends the
-    /// connection, rather than having sent one bad frame.
-    pub fn is_version(&self) -> bool {
-        matches!(self, Self::MissingVersion | Self::WrongVersion(_))
-    }
-}
-
-/// One frame as a line, without the trailing newline, carrying `"v":2`.
-pub fn encode_frame<F: Serialize>(frame: &F) -> Result<String, serde_json::Error> {
-    let Value::Object(mut fields) = serde_json::to_value(frame)? else {
-        return Err(serde::ser::Error::custom(
-            "a frame serializes to a JSON object",
-        ));
-    };
-    fields.insert("v".to_string(), Value::from(PROTOCOL_VERSION));
-    serde_json::to_string(&Value::Object(fields))
-}
-
-/// One line off the socket as a frame, refusing anything that is not v2.
-pub fn decode_frame<F: DeserializeOwned>(line: &str) -> Result<F, FrameError> {
-    let value: Value =
-        serde_json::from_str(line).map_err(|e| FrameError::Malformed(e.to_string()))?;
-    let Value::Object(mut fields) = value else {
-        return Err(FrameError::Malformed(
-            "a frame is a JSON object".to_string(),
-        ));
-    };
-    match fields.remove("v") {
-        None => return Err(FrameError::MissingVersion),
-        Some(v) if v.as_u64() == Some(PROTOCOL_VERSION) => {}
-        Some(other) => return Err(FrameError::WrongVersion(other)),
-    }
-    serde_json::from_value(Value::Object(fields)).map_err(|e| FrameError::Malformed(e.to_string()))
-}
 
 /// The state of one task, in A2A's vocabulary.
 ///
@@ -511,17 +452,16 @@ pub struct ParticipantCard {
 }
 
 /// A frame from a participant to the broker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub enum ParticipantFrame {
-    /// The first frame on a connection. A second one is a protocol error.
-    /// The card's `name` is ignored: the connection already names the node.
-    Hello {
-        #[serde(default)]
-        card: ParticipantCard,
-    },
+    /// `session.hello`: the first message on a connection. A second one
+    /// is a protocol error. The card's `name` is ignored: the connection
+    /// already names the node.
+    Hello { card: ParticipantCard },
     /// A task moved, optionally with progress text. The broker turns this
-    /// into an A2A `TaskStatusUpdateEvent`.
+    /// into an A2A `TaskStatusUpdateEvent`. On the wire a terminal one is
+    /// the `task.run`'s result, `input-required` is `task.input_required`,
+    /// and any other is a `task.event` of kind `status`.
     ///
     /// `metadata` is copied verbatim into the A2A status's `metadata` field.
     /// It is where a turn's token usage rides back: A2A has no usage concept
@@ -533,41 +473,29 @@ pub enum ParticipantFrame {
     /// waiting for. The broker serves it to the caller under the A2A
     /// status's `metadata.clarification`, and the caller's answer comes
     /// back as [`BrokerFrame::Input`].
-    #[serde(rename_all = "camelCase")]
     Status {
         task_id: String,
         state: TaskState,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         input: Option<InputRequest>,
     },
     /// A chunk of the task's output, in stream order. The broker turns this
     /// into an A2A `TaskArtifactUpdateEvent`.
-    #[serde(rename_all = "camelCase")]
     Artifact {
         task_id: String,
         text: String,
-        #[serde(default)]
         last_chunk: bool,
     },
     /// A call to another agent, made as the node this connection names
-    /// (BI-4). `id` is the worker's own, unique on this connection; the
-    /// replies carry it back. The request is flattened in, so the wire
-    /// reads `{"type":"call","id":1,"method":…,"params":…}`.
-    #[serde(rename = "call")]
-    Call {
-        id: u64,
-        #[serde(flatten)]
-        request: CallRequest,
-    },
+    /// (BI-4): an `agent.invoke`, `agent.list` or `mailbox.post` request.
+    /// `id` is the worker's own call id on its side and the request id the
+    /// worker gave it on the broker's; the codec maps between them.
+    Call { id: u64, request: CallRequest },
     /// The answer to a question a callee of call `id` asked
     /// ([`BrokerFrame::CallInputRequired`]): `task` is the callee's parked
     /// task, `input` the same shape an [`BrokerFrame::Input`] carries
     /// (BI-5).
-    #[serde(rename = "call_input")]
     CallInput {
         id: u64,
         task: String,
@@ -575,13 +503,14 @@ pub enum ParticipantFrame {
     },
     /// One of the worker's own turns or tool events on a task sent with
     /// `swarmEvents` (TB-1). The broker tags it; the frame cannot.
-    #[serde(rename_all = "camelCase")]
     Event { task_id: String, event: SwarmItem },
+    /// The worker withdraws call `id` (`req.cancel`): the broker stops it,
+    /// and sends nothing more for it.
+    CancelCall { id: u64 },
 }
 
 /// A frame from the broker to a participant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub enum BrokerFrame {
     /// The answer to `hello`: who this connection is. `name` is what
     /// callers address, `scope` the conversation the node works for, and
@@ -591,33 +520,27 @@ pub enum BrokerFrame {
         scope: ConversationScope,
         owner: Option<NodeName>,
     },
-    /// The connection is refused: a frame that is not v2, a first frame
-    /// that is not `hello`, or any registration on the shared socket. The
-    /// broker closes the connection after this frame.
+    /// The `session.hello` is refused (any hello on the shared socket): an
+    /// `error` for the hello's id, after which the broker closes the
+    /// connection. Without a pending hello nothing is sent.
     Error { reason: String },
-    /// Work. Answer with `Status` / `Artifact` frames carrying this `taskId`
-    /// and end with a terminal state. `bearer` is the caller's token when
-    /// they presented one (AGE-371); absent on the wire otherwise, so a
-    /// broker and a worker from either side of that change still agree.
-    /// `captureConversation` asks the worker to attach its conversation to
-    /// the terminal status (RC-0, AGE-649); also absent on the wire when
-    /// `false`, for the same reason.
-    #[serde(rename_all = "camelCase")]
+    /// Work: a `task.run` request. Answer with `Status` / `Artifact` frames
+    /// carrying this `taskId` and end with a terminal state. `bearer` is the
+    /// caller's token when they presented one (AGE-371), absent on the wire
+    /// otherwise. `captureConversation` asks the worker to attach its
+    /// conversation to the terminal status (RC-0, AGE-649); absent on the
+    /// wire when `false`.
     Task {
         task_id: String,
         text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         bearer: Option<TaskBearer>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         capture_conversation: bool,
         /// The context this worker was spawned with (BI-5): its workspace
         /// root, base branch, roster, verification command and endpoint.
         /// Absent on the wire for a task given without one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         spawn_context: Option<SpawnContext>,
         /// The role and schema the worker's final answer must match (TD-2,
         /// AGE-693). Absent on the wire for a role without one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         handoff: Option<HandoffContract>,
         /// What the worker may spend on this task (DP-3): the turns,
         /// seconds and dollars its call chain leaves it. The worker runs
@@ -625,33 +548,26 @@ pub enum BrokerFrame {
         /// wire when unlimited.
         /// Boxed: the frame enum stays small for the frames that are not
         /// a task.
-        #[serde(default, skip_serializing_if = "Remaining::is_unlimited")]
         budget: Box<Remaining>,
-        /// Report turns and tool events as `event` frames (TB-1). Absent on
-        /// the wire when `false`.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        /// Report turns and tool events as `swarm` task events (TB-1).
+        /// Absent on the wire when `false`.
         swarm_events: bool,
     },
-    /// The caller went away. Stop working on `taskId`; no reply is required.
-    #[serde(rename_all = "camelCase")]
+    /// The caller went away: `req.cancel` of the task's `task.run`. Stop
+    /// working on `taskId`.
     Cancel { task_id: String },
     /// The answer to a task parked in `input-required`. Resolve the request
     /// it names and carry on; the next `Status` frame un-parks the task.
-    #[serde(rename_all = "camelCase")]
     Input { task_id: String, input: TaskInput },
     /// Progress on call `id`: an `InvokeAgentProgress`, as JSON.
-    #[serde(rename = "call_progress")]
     CallProgress { id: u64, event: Value },
     /// Call `id` is over, and this is what it returned.
-    #[serde(rename = "call_result")]
     CallResult { id: u64, result: Value },
     /// Call `id` could not be carried out, and is over.
-    #[serde(rename = "call_error")]
     CallError { id: u64, error: CallError },
     /// A callee of call `id` parked its task `task` on a question
     /// (`request`, an [`InputRequest`] as JSON). The call stays open; answer
     /// with [`ParticipantFrame::CallInput`] (BI-5).
-    #[serde(rename = "call_input_required")]
     CallInputRequired {
         id: u64,
         task: String,
@@ -659,7 +575,6 @@ pub enum BrokerFrame {
     },
     /// The question call `id`'s callee parked `task` on is over without
     /// this worker's answer (TB-7): withdraw the copy re-raised for it.
-    #[serde(rename = "call_input_withdrawn")]
     CallInputWithdrawn { id: u64, task: String },
 }
 
@@ -711,243 +626,6 @@ mod tests {
     }
 
     #[test]
-    fn participant_frames_use_the_documented_wire_names() {
-        let frame = ParticipantFrame::Status {
-            task_id: "task-1".into(),
-            state: TaskState::InputRequired,
-            message: Some("which file?".into()),
-            metadata: None,
-            input: None,
-        };
-        let json = serde_json::to_value(&frame).unwrap();
-        assert_eq!(json["type"], "status");
-        assert_eq!(json["taskId"], "task-1");
-        assert_eq!(json["state"], "input-required");
-        assert_eq!(json["message"], "which file?");
-        assert!(
-            json.get("metadata").is_none(),
-            "an absent metadata field stays off the wire"
-        );
-        assert!(
-            json.get("input").is_none(),
-            "an absent input field stays off the wire"
-        );
-    }
-
-    #[test]
-    fn a_parked_task_says_what_it_is_waiting_for() {
-        let frame = ParticipantFrame::Status {
-            task_id: "task-1".into(),
-            state: TaskState::InputRequired,
-            message: Some("Which database?".into()),
-            metadata: None,
-            input: Some(InputRequest {
-                id: "req-1".into(),
-                questions: vec![InputQuestion::Question {
-                    id: "q1".into(),
-                    question: "Which database?".into(),
-                    options: vec!["Postgres".into(), "SQLite".into()],
-                }],
-            }),
-        };
-        let json = serde_json::to_value(&frame).unwrap();
-        assert_eq!(json["input"]["id"], "req-1");
-        assert_eq!(json["input"]["questions"][0]["id"], "q1");
-        assert_eq!(json["input"]["questions"][0]["options"][1], "SQLite");
-
-        let back: ParticipantFrame = serde_json::from_value(json).unwrap();
-        let ParticipantFrame::Status { input, .. } = back else {
-            panic!("expected a status frame");
-        };
-        assert_eq!(input.unwrap().questions.len(), 1);
-    }
-
-    #[test]
-    fn an_input_frame_carries_the_answers_under_the_request_id() {
-        let json = serde_json::to_value(BrokerFrame::Input {
-            task_id: "task-1".into(),
-            input: TaskInput {
-                request_id: "req-1".into(),
-                answers: vec![InputAnswer {
-                    id: "q1".into(),
-                    answer: "Postgres".into(),
-                    custom: false,
-                }],
-            },
-        })
-        .unwrap();
-        assert_eq!(json["type"], "input");
-        assert_eq!(json["taskId"], "task-1");
-        assert_eq!(json["input"]["requestId"], "req-1");
-        assert_eq!(json["input"]["answers"][0]["answer"], "Postgres");
-
-        // `custom` is optional on the way in: a caller that only ever picks
-        // an option need not say so.
-        let line = r#"{"type":"input","taskId":"t","input":{"requestId":"r","answers":[{"id":"q1","answer":"x"}]}}"#;
-        let frame: BrokerFrame = serde_json::from_str(line).unwrap();
-        let BrokerFrame::Input { input, .. } = frame else {
-            panic!("expected an input frame");
-        };
-        assert!(!input.answers[0].custom);
-    }
-
-    #[test]
-    fn status_metadata_round_trips() {
-        let line = r#"{"type":"status","taskId":"t","state":"completed",
-                       "metadata":{"usage":{"inputTokens":12}}}"#;
-        let frame: ParticipantFrame = serde_json::from_str(line).unwrap();
-        let ParticipantFrame::Status { metadata, .. } = frame else {
-            panic!("expected a status frame");
-        };
-        assert_eq!(metadata.unwrap()["usage"]["inputTokens"], 12);
-    }
-
-    #[test]
-    fn broker_frames_use_the_documented_wire_names() {
-        let json = serde_json::to_value(BrokerFrame::Task {
-            task_id: "task-1".into(),
-            text: "do it".into(),
-            bearer: None,
-            capture_conversation: false,
-            spawn_context: None,
-            handoff: None,
-            budget: Box::default(),
-            swarm_events: false,
-        })
-        .unwrap();
-        assert_eq!(json["type"], "task");
-        assert_eq!(json["taskId"], "task-1");
-        assert_eq!(json["text"], "do it");
-        assert!(
-            json.get("bearer").is_none(),
-            "a task without a bearer is the frame it was before AGE-371"
-        );
-        assert!(
-            json.get("captureConversation").is_none(),
-            "a task that does not ask for capture is the frame it was before AGE-649"
-        );
-        assert!(
-            json.get("swarmEvents").is_none(),
-            "a task nobody forwards is the frame it was before TB-1"
-        );
-    }
-
-    /// TB-1: an `event` frame carries one item and nothing a worker could
-    /// tag it with.
-    #[test]
-    fn an_event_frame_drops_a_forged_tag_when_parsed() {
-        let line = r#"{"v":2,"type":"event","taskId":"t","root_task_id":"forged",
-                       "event":{"kind":"tool_call_started","id":"c1","name":"shell",
-                                "node":"root","chain":{"root_task_id":"forged","chain":["root"],"depth":0}}}"#;
-        let frame: ParticipantFrame = decode_frame(line).unwrap();
-        let ParticipantFrame::Event { task_id, event } = frame else {
-            panic!("expected an event frame");
-        };
-        assert_eq!(task_id, "t");
-        assert_eq!(
-            event,
-            SwarmItem::ToolCallStarted {
-                id: "c1".into(),
-                name: "shell".into()
-            }
-        );
-    }
-
-    #[test]
-    fn a_task_frame_carries_the_bearer_and_reads_one_without() {
-        let json = serde_json::to_value(BrokerFrame::Task {
-            task_id: "task-1".into(),
-            text: "do it".into(),
-            bearer: Some(TaskBearer::new("eyJ.token")),
-            capture_conversation: false,
-            spawn_context: None,
-            handoff: None,
-            budget: Box::default(),
-            swarm_events: false,
-        })
-        .unwrap();
-        assert_eq!(json["bearer"], "eyJ.token");
-
-        let old: BrokerFrame =
-            serde_json::from_str(r#"{"type":"task","taskId":"t","text":"x"}"#).unwrap();
-        let BrokerFrame::Task {
-            bearer,
-            capture_conversation,
-            ..
-        } = old
-        else {
-            panic!("expected a task frame");
-        };
-        assert!(bearer.is_none());
-        assert!(
-            !capture_conversation,
-            "an old frame without the field means off"
-        );
-    }
-
-    #[test]
-    fn a_task_frame_carries_capture_conversation_and_reads_one_without() {
-        let json = serde_json::to_value(BrokerFrame::Task {
-            task_id: "task-1".into(),
-            text: "do it".into(),
-            bearer: None,
-            capture_conversation: true,
-            spawn_context: None,
-            handoff: None,
-            budget: Box::default(),
-            swarm_events: false,
-        })
-        .unwrap();
-        assert_eq!(json["captureConversation"], true);
-
-        let back: BrokerFrame = serde_json::from_value(json).unwrap();
-        let BrokerFrame::Task {
-            capture_conversation,
-            ..
-        } = back
-        else {
-            panic!("expected a task frame");
-        };
-        assert!(capture_conversation);
-    }
-
-    /// DP-3: the task frame carries the budget the worker runs under, and
-    /// says nothing when there is none.
-    #[test]
-    fn a_task_frame_carries_its_budget_and_reads_one_without() {
-        let budget = Remaining {
-            turns: Some(2),
-            seconds: Some(30),
-            usd: Some(0.02),
-        };
-        let json = serde_json::to_value(BrokerFrame::Task {
-            task_id: "t".into(),
-            text: "x".into(),
-            bearer: None,
-            capture_conversation: false,
-            spawn_context: None,
-            handoff: None,
-            budget: Box::new(budget.clone()),
-            swarm_events: false,
-        })
-        .unwrap();
-        assert_eq!(
-            json["budget"],
-            serde_json::json!({"turns": 2, "seconds": 30, "usd": 0.02})
-        );
-        let BrokerFrame::Task { budget: read, .. } = serde_json::from_value(json).unwrap() else {
-            panic!("a task frame");
-        };
-        assert_eq!(*read, budget);
-
-        let bare = serde_json::json!({"type": "task", "taskId": "t", "text": "x"});
-        let BrokerFrame::Task { budget, .. } = serde_json::from_value(bare).unwrap() else {
-            panic!("a task frame");
-        };
-        assert!(budget.is_unlimited());
-    }
-
-    #[test]
     fn the_bearer_does_not_debug_print() {
         let frame = BrokerFrame::Task {
             task_id: "t".into(),
@@ -962,170 +640,6 @@ mod tests {
         let printed = format!("{frame:?}");
         assert!(!printed.contains("secret-token"), "{printed}");
         assert!(printed.contains("[redacted]"));
-    }
-
-    #[test]
-    fn hello_frame_round_trips_a_card() {
-        let line = r#"{"v":2,"type":"hello","card":{"name":"worker-1","description":"a worker",
-                       "skills":[{"name":"edit"}]}}"#;
-        let frame: ParticipantFrame = decode_frame(line).unwrap();
-        let ParticipantFrame::Hello { card } = frame else {
-            panic!("expected a hello frame");
-        };
-        assert_eq!(card.name, "worker-1", "carried, and ignored by the broker");
-        assert_eq!(card.skills[0].name, "edit");
-        // Absent optional fields default rather than failing the connection.
-        assert_eq!(card.version, "");
-        assert!(card.display_name.is_none());
-
-        let bare: ParticipantFrame = decode_frame(r#"{"v":2,"type":"hello"}"#).unwrap();
-        assert!(matches!(bare, ParticipantFrame::Hello { card } if card.name.is_empty()));
-    }
-
-    #[test]
-    fn every_encoded_frame_carries_v2() {
-        let line = encode_frame(&BrokerFrame::Cancel {
-            task_id: "t".into(),
-        })
-        .unwrap();
-        let json: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(json["v"], 2, "{line}");
-        let back: BrokerFrame = decode_frame(&line).unwrap();
-        assert!(matches!(back, BrokerFrame::Cancel { task_id } if task_id == "t"));
-    }
-
-    /// TB-7: a withdrawn question reaches the calling worker under the
-    /// documented wire name.
-    #[test]
-    fn a_withdrawn_question_uses_the_documented_wire_name() {
-        let line = encode_frame(&BrokerFrame::CallInputWithdrawn {
-            id: 1,
-            task: "task-1".into(),
-        })
-        .unwrap();
-        let json: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({"v": 2, "type": "call_input_withdrawn", "id": 1, "task": "task-1"})
-        );
-    }
-
-    #[test]
-    fn a_frame_without_v_or_with_another_is_refused() {
-        let v1 = r#"{"type":"register","card":{"name":"worker-1"}}"#;
-        let err = decode_frame::<ParticipantFrame>(v1).unwrap_err();
-        assert!(matches!(err, FrameError::MissingVersion));
-        assert!(err.is_version());
-        assert!(err.to_string().contains("v2"), "{err}");
-
-        let v3 = r#"{"v":3,"type":"hello"}"#;
-        let err = decode_frame::<ParticipantFrame>(v3).unwrap_err();
-        assert!(matches!(err, FrameError::WrongVersion(_)));
-        assert!(err.to_string().contains("v2"), "{err}");
-
-        let err = decode_frame::<ParticipantFrame>(r#"{"v":2,"type":"register"}"#).unwrap_err();
-        assert!(
-            !err.is_version(),
-            "a v2 frame of an unknown type is malformed, not another version"
-        );
-    }
-
-    #[test]
-    fn welcome_names_the_node_its_scope_and_its_owner() {
-        let frame: BrokerFrame = decode_frame(
-            r#"{"v":2,"type":"welcome","name":"local-coder-0","scope":"root","owner":null}"#,
-        )
-        .unwrap();
-        let BrokerFrame::Welcome { name, scope, owner } = frame else {
-            panic!("expected a welcome frame");
-        };
-        assert_eq!(name.as_str(), "local-coder-0");
-        assert_eq!(scope.as_str(), "root");
-        assert!(owner.is_none());
-    }
-
-    #[test]
-    fn call_frames_use_the_documented_wire_names() {
-        use chatty_fabric::InvokeAgentParams;
-
-        let line = encode_frame(&ParticipantFrame::Call {
-            id: 7,
-            request: CallRequest::InvokeAgent(InvokeAgentParams {
-                agent: "local-reviewer".into(),
-                prompt: "review it".into(),
-                handle: None,
-                include_trace: false,
-                spawn_context: None,
-                remaining: Default::default(),
-            }),
-        })
-        .unwrap();
-        let json: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(json["type"], "call");
-        assert_eq!(json["id"], 7);
-        assert_eq!(json["method"], "invoke_agent");
-        assert_eq!(json["params"]["agent"], "local-reviewer");
-        let back: ParticipantFrame = decode_frame(&line).unwrap();
-        assert!(matches!(
-            back,
-            ParticipantFrame::Call { id: 7, request: CallRequest::InvokeAgent(p) } if p.prompt == "review it"
-        ));
-
-        let list: ParticipantFrame =
-            decode_frame(r#"{"v":2,"type":"call","id":2,"method":"list_agents"}"#).unwrap();
-        assert!(matches!(
-            list,
-            ParticipantFrame::Call {
-                id: 2,
-                request: CallRequest::ListAgents
-            }
-        ));
-
-        for (frame, kind) in [
-            (
-                BrokerFrame::CallProgress {
-                    id: 1,
-                    event: serde_json::json!({"Step": "read_file"}),
-                },
-                "call_progress",
-            ),
-            (
-                BrokerFrame::CallResult {
-                    id: 1,
-                    result: serde_json::json!({"success": true}),
-                },
-                "call_result",
-            ),
-            (
-                BrokerFrame::CallError {
-                    id: 1,
-                    error: CallError::UnknownAgent("nobody".into()),
-                },
-                "call_error",
-            ),
-        ] {
-            let json: Value = serde_json::from_str(&encode_frame(&frame).unwrap()).unwrap();
-            assert_eq!(json["type"], kind);
-            assert_eq!(json["id"], 1);
-        }
-        let error: BrokerFrame = decode_frame(
-            r#"{"v":2,"type":"call_error","id":3,"error":{"kind":"unknown_agent","message":"x"}}"#,
-        )
-        .unwrap();
-        assert!(matches!(
-            error,
-            BrokerFrame::CallError { id: 3, error: CallError::UnknownAgent(m) } if m == "x"
-        ));
-    }
-
-    #[test]
-    fn artifact_last_chunk_defaults_to_false() {
-        let frame: ParticipantFrame =
-            serde_json::from_str(r#"{"type":"artifact","taskId":"t","text":"x"}"#).unwrap();
-        let ParticipantFrame::Artifact { last_chunk, .. } = frame else {
-            panic!("expected an artifact frame");
-        };
-        assert!(!last_chunk, "a chunk is only the last one if it says so");
     }
 
     #[test]

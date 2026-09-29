@@ -9,7 +9,6 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-serde = "1"
 chatty-protocol-gateway = { path = ".." }
 
 # Its own workspace: nightly-only, and never built by `cargo test` at the
@@ -18,8 +17,8 @@ chatty-protocol-gateway = { path = ".." }
 members = ["."]
 
 [[bin]]
-name = "decode-frame"
-path = "fuzz_targets/decode_frame.rs"
+name = "frame-codec"
+path = "fuzz_targets/frame_codec.rs"
 test = false
 doc = false
 bench = false
