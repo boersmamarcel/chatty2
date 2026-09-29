@@ -20,7 +20,7 @@ When the workspace is a git repository, each spawned sub-agent works in its own 
 
 ## From the chat
 
-Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; a built-in one such as `data-analyst` once your roster names it), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
+Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; a built-in one such as `data-analyst` once your roster names it), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt. In the desktop app, typing `/agent ` (with the space) opens a list of the agents this conversation can reach; type to filter it, and Enter or Tab puts the chosen name in for you.
 
 `/agent` hands the task to the same local agents the assistant itself delegates to, so the delegation row — and the swarm tree below, when that agent delegates in turn — looks exactly as if the assistant had made the call. If the agent fails or stops before answering, the row ends with the error.
 
