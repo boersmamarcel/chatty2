@@ -827,6 +827,10 @@ impl AgentSession {
             // The handler emits these as `SessionEvent::SwarmEvent`: a
             // nested run's events are not this delegation's row (TB-1).
             InvokeAgentProgress::Swarm(_) => {}
+            // Nothing to render here: the conversation's delegation row
+            // has no per-call identity. `SwarmTrace` is what a stop
+            // targets by name (AGE-762).
+            InvokeAgentProgress::Admitted(_) => {}
         }
     }
 

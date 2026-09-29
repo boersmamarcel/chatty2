@@ -141,7 +141,7 @@ pub struct FetchTool {
 
 impl FetchTool {
     pub fn new(workspace_dir: Option<PathBuf>) -> Self {
-        let client = crate::services::http_client::no_redirect_client(REQUEST_TIMEOUT_SECS);
+        let client = crate::services::http_client::open_web_client(REQUEST_TIMEOUT_SECS);
         Self {
             client,
             workspace_dir,
@@ -874,8 +874,11 @@ fn unique_path(path: PathBuf) -> PathBuf {
 ///
 /// Delegates to the shared SSRF guard (`services::ssrf_guard`) so this tool and the
 /// browser's internet-enabled navigation policy enforce the same denylist.
+/// Needs no DNS: a hostname is checked where it is resolved, by the guarded
+/// resolver of this tool's client, so the check and the connection share one
+/// lookup (AGE-537).
 fn validate_url_host(url: &str) -> Result<(), ToolError> {
-    crate::services::ssrf_guard::check_public_host(url)
+    crate::services::ssrf_guard::check_public_url_without_lookup(url)
         .map_err(|reason| ToolError::OperationFailed(format!("Access denied: {reason}")))
 }
 
@@ -2721,7 +2724,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_request_uses_default_user_agent_when_not_declared() {
-        // The client's own default User-Agent (set once in `no_redirect_client`)
+        // The client's own default User-Agent (set once in `open_web_client`)
         // is applied by reqwest at send time, not baked into `build()`'s
         // `Request` — so "no override" means no per-request header at all.
         let tool = FetchTool::new(None);
@@ -2925,6 +2928,63 @@ mod tests {
     fn test_validate_url_host_allows_public() {
         assert!(validate_url_host("https://example.com").is_ok());
         assert!(validate_url_host("https://docs.rs/rig-core/latest").is_ok());
+    }
+
+    /// AGE-537: the name is resolved once, by the client that connects, and
+    /// that answer is checked. A rebinding name whose answer turns private is
+    /// refused at connect time: the private server never sees a request.
+    #[tokio::test]
+    async fn fetch_connects_only_to_the_checked_address() {
+        use crate::services::ssrf_guard::HostLookup;
+        use std::future::Future;
+        use std::net::IpAddr;
+        use std::pin::Pin;
+
+        struct Rebinds;
+        impl HostLookup for Rebinds {
+            fn lookup(
+                &self,
+                _host: &str,
+            ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>> {
+                Box::pin(async { Ok(vec!["127.0.0.1".parse().unwrap()]) })
+            }
+        }
+        struct Fails;
+        impl HostLookup for Fails {
+            fn lookup(
+                &self,
+                _host: &str,
+            ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>> {
+                Box::pin(async { Err(std::io::Error::other("stub: resolver down")) })
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let url = format!("http://rebind.test:{port}/admin");
+        for lookup in [
+            std::sync::Arc::new(Rebinds) as std::sync::Arc<dyn HostLookup>,
+            std::sync::Arc::new(Fails),
+        ] {
+            let tool = FetchTool {
+                client: crate::services::http_client::open_web_client_with(5, lookup),
+                ..FetchTool::new(None)
+            };
+            let err = tool
+                .send(&url, None)
+                .await
+                .expect_err("a private or unresolvable answer must be refused");
+            let message = format!("{err}");
+            assert!(message.contains("Request failed"), "{message}");
+        }
+        // A connection, had one been made, would be waiting in the backlog.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "the private server must never be connected to"
+        );
     }
 
     #[tokio::test]

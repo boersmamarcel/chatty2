@@ -162,9 +162,9 @@ pub struct BrokerCalls {
     /// result.
     pending: Arc<Mutex<HashMap<Recipient, PendingList>>>,
     next_message: AtomicU64,
-    /// The spec rules a call is checked against (PL-S2, AGE-745); `None`
-    /// checks only the chain.
-    policy: Option<Arc<dyn CallPolicy>>,
+    /// The spec rules a call is checked against (PL-S2, AGE-745). Always
+    /// one: a broker nobody gave a policy consults [`LocalPermissive`].
+    policy: Policy,
     /// Prices a callee's reported usage for its task row (DP-3); `None`
     /// writes no price.
     pricer: Option<Arc<dyn UsagePricer>>,
@@ -324,6 +324,54 @@ async fn next_nested(listening: &mut Option<Listening>) -> Option<Nested> {
     }
 }
 
+/// The delegation policy of a local broker nobody gave one: every caller,
+/// the root included, may call every spec, and no spec brings a budget of
+/// its own, so only the call chain (cycle, depth, the caller's budget)
+/// limits a call. Right for a plain local root, whose own tools decide
+/// whether it may delegate at all (AGE-745).
+///
+/// A named value, not a skipped check, so that nothing inherits it
+/// silently. Its constructor is crate-private on purpose: only the local
+/// and desktop builders here ([`BrokerCalls::new`],
+/// [`BrokerCalls::with_policy`] given `None`) make one. The hosted broker
+/// (HS-4a, AGE-685) takes a [`CallPolicy`] by value and must not be able to
+/// build this one: without a real policy, a hosted broker does not start
+/// (ADR-0021, Migration step 4).
+#[derive(Debug)]
+pub struct LocalPermissive(());
+
+impl LocalPermissive {
+    pub(crate) fn new() -> Self {
+        Self(())
+    }
+}
+
+impl CallPolicy for LocalPermissive {
+    fn may_call(&self, _caller: &str, _callee: &str) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    fn root_may_call(&self, _callee: &str) -> Result<(), Refusal> {
+        Ok(())
+    }
+}
+
+/// The policy a broker checks calls against: the local default by name, or
+/// the one it was given.
+enum Policy {
+    LocalPermissive(LocalPermissive),
+    Configured(Arc<dyn CallPolicy>),
+}
+
+impl Policy {
+    fn get(&self) -> &dyn CallPolicy {
+        match self {
+            Policy::LocalPermissive(policy) => policy,
+            Policy::Configured(policy) => policy.as_ref(),
+        }
+    }
+}
+
 fn lock_swarm(
     swarm: &Swarm,
 ) -> std::sync::MutexGuard<'_, HashMap<String, mpsc::UnboundedSender<Nested>>> {
@@ -342,7 +390,7 @@ impl BrokerCalls {
             edges,
             pending: Arc::default(),
             next_message: AtomicU64::new(0),
-            policy: None,
+            policy: Policy::LocalPermissive(LocalPermissive::new()),
             pricer: None,
             swarm: Arc::default(),
             stops: Arc::default(),
@@ -407,9 +455,12 @@ impl BrokerCalls {
     }
 
     /// Check every call, the root's included, against `policy` before
-    /// anything is spawned.
+    /// anything is spawned. `None` is [`LocalPermissive`], by name.
     pub fn with_policy(mut self, policy: Option<Arc<dyn CallPolicy>>) -> Self {
-        self.policy = policy;
+        self.policy = match policy {
+            Some(policy) => Policy::Configured(policy),
+            None => Policy::LocalPermissive(LocalPermissive::new()),
+        };
         self
     }
 
@@ -701,7 +752,7 @@ impl BrokerCalls {
                 }
             };
             let running = if registry.is_registered(&agent) {
-                a2a_participant::submit(&registry, &agent, task)
+                a2a_participant::submit(&registry, &agent, task).await
                     .ok_or_else(|| format!("participant '{agent}' is no longer connected"))
             } else if let Some(runner) = runner {
                 info!(caller = %caller.name(), agent = %agent, "Starting a worker for a call");
@@ -721,6 +772,11 @@ impl BrokerCalls {
                 }
             };
             edge.to = running.participant().to_string();
+            // As soon as admitted, before anything else: a caller that
+            // only knew this callee by its spec can now name this one
+            // call precisely (AGE-762), which two parallel calls to the
+            // same spec need to be stoppable one at a time.
+            yield Ok(CallEvent::Progress(json!({ "Admitted": running.participant() })));
             let (mut stopped, _stoppable) = stoppable(&stops, &caller, &agent, running.participant());
             let mut stopped_by_user = false;
             // The task this call's callee is parked on, until it moves on.
@@ -938,25 +994,18 @@ impl BrokerCalls {
             .registry
             .node_spec(agent)
             .unwrap_or_else(|| agent.to_string());
+        let policy = self.policy.get();
         let caller = match caller {
             Caller::Root => {
-                if let Some(policy) = self.policy.as_ref() {
-                    policy.root_may_call(&callee)?;
-                }
+                policy.root_may_call(&callee)?;
                 None
             }
             Caller::Node(name) => {
-                if let Some(policy) = self.policy.as_ref() {
-                    policy.may_call(&self.caller_spec(name), &callee)?;
-                }
+                policy.may_call(&self.caller_spec(name), &callee)?;
                 Some(name.clone())
             }
         };
-        let own = self
-            .policy
-            .as_ref()
-            .map(|policy| policy.budget(&callee))
-            .unwrap_or_default();
+        let own = policy.budget(&callee);
         let chain =
             chain
                 .extend(&callee)?
@@ -1149,6 +1198,7 @@ impl Transport for DirectTransport {
         self.calls
             .registry
             .answer_task(task, input)
+            .await
             .map_err(|e| CallError::Failed(e.to_string()))
     }
 
@@ -1399,13 +1449,14 @@ mod tests {
 
         let (calls, registry) = broker(None);
         let admitted = registry.admit("lead", AgentOrigin::Local, None).unwrap();
-        let (tx, mut outbound) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut outbound) = tokio::sync::mpsc::channel(8);
         let lead = registry.register(admitted, ParticipantCard::default(), tx);
         let coder = registry.admit_under("coder", Some(&lead));
         send(&calls, node(&coder), &lead, "<b>tests pass</b>").await;
 
         registry
             .submit_task(&lead, DelegatedTask::new("next task"))
+            .await
             .expect("the lead is registered");
         let Some(BrokerFrame::Task { text, .. }) = outbound.recv().await else {
             panic!("a task frame");
@@ -1418,6 +1469,7 @@ mod tests {
         );
         registry
             .submit_task(&lead, DelegatedTask::new("and another"))
+            .await
             .unwrap();
         let Some(BrokerFrame::Task { text, .. }) = outbound.recv().await else {
             panic!("a task frame");
@@ -1664,6 +1716,55 @@ mod tests {
                 "Take your time.".len() as u64,
                 "failed".to_string()
             )]
+        );
+    }
+
+    /// EN-0a (AGE-765): a broker built with no policy consults the named
+    /// [`LocalPermissive`], and delegation behaves as it did when the check
+    /// was skipped: the root and every node may call any spec, no spec
+    /// brings a budget, and the chain still refuses a cycle or a call too
+    /// deep.
+    #[test]
+    fn absent_policy_is_local_permissive() {
+        let (calls, registry) = broker(None);
+        assert!(
+            matches!(calls.policy, Policy::LocalPermissive(_)),
+            "no policy is LocalPermissive"
+        );
+        let given_none =
+            BrokerCalls::new(registry, Arc::new(BTreeMap::new()), None).with_policy(None);
+        assert!(
+            matches!(given_none.policy, Policy::LocalPermissive(_)),
+            "`with_policy(None)` is LocalPermissive too"
+        );
+
+        let left = Remaining::default();
+        let root = CallChain::root("t-permissive");
+        let stamp = calls
+            .check(&Caller::Root, root.clone(), "anyone", &left)
+            .expect("a plain root may call any spec");
+        assert_eq!(stamp.caller, None);
+        assert_eq!(stamp.chain.chain, ["root", "anyone"]);
+        assert_eq!(stamp.chain.remaining, Remaining::default(), "no own budget");
+
+        let at_one = root.extend("kit-1").unwrap();
+        let stamp = calls
+            .check(&node("kit-1-0"), at_one.clone(), "kit-2", &left)
+            .expect("a node may call any spec");
+        assert_eq!(stamp.caller.as_deref(), Some("kit-1-0"));
+        assert_eq!(stamp.chain.chain, ["root", "kit-1", "kit-2"]);
+
+        assert!(matches!(
+            calls.check(&node("kit-1-0"), at_one, "kit-1", &left),
+            Err(Refusal::Cycle { .. })
+        ));
+        let mut deepest = CallChain::root("t-deep");
+        for spec in ["a", "b", "c", "d"] {
+            deepest = deepest.extend(spec).unwrap();
+        }
+        assert_eq!(
+            calls.check(&node("d-0"), deepest, "e", &left).err(),
+            Some(Refusal::TooDeep { depth: 5, max: 4 })
         );
     }
 

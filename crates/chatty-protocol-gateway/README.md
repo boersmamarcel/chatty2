@@ -279,6 +279,16 @@ task it still owed is failed with a `failed` status naming the disconnect. A
 process that has died cannot fail to send a heartbeat, so the connection is
 the only signal that cannot lie.
 
+**Every connection is bounded** (EN-0b, `participant/limits.rs`), and only a
+peer's own frame closes its connection. Each end reads lines of at most
+`MAX_FRAME_BYTES` (33 MiB, interim until ADR-0021 Q4); a longer line, or one
+that does not decode, closes the connection it arrived on. A reply that would
+put a frame over the receiver's cap — a callee's result too large for its
+caller — fails only that call with a `call_error`. The outbound queue holds
+`OUTBOUND_QUEUE_FRAMES` and makes the producer wait when full, never closing
+the slow reader. Calls past `MAX_IN_FLIGHT_CALLS` or `CALLS_PER_SECOND` per
+connection are refused. `fuzz/` fuzzes `decode_frame` (see its README).
+
 The hosted transport is Firecracker vsock, which reaches this crate as a
 plain stream — `serve_connection(stream, registry, admitted_node)` takes any
 of them, and `ParticipantConnection::hello_over` is the worker's side of the
