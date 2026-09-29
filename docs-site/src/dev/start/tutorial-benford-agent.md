@@ -77,11 +77,23 @@ cargo test --target x86_64-unknown-linux-gnu   # or your host's triple
 
 ## Step 2 — Build and install the plugin
 
+One command, from the repo root, builds the plugin and installs it into the
+module directory the desktop app scans by default:
+
+```sh
+make example-plugin-benford
+```
+
+Set `MODULE_DIR` to install somewhere else, e.g. a workspace-local
+`.chatty/modules/benford`. Without `make` (or on Windows), do the same two
+steps by hand:
+
 ```sh
 cd modules/benford
 cargo build --target wasm32-wasip2 --release
-cp target/wasm32-wasip2/release/benford.wasm .
-cp -r . ~/.local/share/chatty/modules/benford/
+mkdir -p ~/.local/share/chatty/modules/benford
+cp target/wasm32-wasip2/release/benford.wasm ~/.local/share/chatty/modules/benford/
+cp module.toml ~/.local/share/chatty/modules/benford/
 ```
 
 ## Step 3 — The agent spec

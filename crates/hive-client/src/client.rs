@@ -13,6 +13,7 @@ use crate::{
         BegunDownload, CategoryList, CreditBalance, DownloadResult, ListParams, ModuleList,
         ModuleMetadata, ModulePricingInfo, TokenPair, VersionList,
     },
+    secure_url::ensure_secure_url,
     session::{HiveSession, send_authed},
     trust,
     verify::{self, ModuleChain, TrustLevel},
@@ -31,6 +32,10 @@ pub struct HiveRegistryClient {
     /// The registry root public key downloads are verified against
     /// ([`trust::trusted_root`]); `None` refuses every download.
     root_key: Option<String>,
+    /// Why `base_url` is not allowed (SEC-16, AGE-756), computed once at
+    /// construction since the URL never changes afterwards. `None` means
+    /// every request may proceed.
+    insecure_url: Option<String>,
 }
 
 impl HiveRegistryClient {
@@ -54,10 +59,20 @@ impl HiveRegistryClient {
         let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
             root_key: trust::trusted_root_from_env(&base_url),
+            insecure_url: ensure_secure_url(&base_url).err(),
             base_url,
             http,
             cache: None,
             session: None,
+        }
+    }
+
+    /// Refuse before any request when [`ensure_secure_url`] rejected this
+    /// client's base URL at construction (SEC-16, AGE-756).
+    fn ensure_secure(&self) -> Result<(), ClientError> {
+        match &self.insecure_url {
+            Some(reason) => Err(ClientError::InsecureUrl(reason.clone())),
+            None => Ok(()),
         }
     }
 
@@ -110,6 +125,7 @@ impl HiveRegistryClient {
         email: &str,
         password: &str,
     ) -> Result<TokenPair, ClientError> {
+        self.ensure_secure()?;
         #[derive(Serialize)]
         struct RegisterBody<'a> {
             username: &'a str,
@@ -138,6 +154,7 @@ impl HiveRegistryClient {
 
     /// Log in with email and password.
     pub async fn login(&self, email: &str, password: &str) -> Result<TokenPair, ClientError> {
+        self.ensure_secure()?;
         #[derive(Serialize)]
         struct LoginBody<'a> {
             email: &'a str,
@@ -163,6 +180,7 @@ impl HiveRegistryClient {
     /// The presented token is retired by the call. A rejected token —
     /// expired, revoked, or already rotated — is [`ClientError::Unauthorized`].
     pub async fn refresh(&self, refresh_token: &str) -> Result<TokenPair, ClientError> {
+        self.ensure_secure()?;
         let url = format!("{}/api/auth/refresh", self.base_url);
         let resp = self
             .http
@@ -184,6 +202,7 @@ impl HiveRegistryClient {
     /// Revoke `refresh_token` (`POST /api/auth/logout`). The access token it
     /// was paired with expires on its own within the hour.
     pub async fn logout(&self, refresh_token: &str) -> Result<(), ClientError> {
+        self.ensure_secure()?;
         let url = format!("{}/api/auth/logout", self.base_url);
         let resp = self
             .http
@@ -552,6 +571,7 @@ impl HiveRegistryClient {
         &self,
         build: impl Fn() -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, ClientError> {
+        self.ensure_secure()?;
         send_authed(self.session.as_deref(), build)
             .await
             .map_err(ClientError::from)
@@ -589,4 +609,43 @@ fn urlencoded(s: &str) -> String {
 
 fn header_str<'a>(headers: &'a reqwest::header::HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SEC-16 / AGE-756: a registry at a real host must use `https://`; a
+    /// loopback registry (the docker-compose stack, a local dev registry)
+    /// may keep using `http://`. Both cases must be decided before any
+    /// request leaves — never as an HTTP error from the wire.
+    #[tokio::test]
+    async fn hive_registry_requires_https_off_loopback() {
+        let remote = HiveRegistryClient::new("http://registry.hive.dev");
+        let err = remote
+            .search("anything")
+            .await
+            .expect_err("a plain-http remote registry must be refused");
+        assert!(
+            matches!(err, ClientError::InsecureUrl(_)),
+            "expected InsecureUrl, got {err:?}"
+        );
+
+        // A loopback registry is allowed to use http://; the gate itself
+        // must not be what stops the request (it may still fail because
+        // nothing is listening on this port in the test environment).
+        let local = HiveRegistryClient::new("http://127.0.0.1:1");
+        let err = local
+            .search("anything")
+            .await
+            .expect_err("nothing listens on this port");
+        assert!(
+            !matches!(err, ClientError::InsecureUrl(_)),
+            "a loopback registry must not be rejected as insecure, got {err:?}"
+        );
+
+        // https:// is always fine, wherever the host is.
+        let https = HiveRegistryClient::new("https://registry.hive.dev");
+        assert!(https.ensure_secure().is_ok());
+    }
 }

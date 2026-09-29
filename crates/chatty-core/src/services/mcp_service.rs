@@ -28,6 +28,8 @@ impl McpConnection {
     /// If the server requires OAuth authentication, an interactive browser-based
     /// flow is initiated automatically.
     pub async fn connect(config: McpServerConfig) -> Result<Self> {
+        hive_client::ensure_secure_url(&config.url).map_err(anyhow::Error::msg)?;
+
         let name = config.name.clone();
         let url = config.url.clone();
 
@@ -966,6 +968,25 @@ mod tests {
         let result = svc.connect_all(configs).await;
         // connect_all returns Ok even when all servers fail to connect
         assert!(result.is_ok());
+    }
+
+    /// SEC-16 / AGE-756: an MCP server configured over plain `http://` to a
+    /// real host is refused before any request is dialed — its bearer token
+    /// never has the chance to cross the wire in clear text.
+    #[tokio::test]
+    async fn mcp_server_over_plain_http_is_refused() {
+        let config = McpServerConfig {
+            name: "remote".to_string(),
+            url: "http://mcp.example.com/mcp".to_string(),
+            api_key: None,
+            enabled: true,
+            is_module: false,
+        };
+        let result = McpConnection::connect(config).await;
+        match result {
+            Ok(_) => panic!("a plain-http remote MCP server must be refused"),
+            Err(err) => assert!(format!("{err:#}").contains("https"), "{err:#}"),
+        }
     }
 
     // --- Tool cache: get_all_tools idempotent with no connections ---
