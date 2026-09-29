@@ -61,19 +61,20 @@ impl Harness {
 
         // A role the loopback route must refuse: a connection the broker
         // made for it, exactly as a real worker gets (ADR-0020), welcomed
-        // over the v2 protocol so it is actually live in the registry.
+        // over the v3 protocol so it is actually live in the registry.
         let connection = open_connection(&participants, "stub-worker", None).expect("a connection");
         connection.worker_end.set_nonblocking(true).unwrap();
         let mut worker = UnixStream::from_std(connection.worker_end).unwrap();
         let hello = json!({
-            "v": 2,
-            "type": "hello",
-            "card": {
+            "v": 3,
+            "id": 1,
+            "method": "session.hello",
+            "params": {"card": {
                 "name": "stub-worker",
                 "description": "a stub worker",
                 "version": "0.1.0",
                 "skills": [],
-            }
+            }}
         });
         worker
             .write_all(format!("{hello}\n").as_bytes())
@@ -86,7 +87,8 @@ impl Harness {
                 .expect("the broker answers hello")
                 .unwrap()
                 .expect("the socket is readable");
-            assert!(welcome.contains("\"welcome\""), "{welcome}");
+            let welcome: serde_json::Value = serde_json::from_str(&welcome).unwrap();
+            assert_eq!(welcome["result"]["name"], "stub-worker-0", "{welcome}");
         }
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")

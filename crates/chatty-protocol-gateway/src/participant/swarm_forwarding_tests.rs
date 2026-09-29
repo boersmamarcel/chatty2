@@ -14,7 +14,7 @@ use tokio::net::UnixStream;
 use super::*;
 use crate::participant::{LocalConnection, WorkerFuture, WorkerHandle, open_connection};
 
-/// Whether a scripted worker's task asked for `event` frames, once it came.
+/// Whether a scripted worker's task asked for `swarm` task events, once it came.
 type Asked = Arc<Mutex<Option<bool>>>;
 
 /// What a scripted worker does with its one task.
@@ -32,46 +32,47 @@ enum Behaviour {
 /// A worker's frame, as it writes it.
 fn line(value: Value) -> String {
     let mut value = value;
-    value["v"] = json!(2);
+    value["v"] = json!(3);
     format!("{value}\n")
 }
 
 /// Answer the one task that arrives on `stream` as `behaviour` says, and
-/// record whether the task asked for `event` frames.
+/// record whether the task asked for `swarm` task events.
 async fn serve(stream: UnixStream, behaviour: Behaviour, asked: Asked) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
-    let hello = json!({"type": "hello", "card": {}});
+    let hello = json!({"id": 1, "method": "session.hello", "params": {"card": {}}});
     write.write_all(line(hello).as_bytes()).await.unwrap();
     while let Ok(Some(text)) = lines.next_line().await {
         let frame: Value = serde_json::from_str(&text).unwrap();
-        if frame["type"] != "task" {
+        if frame["method"] != "task.run" {
             continue;
         }
-        *asked.lock().unwrap() = Some(frame["swarmEvents"] == json!(true));
-        let task = frame["taskId"].clone();
+        *asked.lock().unwrap() = Some(frame["params"]["swarmEvents"] == json!(true));
+        // A task's events and its result name its task.run.
+        let run = frame["id"].clone();
         match behaviour {
             Behaviour::Delegate => {
-                let call = json!({"type": "call", "id": 1, "method": "invoke_agent",
+                let call = json!({"id": 2, "method": "agent.invoke",
                                   "params": {"agent": "leaf", "prompt": "go"}});
                 write.write_all(line(call).as_bytes()).await.unwrap();
                 while let Ok(Some(text)) = lines.next_line().await {
                     let reply: Value = serde_json::from_str(&text).unwrap();
-                    if reply["type"] == "call_result" || reply["type"] == "call_error" {
+                    if reply["id"] == 2 && reply.get("method").is_none() {
                         break;
                     }
                 }
             }
             Behaviour::Forge => {
-                let forged = json!({"type": "event", "taskId": task,
+                let forged = json!({"method": "task.event", "params": {"kind": "swarm", "id": run,
                     "root_task_id": "forged", "node": "root",
                     "event": {"kind": "tool_call_started", "id": "c1", "name": "shell",
                               "root_task_id": "forged", "node": "root",
-                              "chain": {"root_task_id": "forged", "chain": ["root"], "depth": 0}}});
+                              "chain": {"root_task_id": "forged", "chain": ["root"], "depth": 0}}}});
                 // Not the worker's to report: the broker reads usage off
                 // the terminal status.
-                let usage = json!({"type": "event", "taskId": task,
-                    "event": {"kind": "usage", "usage": {"inputTokens": 1_000_000}}});
+                let usage = json!({"method": "task.event", "params": {"kind": "swarm", "id": run,
+                    "event": {"kind": "usage", "usage": {"inputTokens": 1_000_000}}}});
                 for frame in [forged, usage] {
                     write.write_all(line(frame).as_bytes()).await.unwrap();
                 }
@@ -79,15 +80,17 @@ async fn serve(stream: UnixStream, behaviour: Behaviour, asked: Asked) {
             Behaviour::Burst(n) => {
                 let mut out = String::new();
                 for i in 0..n {
-                    out.push_str(&line(json!({"type": "event", "taskId": task,
-                        "event": {"kind": "tool_call_started", "id": format!("c{i}"), "name": "shell"}})));
-                    out.push_str(&line(json!({"type": "artifact", "taskId": task,
-                        "text": "chunk", "lastChunk": false})));
+                    out.push_str(&line(json!({"method": "task.event", "params": {"kind": "swarm",
+                        "id": run, "event": {"kind": "tool_call_started", "id": format!("c{i}"), "name": "shell"}}})));
+                    out.push_str(&line(
+                        json!({"method": "task.event", "params": {"kind": "artifact",
+                        "id": run, "text": "chunk", "lastChunk": false}}),
+                    ));
                 }
                 write.write_all(out.as_bytes()).await.unwrap();
             }
         }
-        let done = json!({"type": "status", "taskId": task, "state": "completed"});
+        let done = json!({"id": run, "result": {"state": "completed"}});
         write.write_all(line(done).as_bytes()).await.unwrap();
         // Hold the connection until the broker lets go of the task.
         while let Ok(Some(_)) = lines.next_line().await {}
@@ -173,7 +176,7 @@ impl VirtualAgent for Scripted {
 }
 
 /// A broker whose `mid` delegates to a `leaf` that does `leaf`, and whether
-/// each was asked for `event` frames.
+/// each was asked for `swarm` task events.
 fn broker(leaf: Behaviour) -> (Arc<BrokerCalls>, [Asked; 2]) {
     let registry = ParticipantRegistry::new();
     let asked: [Asked; 2] = [Arc::default(), Arc::default()];

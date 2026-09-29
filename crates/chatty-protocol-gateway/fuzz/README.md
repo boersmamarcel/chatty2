@@ -1,9 +1,12 @@
-# Fuzzing the worker socket's frame decoder
+# Fuzzing the worker socket's frame codec
 
-`decode_frame` reads every line a worker or the broker receives, so it is
-the first thing untrusted input reaches (ADR-0021, EN-0b). The target decodes
-arbitrary input as both a `ParticipantFrame` and a `BrokerFrame`; a frame
-that decodes must encode and decode back to the same encoding.
+`FrameCodec` reads every line a worker or the broker receives, so it is the
+first thing untrusted input reaches (ADR-0021 § 1; EN-0b added the target,
+EN-1 moved it to the codec). The target feeds each input's lines, in order,
+to a broker codec and a worker codec that have already exchanged a hello and
+a `task.run`, so the id state is live. A line must decode, be dropped or
+fail with a `FrameError`, never panic; a frame one side decodes must encode
+on the other side and decode back.
 
 Needs a nightly toolchain and `cargo-fuzz`:
 
@@ -11,9 +14,8 @@ Needs a nightly toolchain and `cargo-fuzz`:
 rustup toolchain install nightly --profile minimal
 cargo install cargo-fuzz
 cd crates/chatty-protocol-gateway
-cargo +nightly fuzz run decode-frame -- -max_total_time=60
+cargo +nightly fuzz run frame-codec -- -max_total_time=60
 ```
 
 The corpus and any crash artifacts land in `fuzz/corpus/` and
-`fuzz/artifacts/`, which are not committed. ADR-0021 step 1 (EN-1) moves this
-target to `FrameCodec`.
+`fuzz/artifacts/`, which are not committed.

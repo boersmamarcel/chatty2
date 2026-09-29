@@ -25,7 +25,7 @@ use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{
-    LocalRunner, PARTICIPANT_FD, ParticipantFrame, encode_frame,
+    LocalRunner, PARTICIPANT_FD, ParticipantFrame, WorkerCodec,
 };
 use chatty_protocol_gateway::worker::TaskMapper;
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
@@ -55,7 +55,16 @@ impl LlmProvider for NoopProvider {
 /// A worker that answers its one task with `ANSWER`, as a real one
 /// replaying that turn through `TaskMapper` would.
 fn answering_worker(dir: &Path) -> PathBuf {
-    const TASK_ID: &str = "@TASK_ID@";
+    // The `task.run` id as the canned lines carry it; `sed` fills in the
+    // real one.
+    const RUN_ID: u64 = 4_294_967_291;
+    const TASK_ID: &str = "stand-in-task";
+    let codec = WorkerCodec::new();
+    codec
+        .decode(&format!(
+            r#"{{"v":3,"id":{RUN_ID},"method":"task.run","params":{{"taskId":"{TASK_ID}","text":""}}}}"#
+        ))
+        .expect("a task.run decodes");
     let mut mapper = TaskMapper::new(TASK_ID);
     let mut frames: Vec<ParticipantFrame> = [
         SessionEvent::TurnStarted,
@@ -68,7 +77,13 @@ fn answering_worker(dir: &Path) -> PathBuf {
     frames.push(mapper.terminal());
     let frames: String = frames
         .iter()
-        .map(|frame| encode_frame(frame).expect("a frame encodes") + "\n")
+        .map(|frame| {
+            codec
+                .encode(frame)
+                .expect("a frame encodes")
+                .expect("every frame names the task.run")
+                + "\n"
+        })
         .collect();
     std::fs::write(dir.join("frames.jsonl"), frames).expect("frames written");
     let fd = PARTICIPANT_FD;
@@ -76,11 +91,11 @@ fn answering_worker(dir: &Path) -> PathBuf {
         dir,
         &format!(
             r#"here="$(dirname "$0")"
-printf '{{"v":2,"type":"hello","card":{{"name":"stand-in"}}}}\n' >&{fd}
+printf '{{"v":3,"id":1,"method":"session.hello","params":{{"card":{{"name":"stand-in"}}}}}}\n' >&{fd}
 read -r welcome <&{fd}
 read -r task <&{fd}
-id=$(printf '%s' "$task" | sed 's/.*"taskId":"\([^"]*\)".*/\1/')
-sed "s/{TASK_ID}/$id/g" "$here/frames.jsonl" >&{fd}
+id=$(printf '%s' "$task" | sed 's/^{{"v":3,"id":\([0-9]*\),.*/\1/')
+sed "s/{RUN_ID}/$id/g" "$here/frames.jsonl" >&{fd}
 exec sleep 30"#
         ),
     )

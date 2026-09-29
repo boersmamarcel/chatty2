@@ -5,30 +5,44 @@
 //! runner is about to hand out: the runner admits the node, makes the
 //! connection and gives the child its end at descriptor 3, and only what
 //! speaks on that end can serve the task. So the stand-in is a real child —
-//! a short `sh` script — that records its argv, says `hello` on descriptor
-//! 3, reads its `welcome` and its `task`, and answers with the frames a
-//! worker replaying `events` through the real [`TaskMapper`] would send,
-//! computed here in advance with the task id filled in by `sed`.
+//! a short `sh` script — that records its argv, says `session.hello` on
+//! descriptor 3, reads the hello's result and its `task.run`, and answers
+//! with the lines a worker replaying `events` through the real
+//! [`TaskMapper`] and [`WorkerCodec`] would send, computed here in advance
+//! with the `task.run`'s id filled in by `sed`.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chatty_core::session::SessionEvent;
-use chatty_protocol_gateway::participant::{PARTICIPANT_FD, ParticipantFrame, encode_frame};
+use chatty_protocol_gateway::participant::{PARTICIPANT_FD, ParticipantFrame, WorkerCodec};
 use chatty_protocol_gateway::worker::TaskMapper;
 
-/// What the task id is written as in the canned frames.
-const TASK_ID: &str = "@TASK_ID@";
+/// What the `task.run` id is written as in the canned lines: a number no
+/// real line on a stand-in's connection carries.
+const RUN_ID: u64 = 4_294_967_291;
 
-/// Every frame a worker replaying `events` sends for one task, as lines.
+/// Every line a worker replaying `events` sends for one task.
 fn canned_frames(events: &[SessionEvent]) -> String {
+    const TASK_ID: &str = "stand-in-task";
+    let codec = WorkerCodec::new();
+    let run = format!(
+        r#"{{"v":3,"id":{RUN_ID},"method":"task.run","params":{{"taskId":"{TASK_ID}","text":""}}}}"#
+    );
+    codec.decode(&run).expect("a task.run decodes");
     let mut mapper = TaskMapper::new(TASK_ID);
     let mut frames: Vec<ParticipantFrame> = events.iter().filter_map(|e| mapper.map(e)).collect();
     frames.push(mapper.terminal());
     frames
         .iter()
-        .map(|frame| encode_frame(frame).expect("a frame encodes") + "\n")
+        .map(|frame| {
+            codec
+                .encode(frame)
+                .expect("a frame encodes")
+                .expect("every frame names the task.run")
+                + "\n"
+        })
         .collect()
 }
 
@@ -42,11 +56,11 @@ pub(crate) fn scripted_worker_binary(dir: &Path, events: &[SessionEvent]) -> Pat
         r#"#!/bin/sh
 here="$(dirname "$0")"
 printf '%s\n' "$*" >> "$here/argv.log"
-printf '{{"v":2,"type":"hello","card":{{"name":"stand-in"}}}}\n' >&{fd}
+printf '{{"v":3,"id":1,"method":"session.hello","params":{{"card":{{"name":"stand-in"}}}}}}\n' >&{fd}
 read -r welcome <&{fd}
 read -r task <&{fd}
-id=$(printf '%s' "$task" | sed 's/.*"taskId":"\([^"]*\)".*/\1/')
-sed "s/{TASK_ID}/$id/g" "$here/frames.jsonl" >&{fd}
+id=$(printf '%s' "$task" | sed 's/^{{"v":3,"id":\([0-9]*\),.*/\1/')
+sed "s/{RUN_ID}/$id/g" "$here/frames.jsonl" >&{fd}
 exec sleep 30
 "#
     );
