@@ -160,7 +160,7 @@ its own branch, which lives in the shared repository and not in the lead's
 tree, and to judge by the evidence block and the verdict; it told the coder
 never to create or switch branches, and the reviewer that its own worktree
 shows the code before the change, so it reads the change only through
-`git_diff <base>..<branch>`. The fixture gained a `.gitignore` for `*.pyc`.
+`git_diff <base>..<branch>`. (After the runs, review dropped a clause pointing the reviewer at `git_log` "with the same range": `git_log` takes no range, so it would have listed the reviewer's own branch.) The fixture gained a `.gitignore` for `*.pyc`.
 Tokens for the headless runs were not recorded: headless prints no usage,
 and the vLLM counters were shared with another run.
 
