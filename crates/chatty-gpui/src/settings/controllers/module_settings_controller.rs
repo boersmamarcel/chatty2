@@ -596,6 +596,7 @@ pub fn refresh_runtime(cx: &mut App) {
                                     &settings,
                                     &agents,
                                     &common_args,
+                                    resolved_workspace.as_deref(),
                                 );
                                 (resolved_workspace, specs)
                             })

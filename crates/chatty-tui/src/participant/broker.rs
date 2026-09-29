@@ -133,8 +133,14 @@ impl Broker {
             common_args.push("--auto-approve".to_string());
         }
         common_args.extend(provider_flags.iter().cloned());
-        let mut specs =
-            resolve_virtual_agents(models, providers, module_settings, agents, &common_args);
+        let mut specs = resolve_virtual_agents(
+            models,
+            providers,
+            module_settings,
+            agents,
+            &common_args,
+            workspace_dir.as_deref().map(std::path::Path::new),
+        );
         for spec in &mut specs {
             spec.handoff = handoffs.get(&spec.name).cloned();
         }
@@ -673,7 +679,7 @@ mod tests {
         providers: &[ProviderConfig],
         module_settings: &ModuleSettingsModel,
     ) -> Vec<VirtualAgentSpec> {
-        resolve_virtual_agents(models, providers, module_settings, &[], &[])
+        resolve_virtual_agents(models, providers, module_settings, &[], &[], None)
     }
 
     /// BI-2, AGE-634: nothing is bound or spawned when a `PendingBroker` is

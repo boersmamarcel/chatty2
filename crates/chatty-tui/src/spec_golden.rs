@@ -138,6 +138,7 @@ fn worker_contexts(workspace: &str) -> Vec<(String, AgentBuildContext, Option<St
         &module_settings,
         &team.agents,
         &["--auto-approve".to_string()],
+        Some(&crate::team_fixture::workspace()),
     )
     .into_iter()
     .map(|spec| {

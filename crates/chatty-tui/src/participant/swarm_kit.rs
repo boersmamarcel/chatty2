@@ -371,8 +371,14 @@ impl SwarmKit {
         } else {
             vec!["--auto-approve".to_string()]
         };
-        let mut specs =
-            resolve_virtual_agents(&models, &providers, &module_settings, &specs, &common_args);
+        let mut specs = resolve_virtual_agents(
+            &models,
+            &providers,
+            &module_settings,
+            &specs,
+            &common_args,
+            Some(&workspace),
+        );
         // What `Broker::start` does with a team's `handoffs` (TD-2).
         for (spec, agent) in specs.iter_mut().zip(&roster) {
             spec.handoff = agent.handoff.clone().map(|schema| HandoffContract {
