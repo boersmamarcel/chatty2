@@ -1,5 +1,5 @@
 //! PL-U5's verification over the real broker: with nothing declared, the
-//! roster is every exposed spec — the presets and the workspace's own — so
+//! roster is `local-agent` and the workspace's own exposed specs, so
 //! a workspace `auditor` spec that runs with the `benford` plugin is listed
 //! by `list_agents` and reached by a coordinator's `invoke_agent` exactly
 //! as any other local agent, and the plugin itself is not an agent at all.
@@ -45,7 +45,7 @@ async fn a_spec_with_a_plugin_is_listed_and_reached_like_any_local_agent() {
     let agents = workspace.path().join(".chatty/agents");
     std::fs::create_dir_all(&agents).unwrap();
     std::fs::write(agents.join("auditor.toml"), AUDITOR_SPEC).unwrap();
-    // Nothing declared: the presets, the workspace's spec, the default worker.
+    // Nothing declared: the workspace's spec and the default worker.
     let roster = load_roster_from(&[], Some(workspace.path()), None).expect("the roster loads");
     let names: Vec<String> = roster.iter().map(|spec| spec.agent.name.clone()).collect();
     assert_eq!(names[0], LOCAL_AGENT_NAME);

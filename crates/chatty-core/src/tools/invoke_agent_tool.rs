@@ -1329,7 +1329,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, InvokeAgentError::NotFound(_)), "{err}");
-        assert!(err.to_string().contains("data-analyst"), "{err}");
+        assert!(err.to_string().contains("local-agent"), "{err}");
     }
 
     /// A roster spec is reached through the broker, which this tool needs:
