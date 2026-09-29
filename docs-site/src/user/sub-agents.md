@@ -154,11 +154,12 @@ A worker's side effects come to you for approval like the leader's own, whatever
 
 `--team <id>` packages a roster like the one above with a leader and a verification command into one directory, so a run is reproducible and the leader has a role too: a named leader plus co-workers, each with its own model, role and standing instructions, defined once in `teams/<id>/team.json`, which names the leader's spec and the workers' specs. It implies `--broker`, and for that run the team's `agents` replace whatever `virtual_agents` your module settings declare.
 
-Three teams ship built in. Agent teams are supported and **experimental**: they show what Chatty can do with a team, not that a team beats a single agent. That research comes later.
+Four teams ship built in. Agent teams are supported and **experimental**: they show what Chatty can do with a team, not that a team beats a single agent. That research comes later.
 
 | Team | Start it with | What it shows |
 |---|---|---|
 | `data-analysis` | `/agent data-lead Revenue in orders.csv fell in August. Find out why.` | A lead breaks a business question about a data file into parts, an analyst answers them with SQL queries, a reviewer works out the key numbers again, and the analyst saves the report (the write comes to you for approval). Walkthrough: [From one agent to a team](./tutorial-swarm.md). |
+| `fix-and-verify` | `chatty-tui --team fix-and-verify -m "The tests fail. Find the bug and fix it without changing the tests."` | A coder fixes a bug in its own git worktree, Chatty runs the project's tests on that branch (the coder's claim that they pass counts for nothing), a reviewer reads the real diff and Chatty's test output, and the lead merges only on approval with passing tests. One fix round at most. Walkthrough: [A coding team whose tests Chatty runs](./tutorial-team.md#a-built-in-coding-team-fix-and-verify). |
 | `research-brief` | `/agent editor Using the documents in docs/, write brief.md: <your question>` | A researcher finds sourced facts in a folder of documents, a writer turns them into a brief (the file write comes to you for approval), and the reviewer checks the brief against the sources. |
 
 The leader of each team is an agent like any other, so `/agent <leader> …` runs the team from the desktop, and `chatty-tui --team <id>` runs it from the terminal:

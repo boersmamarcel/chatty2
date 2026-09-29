@@ -1922,3 +1922,129 @@ async fn a_sandboxed_shell_that_dies_before_its_prompt_falls_back_once() {
     let started = std::fs::read_to_string(&starts).unwrap();
     assert_eq!(started.lines().count(), 2, "{started}");
 }
+
+/// AGE-757: a worker's shell runs in a linked worktree whose git directory
+/// lies outside it. Sandboxed (where bubblewrap works), shell git must
+/// still see the repository, commit onto the worker's branch, and leave
+/// the host's view of that branch showing the commit.
+#[tokio::test]
+async fn worker_shell_git_status_works_in_worktree() {
+    let (repo, tree) = worktree_git::tests::repo_with_worktree();
+    let session = ShellSession::with_secrets(
+        Some(tree.to_string_lossy().into_owned()),
+        30,
+        51200,
+        false,
+        vec![],
+    );
+    let sandboxed = session.is_sandboxed().await;
+
+    let out = session
+        .execute("echo new > added.txt && git status --short --branch")
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0, "sandboxed={sandboxed}: {out:?}");
+    assert!(out.stdout.contains("sub-agent/w"), "{out:?}");
+    assert!(out.stdout.contains("?? added.txt"), "{out:?}");
+
+    let out = session
+        .execute("git add added.txt && git commit -qm 'worker commit' && git log --oneline -1")
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0, "sandboxed={sandboxed}: {out:?}");
+    assert!(out.stdout.contains("worker commit"), "{out:?}");
+
+    // The host sees the commit on the worker's branch.
+    let log = std::process::Command::new("git")
+        .args(["log", "--format=%s", "-1", "sub-agent/w"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "worker commit");
+
+    // What is not the worker's stays read-only in the sandbox: the shared
+    // config (code the host's git runs) and other branches.
+    if sandboxed {
+        let out = session
+            .execute("git config core.hooksPath /tmp; git branch other; ls .git")
+            .await
+            .unwrap();
+        assert!(out.stdout.contains("Read-only file system"), "{out:?}");
+        let hooks = std::process::Command::new("git")
+            .args(["config", "--get", "core.hooksPath"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(!hooks.status.success(), "the shared config was written");
+    }
+    session.shutdown().await;
+}
+
+/// AGE-757: `git init` inside a worker's worktree is refused with a
+/// message that says why, and the worktree keeps its branch. `git init`
+/// elsewhere still works.
+#[tokio::test]
+async fn git_init_in_worktree_refused() {
+    let (_repo, tree) = worktree_git::tests::repo_with_worktree();
+    std::fs::create_dir(tree.join("sub")).unwrap();
+    let session = ShellSession::with_secrets(
+        Some(tree.to_string_lossy().into_owned()),
+        30,
+        51200,
+        false,
+        vec![],
+    );
+
+    for command in [
+        "git init",
+        "cd sub && git init; cd ..",
+        "git -C sub init -q",
+    ] {
+        let out = session.execute(command).await.unwrap();
+        assert!(
+            out.stdout.contains("refused `git init`"),
+            "{command}: {out:?}"
+        );
+        assert!(out.stdout.contains("git_commit"), "{command}: {out:?}");
+    }
+    assert!(!tree.join("sub/.git").exists());
+    let dot_git = std::fs::read_to_string(tree.join(".git")).unwrap();
+    assert!(dot_git.starts_with("gitdir:"), "{dot_git}");
+
+    // Outside the worktree git init is the model's business.
+    let out = session
+        .execute("cd /tmp && d=$(mktemp -d) && git init -q \"$d\" && test -d \"$d/.git\" && echo made; cd - >/dev/null")
+        .await
+        .unwrap();
+    assert!(out.stdout.contains("made"), "{out:?}");
+    session.shutdown().await;
+}
+
+/// AGE-757: bubblewrap gets the worktree's git binds after the workspace,
+/// in the order that keeps the pointers out of it read-only.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worktree_sandbox_binds_its_git_after_the_workspace() {
+    let (repo, tree) = worktree_git::tests::repo_with_worktree();
+    let common = repo.path().canonicalize().unwrap().join(".git");
+    let workspace = tree.to_string_lossy().into_owned();
+    let args = ShellSession::bwrap_args(
+        &Some(workspace.clone()),
+        false,
+        std::path::Path::new("/tmp/session"),
+    );
+    let pos = |flag: &str, path: &std::path::Path| {
+        let path = path.to_string_lossy();
+        args.windows(3)
+            .position(|w| w[0] == flag && w[1] == path && w[2] == path)
+            .unwrap_or_else(|| panic!("{flag} {path} missing from {args:?}"))
+    };
+    let ws = pos("--bind", &tree);
+    let common_ro = pos("--ro-bind", &common);
+    let objects = pos("--bind", &common.join("objects"));
+    let git_dir = pos("--bind", &common.join("worktrees/w"));
+    let dot_git = pos("--ro-bind", &tree.join(".git"));
+    let commondir = pos("--ro-bind", &common.join("worktrees/w/commondir"));
+    assert!(ws < common_ro && common_ro < objects && objects < git_dir);
+    assert!(git_dir < commondir && ws < dot_git);
+}

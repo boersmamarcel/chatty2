@@ -195,6 +195,28 @@ Keep the specs, `SKILL.md` and `team.json` in the repository. The team is part o
 - **The reviewer approves a branch that does not do the job.** Make the reviewer reproduce something: tell it to *revert one line of the fix and confirm the new test fails*. A reviewer that only reads will approve on the coder's word.
 - **A worker stalls at the model server.** Two workers on one Ollama server queue rather than run at once — that is the endpoint budget protecting a local model from thrashing — so a run with a coder and a reviewer is sequential by design. Only the wall clock is affected.
 
+## A built-in coding team: `fix-and-verify`
+
+> Experimental, like every team that ships built in.
+
+If you want the result of this tutorial without writing a team, `fix-and-verify` ships with Chatty. Its lead restates the task as acceptance criteria, `fix-coder` fixes the bug in its own worktree, and Chatty runs the project's test command in that worktree. `code-reviewer` has no shell. It reads the real diff and the test output Chatty wrote, and never takes the coder's word that the tests pass. The lead merges only on `APPROVE` with exit code 0, after at most one fix round. Try it on the sample project, a small invoice module with one failing test:
+
+```bash
+mkdir -p invoice/tests && cd invoice
+curl -LO https://boersmamarcel.github.io/chatty2/assets/samples/invoice/invoice.py
+curl -Lo tests/test_invoice.py https://boersmamarcel.github.io/chatty2/assets/samples/invoice/tests/test_invoice.py
+touch tests/__init__.py && printf '__pycache__/\n' > .gitignore
+git init -q -b main && git add -A && git commit -qm "Invoice module with a failing test"
+chatty-tui --team fix-and-verify --headless --auto-approve --model <model> \
+  -m "The project's tests fail. Find the bug and fix it without changing the tests."
+```
+
+The team's `verification` is this sample's command, `python3 -m unittest discover -s tests -t . -v`. For your own project, put a `.chatty/teams/fix-and-verify/team.json` with the same `leader` and `agents` and your own test command. It shadows the built-in team, and the specs stay the built-in ones.
+
+On the desktop, `/agent fix-lead <task>` runs the same team, and the swarm tree shows the lead, the coder's run and the review as they happen. The desktop does not read `team.json`, so it runs the tests only when `module_settings.json` in your config directory has `"team": {"verification": "<your test command>"}`. Without it, the coder's evidence block has no test result and the reviewer asks for changes. On the desktop the lead is a worker too, so it merges into its own branch, `sub-agent/fix-lead-0`, and that branch is what you merge.
+
+![The fix-and-verify team in the swarm tree: the lead, fix-coder and code-reviewer](../assets/screenshots/fix-and-verify-tree.png)
+
 ## Next
 
 - [Sub-agents › Teams](./sub-agents.md#teams) — where teams are searched for and how `--model` / `--tools` / `--preamble` override the leader.
