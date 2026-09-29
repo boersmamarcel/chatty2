@@ -120,9 +120,11 @@ pub struct AgentBuildContext {
     pub unattended: bool,
     /// Whether this run's task asks for an answer file (`answer.txt`),
     /// when the host knows before the agent exists — chatty-tui's
-    /// `--headless` reads it off `--message`. `Some(false)`: `final_answer`
-    /// writes nothing, so a coding run cannot leave an answer.txt behind.
-    /// `None` (every other host) keeps it writing as before.
+    /// `--headless` reads it off `--message`. Only `Some(true)` offers
+    /// `final_answer` at all and lets it write; `Some(false)` (a headless
+    /// task that does not ask for one) and `None` (every other host,
+    /// interactive included, AGE-758) both leave it out of the tool set, so
+    /// neither can leave a stray `answer.txt` behind.
     pub answer_file: Option<bool>,
     /// The host's `ExecutionSettingsModel::ask_user_enabled`, carried
     /// separately because a gating host (see [`gated_exec_settings`]) hands

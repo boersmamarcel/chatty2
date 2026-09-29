@@ -54,6 +54,7 @@ impl ChatView {
 
         // Reset sub-agent tracking (sub-agent progress is UI-only, not in history)
         self.delegation_progress_msg_idx = None;
+        self.delegation_started_at = None;
         self.swarm_rows.clear();
 
         self.messages.clear();
