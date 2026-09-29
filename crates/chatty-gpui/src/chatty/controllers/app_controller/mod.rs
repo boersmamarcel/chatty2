@@ -71,7 +71,7 @@ pub(crate) use conversation_ops_modify::move_ui_enabled;
 /// They also come back empty when no broker is published at all, or none
 /// could serve them on this platform: a name listed without one fails
 /// every delegation (AGE-759).
-fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<String>)> {
+pub(crate) fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<String>)> {
     let m = cx.try_global::<crate::settings::models::ModuleSettingsModel>()?;
     if !crate::settings::models::agent_specs::broker_reachable(cx) {
         return Some((m.gateway_port, Vec::new()));
