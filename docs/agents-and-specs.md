@@ -30,12 +30,17 @@ agent, and `module.toml` refuses the keys that used to say it was one.
 
 The broker serves the **roster**: the specs `module_settings.json`'s `virtual_agents`
 names (a `--team` names its own), or — when nothing is declared — `local-agent` and
-**every exposed spec** the workspace reaches, first definition of each name
-(`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). So the
-`data-analyst` preset is an agent like any other: `list_agents` lists it,
-`invoke_agent` reaches it at `/a2a/data-analyst`, and `/agent data-analyst …` runs
-it. A spec file that does not load is left out of the roster with a warning;
-Settings → Agents and `/agents` show it with its error.
+**every exposed spec of your own** (workspace and data directory), first definition of
+each name (`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). The
+presets are experimental teams' roles and join the default roster only when one of
+your specs names them in `delegates_to`, directly or through another preset (a glob
+pulls in none; AGE-760). Otherwise a preset runs with its team (`--team <id>`) or when
+`virtual_agents` names it: then the `data-analyst` preset is an agent like any other,
+`list_agents` lists it, `invoke_agent` reaches it at `/a2a/data-analyst`, and
+`/agent data-analyst …` runs it. A spec that names its `callers` (a team-internal worker
+such as `panel-writer`) is served for its lead but never offered to the root's
+`list_agents`/`invoke_agent`. A spec file that does not load is left out of the roster
+with a warning; Settings → Agents and `/agents` show it with its error.
 
 On the desktop, "the workspace" a conversation's own `list_agents`/`invoke_agent`/`/agent`
 resolve the roster from is its own working directory when it has one, else the shared
@@ -854,7 +859,9 @@ changed prompt is a new preset name, so a run of one stays comparable with an ea
 | `research-brief` | `editor` | `researcher`, `writer`, `reviewer` | Sourced writing from a folder of documents, a relayed write approval. `teams/research-brief/fixture/docs/` is its sample corpus. |
 
 `data-analysis` and `research-brief` have no `SKILL.md`: the leader's preamble is the
-playbook, so `/agent data-lead …` on the desktop runs it the same as `--team data-analysis`.
+playbook, so `/agent data-lead …` on the desktop runs it the same as `--team data-analysis`
+once `virtual_agents` names the team (`["local-agent", "data-lead", "data-analyst",
+"reviewer"]`); the desktop has no team selection of its own.
 `reviewer` is shared by both.
 The user walkthrough is the docs-site tutorial *From one agent to a team*; the
 reliability runs behind both presets, and why `coder-reviewer` and the Benford team did

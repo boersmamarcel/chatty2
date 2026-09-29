@@ -59,7 +59,10 @@ use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
 /// The relative directory specs live in under a workspace.
 pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 
-/// The specs compiled into the binary: `(name, spec.toml)`.
+/// The specs compiled into the binary: `(name, spec.toml)`. They are the
+/// experimental example teams' roles, so none is on the default roster: a
+/// preset joins through its team (`--team <id>`), a declared roster that
+/// names it, or a spec of yours that delegates to it (AGE-760).
 pub const PRESETS: &[(&str, &str)] = &[
     ("data-analyst", include_str!("../agents/data-analyst.toml")),
     ("data-lead", include_str!("../agents/data-lead.toml")),
@@ -719,9 +722,10 @@ pub fn list_agent_specs_from(workspace: Option<&Path>, data_dir: Option<&Path>) 
     listed
 }
 
-/// The specs behind a roster of names. An empty roster is every exposed
-/// spec the workspace can reach ([`exposed_specs`]): one kind of agent,
-/// whatever file or preset defined it (PL-U5).
+/// The specs behind a roster of names. An empty roster is the default one
+/// ([`exposed_specs`]): `local-agent`, your own exposed specs, and the
+/// presets they delegate to — one kind of agent, whatever file or preset
+/// defined it (PL-U5, AGE-760).
 pub fn load_roster(names: &[String], workspace: Option<&Path>) -> Result<Vec<AgentSpec>> {
     load_roster_from(names, workspace, dirs::data_dir().as_deref())
 }
@@ -736,14 +740,30 @@ pub fn load_roster_from(
     if names.is_empty() {
         return Ok(exposed_specs_from(workspace, data_dir));
     }
+    let default_name = crate::tools::LOCAL_AGENT_NAME;
     names
         .iter()
-        .map(|name| load_agent_spec_from(name, workspace, data_dir).map(|loaded| loaded.spec))
+        .map(|name| {
+            // `local-agent` declared beside a preset keeps the default
+            // worker: the bare spec, unless a spec directory defines one
+            // (AGE-760).
+            let defined = || {
+                spec_dirs(workspace, data_dir)
+                    .iter()
+                    .any(|(dir, _)| dir.join(format!("{name}.toml")).is_file())
+            };
+            if name == default_name && !defined() {
+                return Ok(AgentSpec::named(default_name));
+            }
+            load_agent_spec_from(name, workspace, data_dir).map(|loaded| loaded.spec)
+        })
         .collect()
 }
 
-/// The names of the roster [`load_roster`] loads: `declared` when it names
-/// any agents, else every exposed spec's name.
+/// The names the root agent is offered as its `local_agents`, from the
+/// roster [`load_roster`] loads: `declared` when it names any agents, else
+/// the default roster — less every spec that names its `callers`, which is
+/// a team's internal worker only its lead may call (AGE-760).
 pub fn roster_names(declared: &[String], workspace: Option<&Path>) -> Vec<String> {
     roster_names_from(declared, workspace, dirs::data_dir().as_deref())
 }
@@ -755,11 +775,12 @@ pub fn roster_names_from(
     workspace: Option<&Path>,
     data_dir: Option<&Path>,
 ) -> Vec<String> {
-    roster_names_of(declared, &inspect_agent_specs_from(workspace, data_dir))
+    root_agent_names_of(declared, &inspect_agent_specs_from(workspace, data_dir))
 }
 
-/// [`roster_names`] over listings already read: `declared` when it names
-/// any agents, else `local-agent` and every served listing's name.
+/// The names the broker serves, over listings already read: `declared`
+/// when it names any agents, else `local-agent` and the default roster's
+/// served listings ([`default_roster`]).
 pub fn roster_names_of(declared: &[String], listings: &[SpecListing]) -> Vec<String> {
     if !declared.is_empty() {
         return declared.to_vec();
@@ -767,12 +788,72 @@ pub fn roster_names_of(declared: &[String], listings: &[SpecListing]) -> Vec<Str
     let default_name = crate::tools::LOCAL_AGENT_NAME;
     let mut names = vec![default_name.to_string()];
     names.extend(
-        listings
-            .iter()
-            .filter(|listing| listing.is_served() && listing.name != default_name)
+        default_roster(listings)
+            .into_iter()
+            .filter(|listing| listing.name != default_name)
             .map(|listing| listing.name.clone()),
     );
     names
+}
+
+/// [`roster_names`] over listings already read: [`roster_names_of`] less
+/// the specs that name their `callers`. A plain root is no named caller,
+/// so a team-internal worker (`panel-writer`, `callers = ["panel-lead"]`)
+/// is never offered to it; its lead still reaches it through the broker
+/// (AGE-760).
+pub fn root_agent_names_of(declared: &[String], listings: &[SpecListing]) -> Vec<String> {
+    roster_names_of(declared, listings)
+        .into_iter()
+        .filter(|name| {
+            !listings.iter().any(|listing| {
+                &listing.name == name
+                    && !listing.shadowed
+                    && listing
+                        .spec
+                        .as_ref()
+                        .is_ok_and(|spec| spec.swarm.callers.is_some())
+            })
+        })
+        .collect()
+}
+
+/// The served listings the default roster holds, in lookup order (AGE-760):
+/// every spec from a spec directory, and a preset only when one of those
+/// names it in `delegates_to` — directly or through another preset, so a
+/// lead brings its workers. A glob in `delegates_to` pulls in no preset:
+/// the presets are experimental example teams (`--team <id>`), and joining
+/// the roster of everyone who never asked for them is what this prevents.
+fn default_roster(listings: &[SpecListing]) -> Vec<&SpecListing> {
+    let served: Vec<&SpecListing> = listings
+        .iter()
+        .filter(|listing| listing.is_served())
+        .collect();
+    let mut joined: HashSet<&str> = served
+        .iter()
+        .filter(|listing| listing.source != SpecSource::Preset)
+        .map(|listing| listing.name.as_str())
+        .collect();
+    let mut pending: Vec<&str> = joined.iter().copied().collect();
+    while let Some(name) = pending.pop() {
+        let Some(spec) = served
+            .iter()
+            .find(|listing| listing.name == name)
+            .and_then(|listing| listing.spec.as_ref().ok())
+        else {
+            continue;
+        };
+        for delegate in &spec.swarm.delegates_to {
+            if served.iter().any(|listing| &listing.name == delegate)
+                && joined.insert(delegate.as_str())
+            {
+                pending.push(delegate.as_str());
+            }
+        }
+    }
+    served
+        .into_iter()
+        .filter(|listing| joined.contains(listing.name.as_str()))
+        .collect()
 }
 
 /// The workspace a conversation's own roster and the broker's roster must
@@ -808,12 +889,13 @@ pub fn roster_workspace_matches(
     !broker_is_live || conversation_workspace == broker_workspace
 }
 
-/// Every spec a workspace can reach that others may call, in lookup order
-/// and once per name: `local-agent` first (a bare spec unless a spec
-/// directory defines one), then each first definition whose
-/// `swarm.exposed` is set. A file that does not load is left out with a
-/// warning rather than taking the whole roster down; the Agents settings
-/// page and `/agents` show it with its error.
+/// The default roster's specs, in lookup order and once per name:
+/// `local-agent` first (a bare spec unless a spec directory defines one),
+/// then each first definition whose `swarm.exposed` is set — your own
+/// specs, and a preset only when one of them delegates to it
+/// ([`default_roster`], AGE-760). A file that does not load is left out
+/// with a warning rather than taking the whole roster down; the Agents
+/// settings page and `/agents` show it with its error.
 pub fn exposed_specs(workspace: Option<&Path>) -> Vec<AgentSpec> {
     exposed_specs_from(workspace, dirs::data_dir().as_deref())
 }
@@ -822,21 +904,20 @@ pub fn exposed_specs(workspace: Option<&Path>) -> Vec<AgentSpec> {
 /// platform's.
 pub fn exposed_specs_from(workspace: Option<&Path>, data_dir: Option<&Path>) -> Vec<AgentSpec> {
     let default_name = crate::tools::LOCAL_AGENT_NAME;
-    let mut specs = Vec::new();
-    for listing in inspect_agent_specs_from(workspace, data_dir) {
-        if listing.shadowed {
-            continue;
-        }
-        match listing.spec {
-            Ok(spec) if spec.swarm.exposed => specs.push(spec),
-            Ok(_) => {}
-            Err(error) => tracing::warn!(
+    let listings = inspect_agent_specs_from(workspace, data_dir);
+    for listing in &listings {
+        if let (Err(error), false) = (&listing.spec, listing.shadowed) {
+            tracing::warn!(
                 agent = %listing.name,
                 %error,
                 "Leaving an agent spec that does not load out of the roster"
-            ),
+            );
         }
     }
+    let mut specs: Vec<AgentSpec> = default_roster(&listings)
+        .into_iter()
+        .filter_map(|listing| listing.spec.clone().ok())
+        .collect();
     match specs
         .iter()
         .position(|spec| spec.agent.name == default_name)
@@ -1298,37 +1379,98 @@ cap_usd = 2.0
         specs.iter().map(|spec| spec.agent.name.as_str()).collect()
     }
 
-    /// PL-U5: with nothing declared, the roster is `local-agent` and every
-    /// exposed spec — the presets included, so `data-analyst` is an agent
-    /// like any other.
+    /// AGE-760: with nothing declared and no spec of your own, the roster
+    /// is `local-agent` alone. The presets are experimental example teams;
+    /// none joins a roster nobody asked it into.
     #[test]
-    fn an_empty_roster_is_every_exposed_spec() {
+    fn default_roster_is_local_agent_only() {
         let roster = load_roster_from(&[], None, None).unwrap();
+        assert_eq!(names(&roster), [crate::tools::LOCAL_AGENT_NAME]);
+        assert_eq!(roster[0], AgentSpec::named(crate::tools::LOCAL_AGENT_NAME));
+        assert_eq!(
+            roster_names_from(&[], None, None),
+            [crate::tools::LOCAL_AGENT_NAME]
+        );
+        // Naming a preset is the opt-in.
+        let declared = vec!["data-analyst".to_string()];
+        assert_eq!(
+            names(&load_roster_from(&declared, None, None).unwrap()),
+            ["data-analyst"]
+        );
+    }
+
+    /// AGE-760: a preset joins the default roster when a spec of your own
+    /// names it in `delegates_to`, and brings the presets it delegates to,
+    /// so a lead reaches its workers. A glob pulls in no preset, and a
+    /// team-internal worker (one that names its `callers`) is served for
+    /// its lead but never offered to the root.
+    #[test]
+    fn a_preset_joins_when_your_spec_delegates_to_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("boss.toml"),
+            "[agent]\nname = \"boss\"\n\n[swarm]\ndelegates_to = [\"data-lead\", \"panel-lead\", \"*\"]\n",
+        )
+        .unwrap();
+        // A spec of yours with a preset's name is yours: it joins.
+        std::fs::write(dir.join("writer.toml"), "[agent]\nname = \"writer\"\n").unwrap();
+
+        let roster = exposed_specs_from(Some(workspace.path()), None);
         assert_eq!(
             names(&roster),
             [
-                crate::tools::LOCAL_AGENT_NAME,
+                "local-agent",
+                "boss",
+                "writer",
                 "data-analyst",
                 "data-lead",
-                "editor",
                 "panel-adjudicator",
                 "panel-analyst-1",
                 "panel-analyst-2",
                 "panel-analyst-3",
                 "panel-lead",
                 "panel-writer",
-                "researcher",
                 "reviewer",
-                "writer",
             ]
         );
-        assert_eq!(roster[0], AgentSpec::named(crate::tools::LOCAL_AGENT_NAME));
+        let listings = inspect_agent_specs_from(Some(workspace.path()), None);
+        assert_eq!(roster_names_of(&[], &listings), names(&roster));
         assert_eq!(
-            roster_names_from(&[], None, None),
-            names(&roster)
-                .into_iter()
-                .map(str::to_string)
-                .collect::<Vec<_>>()
+            roster_names_from(&[], Some(workspace.path()), None),
+            [
+                "local-agent",
+                "boss",
+                "writer",
+                "data-analyst",
+                "data-lead",
+                "panel-lead",
+                "reviewer",
+            ]
+        );
+    }
+
+    /// AGE-760: a team-internal spec is never offered to the root, even
+    /// when module settings name it; `local-agent` declared beside a
+    /// preset is the default worker.
+    #[test]
+    fn a_team_internal_spec_is_not_offered_to_the_root() {
+        let declared: Vec<String> = ["local-agent", "panel-lead", "panel-writer"]
+            .map(str::to_string)
+            .to_vec();
+        assert_eq!(
+            names(&load_roster_from(&declared, None, None).unwrap()),
+            ["local-agent", "panel-lead", "panel-writer"],
+            "the broker serves it, for its lead"
+        );
+        assert_eq!(
+            load_roster_from(&declared, None, None).unwrap()[0],
+            AgentSpec::named(crate::tools::LOCAL_AGENT_NAME)
+        );
+        assert_eq!(
+            roster_names_from(&declared, None, None),
+            ["local-agent", "panel-lead"]
         );
     }
 
@@ -1395,24 +1537,7 @@ cap_usd = 2.0
         assert!(!shadowed_preset.is_served());
 
         let roster = exposed_specs_from(Some(workspace.path()), None);
-        assert_eq!(
-            names(&roster),
-            [
-                "local-agent",
-                "analyst",
-                "data-lead",
-                "editor",
-                "panel-adjudicator",
-                "panel-analyst-1",
-                "panel-analyst-2",
-                "panel-analyst-3",
-                "panel-lead",
-                "panel-writer",
-                "researcher",
-                "reviewer",
-                "writer",
-            ]
-        );
+        assert_eq!(names(&roster), ["local-agent", "analyst"]);
         assert_eq!(roster[0].agent.preamble.as_deref(), Some("Be brief."));
     }
 

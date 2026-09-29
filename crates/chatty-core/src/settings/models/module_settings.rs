@@ -43,10 +43,12 @@ pub struct ModuleSettingsModel {
     pub endpoint_budgets: HashMap<String, usize>,
     /// The broker's virtual agents (ADR-0011 C10), by agent spec name
     /// (AGE-614): each names a spec in `<workspace>/.chatty/agents/`, the
-    /// data directory's `chatty/agents/`, or the presets. Empty means every
-    /// exposed spec the workspace can reach, `local-agent` first
+    /// data directory's `chatty/agents/`, or the presets. Empty means
+    /// `local-agent` and every exposed spec of your own, plus the presets
+    /// they delegate to
     /// ([`agent_spec::exposed_specs`](crate::agent_spec::exposed_specs),
-    /// PL-U5); naming agents here narrows the roster to them.
+    /// PL-U5, AGE-760); naming agents here sets the roster to exactly them,
+    /// which is how a preset joins without its team.
     ///
     /// Roles are declared here rather than passed on `invoke_agent`, so the
     /// leader's tool schema and prompt stay identical whatever the team. A
@@ -131,9 +133,10 @@ impl ModuleSettingsModel {
             .max(1)
     }
 
-    /// The names the broker publishes as virtual agents, looked up from
-    /// `workspace`: what was declared, or every exposed spec when nothing
-    /// was ([`agent_spec::roster_names`](crate::agent_spec::roster_names)).
+    /// The names the root is offered from the broker's virtual agents,
+    /// looked up from `workspace`: what was declared, or the default roster
+    /// when nothing was, less team-internal specs
+    /// ([`agent_spec::roster_names`](crate::agent_spec::roster_names)).
     pub fn roster_names(&self, workspace: Option<&std::path::Path>) -> Vec<String> {
         crate::agent_spec::roster_names(&self.virtual_agents, workspace)
     }
@@ -308,7 +311,7 @@ mod tests {
         assert!(old.endpoint_budgets.is_empty());
     }
 
-    /// PL-U5: nothing declared means every exposed spec, `local-agent`
+    /// PL-U5: nothing declared means the default roster, `local-agent`
     /// first.
     #[test]
     fn no_declared_virtual_agents_means_every_exposed_spec() {
@@ -317,7 +320,7 @@ mod tests {
         assert_eq!(
             settings.roster_names(None),
             crate::agent_spec::roster_names(&[], None),
-            "nothing declared is every exposed spec"
+            "nothing declared is the default roster"
         );
         assert_eq!(settings.roster_names(None)[0], "local-agent");
 

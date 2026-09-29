@@ -8,7 +8,7 @@ use rig_core::completion::Message;
 use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
-use chatty_core::agent_spec::SpecListing;
+use chatty_core::agent_spec::{SpecListing, SpecSource};
 use chatty_core::models::conversation::ConversationMode;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
 use chatty_core::session::{
@@ -99,6 +99,12 @@ pub(crate) fn format_agents_summary(
                 (_, true) => "shadowed by a nearer spec of the same name".to_string(),
                 (Err(error), false) => format!("does not load: {error}"),
                 (Ok(spec), false) if !spec.swarm.exposed => "exposed = false".to_string(),
+                // An experimental team's role (AGE-760).
+                (Ok(_), false) if listing.source == SpecSource::Preset => {
+                    "preset; runs with its team (--team <id>), or name it in \
+                     module settings' virtual_agents"
+                        .to_string()
+                }
                 (Ok(_), false) => "not in the declared roster".to_string(),
             };
             format!("  {} ({}) — {why}\n", listing.name, listing.source.label())
@@ -1116,7 +1122,8 @@ mod tests {
         std::fs::write(
             dir.join("auditor.toml"),
             "[agent]\nname = \"auditor\"\ndescription = \"Audits a list of amounts\"\n\n\
-             [tools]\nprofile = \"reviewer\"\n\n[[plugins]]\nmodule = \"benford\"\n",
+             [tools]\nprofile = \"reviewer\"\n\n[[plugins]]\nmodule = \"benford\"\n\n\
+             [swarm]\ndelegates_to = [\"data-analyst\", \"reviewer\"]\n",
         )
         .unwrap();
         std::fs::write(
@@ -1159,6 +1166,14 @@ mod tests {
         assert!(left_out.contains("does not load"), "{text}");
         assert!(left_out.contains("hidden"), "{text}");
         assert!(left_out.contains("exposed = false"), "{text}");
+        // A preset joins through a spec that delegates to it; the rest are
+        // left out as presets (AGE-760).
+        assert!(text.contains("  data-analyst — "), "{text}");
+        assert!(!left_out.contains("data-analyst"), "{text}");
+        assert!(
+            left_out.contains("data-lead (preset) — preset; runs with its team"),
+            "{text}"
+        );
     }
 
     #[test]

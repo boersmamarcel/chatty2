@@ -20,7 +20,7 @@ When the workspace is a git repository, each spawned sub-agent works in its own 
 
 ## From the chat
 
-Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; the built-in `data-analyst` is one), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
+Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; a built-in one such as `data-analyst` once your roster names it), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
 
 `/agent` hands the task to the same local agents the assistant itself delegates to, so the delegation row — and the swarm tree below, when that agent delegates in turn — looks exactly as if the assistant had made the call. If the agent fails or stops before answering, the row ends with the error.
 
@@ -81,7 +81,7 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 
 ## Named workers and roles
 
-Out of the box the parent can reach `local-agent` — your default model with the parent's tools — and every built-in or project spec that doesn't opt out with `exposed = false` under `[swarm]`. You can declare your own **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
+Out of the box the parent can reach `local-agent` — your default model with the parent's tools — and every spec of your own that doesn't opt out with `exposed = false` under `[swarm]`. The built-in specs are the example teams' roles: they join only with their team (`--team <id>`), when `virtual_agents` below names them, or when a spec of yours lists them in `delegates_to`. A spec that names its `callers` works only for those agents and is never offered to the parent. You can declare your own **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
 
 Declare each worker as an **agent spec**: a small TOML file named after the worker, in your project's `.chatty/agents/` folder (or in Chatty's data folder under `chatty/agents/` to share it across projects — [where that is](./advanced.md)):
 
@@ -157,7 +157,7 @@ Three teams ship built in. Agent teams are supported and **experimental**: they 
 | `data-analysis` | `/agent data-lead Revenue in orders.csv fell in August. Find out why.` | A lead breaks a business question about a data file into parts, an analyst answers them with SQL queries, a reviewer works out the key numbers again, and the analyst saves the report (the write comes to you for approval). Walkthrough: [From one agent to a team](./tutorial-swarm.md). |
 | `research-brief` | `/agent editor Using the documents in docs/, write brief.md: <your question>` | A researcher finds sourced facts in a folder of documents, a writer turns them into a brief (the file write comes to you for approval), and the reviewer checks the brief against the sources. |
 
-The leader of each team is an agent like any other, so `/agent <leader> …` runs the team from the desktop, and `chatty-tui --team <id>` runs it from the terminal:
+`chatty-tui --team <id>` runs a team from the terminal. The desktop has no team switch: name the team's agents in `virtual_agents` (for `data-analysis`, `["local-agent", "data-lead", "data-analyst", "reviewer"]`), restart, and `/agent <leader> …` runs it, since the leader is an agent like any other:
 
 ```bash
 chatty-tui --team research-brief --headless --ollama --model qwen3:14b \
