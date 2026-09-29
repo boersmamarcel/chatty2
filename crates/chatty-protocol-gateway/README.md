@@ -332,7 +332,8 @@ listener serving `build_router()` answers 401 without
 symlink, someone else's, or open to group or others, and it never unlinks a
 socket this user does not own. There is no TCP listener. On Windows `start()`
 fails with `access::WINDOWS_UNSUPPORTED` (an owner-only DACL is not
-implemented yet).
+implemented yet, tracked by AGE-778): external MCP access is macOS/Linux-only
+for now.
 
 ## Being a worker (`worker` feature)
 

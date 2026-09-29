@@ -16,8 +16,11 @@
 //!   it is a socket this user owns and nothing answers on it.
 //!
 //! Windows has no owner-only directory yet (an owner-only DACL under
-//! `%LOCALAPPDATA%` is the plan), so there the gateway refuses to start with
-//! [`WINDOWS_UNSUPPORTED`]; the broker's direct transport does not need it.
+//! `%LOCALAPPDATA%` is the plan, tracked by AGE-778), so there the gateway
+//! refuses to start with [`WINDOWS_UNSUPPORTED`]; the broker's direct
+//! transport does not need it, so on-desktop plugin tools work on Windows
+//! today — only *external* MCP clients reaching the gateway are
+//! macOS/Linux-only for now.
 //!
 //! [`build_router`]: crate::ProtocolGateway::build_router
 //! [`ProtocolGateway`]: crate::ProtocolGateway
@@ -38,7 +41,8 @@ use serde_json::json;
 
 /// Why the gateway does not start on Windows.
 pub const WINDOWS_UNSUPPORTED: &str = "the module gateway needs an owner-only socket directory, \
-     which chatty only has on Unix so far; on Windows it does not start (ADR-0021 § 4)";
+     which chatty only has on Unix so far; external MCP access is macOS/Linux-only for now \
+     (ADR-0021 § 4, tracked by AGE-778)";
 
 /// The name of the owner-only directory under the runtime (or cache) dir.
 const DIR_NAME: &str = "chatty-run";
