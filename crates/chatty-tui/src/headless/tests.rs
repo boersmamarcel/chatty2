@@ -594,8 +594,7 @@ mod runner {
     /// neither carries the instruction nor consumes it.
     #[tokio::test]
     async fn a_team_leaders_first_human_turn_opens_with_the_skill_instruction() {
-        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
-            .expect("the preset loads");
+        let team = crate::team_fixture::load();
         let (mut runner, _event_rx) = test_runner_with_team(Some(team)).await;
         let text = |input: &chatty_core::session::TurnInput| -> String {
             input
@@ -661,8 +660,7 @@ mod runner {
     #[tokio::test]
     async fn a_team_leader_keeps_going_when_a_worker_writes_the_answer_file() {
         let workspace = tempfile::tempdir().expect("a workspace");
-        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
-            .expect("the preset loads");
+        let team = crate::team_fixture::load();
         let (mut leader, _event_rx) = test_runner_with_team(Some(team)).await;
         leader.execution_settings.workspace_dir =
             Some(workspace.path().to_string_lossy().into_owned());
@@ -716,8 +714,7 @@ mod runner {
     /// exactly as `run_headless` would.
     #[tokio::test]
     async fn a_team_leaders_clarification_is_answered_not_cancelled() {
-        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
-            .expect("the preset loads");
+        let team = crate::team_fixture::load();
         let (mut leader, _event_rx) = test_runner_with_team(Some(team)).await;
         assert!(leader.is_team_leader());
 

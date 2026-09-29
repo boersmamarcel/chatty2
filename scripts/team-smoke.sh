@@ -38,8 +38,9 @@ fi
 docker build -q -t "$IMAGE" "$SMOKE" >/dev/null
 
 # 3. A throwaway HOME: Ollama provider, the two models, and the
-#    coder-reviewer preset copied into the data dir with the models and the
-#    verification command filled in (the compiled-in preset carries neither).
+#    coder-reviewer team (a test fixture since AGE-752, no longer a preset)
+#    copied into the data dir with the models and the verification command
+#    filled in.
 RUN_DIR="$ROOT/target/team-smoke/run-$(date +%Y%m%d-%H%M%S)"
 HOME_DIR="$RUN_DIR/home"
 WORK_DIR="$RUN_DIR/work"
@@ -80,16 +81,22 @@ cat > "$CFG/execution_settings.json" <<'EOF'
 }
 EOF
 printf '[user]\n\temail = team-smoke@chatty.invalid\n\tname = team-smoke\n' > "$HOME_DIR/.gitconfig"
-cp "$ROOT/crates/chatty-core/teams/coder-reviewer/SKILL.md" "$TEAM_DIR/SKILL.md"
+FIX="$ROOT/crates/chatty-tui/tests/fixtures/team-workspace/.chatty"
+AGENTS_DIR="$HOME_DIR/.local/share/chatty/agents"
+mkdir -p "$AGENTS_DIR"
+cp "$FIX/teams/coder-reviewer/SKILL.md" "$TEAM_DIR/SKILL.md"
 LEADER_MODEL="$LEADER_MODEL" CODER_MODEL="$CODER_MODEL" python3 - \
-  "$ROOT/crates/chatty-core/teams/coder-reviewer/team.json" "$TEAM_DIR/team.json" <<'PY'
+  "$FIX" "$TEAM_DIR/team.json" "$AGENTS_DIR" <<'PY'
 import json, os, sys
-team = json.load(open(sys.argv[1]))
-team["leader"]["model"] = os.environ["LEADER_MODEL"]
-for agent in team["agents"]:
-    agent["model"] = os.environ["CODER_MODEL"] if agent["name"] == "local-coder" else os.environ["LEADER_MODEL"]
+fix, out, agents = sys.argv[1:4]
+team = json.load(open(f"{fix}/teams/coder-reviewer/team.json"))
 team["verification"] = "python3 -m unittest discover -s tests -t . -v"
-json.dump(team, open(sys.argv[2], "w"), indent=2)
+json.dump(team, open(out, "w"), indent=2)
+for name in [team["leader"], *team["agents"]]:
+    model = os.environ["CODER_MODEL"] if name == "local-coder" else os.environ["LEADER_MODEL"]
+    text = open(f"{fix}/agents/{name}.toml").read()
+    text = text.replace(f'name = "{name}"\n', f'name = "{name}"\nmodel = "{model}"\n', 1)
+    open(f"{agents}/{name}.toml", "w").write(text)
 PY
 
 # 4. The fixture repo: the bank-account module with the overdraft bug.
@@ -143,7 +150,7 @@ reward="${reward:-0}"
 {
   echo "== team smoke: $(basename "$RUN_DIR")"
   echo "leader exit=$leader_exit wall=${wall}s (timeout ${TIMEOUT}s)  base=$BASE_COMMIT"
-  echo "team: $TEAM_DIR (the preset plus models and verification)"
+  echo "team: $TEAM_DIR (the fixture team plus models and verification)"
   echo "processes spawned per role:"
   sort -u "$RUN_DIR/ps.log" \
     | awk '{sub(/-[0-9]+$/, "", $2); n[$2]++; c++} END {for (r in n) printf "  %s: %d\n", r, n[r]; if (!c) print "  (none seen)"}'

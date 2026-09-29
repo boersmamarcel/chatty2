@@ -30,6 +30,11 @@ const ROOT_MODEL: &str = "kit/root";
 /// The root conversation, on the kit's SSE endpoint, delegating through the
 /// kit's broker.
 async fn root_session(kit: &SwarmKit) -> AgentSession {
+    root_session_with(kit, &[LEAD, ANALYST]).await
+}
+
+/// [`root_session`] whose roster is `local_agents`.
+async fn root_session_with(kit: &SwarmKit, local_agents: &[&str]) -> AgentSession {
     let _ = chatty_core::init_repositories();
     let settings = ExecutionSettingsModel {
         workspace_dir: Some(kit.workspace().to_string_lossy().into_owned()),
@@ -60,7 +65,7 @@ async fn root_session(kit: &SwarmKit) -> AgentSession {
             AgentBuildContext::from_services(AgentServices {
                 exec_settings: Some(settings),
                 lazy_broker: Some(Arc::new(StartedBroker(kit.broker().transport()))),
-                local_agents: vec![LEAD.to_string(), ANALYST.to_string()],
+                local_agents: local_agents.iter().map(|name| name.to_string()).collect(),
                 ..AgentServices::default()
             }),
         )
@@ -144,6 +149,78 @@ async fn slash_agent_delegation_builds_tree() {
     assert!(
         text.contains("The analyst read it: Chatty."),
         "the lead's answer is the turn's text: {text}"
+    );
+}
+
+/// AGE-752: a command the delegated agent asks to run reaches this
+/// conversation's approval card while the `/agent` turn is still running —
+/// the delegation stream forwards the store's notifications as a model's
+/// stream does — and the approval lets the worker run it. Before the fix
+/// the notification was dropped and the worker waited out its timeout.
+#[tokio::test]
+async fn slash_agent_relays_a_worker_approval() {
+    use chatty_core::models::execution_approval_store::ApprovalDecision;
+
+    let kit = SwarmKit::start_asking(
+        vec![AgentDef::new(ANALYST, ANALYST_MODEL, Endpoint::Ndjson)],
+        Script::new(),
+        Script::new().route(
+            ANALYST_MODEL,
+            [
+                Reply::tool_call("shell_execute", json!({ "command": "echo hi" })),
+                Reply::text("It printed hi."),
+            ],
+        ),
+    )
+    .await;
+    let mut session = root_session_with(&kit, &[ANALYST]).await;
+    let store = session.execution_approvals().clone();
+
+    let events: Rc<RefCell<Vec<SessionEvent>>> = Rc::default();
+    let sink = events.clone();
+    let turn = session
+        .begin_turn(
+            TurnInput::delegation(Delegation {
+                agent: ANALYST.to_string(),
+                prompt: "run echo hi".to_string(),
+            }),
+            move |event| {
+                // The human at the card: approve what the worker asks.
+                if let SessionEvent::ApprovalRequested { id, .. } = &event {
+                    assert!(store.resolve(id, ApprovalDecision::Approved));
+                }
+                sink.borrow_mut().push(event);
+            },
+        )
+        .expect("the /agent turn starts");
+    tokio::time::timeout(std::time::Duration::from_secs(120), turn)
+        .await
+        .expect("the /agent turn ends before the deadline");
+    let events = Rc::try_unwrap(events).unwrap().into_inner();
+
+    let asked: Vec<&String> = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::ApprovalRequested { command, .. } => Some(command),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        asked.len(),
+        1,
+        "one card, for the worker's command: {events:#?}"
+    );
+    assert!(asked[0].ends_with("[shell] echo hi"), "{asked:?}");
+    let analyst = kit.ndjson.requests_for(ANALYST_MODEL);
+    assert_eq!(analyst.len(), 2, "the worker's model is asked again");
+    let result = analyst[1].json()["messages"]
+        .as_array()
+        .and_then(|messages| messages.last())
+        .map(|message| message.to_string())
+        .unwrap_or_default();
+    assert!(
+        result.contains(r#"\"stdout\":\"hi\""#),
+        "the approved command ran in the worker: {result}"
     );
 }
 

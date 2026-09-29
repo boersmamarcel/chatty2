@@ -14,6 +14,7 @@
 
 <div class="cards">
   <a class="card" href="user/getting-started.md"><span class="eyebrow">Use Chatty</span><strong>Getting started</strong><span>Install, connect a provider, add a model, send your first message.</span></a>
+  <a class="card" href="user/tutorial-swarm.md"><span class="eyebrow">New in 0.5</span><strong>From one agent to a team</strong><span>Ask a three-agent team why revenue fell, watch the tree, approve its report, read the bill per model.</span></a>
   <a class="card" href="user/agents-and-tools.md"><span class="eyebrow">Use Chatty</span><strong>Agents &amp; tools</strong><span>Let the agent read and edit files, run code, query data and browse.</span></a>
   <a class="card" href="dev/guides/build-wasm-module.md"><span class="eyebrow">Extend it</span><strong>Build a WASM plugin</strong><span>Ship your own agent module and publish it to the Hive marketplace.</span></a>
   <a class="card" href="dev/start/build-and-run.md"><span class="eyebrow">Contribute</span><strong>Build and run in 10 minutes</strong><span>Clone, build, run the terminal app against a local model, run the tests.</span></a>

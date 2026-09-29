@@ -61,19 +61,9 @@ pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 
 /// The specs compiled into the binary: `(name, spec.toml)`.
 pub const PRESETS: &[(&str, &str)] = &[
-    (
-        "benford-analyst",
-        include_str!("../agents/benford-analyst.toml"),
-    ),
-    (
-        "coder-reviewer-leader",
-        include_str!("../agents/coder-reviewer-leader.toml"),
-    ),
-    ("local-coder", include_str!("../agents/local-coder.toml")),
-    (
-        "local-reviewer",
-        include_str!("../agents/local-reviewer.toml"),
-    ),
+    ("data-analyst", include_str!("../agents/data-analyst.toml")),
+    ("data-lead", include_str!("../agents/data-lead.toml")),
+    ("editor", include_str!("../agents/editor.toml")),
     (
         "panel-adjudicator",
         include_str!("../agents/panel-adjudicator.toml"),
@@ -92,6 +82,9 @@ pub const PRESETS: &[(&str, &str)] = &[
     ),
     ("panel-lead", include_str!("../agents/panel-lead.toml")),
     ("panel-writer", include_str!("../agents/panel-writer.toml")),
+    ("researcher", include_str!("../agents/researcher.toml")),
+    ("reviewer", include_str!("../agents/reviewer.toml")),
+    ("writer", include_str!("../agents/writer.toml")),
 ];
 
 /// One agent, as declared.
@@ -931,7 +924,7 @@ mod tests {
 
     const FULL: &str = r#"
 [agent]
-name = "benford-analyst"
+name = "auditor"
 description = "Audits number sets for Benford's-law anomalies"
 model = "qwen3:4b"
 preamble = "You audit financial datasets."
@@ -949,9 +942,9 @@ config = { threshold = "0.05" }
 limits = { max_memory_mb = 64, max_execution_ms = 10000 }
 
 [swarm]
-delegates_to = ["local-coder", "*-reviewer"]
+delegates_to = ["data-analyst", "*-reviewer"]
 exposed = true
-callers = ["coder-reviewer-leader"]
+callers = ["data-lead"]
 
 [budget]
 max_agent_turns = 0
@@ -962,14 +955,11 @@ cap_usd = 2.0
     #[test]
     fn agent_spec_round_trips_toml_and_json() {
         let spec = AgentSpec::from_toml(FULL).expect("the full example parses");
-        assert_eq!(spec.agent.name, "benford-analyst");
+        assert_eq!(spec.agent.name, "auditor");
         assert_eq!(spec.tools.profile.as_deref(), Some("reviewer"));
         assert_eq!(spec.plugins[0].config["threshold"], "0.05");
         assert_eq!(spec.plugins[0].limits.max_memory_mb, Some(64));
-        assert_eq!(
-            spec.swarm.callers.as_deref().unwrap(),
-            ["coder-reviewer-leader"]
-        );
+        assert_eq!(spec.swarm.callers.as_deref().unwrap(), ["data-lead"]);
         assert_eq!(spec.max_duration(), Some(Duration::from_secs(1800)));
         assert_eq!(spec.budget.cap_usd, Some(2.0));
         spec.validate(None).expect("the full example is valid");
@@ -1187,50 +1177,53 @@ cap_usd = 2.0
         let data_dir = data.path().join("chatty").join("agents");
         let write = |dir: &Path, preamble: &str| {
             std::fs::create_dir_all(dir).unwrap();
-            let path = dir.join("local-coder.toml");
+            let path = dir.join("data-analyst.toml");
             std::fs::write(
                 &path,
-                format!("[agent]\nname = \"local-coder\"\npreamble = \"{preamble}\"\n"),
+                format!("[agent]\nname = \"data-analyst\"\npreamble = \"{preamble}\"\n"),
             )
             .unwrap();
             path
         };
 
         let loaded =
-            load_agent_spec_from("local-coder", Some(workspace.path()), Some(data.path())).unwrap();
+            load_agent_spec_from("data-analyst", Some(workspace.path()), Some(data.path()))
+                .unwrap();
         assert_eq!(loaded.source, SpecSource::Preset);
 
         let data_path = write(&data_dir, "data");
         let loaded =
-            load_agent_spec_from("local-coder", Some(workspace.path()), Some(data.path())).unwrap();
+            load_agent_spec_from("data-analyst", Some(workspace.path()), Some(data.path()))
+                .unwrap();
         assert_eq!(loaded.source, SpecSource::DataDir(data_path.clone()));
         assert_eq!(loaded.spec.agent.preamble.as_deref(), Some("data"));
 
         let ws_path = write(&ws_dir, "workspace");
         let loaded =
-            load_agent_spec_from("local-coder", Some(workspace.path()), Some(data.path())).unwrap();
+            load_agent_spec_from("data-analyst", Some(workspace.path()), Some(data.path()))
+                .unwrap();
         assert_eq!(loaded.source, SpecSource::Workspace(ws_path.clone()));
         assert_eq!(loaded.spec.agent.preamble.as_deref(), Some("workspace"));
 
         let listed: Vec<_> = list_agent_specs_from(Some(workspace.path()), Some(data.path()))
             .into_iter()
-            .filter(|entry| entry.name == "local-coder")
+            .filter(|entry| entry.name == "data-analyst")
             .collect();
         assert_eq!(
             listed,
             vec![
                 ListedSpec {
-                    name: "local-coder".to_string(),
+                    name: "data-analyst".to_string(),
                     source: SpecSource::Workspace(ws_path),
                     shadowed: false,
                 },
                 ListedSpec {
-                    name: "local-coder".to_string(),
+                    name: "data-analyst".to_string(),
                     source: SpecSource::DataDir(data_path),
                     shadowed: true,
                 },
                 ListedSpec {
-                    name: "local-coder".to_string(),
+                    name: "data-analyst".to_string(),
                     source: SpecSource::Preset,
                     shadowed: true,
                 },
@@ -1238,7 +1231,7 @@ cap_usd = 2.0
         );
         let reviewer = list_agent_specs_from(Some(workspace.path()), Some(data.path()))
             .into_iter()
-            .find(|entry| entry.name == "local-reviewer")
+            .find(|entry| entry.name == "reviewer")
             .unwrap();
         assert!(
             !reviewer.shadowed,
@@ -1273,13 +1266,41 @@ cap_usd = 2.0
         }
     }
 
+    /// AGE-752: what ships reads well in Settings → Agents and `list_agents`:
+    /// every preset has a one-line description and a preamble, names no
+    /// model (the roster's default runs it), and has a budget: a turn cap or
+    /// a deadline.
+    #[test]
+    fn every_preset_is_described_and_budgeted() {
+        for (name, _) in PRESETS {
+            let spec = load_agent_spec_from(name, None, None).unwrap().spec;
+            let description = spec.agent.description.as_deref().unwrap_or_default();
+            assert!(
+                !description.is_empty() && !description.contains('\n') && description.len() <= 130,
+                "{name}: {description:?}"
+            );
+            assert!(
+                spec.agent
+                    .preamble
+                    .as_deref()
+                    .is_some_and(|p| !p.is_empty()),
+                "{name} has a preamble"
+            );
+            assert!(spec.agent.model.is_none(), "{name} names no model");
+            assert!(
+                spec.budget.max_agent_turns.is_some() || spec.budget.max_duration.is_some(),
+                "{name} has a budget"
+            );
+        }
+    }
+
     fn names(specs: &[AgentSpec]) -> Vec<&str> {
         specs.iter().map(|spec| spec.agent.name.as_str()).collect()
     }
 
     /// PL-U5: with nothing declared, the roster is `local-agent` and every
-    /// exposed spec — the presets included, so `benford-analyst` is an
-    /// agent like any other.
+    /// exposed spec — the presets included, so `data-analyst` is an agent
+    /// like any other.
     #[test]
     fn an_empty_roster_is_every_exposed_spec() {
         let roster = load_roster_from(&[], None, None).unwrap();
@@ -1287,16 +1308,18 @@ cap_usd = 2.0
             names(&roster),
             [
                 crate::tools::LOCAL_AGENT_NAME,
-                "benford-analyst",
-                "coder-reviewer-leader",
-                "local-coder",
-                "local-reviewer",
+                "data-analyst",
+                "data-lead",
+                "editor",
                 "panel-adjudicator",
                 "panel-analyst-1",
                 "panel-analyst-2",
                 "panel-analyst-3",
                 "panel-lead",
                 "panel-writer",
+                "researcher",
+                "reviewer",
+                "writer",
             ]
         );
         assert_eq!(roster[0], AgentSpec::named(crate::tools::LOCAL_AGENT_NAME));
@@ -1311,9 +1334,9 @@ cap_usd = 2.0
 
     #[test]
     fn a_declared_roster_is_exactly_what_it_names() {
-        let declared = vec!["local-reviewer".to_string()];
+        let declared = vec!["reviewer".to_string()];
         let roster = load_roster_from(&declared, None, None).unwrap();
-        assert_eq!(names(&roster), ["local-reviewer"]);
+        assert_eq!(names(&roster), ["reviewer"]);
         assert_eq!(roster_names_from(&declared, None, None), declared);
         assert!(load_roster_from(&["nope".to_string()], None, None).is_err());
     }
@@ -1343,8 +1366,8 @@ cap_usd = 2.0
         .unwrap();
         // A workspace spec that turns a preset off hides the preset too.
         std::fs::write(
-            dir.join("local-coder.toml"),
-            "[agent]\nname = \"local-coder\"\n\n[swarm]\nexposed = false\n",
+            dir.join("data-analyst.toml"),
+            "[agent]\nname = \"data-analyst\"\n\n[swarm]\nexposed = false\n",
         )
         .unwrap();
 
@@ -1365,7 +1388,7 @@ cap_usd = 2.0
         );
         let shadowed_preset = listings
             .iter()
-            .find(|listing| listing.name == "local-coder" && listing.shadowed)
+            .find(|listing| listing.name == "data-analyst" && listing.shadowed)
             .unwrap();
         assert_eq!(shadowed_preset.source, SpecSource::Preset);
         assert!(shadowed_preset.spec.is_ok());
@@ -1377,15 +1400,17 @@ cap_usd = 2.0
             [
                 "local-agent",
                 "analyst",
-                "benford-analyst",
-                "coder-reviewer-leader",
-                "local-reviewer",
+                "data-lead",
+                "editor",
                 "panel-adjudicator",
                 "panel-analyst-1",
                 "panel-analyst-2",
                 "panel-analyst-3",
                 "panel-lead",
                 "panel-writer",
+                "researcher",
+                "reviewer",
+                "writer",
             ]
         );
         assert_eq!(roster[0].agent.preamble.as_deref(), Some("Be brief."));

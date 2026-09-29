@@ -146,7 +146,7 @@ fn plugins_group() -> SettingGroup {
 }
 
 /// The specs that list `module`, each with the capabilities it grants:
-/// `benford-analyst (grants llm)`, `auditor (grants nothing)`. Only a
+/// `auditor (grants llm)`, `auditor (grants nothing)`. Only a
 /// name's first definition counts.
 fn used_by(module: &str, listings: &[SpecListing]) -> Vec<String> {
     listings

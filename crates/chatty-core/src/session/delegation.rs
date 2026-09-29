@@ -9,9 +9,18 @@
 //! text. A delegation that fails — the agent is unknown, the broker cannot
 //! start, the worker exits without answering — ends the call with its error
 //! and says so as the turn's text, so the row never hangs.
+//!
+//! What the delegated agent asks of the human while it runs — a relayed
+//! command or write approval (AGE-646), a clarifying question — lands on
+//! this conversation's stores, like a model-issued call's; the stream
+//! forwards their notifications as they arrive, so the card shows while the
+//! call is still in flight (AGE-752).
 
 use rig_agent::tool::{Tool, ToolContext};
+use tokio::sync::mpsc;
 
+use crate::models::clarification_store::ClarificationNotification;
+use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::services::StreamChunk;
 use crate::services::llm_service::ResponseStream;
 use crate::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
@@ -36,13 +45,27 @@ impl Delegation {
 /// The id the delegation's one tool call carries.
 const CALL_ID: &str = "agent-command";
 
+/// The turn's channels from this conversation's approval and clarification
+/// stores: what reaches the human while the call runs.
+pub(super) struct HumanPrompts {
+    pub approvals: mpsc::UnboundedReceiver<ApprovalNotification>,
+    pub resolutions: mpsc::UnboundedReceiver<ApprovalResolution>,
+    pub clarifications: mpsc::UnboundedReceiver<ClarificationNotification>,
+}
+
 /// The stream a model that called `invoke_agent` once and then repeated its
 /// answer would have produced. `tool` is `None` for an agent built without
 /// one (a role that does not delegate).
 pub(super) fn delegation_stream(
     tool: Option<InvokeAgentTool>,
     delegation: Delegation,
+    prompts: HumanPrompts,
 ) -> ResponseStream {
+    let HumanPrompts {
+        mut approvals,
+        mut resolutions,
+        mut clarifications,
+    } = prompts;
     Box::pin(async_stream::stream! {
         let arguments = serde_json::json!({
             "agent": delegation.agent,
@@ -57,19 +80,47 @@ pub(super) fn delegation_stream(
             arguments: arguments.to_string(),
         });
 
-        let outcome = match tool {
-            Some(tool) => tool
-                .call(
-                    &mut ToolContext::new(),
-                    InvokeAgentArgs {
-                        agent: delegation.agent.clone(),
-                        prompt: delegation.prompt.clone(),
-                        include_trace: false,
-                    },
-                )
-                .await
-                .map_err(|e| e.to_string()),
-            None => Err("This conversation's agent cannot delegate.".to_string()),
+        let args = InvokeAgentArgs {
+            agent: delegation.agent.clone(),
+            prompt: delegation.prompt.clone(),
+            include_trace: false,
+        };
+        let call = async move {
+            match tool {
+                Some(tool) => tool
+                    .call(&mut ToolContext::new(), args)
+                    .await
+                    .map_err(|e| e.to_string()),
+                None => Err("This conversation's agent cannot delegate.".to_string()),
+            }
+        };
+        tokio::pin!(call);
+        // A closed channel's `recv()` is `None` at once, which disables its
+        // arm; the call's own arm always ends the loop.
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut call => break outcome,
+                Some(approval) = approvals.recv() => {
+                    yield Ok(StreamChunk::ApprovalRequested {
+                        id: approval.id,
+                        command: approval.command,
+                        is_sandboxed: approval.is_sandboxed,
+                        detail: approval.detail,
+                    });
+                }
+                Some(resolution) = resolutions.recv() => {
+                    yield Ok(StreamChunk::ApprovalResolved {
+                        id: resolution.id,
+                        approved: resolution.approved,
+                    });
+                }
+                Some(clarification) = clarifications.recv() => {
+                    yield Ok(StreamChunk::ClarificationRequested {
+                        id: clarification.id,
+                        questions: clarification.questions,
+                    });
+                }
+            }
         };
         match outcome {
             Ok(output) => {

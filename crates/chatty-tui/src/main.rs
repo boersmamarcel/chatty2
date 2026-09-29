@@ -10,6 +10,8 @@ mod headless;
 mod participant;
 #[cfg(test)]
 mod spec_golden;
+#[cfg(test)]
+mod team_fixture;
 mod ui;
 
 use anyhow::{Context, Result, bail};
@@ -389,10 +391,11 @@ struct Cli {
     /// it), `max_agent_turns` replaces the persisted budget, and the first turn opens with
     /// "read_skill <skill> and follow it". Searched in
     /// `<workspace>/.chatty/teams/`, then the platform data directory's
-    /// `chatty/teams/`, then the presets compiled in: `coder-reviewer`.
+    /// `chatty/teams/`, then the presets compiled in: `data-analysis`,
+    /// `research-brief`.
     /// Valid with --headless, --pipe and the interactive TUI.
     ///
-    /// Example: --team coder-reviewer --headless -m "Fix the overdraft bug."
+    /// Example: --team data-analysis --headless -m "Why did revenue fall in orders.csv?"
     #[arg(long, value_name = "ID")]
     team: Option<String>,
 
@@ -405,7 +408,7 @@ struct Cli {
     /// --max-agent-turns and --max-duration still beat it. Implies nothing
     /// else — not --broker, not --team.
     ///
-    /// Example: --agent local-reviewer --headless -m "Review main..HEAD"
+    /// Example: --agent reviewer --headless -m "Check report.md against data.csv"
     #[arg(long, value_name = "NAME", conflicts_with_all = ["team", "agent_json"])]
     agent: Option<String>,
 

@@ -1114,6 +1114,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("broken.toml"), "[agent]\nnme = \"broken\"\n").unwrap();
         std::fs::write(
+            dir.join("auditor.toml"),
+            "[agent]\nname = \"auditor\"\ndescription = \"Audits a list of amounts\"\n\n\
+             [tools]\nprofile = \"reviewer\"\n\n[[plugins]]\nmodule = \"benford\"\n",
+        )
+        .unwrap();
+        std::fs::write(
             dir.join("hidden.toml"),
             "[agent]\nname = \"hidden\"\n\n[swarm]\nexposed = false\n",
         )
@@ -1135,13 +1141,13 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("  benford-analyst — Audits a list of financial amounts"),
+            text.contains("  auditor — Audits a list of amounts"),
             "{text}"
         );
         assert!(text.contains("plugins benford"), "{text}");
         assert!(text.contains("profile reviewer"), "{text}");
         assert!(
-            text.contains("delegates to local-coder, local-reviewer"),
+            text.contains("delegates to data-analyst, reviewer"),
             "{text}"
         );
         assert!(
@@ -1252,7 +1258,6 @@ mod tests {
     async fn a_team_does_not_leak_into_module_settings_on_a_modules_save() {
         use crate::engine::ChatEngineConfig;
         use chatty_core::services::StreamSurface;
-        use chatty_core::services::team::load_team;
         use chatty_core::settings::models::models_store::ModelConfig;
         use chatty_core::settings::models::module_settings::ModuleSettingsModel;
         use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
@@ -1262,7 +1267,7 @@ mod tests {
             virtual_agents: vec!["on-disk-agent".to_string()],
             ..ModuleSettingsModel::default()
         };
-        let mut team = load_team("coder-reviewer", None, None).expect("the preset loads");
+        let mut team = crate::team_fixture::load();
         team.file.verification = Some("make test".to_string());
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut engine = ChatEngine::new(

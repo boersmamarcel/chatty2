@@ -1707,8 +1707,7 @@ mod tests {
     #[tokio::test]
     async fn a_team_leaders_first_turn_opens_with_the_skill_instruction() {
         let (mut engine, mut event_rx) = test_engine().await;
-        let team = chatty_core::services::team::load_team("coder-reviewer", None, None)
-            .expect("the preset loads");
+        let team = crate::team_fixture::load();
         engine.pending_first_turn = team.first_turn_instruction();
 
         send_scripted(&mut engine, &mut event_rx, "hi", scenario("text_only")).await;

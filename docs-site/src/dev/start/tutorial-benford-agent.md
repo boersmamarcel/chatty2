@@ -6,8 +6,7 @@ to do it with.
 
 **Full source:** the plugin in
 [`modules/benford/`](https://github.com/boersmamarcel/chatty2/tree/main/modules/benford)
-and the agent in
-[`crates/chatty-core/agents/benford-analyst.toml`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-core/agents/benford-analyst.toml).
+and the agent spec below, which you write yourself (no preset ships it).
 
 ## Prerequisites
 
@@ -22,7 +21,7 @@ report". Two parts of that are arithmetic, one is judgement:
 
 - **The plugin** (`benford`) does the arithmetic, deterministically, in the
   WASM sandbox: `compute_benford_distribution` and `chi_square_test`.
-- **The agent** (`benford-analyst`) is chatty's own harness: a spec with a
+- **The agent** (`auditor`) is chatty's own harness: a spec with a
   forensic-auditor preamble and `plugins = [benford]`. Its model decides when
   to call each tool and writes the report, with everything a chatty agent
   has: approvals, trace, usage and budgets.
@@ -31,7 +30,7 @@ The plugin never calls the model and never loops:
 
 ```mermaid
 sequenceDiagram
-  participant Model as benford-analyst's model
+  participant Model as auditor's model
   participant Harness as chatty harness (AgentSession)
   participant Plugin as benford plugin (WASM)
 
@@ -87,18 +86,15 @@ cp -r . ~/.local/share/chatty/modules/benford/
 
 ## Step 3 — The agent spec
 
-An agent is a spec (TOML): who it is, what it is told, what it may use. The
-`benford-analyst` preset ships with chatty:
+An agent is a spec (TOML): who it is, what it is told, what it may use.
+Write this one to `.chatty/agents/auditor.toml` in a workspace (or
+`<data_dir>/chatty/agents/auditor.toml`):
 
 ```toml
 [agent]
-name = "benford-analyst"
-description = "Audits a list of financial amounts against Benford's Law with a chi-square test"
-preamble = """
-You are a forensic financial auditor specialising in Benford's Law analysis. …
-1. Call benford__compute_benford_distribution with the numbers …
-2. Call benford__chi_square_test with those observed_counts, and total_analyzed as total.
-3. Write a concise, professional audit report …"""
+name = "auditor"
+description = "Audits a list of amounts against Benford's Law with a chi-square test"
+preamble = "You are a forensic auditor. Call benford__compute_benford_distribution with the numbers, then benford__chi_square_test with its observed_counts, and total_analyzed as total. Report the risk level, the chi-square statistic and the digits that deviate most. Every number comes from the tools, never from your own arithmetic."
 
 [tools]
 profile = "reviewer"
@@ -115,15 +111,13 @@ version = "^0.2"
 - `[[plugins]]` loads the plugin into this agent (one instance per agent),
   resolved by name in the module directory; `version` is a semver range. The
   spec is the plugin's allow-list: a tool profile does not hide plugin tools.
-
-To make your own, copy it to `.chatty/agents/<name>.toml` in a workspace (or
-`<data_dir>/chatty/agents/`) and change `name`; a workspace spec with the
-same name shadows the preset.
+- No `grants`: the plugin only computes, so it needs nothing beyond logging,
+  which is always on.
 
 ## Step 4 — Run it
 
 ```sh
-chatty-tui --agent benford-analyst --headless \
+chatty-tui --agent auditor --headless \
   -m "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789"
 ```
 
@@ -133,8 +127,8 @@ The first digits are 1, 4, 8, 2, 5, 8, 2, 4, 7, so the plugin answers
 verdict; the report should say the sample is too small to show an anomaly.
 
 `crates/chatty-tui/tests/plugins_headless.rs`
-(`benford_analyst_preset_gives_the_chi_square_verdict`) runs exactly this
-against a scripted model and checks the verdict the plugin hands back.
+(`a_spec_with_the_benford_plugin_gives_the_chi_square_verdict`) runs exactly
+this spec against a scripted model and checks the verdict the plugin hands back.
 
 ## Step 5 — Other ways in
 

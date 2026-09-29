@@ -1,8 +1,8 @@
 //! PL-U5's verification over the real broker: with nothing declared, the
-//! roster is every exposed spec, so the `benford-analyst` preset is listed
+//! roster is every exposed spec — the presets and the workspace's own — so
+//! a workspace `auditor` spec that runs with the `benford` plugin is listed
 //! by `list_agents` and reached by a coordinator's `invoke_agent` exactly
-//! as any other local agent — and the `benford` plugin it runs with is not
-//! an agent at all.
+//! as any other local agent, and the plugin itself is not an agent at all.
 //!
 //! The broker and the stand-in worker are `team_preset.rs`'s: the child
 //! records its argv and answers on the connection the runner made for it.
@@ -20,13 +20,32 @@ use super::broker::Broker;
 use super::equivalence::named_virtual_agents::{child_argv, completed_turn};
 use super::stand_in::{recorded_argv, scripted_worker_binary};
 
-const BENFORD: &str = "benford-analyst";
+const BENFORD: &str = "auditor";
+
+/// A workspace spec with a plugin, as a user writes one.
+const AUDITOR_SPEC: &str = r#"
+[agent]
+name = "auditor"
+description = "Tests amounts against Benford's Law"
+preamble = "Call the benford tools, then report."
+
+[tools]
+profile = "reviewer"
+disable = ["shell"]
+
+[[plugins]]
+module = "benford"
+version = "^0.2"
+"#;
 
 #[tokio::test]
-async fn benford_analyst_is_listed_and_reached_like_any_local_agent() {
+async fn a_spec_with_a_plugin_is_listed_and_reached_like_any_local_agent() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let workspace = tempfile::tempdir().expect("a temp workspace");
-    // Nothing declared, no spec files: the presets and the default worker.
+    let agents = workspace.path().join(".chatty/agents");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::fs::write(agents.join("auditor.toml"), AUDITOR_SPEC).unwrap();
+    // Nothing declared: the presets, the workspace's spec, the default worker.
     let roster = load_roster_from(&[], Some(workspace.path()), None).expect("the roster loads");
     let names: Vec<String> = roster.iter().map(|spec| spec.agent.name.clone()).collect();
     assert_eq!(names[0], LOCAL_AGENT_NAME);

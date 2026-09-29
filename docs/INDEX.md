@@ -22,7 +22,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and saved skills |
 | [`sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless child agents, named workers and roles, teams |
 | [`tutorial-named-worker.md`](../docs-site/src/user/tutorial-named-worker.md) | Tutorial: declare one named worker with a role and watch it delegate |
-| [`tutorial-team.md`](../docs-site/src/user/tutorial-team.md) | Tutorial: build a coder-reviewer team directory, run it, change it |
+| [`tutorial-team.md`](../docs-site/src/user/tutorial-team.md) | Tutorial: build a coding team directory (lead, coder, reviewer, playbook), run it, change it |
 | [`security.md`](../docs-site/src/user/security.md) | Approval modes, sandboxing, secrets |
 | [`terminal.md`](../docs-site/src/user/terminal.md) | `chatty-tui` install, modes, keybindings |
 | [`advanced.md`](../docs-site/src/user/advanced.md) | Training-data export, where Chatty stores data, updates |
@@ -34,7 +34,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`start/build-and-run.md`](../docs-site/src/dev/start/build-and-run.md) | Clone to running binary in 10 minutes |
 | [`start/first-change.md`](../docs-site/src/dev/start/first-change.md) | Add an LLM tool end to end |
 | [`start/tutorial-echo-agent.md`](../docs-site/src/dev/start/tutorial-echo-agent.md) | First WASM plugin tutorial: write a plugin (echo) |
-| [`start/tutorial-benford-agent.md`](../docs-site/src/dev/start/tutorial-benford-agent.md) | Give an agent a plugin: the benford-analyst spec (benford) |
+| [`start/tutorial-benford-agent.md`](../docs-site/src/dev/start/tutorial-benford-agent.md) | Give an agent a plugin: an `auditor` spec with the benford plugin |
 | [`where-to-look.md`](../docs-site/src/dev/where-to-look.md) | Task → file/doc routing (How-to landing page) |
 | [`guides/add-provider.md`](../docs-site/src/dev/guides/add-provider.md) | Add an LLM provider |
 | [`guides/add-slash-command.md`](../docs-site/src/dev/guides/add-slash-command.md) | Add a `/` command to both front ends |
@@ -69,7 +69,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded catalog and community servers (reference) |
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Labels, version bump, changelog, GitHub Release |
 | [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, pruning |
-| [`team-smoke-test.md`](team-smoke-test.md) | Touching the broker, `--team` or the worker tree | One-command local run of the `coder-reviewer` team against Ollama, with the verifier's reward |
+| [`team-smoke-test.md`](team-smoke-test.md) | Touching the broker, `--team` or the worker tree | One-command local run of the `coder-reviewer` test-fixture team against Ollama, with the verifier's reward |
 | [`swarm-test-kit.md`](swarm-test-kit.md) | Writing a test that spans a leader, its broker and real workers | The scriptable fake model server and the multi-process swarm harness; the pre-fabric goldens |
 | [`hive-api-changes.md`](hive-api-changes.md) | hive re-pin after this branch merges | Public `chatty-core` API changes hive must adapt to, one-line fix each |
 
@@ -88,6 +88,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/adr-0011-broker-ab-2026-09-08.md`](research/adr-0011-broker-ab-2026-09-08.md) | ADR-0011 kill criteria | `sub_agent` vs the broker, measured (AGE-302) |
 | [`research/fabric-hop-latency-baseline.md`](research/fabric-hop-latency-baseline.md) | ADR-0020 latency criterion | Hop latency before BI-3, the baseline BI-8 compares against (AGE-632) |
 | [`research/fabric-hop-latency-2026-09-29.md`](research/fabric-hop-latency-2026-09-29.md) | ADR-0020 latency criterion | The new path against the baseline, both on one box; why the hop shrank (AGE-640) |
+| [`research/showcase-runs-2026-09-29.md`](research/showcase-runs-2026-09-29.md) | Shipping or changing a preset team | Real-model reliability runs of `data-analysis` and `research-brief`, the tuning history, and why `coder-reviewer` and the Benford team did not ship (AGE-752) |
 | [`research/plugin-perf-2026-09-27.md`](research/plugin-perf-2026-09-27.md) | PL-H4, PL-U2, or re-checking PL-H1 | S7 baseline: cold load, per-protocol overhead, concurrency, 1-hour soak (AGE-603) |
 | [`research/resume-spike-template.md`](research/resume-spike-template.md) | Running or analysing the resume spike | The frozen re-brief and resume prompts both arms get; runner in `scripts/resume-spike/` (AGE-650) |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |

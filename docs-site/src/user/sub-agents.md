@@ -20,7 +20,7 @@ When the workspace is a git repository, each spawned sub-agent works in its own 
 
 ## From the chat
 
-Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; the built-in `benford-analyst` is one), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
+Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; the built-in `data-analyst` is one), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
 
 `/agent` hands the task to the same local agents the assistant itself delegates to, so the delegation row — and the swarm tree below, when that agent delegates in turn — looks exactly as if the assistant had made the call. If the agent fails or stops before answering, the row ends with the error.
 
@@ -51,7 +51,7 @@ Task: "Refactor all modules and write tests for each"
 ```
 
 > [!NOTE]
-> A child runs its own side-effect tools without prompting only when your approval mode is **Auto-approve All**. Under the other modes a child has no way to ask you, so keep its tasks to reading, searching and analysis. See [Security & sandboxing](./security.md).
+> A child asks before its side effects the way the parent does. When a worker, however deep in the tree, wants to run a command or write a file, the request climbs the chain to your approval card. The card names the agent that asked and its path (`data-coder-0 (root › coordinator › data-coder)`). Your answer goes back down to that worker only. See [Security & approvals](./security.md).
 
 > [!NOTE]
 > Children of one model server queue rather than run all at once, so a local model is not thrashed by a wide fan-out. The limit is `default_endpoint_budget` in your module settings.
@@ -131,7 +131,7 @@ A `module_settings.json` that still describes workers inline (the format before 
 | `budget.max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
 | `tools.disable` | Tool groups to remove on top of the role (`shell`, `fs-write`, `git`, …). |
 
-A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (`local-coder`, `local-reviewer`, `coder-reviewer-leader`, `benford-analyst`, and the `analyst-panel` team's `panel-*` agents). `chatty-tui --agent <name>` runs the terminal app as any spec.
+A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (the members of the teams below). `chatty-tui --agent <name>` runs the terminal app as any spec.
 
 The three roles:
 
@@ -145,20 +145,27 @@ A role only ever removes tools: it cannot turn on a tool group you switched off 
 
 `team.verification` is one command for the whole roster. When a worker finishes, Chatty commits its branch and then runs that command *itself* in the worker's tree — not through the worker — and puts the exit code and last lines into the `evidence` block the parent reads, next to the branch name, commit count and diff summary. That's the parent's proof that the coder's "tests pass" is true. It is skipped for a worker whose role has no shell, since that worker could not have built anything for it to check.
 
-Every worker still needs a way to run its side-effect tools without asking you, so under any approval mode other than **Auto-approve All** keep the roster to reading roles or run your leader with `--auto-approve` from the terminal ([Security & approvals](./security.md)). The full field reference, including how a worker is metered and started, is on the developer page: [Named virtual agents](../dev/architecture/agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
+A worker's side effects come to you for approval like the leader's own, whatever its depth ([Security & approvals](./security.md)). In an unattended terminal run, `--auto-approve` lets them through. The full field reference, including how a worker is metered and started, is on the developer page: [Named virtual agents](../dev/architecture/agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
 
 ## Teams
 
 `--team <id>` packages a roster like the one above with a leader and a verification command into one directory, so a run is reproducible and the leader has a role too: a named leader plus co-workers, each with its own model, role and standing instructions, defined once in `teams/<id>/team.json`, which names the leader's spec and the workers' specs. It implies `--broker`, and for that run the team's `agents` replace whatever `virtual_agents` your module settings declare.
 
-One team ships built in, `coder-reviewer` — a leader that only delegates, a coder, and a reviewer who checks the diff against the default branch before the leader merges it:
+Three teams ship built in. Agent teams are supported and **experimental**: they show what Chatty can do with a team, not that a team beats a single agent. That research comes later.
+
+| Team | Start it with | What it shows |
+|---|---|---|
+| `data-analysis` | `/agent data-lead Revenue in orders.csv fell in August. Find out why.` | A lead breaks a business question about a data file into parts, an analyst answers them with SQL queries, a reviewer works out the key numbers again, and the analyst saves the report (the write comes to you for approval). Walkthrough: [From one agent to a team](./tutorial-swarm.md). |
+| `research-brief` | `/agent editor Using the documents in docs/, write brief.md: <your question>` | A researcher finds sourced facts in a folder of documents, a writer turns them into a brief (the file write comes to you for approval), and the reviewer checks the brief against the sources. |
+
+The leader of each team is an agent like any other, so `/agent <leader> …` runs the team from the desktop, and `chatty-tui --team <id>` runs it from the terminal:
 
 ```bash
-chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
-  -m "Fix the overdraft bug in src/account.py; the acceptance criterion is that tests/test_account.py passes."
+chatty-tui --team research-brief --headless --ollama --model qwen3:14b \
+  -m "Using the documents in docs/, write brief.md: what do our procurement rules say about splitting purchases?"
 ```
 
-A second, experimental team ships for data questions, `analyst-panel`: three analysts answer the question independently, and unless their answers agree, an adjudicator compares how each one got its answer and picks one. It is slower and costs about three to four times a single agent; use it where one analysis is often plausibly wrong. If your data comes with notes for analysts, put them in a `BRIEF.md` in the workspace root and every analyst reads it first:
+A third, also experimental, is for hard data questions, `analyst-panel`: three analysts answer the question independently, and unless their answers agree, an adjudicator compares how each one got its answer and picks one. It is slower and costs about three to four times a single agent; use it where one analysis is often plausibly wrong. If your data comes with notes for analysts, put them in a `BRIEF.md` in the workspace root and every analyst reads it first:
 
 ```bash
 chatty-tui --team analyst-panel --headless --ollama --model qwen3:14b \
@@ -171,7 +178,8 @@ A team can also make what one role hands the next explicit and checkable: `team.
 
 ## Next
 
+- [Tutorial: from one agent to a team](./tutorial-swarm.md): the desktop walkthrough with `data-analysis`, approvals, the bill and mixed models
 - [Tutorial: your first named worker](./tutorial-named-worker.md) — twenty minutes, one reviewer, real hand-off
-- [Tutorial: a small agentic team](./tutorial-team.md) — a team directory of your own, from the built-in preset to your own playbook
+- [Tutorial: a small agentic team](./tutorial-team.md) — a coding team directory of your own, with its own playbook
 - [Terminal interface](./terminal.md)
 - [Agents & tools](./agents-and-tools.md)

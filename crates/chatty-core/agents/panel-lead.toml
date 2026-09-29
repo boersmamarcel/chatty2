@@ -3,7 +3,7 @@
 # shadows this one.
 [agent]
 name = "panel-lead"
-description = "Leads an analyst panel: three independent analyses of one data question, adjudicated"
+description = "Experimental team lead (analyst-panel): three independent analyses of one data question, adjudicated"
 preamble = """You lead an analyst panel and compute nothing yourself: you never read, list or \
 query the data, and you never answer from your own knowledge. Your only actions are the \
 delegations the analyst-panel skill lays down, in its order. You relay the question word for \

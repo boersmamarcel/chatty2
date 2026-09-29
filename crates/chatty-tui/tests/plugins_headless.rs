@@ -1,9 +1,9 @@
 //! Plugins end to end, through a real `chatty-tui --headless` against a
 //! scripted fake model: PL-U2 (AGE-616), a spec that lists the echo plugin
 //! calls its `reverse` tool in-process and hands the reversed string back to
-//! the model; PL-U3 (AGE-618), the `benford-analyst` preset (a spec plus the
-//! `benford` plugin, benford's old agent loop gone) answers the tutorial's
-//! dataset with the right chi-square verdict. The config each run reads is a
+//! the model; PL-U3 (AGE-618), the developer tutorial's `auditor` spec (a
+//! spec plus the `benford` plugin, benford's old agent loop gone) answers
+//! the tutorial's dataset with the right chi-square verdict. The config each run reads is a
 //! throwaway one under a temp `HOME`; nothing leaves loopback.
 
 use std::path::{Path, PathBuf};
@@ -163,15 +163,31 @@ fn tool_results(request: &serde_json::Value) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// PL-U3's verification: `chatty-tui --agent benford-analyst --headless`
-/// answers the tutorial's dataset question. The model is scripted to call
-/// both tools the preamble names; everything else is real — the preset spec,
+/// PL-U3's verification: `chatty-tui --agent auditor --headless` answers the
+/// tutorial's dataset question with the spec the developer tutorial writes.
+/// The model is scripted to call both tools the preamble names; everything
+/// else is real — the spec from the data directory,
 /// the `benford` plugin (0.3.0, loaded in-process), and its arithmetic. The
 /// verdict the model is handed is the plugin's: first digits
 /// 1,4,8,2,5,8,2,4,7 give χ² ≈ 10.49 on 8 degrees of freedom, under the
 /// 15.507 critical value, so LOW risk, digit 1 the most deviant.
+/// The developer tutorial's spec (`tutorial-benford-agent.md`, step 3).
+const AUDITOR_SPEC: &str = r#"[agent]
+name = "auditor"
+description = "Audits a list of amounts against Benford's Law with a chi-square test"
+preamble = "You are a forensic auditor. Call benford__compute_benford_distribution with the numbers, then benford__chi_square_test with its observed_counts, and total_analyzed as total. Report the risk level, the chi-square statistic and the digits that deviate most. Every number comes from the tools, never from your own arithmetic."
+
+[tools]
+profile = "reviewer"
+disable = ["shell"]
+
+[[plugins]]
+module = "benford"
+version = "^0.2"
+"#;
+
 #[test]
-fn benford_analyst_preset_gives_the_chi_square_verdict() {
+fn a_spec_with_the_benford_plugin_gives_the_chi_square_verdict() {
     const DATASET: [f64; 9] = [
         1234.0, 4521.0, 891.0, 2340.0, 567.0, 8901.0, 234.0, 456.0, 789.0,
     ];
@@ -191,12 +207,15 @@ fn benford_analyst_preset_gives_the_chi_square_verdict() {
         ],
     ));
     let home = config_for(&daemon);
+    let agents = home.path().join("data").join("chatty").join("agents");
+    std::fs::create_dir_all(&agents).expect("agents dir");
+    std::fs::write(agents.join("auditor.toml"), AUDITOR_SPEC).expect("the spec is written");
 
     let output = chatty_tui(
         home.path(),
         &[
             "--agent",
-            "benford-analyst",
+            "auditor",
             "--headless",
             "-m",
             "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789",
@@ -230,11 +249,11 @@ fn benford_analyst_preset_gives_the_chi_square_verdict() {
     }
     assert!(
         !tools.contains(&"shell_execute"),
-        "the preset has no shell: {tools:?}"
+        "the spec has no shell: {tools:?}"
     );
     assert!(
-        first.to_string().contains("forensic financial auditor"),
-        "the preset's preamble is the system prompt"
+        first.to_string().contains("You are a forensic auditor."),
+        "the spec's preamble is the system prompt"
     );
 
     // The distribution the plugin computed is the one the model then tests.
