@@ -1,0 +1,6 @@
+{
+  "leader": "fix-lead",
+  "agents": ["fix-coder", "code-reviewer"],
+  "verification": "python3 -m unittest discover -s tests -t . -v",
+  "max_agent_turns": 16
+}

@@ -849,7 +849,7 @@ as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
 `crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
-Three presets ship, all **experimental**: teams are supported, and a team becomes a
+Four presets ship, all **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their specs name no models, and a
 changed prompt is a new preset name, so a run of one stays comparable with an earlier one.
 
@@ -857,8 +857,9 @@ changed prompt is a new preset name, so a run of one stays comparable with an ea
 |------|--------|---------|-------|
 | `data-analysis` | `data-lead` | `data-analyst`, `reviewer` | A business question answered with SQL (`query_data`, no shell), a reviewer that re-derives the numbers, and the saved `report.md` relayed to you for approval. `teams/data-analysis/fixture/orders.csv` is its sample: 793 orders over July–August with a known answer (August revenue −17.6%; EU `Pro` orders fall 47 → 14, about 70% of the fall; the online `SUMMER30` code takes 30% off `Starter` from 1 August without lifting volume, about 27%). |
 | `research-brief` | `editor` | `researcher`, `writer`, `reviewer` | Sourced writing from a folder of documents, a relayed write approval. `teams/research-brief/fixture/docs/` is its sample corpus. |
+| `fix-and-verify` | `fix-lead` | `fix-coder`, `code-reviewer` | A coding team whose tests Chatty runs (AGE-757): the coder fixes a bug in its own worktree, the team's `verification` runs the project's test command in that tree and the result goes into the `evidence` block, `code-reviewer` (no shell) judges the real diff (`git_diff <base>..<branch>`) and that evidence, never the coder's word, and the leader merges on `APPROVE` with exit code 0. At most one fix round. `teams/fix-and-verify/fixture/` is a four-test Python project with one known bug (an order of exactly the free-shipping threshold is charged shipping; the fix is `>=` in `invoice.py`). Its `verification` is that fixture's command; for your own project, put a `team.json` naming the same specs and your test command in `.chatty/teams/fix-and-verify/`. |
 
-`data-analysis` and `research-brief` have no `SKILL.md`: the leader's preamble is the
+`data-analysis`, `research-brief` and `fix-and-verify` have no `SKILL.md`: the leader's preamble is the
 playbook, so `/agent data-lead …` on the desktop runs it the same as `--team data-analysis`
 once `virtual_agents` names the team (`["local-agent", "data-lead", "data-analyst",
 "reviewer"]`); the desktop has no team selection of its own.

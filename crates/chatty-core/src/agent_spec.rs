@@ -64,9 +64,15 @@ pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 /// preset joins through its team (`--team <id>`), a declared roster that
 /// names it, or a spec of yours that delegates to it (AGE-760).
 pub const PRESETS: &[(&str, &str)] = &[
+    (
+        "code-reviewer",
+        include_str!("../agents/code-reviewer.toml"),
+    ),
     ("data-analyst", include_str!("../agents/data-analyst.toml")),
     ("data-lead", include_str!("../agents/data-lead.toml")),
     ("editor", include_str!("../agents/editor.toml")),
+    ("fix-coder", include_str!("../agents/fix-coder.toml")),
+    ("fix-lead", include_str!("../agents/fix-lead.toml")),
     (
         "panel-adjudicator",
         include_str!("../agents/panel-adjudicator.toml"),
