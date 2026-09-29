@@ -11,7 +11,9 @@ use chatty_core::agent_spec::{SpecListing, inspect_agent_specs, roster_names_of}
 use gpui::{App, Global};
 use std::path::Path;
 
-use crate::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
+use crate::settings::models::{
+    DiscoveredModulesModel, ExecutionSettingsModel, ModuleSettingsModel,
+};
 
 #[derive(Default)]
 pub struct AgentSpecsModel {
@@ -57,9 +59,24 @@ impl AgentSpecsModel {
     }
 }
 
+/// Whether a broker that serves the roster is there to reach: one is
+/// published (lazily, BI-2) or already running, and this platform has the
+/// virtual-agent runners it would serve (Unix only). Independent of the
+/// module runtime, which gates WASM modules only (AGE-759).
+pub fn broker_reachable(cx: &App) -> bool {
+    cfg!(unix)
+        && cx
+            .try_global::<DiscoveredModulesModel>()
+            .is_some_and(|d| d.lazy_broker.is_some() || d.gateway.is_some())
+}
+
 /// The names the broker serves out of `listings`: what module settings
-/// declare, else `local-agent` and every exposed first definition.
+/// declare, else `local-agent` and every exposed first definition. None
+/// when no broker can reach them ([`broker_reachable`]).
 pub fn served_names(listings: &[SpecListing], cx: &App) -> Vec<String> {
+    if !broker_reachable(cx) {
+        return Vec::new();
+    }
     let declared = cx
         .try_global::<ModuleSettingsModel>()
         .map(|settings| settings.virtual_agents.clone())

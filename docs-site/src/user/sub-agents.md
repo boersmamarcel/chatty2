@@ -39,7 +39,7 @@ A single delegation with no further delegation keeps its plain row. In the termi
 
 ## Let the agent decide
 
-With tools on ([Agents & tools](./agents-and-tools.md)) and the module runtime enabled ([Extensions](./extensions.md)), the parent can ask for children itself when a task splits cleanly:
+With tools on ([Agents & tools](./agents-and-tools.md)), the parent can ask for children itself when a task splits cleanly:
 
 ```
 Task: "Refactor all modules and write tests for each"
@@ -114,7 +114,6 @@ A spec file is picked up as soon as it exists (on the desktop, **Settings → Ag
 
 ```json
 {
-  "enabled": true,
   "virtual_agents": ["local-coder", "local-reviewer"],
   "team": { "verification": "python3 -m pytest -q" }
 }

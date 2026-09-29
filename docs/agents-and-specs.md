@@ -56,7 +56,8 @@ turn of the conversation handed to that agent through the conversation's own bro
 (`TurnInput::delegation`, `chatty_core::session::Delegation`, AGE-744/AGE-747): the model
 is not asked, the turn is the one `invoke_agent` call, so the delegation row and its swarm
 tree show exactly as for a model-issued call, and a worker that fails or exits ends the
-row with its error. It needs the module runtime on, like `invoke_agent`. There is no
+row with its error. It needs the conversation's broker, like `invoke_agent`; the desktop
+publishes one whether or not the module runtime is on (AGE-759). There is no
 subprocess path: `chatty-tui --agent <name>` is still how you start the terminal app
 itself running as that spec, but `/agent` inside a running conversation never shells out
 to it. The desktop's lazy broker hands the root its gateway's direct transport
@@ -584,10 +585,14 @@ agent-build context, so `/modules` in the same session still saves exactly what 
 disk (AGE-382).
 
 **The broker starts lazily, on first use (BI-2, AGE-634).** Neither host starts the
-broker at boot: `--broker`/`--team` (chatty-tui) and the module gateway setting (the
-desktop) only prepare it — a `chatty_core::services::lazy_broker::LazyBroker` — and the
+broker at boot: `--broker`/`--team` (chatty-tui) and the desktop's module settings only
+prepare it — a `chatty_core::services::lazy_broker::LazyBroker` — and the
 first `list_agents` or `invoke_agent` call is what actually binds its socket and TCP
-port, through `LazyBroker::ensure_started`. Later calls reuse the same broker
+port, through `LazyBroker::ensure_started`. The desktop prepares one whether or not the
+module runtime is on: that switch gates WASM modules only. With it off, the broker's
+gateway loads no module and binds no TCP port — the root reaches it over
+`LazyBroker::transport` alone — and a broker that fails to start puts its reason in the
+`invoke_agent` error (AGE-759). Later calls reuse the same broker
 (memoized). A test can read `LazyBroker::bound_addrs()` to see whether anything is
 bound yet without triggering a start.
 

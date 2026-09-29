@@ -1,5 +1,5 @@
 //! AGE-744: the desktop's root conversation delegates through its own
-//! broker. The broker is the one the desktop builds — a `ProtocolGateway`
+//! broker — with the module runtime off too (AGE-759). The broker is the one the desktop builds — a `ProtocolGateway`
 //! with a `LocalRunner` per agent, started by the same
 //! [`lazy_gateway_broker::start`] the module-settings controller calls,
 //! behind a [`LazyGatewayBroker`] answered the way that controller answers
@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use chatty_core::factories::{AgentBuildContext, AgentServices};
 use chatty_core::services::StreamSurface;
+use chatty_core::services::lazy_broker::LazyBroker;
 use chatty_core::session::{AgentSession, AgentSessionConfig, Delegation, SessionEvent, TurnInput};
 use chatty_core::settings::models::execution_settings::ExecutionSettingsModel;
 use chatty_core::settings::models::models_store::ModelConfig;
@@ -31,6 +32,7 @@ use chatty_protocol_gateway::worker::TaskMapper;
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 
 use super::lazy_gateway_broker::{self, LazyGatewayBroker};
+use crate::settings::controllers::module_settings_controller::build_registry;
 
 const ANALYST: &str = "analyst";
 const ROOT_MODEL: &str = "desktop/root";
@@ -101,20 +103,39 @@ fn worker_script(dir: &Path, body: &str) -> PathBuf {
 
 /// The desktop's lazy broker over a gateway serving `ANALYST` with
 /// `worker`, started on the first request exactly as
-/// `module_settings_controller::refresh_runtime` starts it.
+/// `module_settings_controller::refresh_runtime` starts it with the module
+/// runtime on.
 fn desktop_broker(worker: PathBuf) -> Arc<LazyGatewayBroker> {
+    desktop_broker_with(worker, None)
+}
+
+/// [`desktop_broker`] with the module runtime off, as `refresh_runtime`
+/// builds it then (AGE-759): the registry from `module_dir` loads no
+/// module, and the gateway binds no HTTP port.
+fn desktop_broker_runtime_off(worker: PathBuf, module_dir: &Path) -> Arc<LazyGatewayBroker> {
+    desktop_broker_with(worker, Some(module_dir.to_string_lossy().into_owned()))
+}
+
+/// `runtime_off_module_dir` is `None` with the module runtime on.
+fn desktop_broker_with(
+    worker: PathBuf,
+    runtime_off_module_dir: Option<String>,
+) -> Arc<LazyGatewayBroker> {
     let (request_tx, mut request_rx) =
         tokio::sync::mpsc::unbounded_channel::<lazy_gateway_broker::StartReply>();
     tokio::spawn(async move {
         let Some(reply) = request_rx.recv().await else {
             return;
         };
-        let registry = ModuleRegistry::new(Arc::new(NoopProvider), ResourceLimits::default())
-            .expect("the module registry builds");
+        let registry = match &runtime_off_module_dir {
+            None => ModuleRegistry::new(Arc::new(NoopProvider), ResourceLimits::default()),
+            Some(module_dir) => build_registry(module_dir, Arc::new(NoopProvider), false),
+        }
+        .expect("the module registry builds");
         let mut gateway = ProtocolGateway::new(Arc::new(tokio::sync::RwLock::new(registry)), 0);
         let runner = LocalRunner::new(worker, gateway.participants()).with_agent_name(ANALYST);
         gateway = gateway.with_virtual_agent(Arc::new(runner));
-        let started = lazy_gateway_broker::start(&mut gateway, 0)
+        let started = lazy_gateway_broker::start(&mut gateway, 0, runtime_off_module_dir.is_none())
             .await
             .map_err(|e| e.to_string());
         let _ = reply.send(started);
@@ -292,5 +313,43 @@ async fn child_exit_ends_delegation_row() {
         conversation.messages().len(),
         2,
         "the command and its outcome are in history"
+    );
+}
+
+/// With the module runtime off (the default), `/agent <name>` still reaches
+/// the roster's local spec through the broker (AGE-759): before, the
+/// desktop listed the agent but published no broker, and every delegation
+/// failed with "needs a broker connection". The broker loads no module and
+/// binds no HTTP port — the root reaches it directly.
+#[tokio::test]
+async fn runtime_off_agent_command_reaches_local_spec() {
+    let dir = tempfile::tempdir().unwrap();
+    // Would fail the scan if the registry tried to load it.
+    let module_dir = dir.path().join("no-such-module-dir");
+    let broker = desktop_broker_runtime_off(answering_worker(dir.path()), &module_dir);
+    let daemon = FakeDaemon::scripted(Script::new());
+    let mut session = desktop_session(&daemon, broker.clone(), dir.path()).await;
+
+    let events = run_turn(
+        &mut session,
+        TurnInput::delegation(Delegation {
+            agent: ANALYST.to_string(),
+            prompt: "check the ledger".to_string(),
+        }),
+    )
+    .await;
+
+    assert!(daemon.requests().is_empty(), "/agent asks no model");
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            SessionEvent::ToolCallError { error, .. } if error.contains("broker")
+        )),
+        "{events:#?}"
+    );
+    assert_eq!(finished(&events), vec![(true, Some(ANSWER.to_string()))]);
+    assert!(
+        broker.bound_addrs().is_empty(),
+        "the module runtime is off: no HTTP port is bound"
     );
 }

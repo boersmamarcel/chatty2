@@ -101,15 +101,11 @@ impl ChatView {
                     .count()
             })
             .unwrap_or(0);
-        // The local roster the broker serves when the module runtime is on
-        // (PL-U5): specs, never modules. Read from the cache the footer's
-        // agent indicator keeps current.
         let module_runtime_enabled = module_settings.is_some_and(|settings| settings.enabled);
-        let local_agent_count = if module_runtime_enabled {
-            served_names(&AgentSpecsModel::cached(cx), cx).len()
-        } else {
-            0
-        };
+        // The local roster the broker serves, module runtime on or off
+        // (PL-U5, AGE-759): specs, never modules. Read from the cache the
+        // footer's agent indicator keeps current.
+        let local_agent_count = served_names(&AgentSpecsModel::cached(cx), cx).len();
 
         let summary_badges = vec![
             render_status_badge(

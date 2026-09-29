@@ -16,17 +16,20 @@
 //! broker per root process), so what the start task answers with is the
 //! gateway's direct [`Transport`] as well as its port: `invoke_agent` reaches
 //! the local roles through that handle, never over loopback HTTP (AGE-744).
+//! So the HTTP side is bound only when the module runtime is on: it serves
+//! the WASM modules and external clients, which the broker's root does not
+//! need (AGE-759).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use chatty_fabric::Transport;
 
-/// What a started gateway hands back: the port it bound, and this process's
-/// direct handle into it (`ProtocolGateway::transport`).
+/// What a started gateway hands back: the port it bound, if it serves HTTP,
+/// and this process's direct handle into it (`ProtocolGateway::transport`).
 #[derive(Clone)]
 pub struct StartedGateway {
-    pub port: u16,
+    pub port: Option<u16>,
     pub transport: Arc<dyn Transport>,
 }
 
@@ -34,16 +37,27 @@ pub struct StartedGateway {
 /// gateway, or the reason it failed to start.
 pub type StartReply = tokio::sync::oneshot::Sender<Result<StartedGateway, String>>;
 
-/// Start `gateway` on `port` as the desktop's broker. Its direct handle is
-/// taken here, after every virtual agent is on it, so the call path reaches
-/// all of them.
+/// Start `gateway` as the desktop's broker, binding its HTTP side on
+/// `port` only with `serve_http` (the module runtime on, AGE-759). Its
+/// direct handle is taken here, after every virtual agent is on it, so the
+/// call path reaches all of them.
 pub async fn start(
     gateway: &mut chatty_protocol_gateway::ProtocolGateway,
     port: u16,
+    serve_http: bool,
 ) -> anyhow::Result<StartedGateway> {
     let transport = gateway.transport();
+    if !serve_http {
+        return Ok(StartedGateway {
+            port: None,
+            transport,
+        });
+    }
     gateway.start().await?;
-    Ok(StartedGateway { port, transport })
+    Ok(StartedGateway {
+        port: Some(port),
+        transport,
+    })
 }
 
 /// See the module docs.
@@ -81,8 +95,12 @@ impl LazyGatewayBroker {
 #[async_trait::async_trait]
 impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
     async fn ensure_started(&self) -> anyhow::Result<String> {
-        let started = self.started().await?;
-        Ok(format!("http://localhost:{}", started.port))
+        match self.started().await?.port {
+            Some(port) => Ok(format!("http://localhost:{port}")),
+            None => Err(anyhow::anyhow!(
+                "the module runtime is off, so the broker serves no HTTP"
+            )),
+        }
     }
 
     /// The root reaches its broker directly (ADR-0020, BI-4).
@@ -91,10 +109,11 @@ impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
     }
 
     fn bound_addrs(&self) -> Vec<SocketAddr> {
-        match self.once.get() {
-            Some(started) => vec![SocketAddr::from(([127, 0, 0, 1], started.port))],
-            None => Vec::new(),
-        }
+        self.once
+            .get()
+            .and_then(|started| started.port)
+            .map(|port| vec![SocketAddr::from(([127, 0, 0, 1], port))])
+            .unwrap_or_default()
     }
 
     /// The root's messages come from its broker's direct handle; a broker

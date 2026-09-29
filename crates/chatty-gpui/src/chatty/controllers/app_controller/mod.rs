@@ -67,8 +67,15 @@ pub(crate) use conversation_ops_modify::move_ui_enabled;
 /// caught up with a workspace change yet. No broker running yet is not a
 /// disagreement — its own resolved roster is the best guess available
 /// until one starts (the lazy broker, BI-2/AGE-634, builds on first use).
+///
+/// They also come back empty when no broker is published at all, or none
+/// could serve them on this platform: a name listed without one fails
+/// every delegation (AGE-759).
 fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<String>)> {
     let m = cx.try_global::<crate::settings::models::ModuleSettingsModel>()?;
+    if !crate::settings::models::agent_specs::broker_reachable(cx) {
+        return Some((m.gateway_port, Vec::new()));
+    }
     let discovered = cx.try_global::<crate::settings::models::DiscoveredModulesModel>();
     let broker_is_live = discovered.is_some_and(|d| d.gateway.is_some());
     let broker_workspace = discovered.and_then(|d| d.gateway_workspace.as_deref());
@@ -1001,5 +1008,46 @@ mod tests {
             Some(&link),
             Some(&canonical_real)
         ));
+    }
+
+    /// A broker published but not started yet, for the roster check.
+    struct PendingBroker;
+
+    #[async_trait::async_trait]
+    impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
+        async fn ensure_started(&self) -> anyhow::Result<String> {
+            unreachable!("listing the roster starts no broker")
+        }
+
+        fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+            Vec::new()
+        }
+    }
+
+    /// With the module runtime off (the default) a conversation still lists
+    /// the roster, since the broker serving it is published anyway; with
+    /// no broker published it lists none, rather than names every
+    /// delegation to would fail (AGE-759).
+    #[gpui::test]
+    fn roster_follows_the_broker_not_the_module_runtime(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::models::ModuleSettingsModel {
+                enabled: false,
+                virtual_agents: vec!["panel-writer".to_string()],
+                ..Default::default()
+            });
+            cx.set_global(crate::settings::models::DiscoveredModulesModel::default());
+            let (_, names) = gateway_and_roster(cx, None).expect("module settings exist");
+            assert!(names.is_empty(), "no broker published: {names:?}");
+
+            cx.global_mut::<crate::settings::models::DiscoveredModulesModel>()
+                .lazy_broker = Some(std::sync::Arc::new(PendingBroker));
+            let (_, names) = gateway_and_roster(cx, None).expect("module settings exist");
+            if cfg!(unix) {
+                assert_eq!(names, vec!["panel-writer".to_string()]);
+            } else {
+                assert!(names.is_empty(), "no runners on this platform: {names:?}");
+            }
+        });
     }
 }

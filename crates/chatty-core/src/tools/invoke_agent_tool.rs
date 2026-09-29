@@ -273,16 +273,26 @@ impl InvokeAgentTool {
     /// The fabric local roles are reached through: the one this tool was
     /// given, else the lazy broker's direct handle (starting it), else
     /// none — a local role is then unreachable, there is no fallback.
-    async fn fabric_transport(&self) -> Option<Arc<dyn Transport>> {
+    ///
+    /// `Err` is a broker that is configured but failed to start: its reason
+    /// goes to the user, not only to the log (AGE-759).
+    async fn fabric_transport(&self, agent: &str) -> Result<Arc<dyn Transport>, InvokeAgentError> {
         if let Some(transport) = &self.transport {
-            return Some(transport.clone());
+            return Ok(transport.clone());
         }
-        let broker = self.lazy_broker.as_ref()?;
+        let no_broker = || {
+            InvokeAgentError::InvocationFailed(format!(
+                "Agent '{agent}' needs a broker connection, which is not available here."
+            ))
+        };
+        let broker = self.lazy_broker.as_ref().ok_or_else(no_broker)?;
         match broker.transport().await {
-            Ok(transport) => transport,
+            Ok(transport) => transport.ok_or_else(no_broker),
             Err(error) => {
                 warn!(%error, "Failed to start the broker for a delegation");
-                None
+                Err(InvokeAgentError::InvocationFailed(format!(
+                    "Agent '{agent}' needs a broker connection, but the broker failed to start: {error:#}"
+                )))
             }
         }
     }
@@ -528,11 +538,7 @@ impl Tool for InvokeAgentTool {
             .map(String::as_str)
             .find(|local| *local == agent_name)
         {
-            let Some(transport) = self.fabric_transport().await else {
-                return Err(InvokeAgentError::InvocationFailed(format!(
-                    "Agent '{local}' needs a broker connection, which is not available here."
-                )));
-            };
+            let transport = self.fabric_transport(local).await?;
             // The broker checks what is left against the chain and
             // refuses a spent budget itself, with an edge-log row.
             info!(agent = %local, "Delegating to a local worker over the fabric");
@@ -1348,6 +1354,53 @@ mod tests {
             "{err}"
         );
         assert!(err.to_string().contains("broker connection"), "{err}");
+    }
+
+    /// A broker that is configured but fails to start says why, to the
+    /// user: not just the generic "no broker" text (AGE-759).
+    #[tokio::test]
+    async fn a_broker_that_fails_to_start_says_why() {
+        struct FailingBroker;
+
+        #[async_trait::async_trait]
+        impl LazyBroker for FailingBroker {
+            async fn ensure_started(&self) -> anyhow::Result<String> {
+                unreachable!("the root reaches its broker over the transport")
+            }
+
+            async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
+                Err(anyhow::anyhow!(
+                    "failed to create module registry: out of wasm memory"
+                ))
+            }
+
+            fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+                Vec::new()
+            }
+        }
+
+        let tool = InvokeAgentTool::new(vec![])
+            .with_local_agents(["data-analyst"])
+            .with_lazy_broker(Arc::new(FailingBroker));
+
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "data-analyst".to_string(),
+                    prompt: "Sum column b of data.csv".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, InvokeAgentError::InvocationFailed(_)),
+            "{err}"
+        );
+        let text = err.to_string();
+        assert!(text.contains("the broker failed to start"), "{text}");
+        assert!(text.contains("out of wasm memory"), "{text}");
     }
 
     #[tokio::test]

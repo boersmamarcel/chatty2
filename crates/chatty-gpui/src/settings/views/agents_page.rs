@@ -4,9 +4,9 @@
 //! `/a2a/{name}`, and `list_agents`, `invoke_agent` and `/agent` reach them
 //! by name. Remote A2A agents are listed below them.
 
-use crate::settings::models::agent_specs::served_names;
+use crate::settings::models::agent_specs::{broker_reachable, served_names};
 use crate::settings::models::extensions_store::ExtensionsModel;
-use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel, ModuleSettingsModel};
+use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel};
 use chatty_core::agent_spec::{AgentSpec, SpecListing};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -18,9 +18,9 @@ pub fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
         .description(
             "Every local agent is a spec: <workspace>/.chatty/agents/<name>.toml, \
-             <data dir>/chatty/agents/<name>.toml, or a preset. With the module runtime on, \
-             the broker serves the exposed ones, and list_agents, invoke_agent and \
-             /agent <name> reach them by name. Edit a spec in its file, then Reload.",
+             <data dir>/chatty/agents/<name>.toml, or a preset. The broker serves the \
+             exposed ones, and list_agents, invoke_agent and /agent <name> reach them by \
+             name. Edit a spec in its file, then Reload.",
         )
         .resettable(false)
         .groups(vec![specs_group(), remote_agents_group()])
@@ -32,9 +32,15 @@ fn specs_group() -> SettingGroup {
         .items(vec![SettingItem::render(|_options, _window, cx| {
             let listings = AgentSpecsModel::listings(cx);
             let served = served_names(&listings, cx);
-            let broker_on = cx
-                .try_global::<ModuleSettingsModel>()
-                .is_some_and(|settings| settings.enabled);
+            // What the conversations' roster actually reaches, whatever the
+            // module runtime's switch says (AGE-759).
+            let status = if !broker_reachable(cx) {
+                "No broker is available here, so none of these are served.".to_string()
+            } else if served.is_empty() {
+                "The broker serves none of these.".to_string()
+            } else {
+                format!("Served by the broker: {}", served.join(", "))
+            };
 
             v_flex()
                 .w_full()
@@ -48,13 +54,7 @@ fn specs_group() -> SettingGroup {
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(if broker_on {
-                                    format!("Served by the broker: {}", served.join(", "))
-                                } else {
-                                    "The module runtime is off, so the broker serves none of \
-                                     these; /agent <name> still runs them."
-                                        .to_string()
-                                }),
+                                .child(status),
                         )
                         .child(
                             Button::new("agents-reload")
