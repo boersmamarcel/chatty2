@@ -48,6 +48,12 @@ pub enum ClientError {
     /// Any other error from the HTTP layer.
     #[error("http error: {0}")]
     HttpTransport(#[source] reqwest::Error),
+
+    /// The registry's base URL is plain `http://` to a non-local address
+    /// (SEC-16, AGE-756): refused before any request is sent, so a bearer
+    /// token or password never has a chance to leave in clear text.
+    #[error("insecure registry URL: {0}")]
+    InsecureUrl(String),
 }
 
 impl From<reqwest::Error> for ClientError {
