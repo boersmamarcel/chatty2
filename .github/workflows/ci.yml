@@ -75,6 +75,9 @@ jobs:
               # eventual rename) must re-run the build.
               - 'templates/module/**'
               - 'wit/**'
+              # Goldens are test inputs: editing one must re-run the tests
+              # that replay it (the pre-fabric ones above all, AGE-640).
+              - '**/goldens/**'
               - 'scripts/build-wasm-fixtures.sh'
               - 'scripts/check-reserved.sh'
               - 'scripts/check-rig-pins.sh'
@@ -298,6 +301,85 @@ jobs:
       - name: Check the desktop app and the CLI
         if: needs.changes.outputs.rust == 'true'
         run: cargo check -p chatty-gpui -p chatty-tui
+
+  # ADR-0020's first kill criterion (AGE-640, BI-8): the parent-side traces
+  # BI-0 recorded from `main` before BI-3 replay unchanged on the new path.
+  # `pre_fabric_goldens_replay` already runs inside `test`; this job runs it
+  # on its own so the criterion is a named check, and fails a change that
+  # rewrites a pre-fabric golden instead of the code (a golden may only be
+  # deleted, with a reason in the PR body; see docs/swarm-test-kit.md).
+  fabric-goldens:
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GOLDENS: crates/chatty-tui/src/participant/goldens/pre_fabric
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # HEAD^1 is the base on a PR merge ref, a merge group and a push.
+          fetch-depth: 2
+
+      - name: Refuse edited pre-fabric goldens
+        run: |
+          edited=$(git diff --name-only --diff-filter=MRT HEAD^1 HEAD -- "$GOLDENS")
+          if [ -n "$edited" ]; then
+            echo "::error::pre-fabric goldens are never re-recorded (ADR-0020 invariant 10):"
+            echo "$edited"
+            exit 1
+          fi
+
+      - name: Skip replay (no Rust-relevant changes)
+        if: needs.changes.outputs.rust != 'true'
+        run: echo "No compile-relevant files changed; skipping the goldens replay."
+
+      - name: Install Rust toolchain
+        if: needs.changes.outputs.rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        if: needs.changes.outputs.rust == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: linux-fabric-goldens
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install Linux dependencies
+        if: needs.changes.outputs.rust == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libgl1-mesa-dev \
+            libfontconfig1-dev \
+            libasound2-dev \
+            libssl-dev \
+            pkg-config
+
+      # `--test worker_binary` makes cargo build the chatty-tui binary the
+      # kit spawns as its workers. The replay must actually run: a renamed
+      # or filtered-out test would otherwise pass with 0 tests.
+      - name: Replay the pre-fabric goldens
+        if: needs.changes.outputs.rust == 'true'
+        run: |
+          set -o pipefail
+          cargo test -p chatty-tui --bin chatty-tui --test worker_binary -- \
+            --exact participant::swarm_kit::pre_fabric_goldens_replay --test-threads=1 \
+            | tee replay.log
+          grep -q "test participant::swarm_kit::pre_fabric_goldens_replay ... ok" replay.log
 
   # Warm the release-profile caches that release.yml restores. Release runs
   # are restore-only (they must never write default-branch caches), so until
