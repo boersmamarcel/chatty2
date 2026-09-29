@@ -61,9 +61,10 @@
 //! it carries is dropped when it is parsed. A call that would close a cycle
 //! or go deeper than [`MAX_DEPTH`](chatty_fabric::MAX_DEPTH) ends with
 //! [`CallError::Delegation`] and a refusal row; the model reads the typed
-//! reason. The root's calls are not checked against the policy: the root's
-//! own spec, which decides whether it has `invoke_agent` at all, is not the
-//! broker's to know.
+//! reason. The root's calls are checked against the spec the root runs as,
+//! when it runs as one — a `--team` leader, an `--agent <spec>` root — and
+//! refused the same way (AGE-745); a plain root's own tools decide whether
+//! it may delegate at all, so the policy lets it call anyone.
 //!
 //! Then the budget (DP-3): what the caller has left is its chain's budget
 //! narrowed by what the call says the caller has left of it (the caller's
@@ -150,7 +151,7 @@ pub struct BrokerCalls {
     /// result.
     pending: Arc<Mutex<HashMap<Recipient, PendingList>>>,
     next_message: AtomicU64,
-    /// The spec rules a node's call is checked against (PL-S2); `None`
+    /// The spec rules a call is checked against (PL-S2, AGE-745); `None`
     /// checks only the chain.
     policy: Option<Arc<dyn CallPolicy>>,
     /// Prices a callee's reported usage for its task row (DP-3); `None`
@@ -283,7 +284,8 @@ impl BrokerCalls {
         }
     }
 
-    /// Check every node's call against `policy` before anything is spawned.
+    /// Check every call, the root's included, against `policy` before
+    /// anything is spawned.
     pub fn with_policy(mut self, policy: Option<Arc<dyn CallPolicy>>) -> Self {
         self.policy = policy;
         self
@@ -754,7 +756,8 @@ impl BrokerCalls {
     }
 
     /// Whether `caller`, at `chain`, may call `agent`: the specs first (a
-    /// node's call only), then the chain's cycle and depth, then its budget
+    /// node's as the spec it was admitted as, the root's as the spec the
+    /// policy says it runs as), then the chain's cycle and depth, then its budget
     /// narrowed by `caller_left`, what the caller says it has left (DP-3).
     /// The run the call starts is stamped with the chain it runs under,
     /// budget included.
@@ -772,7 +775,12 @@ impl BrokerCalls {
             .node_spec(agent)
             .unwrap_or_else(|| agent.to_string());
         let caller = match caller {
-            Caller::Root => None,
+            Caller::Root => {
+                if let Some(policy) = self.policy.as_ref() {
+                    policy.root_may_call(&callee)?;
+                }
+                None
+            }
             Caller::Node(name) => {
                 if let Some(policy) = self.policy.as_ref() {
                     policy.may_call(&self.caller_spec(name), &callee)?;

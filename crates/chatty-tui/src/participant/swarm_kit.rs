@@ -164,17 +164,35 @@ impl SwarmKit {
     /// `sse` and the NDJSON one from `ndjson`. The workspace holds one file,
     /// `README.md` (`# Chatty`).
     pub async fn start(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
-        Self::start_with(roster, sse, ndjson, false).await
+        Self::start_with(None, roster, sse, ndjson, false).await
+    }
+
+    /// As [`start`](Self::start), with the root running as `leader` — a
+    /// `--team` leader, an `--agent <spec>` root — whose own calls the
+    /// broker checks against its spec (AGE-745).
+    pub async fn start_led(
+        leader: AgentSpec,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_with(Some(leader), roster, sse, ndjson, false).await
     }
 
     /// As [`start`](Self::start), with the workspace a git repository on
     /// `main` whose one commit holds `README.md`, so every worker gets a
     /// `git worktree` of its own (BI-5).
     pub async fn start_in_repo(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
-        Self::start_with(roster, sse, ndjson, true).await
+        Self::start_with(None, roster, sse, ndjson, true).await
     }
 
-    async fn start_with(roster: Vec<AgentDef>, sse: Script, ndjson: Script, repo: bool) -> Self {
+    async fn start_with(
+        leader: Option<AgentSpec>,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+        repo: bool,
+    ) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
         let sse = FakeDaemon::scripted(sse);
@@ -306,6 +324,7 @@ impl SwarmKit {
             });
         }
         let broker = Broker::start_priced_at(
+            leader,
             base.join("run").join("participants.sock"),
             executable,
             module_settings.default_endpoint_budget,
