@@ -53,6 +53,7 @@ fn describe(event: &AppEvent) -> String {
             id,
             command,
             is_sandboxed,
+            asker: _,
         } => format!("ApprovalRequested(id={id:?}, {command:?}, sandboxed={is_sandboxed})"),
         AppEvent::ApprovalResolved { id, approved } => {
             format!("ApprovalResolved(id={id:?}, approved={approved})")

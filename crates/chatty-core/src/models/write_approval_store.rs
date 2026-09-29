@@ -62,7 +62,7 @@ impl WriteOperation {
                 destination,
             } => format!("Move: {} → {}", source, destination),
             WriteOperation::ApplyDiff { path, .. } => format!("Edit file: {}", path),
-            WriteOperation::Relayed(detail) => detail.relayed_label(),
+            WriteOperation::Relayed(detail) => detail.description(),
         }
     }
 

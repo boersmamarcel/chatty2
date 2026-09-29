@@ -27,8 +27,9 @@ use std::sync::Arc;
 pub trait LazyBroker: Send + Sync {
     /// Starts the broker if it has not started yet, and returns its loopback
     /// base URL (`http://localhost:<port>`) either way. An error here means
-    /// the broker could not start; callers treat that exactly as they treat
-    /// "no gateway configured".
+    /// the broker is configured but could not start (e.g. a port collision,
+    /// AGE-746); `ListAgentsTool` surfaces it in its `note` rather than
+    /// treating it the same as "no gateway configured".
     async fn ensure_started(&self) -> anyhow::Result<String>;
 
     /// Starts the broker if it has not started yet, and returns a direct

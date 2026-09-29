@@ -693,15 +693,17 @@ impl ChattyApp {
                 id,
                 command,
                 is_sandboxed,
+                asker,
             } => {
                 debug!(id = %id, command = %command, sandboxed = is_sandboxed, "StreamManager: approval requested");
                 let id = id.clone();
                 let command = command.clone();
                 let is_sandboxed = *is_sandboxed;
+                let asker = asker.clone();
 
                 chat_view.update(cx, |view, cx| {
                     if view.conversation_id() == Some(conversation_id) {
-                        view.handle_approval_requested(id, command, is_sandboxed, cx);
+                        view.handle_approval_requested(id, command, is_sandboxed, asker, cx);
                     }
                 });
             }

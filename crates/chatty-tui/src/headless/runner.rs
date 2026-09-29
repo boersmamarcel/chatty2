@@ -700,11 +700,12 @@ impl HeadlessRunner {
                 id,
                 command,
                 is_sandboxed,
+                asker,
             } => {
                 self.session
-                    .note_approval_requested(&id, &command, is_sandboxed);
+                    .note_approval_requested(&id, &command, is_sandboxed, asker.clone());
                 self.transcript
-                    .approval_requested(id, command, is_sandboxed);
+                    .approval_requested(id, command, is_sandboxed, asker);
             }
             AppEvent::ApprovalResolved { id, approved } => {
                 self.session.note_approval_resolved(&id, approved);

@@ -233,6 +233,9 @@ pub enum StreamManagerEvent {
         id: String,
         command: String,
         is_sandboxed: bool,
+        /// Who asked, when relayed up a call chain (AGE-646), shown outside
+        /// the command rather than folded into it (AGE-751).
+        asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
     },
     ApprovalResolved {
         conversation_id: String,
@@ -673,12 +676,13 @@ impl StreamManager {
                 id,
                 command,
                 is_sandboxed,
-                ..
+                detail,
             } => {
                 cx.emit(StreamManagerEvent::ApprovalRequested {
                     conversation_id: conv_id.to_string(),
                     id,
                     command,
+                    asker: detail.asker,
                     is_sandboxed,
                 });
             }

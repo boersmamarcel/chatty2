@@ -130,13 +130,20 @@ impl Transcript {
     }
 
     /// The approval prompt, inline where the stream asked for it.
-    pub fn approval_requested(&mut self, id: String, command: String, is_sandboxed: bool) {
+    pub fn approval_requested(
+        &mut self,
+        id: String,
+        command: String,
+        is_sandboxed: bool,
+        asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
+    ) {
         if let Some(msg) = self.streaming_assistant_or_continuation() {
             msg.blocks.push(MessageBlock::Approval(ApprovalInfo {
                 id,
                 command,
                 is_sandboxed,
                 decision: None,
+                asker,
             }));
         }
     }
@@ -386,7 +393,7 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.start_assistant();
         transcript.tool_started("c1".into(), "run_shell".into());
-        transcript.approval_requested("a1".into(), "rm -rf build".into(), false);
+        transcript.approval_requested("a1".into(), "rm -rf build".into(), false, None);
         let msg = transcript.messages.last().unwrap();
         assert_eq!(kinds(msg), vec!["tool", "approval"]);
         assert!(matches!(
@@ -477,11 +484,11 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.start_assistant();
         transcript.tool_started("c1".into(), "shell_execute".into());
-        transcript.approval_requested("a1".into(), "rm -rf build".into(), false);
+        transcript.approval_requested("a1".into(), "rm -rf build".into(), false, None);
         transcript.approval_resolved("a1", false);
         transcript.tool_error("c1", "denied".into());
         transcript.tool_started("c2".into(), "shell_execute".into());
-        transcript.approval_requested("a2".into(), "cargo build".into(), true);
+        transcript.approval_requested("a2".into(), "cargo build".into(), true, None);
         transcript.approval_resolved("nope", true);
         transcript.approval_resolved("a2", true);
         transcript.tool_result("c2", "ok".into());
@@ -508,7 +515,7 @@ mod tests {
         transcript.tool_started("c2".into(), "read_file".into());
         transcript.tool_result("c2", "ok".into());
         transcript.tool_started("c3".into(), "shell_execute".into());
-        transcript.approval_requested("a1".into(), "rm -rf build".into(), false);
+        transcript.approval_requested("a1".into(), "rm -rf build".into(), false, None);
         transcript.mark_cancelled();
 
         let msg = transcript.messages.last().unwrap();

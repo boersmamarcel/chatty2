@@ -1006,6 +1006,7 @@ mod tests {
             id: "a1".to_string(),
             command: "rm -rf /tmp/x".to_string(),
             is_sandboxed: false,
+            asker: None,
         })
         .unwrap();
         tx.send(AppEvent::TextChunk("c".to_string())).unwrap();

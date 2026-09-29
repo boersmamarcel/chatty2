@@ -193,10 +193,10 @@ async fn approval_card_names_the_asking_agent() {
     let run = root.run("Start.");
     let approval = the_relayed_approval(&mut root).await;
 
-    assert_eq!(
-        approval.command,
-        "kit-coder-0 (root \u{203a} kit-lead \u{203a} kit-coder) asks: [shell] echo hi"
-    );
+    // AGE-751: `command` is the command alone — the asker never folds into
+    // it — so a card that wraps `command` in backticks never wraps the
+    // asker along with it.
+    assert_eq!(approval.command, "[shell] echo hi");
     let asker = approval.detail.asker.clone().expect("a relayed approval");
     assert_eq!(asker.agent, "kit-coder-0");
     assert_eq!(asker.chain, ["root", "kit-lead", "kit-coder"]);

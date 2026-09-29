@@ -198,6 +198,11 @@ pub struct ApprovalBlock {
     pub state: ApprovalState,
     /// When the approval was requested
     pub created_at: std::time::SystemTime,
+    /// Who asked, when this approval was relayed up a call chain (AGE-646):
+    /// its broker-assigned name and the chain of spec names it runs under.
+    /// A card names the asker from this, outside the command (AGE-751).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker: Option<crate::models::execution_approval_store::ApprovalAsker>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -15,7 +15,7 @@ This skill is the way to see them before the PR does.
 
 | Script | What |
 |---|---|
-| `start.sh` | Xvfb + the app on an isolated `XDG_CONFIG_HOME`, resized and focused. Prints the pid and the next command. |
+| `start.sh` | Xvfb + the app on an isolated `XDG_CONFIG_HOME` and `XDG_DATA_HOME`, resized and focused. Prints the pid and the next command. |
 | `x.py` | XTest driver: `geom shot crop click rclick dblclick ctrlclick shiftclick drag wheel type key ctrl/alt/shift`. Run `x.py` with no args for the list. |
 | `stop.sh` | Kills the app, leaked headless Chromes, and Xvfb. |
 
@@ -90,8 +90,11 @@ workstation that is the pyenv shim (3.6), **not** `/usr/bin/python3`.
   the `[c]` trick. Run `pkill` alone or use `stop.sh`.
 - **Killing the app leaks headless Chromes** (`--user-data-dir=/tmp/chatty-browser-*`);
   `stop.sh` sweeps them.
-- **The user's real data**: `XDG_CONFIG_HOME` must never be `~/.config`.
-  `start.sh` writes its own `config/`.
+- **The user's real data**: `XDG_CONFIG_HOME` must never be `~/.config`, and
+  `XDG_DATA_HOME` must never be `~/.local/share` — without a scratch
+  `XDG_DATA_HOME` too, the module registry scans the real
+  `~/.local/share/chatty/modules` (AGE-746). `start.sh` writes its own
+  `config/` and `data/`.
 - **Other work on the machine**: Harbor eval jobs run `chatty-tui` processes
   here; match on `debug/chatty`, never on a bare `chatty`.
 - **Which binary is that?** `start.sh` runs `$CARGO_TARGET_DIR/debug/chatty`

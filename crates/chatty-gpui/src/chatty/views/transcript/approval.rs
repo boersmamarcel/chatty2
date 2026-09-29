@@ -11,6 +11,23 @@ use gpui_component::{ActiveTheme, Sizable};
 
 pub type ApprovalCallback = Arc<dyn Fn(bool, &mut App) + Send + Sync>;
 
+/// The title a relayed approval's card shows (AGE-751): `coder-0 asks to run
+/// `echo hi`` for a shell command, `coder-0 asks to write path (+3 -1)` for a
+/// write. `command` is the plain `[shell] .../[write] ...` tag
+/// [`ApprovalDetail::description`] builds — the same tag a direct (unrelayed)
+/// approval already carries — never the asker.
+///
+/// [`ApprovalDetail::description`]: chatty_core::models::execution_approval_store::ApprovalDetail::description
+fn relayed_approval_title(agent: &str, command: &str) -> String {
+    if let Some(cmd) = command.strip_prefix("[shell] ") {
+        format!("{agent} asks to run `{cmd}`")
+    } else if let Some(write) = command.strip_prefix("[write] ") {
+        format!("{agent} asks to write {write}")
+    } else {
+        format!("{agent} asks to run `{command}`")
+    }
+}
+
 #[derive(IntoElement)]
 pub struct ApprovalCard {
     approval: ApprovalBlock,
@@ -40,6 +57,7 @@ impl RenderOnce for ApprovalCard {
         match self.approval.state {
             ApprovalState::Pending => {
                 let command = self.approval.command.clone();
+                let asker = self.approval.asker.clone();
                 let on_decide = self.on_decide;
                 #[cfg(target_os = "macos")]
                 let (approve_ks, deny_ks) = ("cmd-y", "cmd-shift-n");
@@ -56,12 +74,25 @@ impl RenderOnce for ApprovalCard {
                     .gap_2()
                     .child({
                         let alert_id = ElementId::Name(format!("approval-alert-{id}").into());
-                        // A command for the human's own terminal (AGE-584):
-                        // where it runs and that it is not sandboxed.
-                        match parse_approval_label(&command) {
-                            Some((run, context)) => Alert::warning(alert_id, context.to_string())
-                                .title(format!("Run `{run}` in your terminal?")),
-                            None => Alert::warning(alert_id, format!("Run `{command}`?")),
+                        match &asker {
+                            // A relayed approval (AGE-751): the asker and its
+                            // chain go outside the command, in their own
+                            // field — never parsed back out of a folded
+                            // string.
+                            Some(asker) => {
+                                let what = relayed_approval_title(&asker.agent, &command);
+                                Alert::warning(alert_id, asker.chain.join(" \u{203a} ")).title(what)
+                            }
+                            // A command for the human's own terminal
+                            // (AGE-584): where it runs and that it is not
+                            // sandboxed.
+                            None => match parse_approval_label(&command) {
+                                Some((run, context)) => {
+                                    Alert::warning(alert_id, context.to_string())
+                                        .title(format!("Run `{run}` in your terminal?"))
+                                }
+                                None => Alert::warning(alert_id, format!("Run `{command}`?")),
+                            },
                         }
                     })
                     .child(

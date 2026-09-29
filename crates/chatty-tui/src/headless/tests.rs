@@ -95,6 +95,7 @@ fn formats_the_approval_block_and_its_verdict() {
         command: "rm -rf build".to_string(),
         is_sandboxed: false,
         decision: None,
+        asker: None,
     };
     assert_eq!(
         format_approval_requested(&approval),
@@ -102,6 +103,28 @@ fn formats_the_approval_block_and_its_verdict() {
     );
     assert_eq!(format_approval_resolved(true), "  ✓ allowed");
     assert_eq!(format_approval_resolved(false), "  ✗ denied");
+}
+
+/// AGE-751: the headless trace names a relayed approval's asker outside the
+/// command, not folded into it.
+#[test]
+fn formats_a_relayed_approvals_asker_outside_the_command() {
+    let approval = crate::engine::ApprovalInfo {
+        id: "a1".to_string(),
+        command: "[shell] echo hi".to_string(),
+        is_sandboxed: false,
+        decision: None,
+        asker: Some(
+            chatty_core::models::execution_approval_store::ApprovalAsker {
+                agent: "kit-coder-0".to_string(),
+                chain: vec!["root".into(), "kit-lead".into(), "kit-coder".into()],
+            },
+        ),
+    };
+    assert_eq!(
+        format_approval_requested(&approval),
+        "  ? Approve [host] [shell] echo hi (asked by kit-coder-0 via root \u{203a} kit-lead \u{203a} kit-coder)"
+    );
 }
 
 #[test]

@@ -873,12 +873,14 @@ pub async fn run_headless(
                 ref id,
                 ref command,
                 is_sandboxed,
+                ref asker,
             } => {
                 let approval = crate::engine::ApprovalInfo {
                     id: id.clone(),
                     command: command.clone(),
                     is_sandboxed,
                     decision: None,
+                    asker: asker.clone(),
                 };
                 engine.handle_event(event);
                 eprintln!("\n{}", format_approval_requested(&approval));
