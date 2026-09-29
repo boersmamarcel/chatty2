@@ -105,4 +105,13 @@ impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
             .map(|started| started.transport.take_run_messages())
             .unwrap_or_default()
     }
+
+    /// The root stops one run of its swarm through its direct handle
+    /// (TB-7); a broker that has not started runs nothing.
+    fn cancel(&self, node: &str) -> anyhow::Result<()> {
+        let Some(started) = self.once.get() else {
+            anyhow::bail!("the broker is not running, so nothing is named '{node}'");
+        };
+        started.transport.cancel(node).map_err(anyhow::Error::from)
+    }
 }

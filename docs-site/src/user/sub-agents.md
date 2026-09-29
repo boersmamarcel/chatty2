@@ -33,9 +33,10 @@ When a sub-agent delegates in turn, its row in the desktop transcript opens into
 - Click a line to open that agent's transcript, read-only, in a side sheet. The sheet shows a breadcrumb (`lead › writer-0 › drafter-2`), the agent's spec, model, status, turns and spend, its sub-agents and its tool calls. Click a sub-agent to go down, or a crumb to go back up. Press Escape or click outside to close it.
 - Fold an agent with its arrow, or the whole card from its header.
 - An agent with many sub-agents shows the first few plus any that are still running or failed, then a **+N more done · show all** line.
+- **Stop** on a running agent's line, or **Stop this agent** in its sheet, stops that one agent and every agent it started. The rest of the swarm keeps running. The agent that called it is told `cancelled_by_user` and carries on without it. Any approval or question the stopped agents were waiting on is withdrawn, and the line shows as canceled.
 - If you stop a turn, runs still drawn as running show as canceled.
 
-A single delegation with no further delegation keeps its plain row. In the terminal, `/swarm` prints the same tree as text.
+A single delegation with no further delegation keeps its plain row. In the terminal, `/swarm` prints the same tree as text, and `/stop <agent>` stops one agent by the name `/swarm` shows.
 
 ## Let the agent decide
 

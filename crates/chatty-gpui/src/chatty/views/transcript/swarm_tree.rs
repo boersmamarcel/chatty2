@@ -16,6 +16,11 @@
 //! unfolds the rest: a failure or a live run never hides, and rows keep
 //! their order while statuses change.
 //!
+//! A running agent's line has a Stop action, and so has its transcript
+//! (TB-7, AGE-749): it stops that agent and everything under it through
+//! the broker, and the rest of the swarm keeps running. The line then
+//! reads Canceled, as the broker reports it.
+//!
 //! A line opens that agent's transcript read-only in a sheet
 //! ([`AgentTranscript`]), built from what the broker forwarded: its tool
 //! calls, its answer's length and its spend (a nested run's text never
@@ -422,6 +427,8 @@ pub type OpenSwarmNode = Rc<dyn Fn(String, &mut Window, &mut App)>;
 /// children (`ShowAll`), by name.
 pub type FoldSwarmNode = Rc<dyn Fn(String, SwarmFold, &mut App)>;
 type SwarmToggle = Rc<dyn Fn(&mut App)>;
+/// Stops a running node and its subtree, by name (TB-7).
+pub type StopSwarmNode = Rc<dyn Fn(String, &mut App)>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SwarmFold {
@@ -438,6 +445,7 @@ pub struct SwarmTreeCard {
     on_toggle: Option<SwarmToggle>,
     on_open_node: Option<OpenSwarmNode>,
     on_fold: Option<FoldSwarmNode>,
+    on_stop: Option<StopSwarmNode>,
 }
 
 impl SwarmTreeCard {
@@ -449,7 +457,13 @@ impl SwarmTreeCard {
             on_toggle: None,
             on_open_node: None,
             on_fold: None,
+            on_stop: None,
         }
+    }
+
+    pub fn on_stop(mut self, f: StopSwarmNode) -> Self {
+        self.on_stop = Some(f);
+        self
     }
 
     pub fn open(mut self, open: bool) -> Self {
@@ -517,12 +531,28 @@ fn twisty(tree: &SwarmTree, ix: usize, on_fold: Option<FoldSwarmNode>, cx: &App)
         .into_any_element()
 }
 
+/// The Stop action on a running agent (TB-7): a small button that stops
+/// it and everything under it, without opening its transcript.
+fn stop_button(id: String, name: &str, on_stop: StopSwarmNode) -> Button {
+    let name = name.to_string();
+    Button::new(ElementId::Name(id.into()))
+        .ghost()
+        .xsmall()
+        .label("Stop")
+        .tooltip("Stop this agent and every agent it started")
+        .on_click(move |_, _, cx| {
+            cx.stop_propagation();
+            on_stop(name.clone(), cx)
+        })
+}
+
 fn node_line(
     tree: &SwarmTree,
     ix: usize,
     line: &TreeLine,
     on_open: Option<OpenSwarmNode>,
     on_fold: Option<FoldSwarmNode>,
+    on_stop: Option<StopSwarmNode>,
     cx: &App,
 ) -> AnyElement {
     let node = &tree.nodes[ix];
@@ -596,6 +626,19 @@ fn node_line(
                             .child(secondary),
                     )
                 }),
+        )
+        .child(
+            // The same width on every line, so the columns stay put.
+            div().flex_shrink_0().w(rems(3.5)).when_some(
+                on_stop.filter(|_| node.status.is_running()),
+                |slot, on_stop| {
+                    slot.child(stop_button(
+                        format!("swarm-stop-{name}"),
+                        &node.name,
+                        on_stop,
+                    ))
+                },
+            ),
         )
         .child(
             div()
@@ -730,6 +773,7 @@ impl RenderOnce for SwarmTreeCard {
                     line,
                     self.on_open_node.clone(),
                     self.on_fold.clone(),
+                    self.on_stop.clone(),
                     cx,
                 ),
                 LineKind::More { parent, hidden } => {
@@ -825,6 +869,7 @@ pub struct AgentTranscript {
     tree: std::sync::Arc<SwarmTree>,
     ix: usize,
     on_navigate: Option<OpenSwarmNode>,
+    on_stop: Option<StopSwarmNode>,
 }
 
 impl AgentTranscript {
@@ -833,7 +878,14 @@ impl AgentTranscript {
             tree,
             ix,
             on_navigate: None,
+            on_stop: None,
         }
+    }
+
+    /// What its Stop action does, while the agent runs (TB-7).
+    pub fn on_stop(mut self, f: StopSwarmNode) -> Self {
+        self.on_stop = Some(f);
+        self
     }
 
     /// Where a crumb or a sub-agent leads.
@@ -1033,6 +1085,22 @@ impl RenderOnce for AgentTranscript {
             .flex_col()
             .child(crumbs)
             .child(facts)
+            .when_some(
+                self.on_stop.filter(|_| node.status.is_running()),
+                |this, on_stop| {
+                    this.child(
+                        div().pt_2().flex().flex_row().child(
+                            stop_button(
+                                format!("swarm-sheet-stop-{}", node.name),
+                                &node.name,
+                                on_stop,
+                            )
+                            .label("Stop this agent")
+                            .danger(),
+                        ),
+                    )
+                },
+            )
             .when(!node.usage.is_empty(), |this| {
                 this.child(section("Spend by model".into()))
                     .child(div().flex().flex_col().gap_1().children(usage))

@@ -83,6 +83,16 @@
 //!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}
 //! ```
 //!
+//! A question can end without an answer: the run under it was stopped
+//! (TB-7, AGE-749), so the asker withdrew it and its task went back to
+//! `working`. The broker tells the calling worker with
+//! `call_input_withdrawn`, and the worker withdraws the copy it re-raised,
+//! which un-parks its own task toward its caller in turn.
+//!
+//! ```text
+//! broker      → {"v":2,"type":"call_input_withdrawn","id":1,"task":"task-…"}
+//! ```
+//!
 //! # A parked task
 //!
 //! A worker that asks a question (`ask_user`) parks its task in
@@ -647,6 +657,10 @@ pub enum BrokerFrame {
         task: String,
         request: Value,
     },
+    /// The question call `id`'s callee parked `task` on is over without
+    /// this worker's answer (TB-7): withdraw the copy re-raised for it.
+    #[serde(rename = "call_input_withdrawn")]
+    CallInputWithdrawn { id: u64, task: String },
 }
 
 #[cfg(test)]
@@ -978,6 +992,22 @@ mod tests {
         assert_eq!(json["v"], 2, "{line}");
         let back: BrokerFrame = decode_frame(&line).unwrap();
         assert!(matches!(back, BrokerFrame::Cancel { task_id } if task_id == "t"));
+    }
+
+    /// TB-7: a withdrawn question reaches the calling worker under the
+    /// documented wire name.
+    #[test]
+    fn a_withdrawn_question_uses_the_documented_wire_name() {
+        let line = encode_frame(&BrokerFrame::CallInputWithdrawn {
+            id: 1,
+            task: "task-1".into(),
+        })
+        .unwrap();
+        let json: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"v": 2, "type": "call_input_withdrawn", "id": 1, "task": "task-1"})
+        );
     }
 
     #[test]
