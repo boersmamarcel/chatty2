@@ -35,11 +35,13 @@ pub use at_mention::load_files_for_dir;
 #[cfg(test)]
 pub use at_mention::{apply_at_to_input, at_menu_items_for, at_query_from};
 pub use pr_status_bar_view::PrStatusBarView;
+pub use slash::SkillEntry;
 #[cfg(test)]
 pub use slash::slash_menu_items_for;
-pub use slash::{SkillEntry, slash_menu_items_with_skills};
 #[allow(unused_imports)] // SlashCommand / SlashMenuItem are part of the public API
-pub use slash::{SlashCommand, SlashMenuItem};
+pub use slash::{AgentPickerEntry, SlashCommand, SlashMenuItem};
+#[cfg(test)]
+pub use slash::{agent_menu_items, slash_menu_items, slash_menu_items_with_skills};
 
 use gpui::*;
 use gpui_component::input::InputState;
@@ -130,6 +132,15 @@ pub struct ChatInputState {
     /// Filesystem skills loaded from the project and global skill directories
     /// directories.  Updated whenever the working directory changes.
     available_skills: Vec<SkillEntry>,
+    /// The agents the `/agent ` picker offers, re-read each time it opens
+    /// (AGE-761).
+    available_agents: Vec<AgentPickerEntry>,
+    /// Whether the last input change left the `/agent ` picker in play, so
+    /// the agents are re-read only when it opens.
+    agent_picker_open: bool,
+    /// The text Escape dismissed the `/agent ` picker at; it stays closed
+    /// until the text changes.
+    agent_picker_dismissed_for: Option<String>,
     /// Cached list of files for the `@` mention picker (loaded on first use).
     at_menu_files: Vec<String>,
     /// Index of the highlighted item in the `@` mention picker.
@@ -173,6 +184,9 @@ impl ChatInputState {
             pending_slash_insert: None,
             working_dir: None,
             available_skills: Vec::new(),
+            available_agents: Vec::new(),
+            agent_picker_open: false,
+            agent_picker_dismissed_for: None,
             at_menu_files: Vec::new(),
             at_menu_selected: 0,
             at_menu_scroll_handle: ScrollHandle::new(),
