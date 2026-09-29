@@ -210,7 +210,14 @@ impl NativeTools {
         }
         if let Some((wf, fa, cd, df, mf, ad)) = self.fs_write {
             b = add(b, profile, wf);
-            b = add(b, profile, fa);
+            // Only a headless/benchmark run that has said its task asks for
+            // an answer file offers `final_answer` at all (AGE-758) — an
+            // interactive host (desktop chat, a worker) leaves `answer_file`
+            // unset, and offering the tool there just to have it refuse
+            // every call is worse than not offering it.
+            if fa.is_offered() {
+                b = add(b, profile, fa);
+            }
             b = add(b, profile, cd);
             b = add(b, profile, df);
             b = add(b, profile, mf);

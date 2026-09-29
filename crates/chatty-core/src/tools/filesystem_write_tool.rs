@@ -182,13 +182,17 @@ pub struct FinalAnswerTool {
     approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
     /// Whether the run's task asks for an answer file, when known (see
-    /// `AgentBuildContext::answer_file`). `Some(false)` writes nothing.
+    /// `AgentBuildContext::answer_file`). Only `Some(true)` writes; `None`
+    /// (no host has said so — every interactive host, AGE-758) and
+    /// `Some(false)` both refuse.
     answer_file: Option<bool>,
 }
 
-/// What `final_answer` says when the run's task asks for no answer file.
-/// A SWE-bench run called it with a diagnosis instead of making the fix,
-/// and the answer.txt it wrote into the repository ended the run.
+/// What `final_answer` says when the run's task asks for no answer file, or
+/// no host has said it does (interactive use, AGE-758). A SWE-bench run
+/// called it with a diagnosis instead of making the fix, and the answer.txt
+/// it wrote into the repository ended the run; a desktop coding session
+/// called it and left a stray `answer.txt` in the user's workspace.
 pub const NO_ANSWER_FILE_MESSAGE: &str = "This task does not ask for an answer file, so \
      final_answer wrote nothing: it is only for tasks that ask for their answer in a file \
      (answer.txt). If the task asks for a change, make it with the editing tools and verify it; \
@@ -214,6 +218,15 @@ impl FinalAnswerTool {
             answer_file,
             ..self
         }
+    }
+
+    /// Whether this tool should be offered at all — only a host that knows
+    /// it is running headless/benchmark work and has decided the task asks
+    /// for an answer file (AGE-758). An interactive host never sets
+    /// `answer_file`, so `final_answer` is dropped from its tool set rather
+    /// than registered and left to refuse every call.
+    pub(crate) fn is_offered(&self) -> bool {
+        self.answer_file == Some(true)
     }
 }
 
@@ -271,7 +284,7 @@ impl Tool for FinalAnswerTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        if self.answer_file == Some(false) {
+        if !self.is_offered() {
             return Err(ToolError::OperationFailed(
                 NO_ANSWER_FILE_MESSAGE.to_string(),
             ));
@@ -831,9 +844,10 @@ mod tests {
     };
     use crate::settings::models::execution_settings::ApprovalMode;
 
-    /// A run whose task asks for no answer file: final_answer refuses and
-    /// leaves no answer.txt behind. A run that asks for one (or does not
-    /// know) still gets the file.
+    /// A run whose task asks for no answer file, or whose host has not said
+    /// either way, never writes one: `final_answer` only writes when a host
+    /// explicitly says the task asks for one. Only `Some(true)` (the
+    /// headless runner, once it has read `--message`) gets the file.
     #[tokio::test]
     async fn final_answer_writes_only_when_the_task_asks_for_an_answer_file() {
         use super::{FinalAnswerArgs, FinalAnswerTool, NO_ANSWER_FILE_MESSAGE};
@@ -865,25 +879,67 @@ mod tests {
         };
         let answer_txt = dir.path().join("answer.txt");
 
-        let error = tool(Some(false))
-            .call(&mut ToolContext::new(), args())
-            .await
-            .map(|_| ())
-            .expect_err("no answer file is asked for");
-        assert!(
-            error.to_string().contains(NO_ANSWER_FILE_MESSAGE),
-            "{error}"
-        );
-        assert!(!answer_txt.exists());
-
-        for answer_file in [None, Some(true)] {
-            tool(answer_file)
+        for answer_file in [None, Some(false)] {
+            let error = tool(answer_file)
                 .call(&mut ToolContext::new(), args())
                 .await
-                .expect("the answer is written");
-            assert!(answer_txt.exists());
-            std::fs::remove_file(&answer_txt).unwrap();
+                .map(|_| ())
+                .expect_err("no answer file is asked for (or no host has said so)");
+            assert!(
+                error.to_string().contains(NO_ANSWER_FILE_MESSAGE),
+                "{error}"
+            );
+            assert!(!answer_txt.exists());
         }
+
+        tool(Some(true))
+            .call(&mut ToolContext::new(), args())
+            .await
+            .expect("the answer is written");
+        assert!(answer_txt.exists());
+    }
+
+    /// AGE-758: a coder-profile chat in the desktop app (or any other
+    /// interactive host) never sets `answer_file` — only chatty-tui's
+    /// headless runner does, after reading `--message`. `NativeTools`
+    /// (`tool_collector.rs`) reads `is_offered()` to decide whether to
+    /// register `final_answer` at all, so it must be false for `None`
+    /// (interactive) and `Some(false)` (a headless task that does not ask
+    /// for one), and true only for `Some(true)`.
+    #[tokio::test]
+    async fn final_answer_not_offered_interactively() {
+        use super::FinalAnswerTool;
+        use crate::models::write_approval_store::WriteApprovalStore;
+        use crate::services::filesystem_service::FileSystemService;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = |answer_file| {
+            FinalAnswerTool::new(
+                service.clone(),
+                ApprovalMode::AutoApproveAll,
+                WriteApprovalStore::new().get_pending_approvals(),
+            )
+            .with_answer_file(answer_file)
+        };
+
+        assert!(
+            !tool(None).is_offered(),
+            "no host has said this is a headless/benchmark run: do not offer it"
+        );
+        assert!(
+            !tool(Some(false)).is_offered(),
+            "a headless task that does not ask for an answer file must not offer it either"
+        );
+        assert!(
+            tool(Some(true)).is_offered(),
+            "a headless task that does ask for an answer file must offer it"
+        );
     }
 
     /// AGE-246 / D7: two agents, each with its own `WriteApprovalStore`, must

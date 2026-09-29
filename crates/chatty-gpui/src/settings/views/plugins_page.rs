@@ -3,13 +3,16 @@
 //! `[[plugins]]` and grants it capabilities — and never an agent of its
 //! own, so each row says which specs use it and what they grant.
 
+use crate::settings::controllers::module_settings_controller;
 use crate::settings::models::extensions_store::ExtensionsModel;
-use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel, ModuleLoadStatus};
+use crate::settings::models::{
+    AgentSpecsModel, DiscoveredModulesModel, ModuleLoadStatus, ModuleSettingsModel,
+};
 use crate::settings::views::extensions_page::trust_badge;
 use chatty_core::agent_spec::SpecListing;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
+use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::{ActiveTheme, h_flex, v_flex};
 
 pub fn plugins_page() -> SettingPage {
@@ -21,7 +24,30 @@ pub fn plugins_page() -> SettingPage {
              the module directory.",
         )
         .resettable(false)
-        .groups(vec![plugins_group()])
+        .groups(vec![module_runtime_group(), plugins_group()])
+}
+
+/// The module runtime switch: what used to require quitting Chatty and
+/// hand-editing `module_settings.json`'s `enabled` field, then restarting
+/// (see the swarm tutorial). `toggle_module_runtime` starts or stops the
+/// gateway/broker live, so no restart is needed either way.
+fn module_runtime_group() -> SettingGroup {
+    SettingGroup::new().title("Module runtime").items(vec![
+        SettingItem::new(
+            "Enable module runtime",
+            SettingField::switch(
+                |cx: &App| cx.global::<ModuleSettingsModel>().enabled,
+                |_val: bool, cx: &mut App| {
+                    module_settings_controller::toggle_module_runtime(cx);
+                },
+            )
+            .default_value(false),
+        )
+        .description(
+            "Runs the WASM module runtime and the local agent broker (the gateway plugins and \
+             delegated agents use). Off by default.",
+        ),
+    ])
 }
 
 fn plugins_group() -> SettingGroup {
