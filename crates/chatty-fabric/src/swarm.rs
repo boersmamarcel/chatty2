@@ -167,6 +167,86 @@ mod tests {
         assert!(batcher.flush().is_empty());
     }
 
+    /// The rate cap itself (TB-1/AGE-663): a node fed items far faster than
+    /// [`FORWARD_INTERVAL`] still reaches the root at most once per node
+    /// per interval, because nothing drains [`SwarmBatcher`] but a flush
+    /// gated on the same `tokio::time::interval_at` the broker's
+    /// forwarding loop uses (`calls.rs`). Deterministic: the clock is
+    /// paused and only ever moves because something here explicitly waits
+    /// on it (`sleep`, `interval.tick()`), so this holds regardless of
+    /// machine load — unlike a wall-clock measurement of a real run.
+    #[tokio::test(start_paused = true)]
+    async fn a_fast_node_is_flushed_at_most_once_per_interval() {
+        use std::collections::BTreeMap;
+        use std::sync::Arc;
+
+        use tokio::sync::Mutex;
+
+        const INTERVALS: u32 = 4;
+        const PUSHES_PER_INTERVAL: u32 = 25;
+        // Each node pushes far more often than the flush interval: a push
+        // every 10ms against a 250ms flush.
+        let push_every = FORWARD_INTERVAL / PUSHES_PER_INTERVAL;
+
+        let root = CallChain::root("t-1");
+        let a = root.extend("mid").unwrap().extend("a").unwrap();
+        let b = root.extend("mid").unwrap().extend("b").unwrap();
+
+        let batcher = Arc::new(Mutex::new(SwarmBatcher::new()));
+        let pusher = |node: &'static str, chain: CallChain| {
+            let batcher = batcher.clone();
+            async move {
+                for i in 0..(INTERVALS * PUSHES_PER_INTERVAL) {
+                    tokio::time::sleep(push_every).await;
+                    batcher
+                        .lock()
+                        .await
+                        .push(node, &chain, SwarmItem::Text { bytes: i as u64 });
+                }
+            }
+        };
+
+        // The broker's own pattern (calls.rs): a flush interval, gated to
+        // only fire while there is something pending.
+        let flusher = {
+            let batcher = batcher.clone();
+            async move {
+                let mut flush = tokio::time::interval_at(
+                    tokio::time::Instant::now() + FORWARD_INTERVAL,
+                    FORWARD_INTERVAL,
+                );
+                flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                let mut per_node: BTreeMap<String, usize> = BTreeMap::new();
+                for _ in 0..INTERVALS {
+                    flush.tick().await;
+                    let mut batcher = batcher.lock().await;
+                    if !batcher.is_empty() {
+                        for batch in batcher.flush() {
+                            *per_node.entry(batch.node).or_default() += 1;
+                        }
+                    }
+                }
+                per_node
+            }
+        };
+
+        let (.., per_node) = tokio::join!(pusher("a-0", a), pusher("b-0", b), flusher);
+
+        assert_eq!(
+            per_node.keys().collect::<Vec<_>>(),
+            vec!["a-0", "b-0"],
+            "both fast nodes reached the root"
+        );
+        for (node, count) in &per_node {
+            assert!(
+                *count <= INTERVALS as usize,
+                "{node}: {count} batches over {INTERVALS} intervals \
+                 ({} pushes each): the rate cap was not enforced",
+                INTERVALS * PUSHES_PER_INTERVAL
+            );
+        }
+    }
+
     #[test]
     fn items_serialize_tagged_by_kind() {
         assert_eq!(

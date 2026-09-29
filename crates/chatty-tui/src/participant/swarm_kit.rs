@@ -167,6 +167,20 @@ impl SwarmKit {
         Self::start_with(None, roster, sse, ndjson, false).await
     }
 
+    /// As [`start`](Self::start), with every endpoint's concurrency budget
+    /// raised to `budget` instead of the system default of one (AGE-305):
+    /// what a deployment with a model server that serves more than one
+    /// request at a time configures, and what lets two calls to the same
+    /// spec actually run at once rather than queue for the same permit.
+    pub async fn start_with_endpoint_budget(
+        budget: usize,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_opts(None, roster, sse, ndjson, false, false, budget).await
+    }
+
     /// As [`start`](Self::start), with the root running as `leader` — a
     /// `--team` leader, an `--agent <spec>` root — whose own calls the
     /// broker checks against its spec (AGE-745).
@@ -190,7 +204,16 @@ impl SwarmKit {
     /// command and write — no `--auto-approve`, `AlwaysAsk` — so an
     /// approval goes up the call chain to the root (AGE-646).
     pub async fn start_asking(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
-        Self::start_opts(None, roster, sse, ndjson, false, true).await
+        Self::start_opts(
+            None,
+            roster,
+            sse,
+            ndjson,
+            false,
+            true,
+            ModuleSettingsModel::default().default_endpoint_budget,
+        )
+        .await
     }
 
     async fn start_with(
@@ -200,9 +223,19 @@ impl SwarmKit {
         ndjson: Script,
         repo: bool,
     ) -> Self {
-        Self::start_opts(leader, roster, sse, ndjson, repo, false).await
+        Self::start_opts(
+            leader,
+            roster,
+            sse,
+            ndjson,
+            repo,
+            false,
+            ModuleSettingsModel::default().default_endpoint_budget,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_opts(
         leader: Option<AgentSpec>,
         roster: Vec<AgentDef>,
@@ -210,6 +243,7 @@ impl SwarmKit {
         ndjson: Script,
         repo: bool,
         asking: bool,
+        endpoint_budget: usize,
     ) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
@@ -296,6 +330,7 @@ impl SwarmKit {
         }
         let module_settings = ModuleSettingsModel {
             virtual_agents: roster.iter().map(|agent| agent.name.clone()).collect(),
+            default_endpoint_budget: endpoint_budget,
             ..ModuleSettingsModel::default()
         };
         let execution = ExecutionSettingsModel {
@@ -595,6 +630,9 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             // The broker's batches of nested runs (TB-1) are not the
             // delegation's own progress, which is what the goldens record.
             InvokeAgentProgress::Swarm(_) => continue,
+            // Recorded before this existed (AGE-762): a golden with it
+            // would no longer replay byte for byte.
+            InvokeAgentProgress::Admitted(_) => continue,
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),
@@ -1240,18 +1278,43 @@ async fn nested_delegation_over_the_connection() {
     .filter_map(|event| progress_text_for_event(event, &mut names))
     .collect();
     assert_eq!(grandchild_lines, ["read_file", "\u{2713} read_file"]);
+
+    // The leader sees exactly these six lines. Their relative delivery
+    // order across the two paths that produce them (the middle worker's
+    // own steps, and the grandchild's steps forwarded through it) is not
+    // itself a guarantee: only the order within each causally-linked pair
+    // is. Assert the set, then the causal order that matters.
+    let lines = progress_lines(&run);
+    let mut sorted = lines.clone();
+    sorted.sort();
+    let mut expected = vec![
+        "list_agents".to_string(),
+        "\u{2713} list_agents".to_string(),
+        "invoke_agent".to_string(),
+        "read_file".to_string(),
+        "\u{2713} read_file".to_string(),
+        "\u{2713} invoke_agent".to_string(),
+    ];
+    expected.sort();
     assert_eq!(
-        progress_lines(&run),
-        [
-            "list_agents",
-            "\u{2713} list_agents",
-            "invoke_agent",
-            "read_file",
-            "\u{2713} read_file",
-            "\u{2713} invoke_agent",
-        ],
-        "the leader sees the grandchild's steps inside the middle worker's delegation"
+        sorted, expected,
+        "the leader sees the grandchild's steps inside the middle worker's delegation: {lines:?}"
     );
+    let pos = |line: &str| {
+        lines
+            .iter()
+            .position(|l| l == line)
+            .unwrap_or_else(|| panic!("{line:?} missing from {lines:?}"))
+    };
+    // Each call precedes its own result.
+    assert!(pos("list_agents") < pos("\u{2713} list_agents"));
+    assert!(pos("invoke_agent") < pos("\u{2713} invoke_agent"));
+    assert!(pos("read_file") < pos("\u{2713} read_file"));
+    // list_agents finishes before the delegation to the grandchild starts.
+    assert!(pos("\u{2713} list_agents") < pos("invoke_agent"));
+    // The grandchild's whole round trip sits inside the delegation's span.
+    assert!(pos("invoke_agent") < pos("read_file"));
+    assert!(pos("\u{2713} read_file") < pos("\u{2713} invoke_agent"));
 
     // One edge-log row per call, named by the connections: the root's call
     // to the middle worker, and the middle worker's to the grandchild.

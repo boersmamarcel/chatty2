@@ -252,7 +252,9 @@ async fn swarm_tree_spend_sums() {
     assert_eq!(sum(&trace.total()), (i + ri + ci, o + ro + co, rc + cc, 0));
 
     // Built live, one event at a time, it is the same tree: the root's
-    // callee is named by its spec until the edge log names its node.
+    // callee is named by its spec only until the broker says which node
+    // it admitted the call as (AGE-762) — before the edge log ever names
+    // it.
     let mut live = SwarmTrace::new();
     let mut revisions = Vec::new();
     for event in &run.events {
@@ -260,7 +262,9 @@ async fn swarm_tree_spend_sums() {
         revisions.push(live.revision());
     }
     assert!(revisions.windows(2).all(|w| w[0] <= w[1]));
-    let callee = live.node_named(REVIEWER).expect("named by its spec");
+    let callee = live
+        .node_named("kit-reviewer-0")
+        .expect("named by the broker's admission, ahead of the edge log");
     assert_eq!(spent(live.tree().get(callee)), served(&REVIEWER_USAGE));
     for row in &run.edges {
         live.apply_edge(row);

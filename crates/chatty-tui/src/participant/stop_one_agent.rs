@@ -7,9 +7,13 @@
 //! desktop's Stop and the TUI's `/stop` call. Nothing here waits on the
 //! clock except the deadlines only a failure reaches.
 
+use chatty_core::services::install_progress_channel;
 use chatty_core::testing::fake_model::{RecordedRequest, Reply, Script};
-use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+use chatty_core::tools::invoke_agent_tool::{
+    InvokeAgentArgs, InvokeAgentError, InvokeAgentProgress,
+};
 use chatty_fabric::{CANCELLED_BY_USER, SwarmItem};
+use rig_agent::tool::{Tool, ToolContext};
 
 use super::swarm_kit::{AgentDef, Endpoint, KitRoot, ROOT_MODEL, SwarmKit};
 
@@ -260,6 +264,146 @@ async fn caller_sees_cancelled_by_user() {
         kit.broker().transport().cancel(STUCK).is_err(),
         "nothing is left to stop"
     );
+}
+
+/// The node the broker admitted `call`'s connection under, read off its own
+/// progress channel as soon as it arrives (AGE-762) — before its callee has
+/// done anything else, let alone finished.
+async fn admitted_node(
+    progress: &mut tokio::sync::mpsc::UnboundedReceiver<InvokeAgentProgress>,
+) -> String {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            match progress
+                .recv()
+                .await
+                .expect("the progress channel stays open")
+            {
+                InvokeAgentProgress::Admitted(node) => return node,
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("the callee is admitted before the deadline")
+}
+
+/// Two parallel root calls to the same spec share nothing but a spec name
+/// until each is admitted (AGE-762): before that, a tree that only knows
+/// them by that shared name cannot stop one without the other. As soon as
+/// each is admitted it carries its own node name on its progress channel,
+/// so a stop naming one of those two concrete nodes stops exactly that one
+/// — the other keeps running, untouched.
+#[tokio::test]
+async fn stop_targets_one_of_two_parallel_same_spec_calls() {
+    // A budget of one endpoint-wide (AGE-305's default) would queue the
+    // second call behind the first's permit until the first's worker is
+    // reaped, so neither would ever be admitted at the same time; raised
+    // to two, both run at once, as a deployment whose model server serves
+    // more than one request concurrently would have it configured.
+    let kit = SwarmKit::start_with_endpoint_budget(
+        2,
+        vec![AgentDef::new(STUCK, STUCK_MODEL, Endpoint::Ndjson)],
+        Script::new().route(ROOT_MODEL, [Reply::text("unused: called directly")]),
+        Script::new().route(
+            STUCK_MODEL,
+            [
+                Reply::Delay(HANG_MS),
+                Reply::text("Stuck one done."),
+                Reply::Delay(HANG_MS),
+                Reply::text("Stuck two done."),
+            ],
+        ),
+    )
+    .await;
+
+    // Two concurrent calls to the same spec, as two parallel `invoke_agent`
+    // tool calls from one model turn would be, each with its own progress
+    // channel — as each would have in the real engine, which installs a
+    // fresh one per call.
+    let tool_a = kit.leader_tool();
+    let mut progress_a = install_progress_channel(&tool_a.progress_slot());
+    let tool_b = kit.leader_tool();
+    let mut progress_b = install_progress_channel(&tool_b.progress_slot());
+
+    let call_a = tokio::spawn(async move {
+        tool_a
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: STUCK.to_string(),
+                    prompt: "Dig a.".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+    });
+    let call_b = tokio::spawn(async move {
+        tool_b
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: STUCK.to_string(),
+                    prompt: "Dig b.".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+    });
+
+    let node_a = admitted_node(&mut progress_a).await;
+    let node_b = admitted_node(&mut progress_b).await;
+    assert_ne!(
+        node_a, node_b,
+        "two parallel calls to the same spec get different node names as soon as they are admitted"
+    );
+    assert!(node_a.starts_with(&format!("{STUCK}-")));
+    assert!(node_b.starts_with(&format!("{STUCK}-")));
+
+    until("both calls are busy", || {
+        kit.ndjson.requests_for(STUCK_MODEL).len() == 2
+    })
+    .await;
+
+    kit.broker()
+        .transport()
+        .cancel(&node_a)
+        .expect("node_a is stopped by its own concrete name");
+
+    let outcome_a = tokio::time::timeout(DEADLINE, call_a)
+        .await
+        .expect("a's call ends before the deadline")
+        .expect("a's call does not panic");
+    assert!(
+        matches!(outcome_a, Err(InvokeAgentError::CancelledByUser { .. })),
+        "node_a reads cancelled_by_user: {outcome_a:?}"
+    );
+
+    // node_b is untouched: still registered, still the only one running.
+    assert!(
+        kit.participants().is_registered(&node_b),
+        "the other parallel call to the same spec keeps running"
+    );
+    assert_eq!(
+        kit.ndjson.requests_for(STUCK_MODEL).len(),
+        2,
+        "node_b's own call was never asked again by a stop that named node_a"
+    );
+
+    // Cleanup: stop node_b too, so the test does not wait out its hang.
+    kit.broker()
+        .transport()
+        .cancel(&node_b)
+        .expect("node_b is stopped by its own concrete name");
+    let outcome_b = tokio::time::timeout(DEADLINE, call_b)
+        .await
+        .expect("b's call ends before the deadline")
+        .expect("b's call does not panic");
+    assert!(
+        matches!(outcome_b, Err(InvokeAgentError::CancelledByUser { .. })),
+        "node_b reads cancelled_by_user: {outcome_b:?}"
+    );
+    all_reaped(&kit).await;
 }
 
 /// root → lead → coder, each asking before a command. The coder's command
