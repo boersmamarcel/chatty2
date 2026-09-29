@@ -563,6 +563,19 @@ mod tests {
             ),
             handoff::HandoffOutcome::Valid(_)
         ));
+        // Only what the leader acts on is required: a decision without its
+        // reason still delivers an answer (a dev-10 smoke lost one that way).
+        assert!(matches!(
+            handoff::check(
+                adjudicator,
+                "```json\n{\"choice\": 1, \"answer\": \"x\"}\n```"
+            ),
+            handoff::HandoffOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            handoff::check(analyst, "```json\n{\"answer\": \"NL\"}\n```"),
+            handoff::HandoffOutcome::Valid(_)
+        ));
     }
 
     /// A preset whose `handoffs` names a schema it does not compile in fails

@@ -1,7 +1,7 @@
 {
   "title": "The adjudicator's decision",
   "type": "object",
-  "required": ["choice", "answer", "reason"],
+  "required": ["choice", "answer"],
   "properties": {
     "choice": {
       "type": "integer",

@@ -1,7 +1,7 @@
 {
   "title": "An analyst's answer to one data question",
   "type": "object",
-  "required": ["answer", "method"],
+  "required": ["answer"],
   "properties": {
     "answer": {
       "type": "string",
