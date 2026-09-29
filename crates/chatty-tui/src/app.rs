@@ -714,6 +714,17 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
             engine.add_system_message(summary);
             None
         }
+        Command::Stop(Some(agent)) => {
+            let outcome = engine.stop_agent(&agent);
+            engine.add_system_message(outcome);
+            None
+        }
+        Command::Stop(None) => {
+            engine.add_system_message(
+                "Usage: /stop <agent> (/swarm shows the running agents' names)".to_string(),
+            );
+            None
+        }
         Command::Clear => Some(KeyAction::ClearConversation),
         Command::Compact => Some(KeyAction::CompactConversation),
         Command::Context => Some(KeyAction::ShowContext),

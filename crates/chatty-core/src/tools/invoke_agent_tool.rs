@@ -168,7 +168,24 @@ pub enum InvokeAgentError {
     /// `too_deep: depth 5 > max 4`, `not_listed: a may not call b`.
     #[error(transparent)]
     Refused(Refusal),
+    /// The user stopped the callee and everything it started (TB-7,
+    /// AGE-749). The model sees `cancelled_by_user: …` and carries on
+    /// without it; `messages` are the caller's tree messages the result
+    /// still delivers (TM-2).
+    #[error(
+        "cancelled_by_user: the user stopped '{agent}' and everything it started; carry on without its result{}",
+        delivered_after_error(messages)
+    )]
+    CancelledByUser {
+        agent: String,
+        messages: Vec<String>,
+    },
 }
+
+/// The line a delegation the user stopped finishes with, in its
+/// [`InvokeAgentProgress::Finished`] result: what tells a transcript the
+/// callee was stopped rather than failed (TB-7, AGE-749).
+pub const STOPPED_BY_USER: &str = "\u{23f9}\u{fe0f} cancelled_by_user: stopped by the user";
 
 /// The tree messages a failed delegation still delivers (TM-2), as the
 /// tail of its error text; empty when there are none.
@@ -729,7 +746,30 @@ impl InvokeAgentTool {
 
         let mut outcome = None;
         let mut failure = None;
-        while let Some(event) = stream.next().await {
+        // The questions the callee's subtree parked, each being answered
+        // here while the call goes on — so a call that ends, or a question
+        // withdrawn below (TB-7), drops the copy re-raised on this agent's
+        // store, which withdraws it. At most one per task: a task parks on
+        // one question at a time.
+        let mut parked = futures::stream::FuturesUnordered::new();
+        let mut withdraw: std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>> =
+            std::collections::HashMap::new();
+        loop {
+            let event = tokio::select! {
+                Some(answered) = parked.next(), if !parked.is_empty() => {
+                    if let Err(e) = answered {
+                        // Dropping the stream on the way out cancels the
+                        // call, which reaps the worker.
+                        failure = Some(e);
+                        break;
+                    }
+                    continue;
+                }
+                event = stream.next() => match event {
+                    Some(event) => event,
+                    None => break,
+                },
+            };
             match event {
                 Ok(CallEvent::Progress(value)) => {
                     if let Some(progress) = progress_from_value(value) {
@@ -740,28 +780,19 @@ impl InvokeAgentTool {
                     self.send_progress(InvokeAgentProgress::Swarm(event));
                 }
                 Ok(CallEvent::InputRequired { task, request }) => {
-                    let answered = if let Ok(approval) =
-                        serde_json::from_value::<A2aApprovalRequest>(request.clone())
-                    {
-                        self.relay_approval(transport, agent, &task, approval).await;
-                        Ok(())
-                    } else {
-                        match serde_json::from_value::<A2aClarificationRequest>(request) {
-                            Ok(request) => {
-                                self.answer_over_fabric(transport, agent, &task, request)
-                                    .await
-                            }
-                            // A request that is neither has nothing to
-                            // answer.
-                            Err(_) => Ok(()),
+                    let (withdrawn_tx, withdrawn) = tokio::sync::oneshot::channel::<()>();
+                    let answer = self.answer_parked(transport, agent, task.clone(), request);
+                    withdraw.insert(task, withdrawn_tx);
+                    parked.push(Box::pin(async move {
+                        tokio::select! {
+                            answered = answer => answered,
+                            // Withdrawn below: nothing to answer.
+                            _ = withdrawn => Ok(()),
                         }
-                    };
-                    if let Err(e) = answered {
-                        // Dropping the stream on the way out cancels the
-                        // call, which reaps the worker.
-                        failure = Some(e);
-                        break;
-                    }
+                    }));
+                }
+                Ok(CallEvent::InputWithdrawn { task }) => {
+                    withdraw.remove(&task);
                 }
                 Ok(CallEvent::Result(value)) => {
                     outcome = Some(serde_json::from_value::<InvokeAgentOutcome>(value).map_err(
@@ -788,6 +819,11 @@ impl InvokeAgentTool {
             }
         }
 
+        // Whatever is still parked is withdrawn before the model reads the
+        // result.
+        drop(parked);
+        drop(withdraw);
+
         let outcome = match (failure, outcome) {
             (Some(reason), _) | (None, Some(Err(reason))) => InvokeAgentOutcome {
                 success: false,
@@ -795,6 +831,7 @@ impl InvokeAgentTool {
                 error: Some(reason),
                 metadata: None,
                 messages: Vec::new(),
+                cancelled_by_user: false,
             },
             (None, Some(Ok(outcome))) => outcome,
             (None, None) => InvokeAgentOutcome {
@@ -803,8 +840,22 @@ impl InvokeAgentTool {
                 error: Some("the broker ended the call without a result".to_string()),
                 metadata: None,
                 messages: Vec::new(),
+                cancelled_by_user: false,
             },
         };
+
+        if outcome.cancelled_by_user {
+            info!(agent = %agent, "The user stopped the delegated agent");
+            self.send_progress(InvokeAgentProgress::Finished {
+                success: false,
+                result: Some(STOPPED_BY_USER.to_string()),
+                usage: Vec::new(),
+            });
+            return Err(InvokeAgentError::CancelledByUser {
+                agent: agent.to_string(),
+                messages: outcome.messages,
+            });
+        }
 
         let metadata = outcome.metadata.as_ref();
         let handoff = HandoffReport::from_status_metadata(metadata);
@@ -964,6 +1015,30 @@ impl InvokeAgentTool {
             .answer(task_id, input)
             .await
             .map_err(|e| undeliverable(agent, e))
+    }
+
+    /// Answer the question a callee over the fabric parked `task` on: an
+    /// approval is relayed, a clarification re-asked; a request that is
+    /// neither has nothing to answer. `Err` is why the delegation cannot
+    /// go on. Dropping this withdraws the copy raised here (TB-7).
+    async fn answer_parked(
+        &self,
+        transport: &dyn Transport,
+        agent: &str,
+        task: String,
+        request: serde_json::Value,
+    ) -> Result<(), String> {
+        if let Ok(approval) = serde_json::from_value::<A2aApprovalRequest>(request.clone()) {
+            self.relay_approval(transport, agent, &task, approval).await;
+            return Ok(());
+        }
+        match serde_json::from_value::<A2aClarificationRequest>(request) {
+            Ok(request) => {
+                self.answer_over_fabric(transport, agent, &task, request)
+                    .await
+            }
+            Err(_) => Ok(()),
+        }
     }
 
     /// Re-ask a delegated agent's questions on this agent's own store and

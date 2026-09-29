@@ -502,6 +502,15 @@ impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
             .map(|broker| broker.transport().take_run_messages())
             .unwrap_or_default()
     }
+
+    /// `/stop <agent>` stops one run through the direct handle (TB-7); a
+    /// broker that has not started runs nothing.
+    fn cancel(&self, node: &str) -> anyhow::Result<()> {
+        let Some(broker) = self.once.get() else {
+            anyhow::bail!("the broker is not running, so nothing is named '{node}'");
+        };
+        broker.transport().cancel(node).map_err(anyhow::Error::from)
+    }
 }
 
 /// One `LocalRunner` per resolved agent, all metered on one shared budget

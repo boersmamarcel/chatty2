@@ -139,6 +139,9 @@ pub enum Command {
     Agents,
     /// /swarm — print this conversation's latest swarm tree (TB-5, AGE-667)
     Swarm,
+    /// /stop <agent> — stop one agent of the swarm and everything it
+    /// started, while the rest keeps running (TB-7, AGE-749)
+    Stop(Option<String>),
     /// /clear, /new — clear conversation and start fresh
     Clear,
     /// /compact — summarize older conversation turns
@@ -190,6 +193,7 @@ impl ChatEngine {
             "/agent" => Some(Command::Agent(arg)),
             "/agents" => Some(Command::Agents),
             "/swarm" => Some(Command::Swarm),
+            "/stop" => Some(Command::Stop(arg)),
             "/clear" | "/new" => Some(Command::Clear),
             "/compact" => Some(Command::Compact),
             "/context" => Some(Command::Context),
@@ -231,6 +235,19 @@ impl ChatEngine {
     /// events (TB-5, AGE-667).
     pub fn swarm_summary(&self) -> String {
         crate::ui::swarm::render(&self.swarm_trace)
+    }
+
+    /// `/stop <agent>`: stop that agent — the name `/swarm` shows — and
+    /// everything under it; the turn that delegated to it carries on
+    /// without it (TB-7, AGE-749). What happened, as a system line.
+    pub fn stop_agent(&self, agent: &str) -> String {
+        let Some(broker) = self.broker.as_ref() else {
+            return "No agents are running: this session has no broker.".to_string();
+        };
+        match broker.cancel(agent) {
+            Ok(()) => format!("Stopped {agent} and everything it started."),
+            Err(error) => format!("Could not stop {agent}: {error}"),
+        }
     }
 
     /// Show current context usage and working directory.
@@ -1107,6 +1124,19 @@ mod tests {
     #[test]
     fn swarm_command_parses() {
         assert_eq!(ChatEngine::parse_command("/swarm"), Some(Command::Swarm));
+    }
+
+    /// TB-7 (AGE-749): `/stop <agent>` names the agent to stop.
+    #[test]
+    fn stop_command_parses() {
+        assert_eq!(
+            ChatEngine::parse_command("/stop kit-coder-0"),
+            Some(Command::Stop(Some("kit-coder-0".to_string())))
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/stop"),
+            Some(Command::Stop(None))
+        );
     }
 
     /// PL-U5: `/agents` lists the roster's specs with what they declare,

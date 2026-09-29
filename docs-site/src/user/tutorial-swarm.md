@@ -27,7 +27,7 @@ You give a sales export to a three-agent team and ask it a real question: *reven
 
 ## 1. Set up
 
-**Add the team.** Its agents ship with Chatty but are experimental, so they are not on your roster until you name them. Settings has no switch for this yet. Quit Chatty, then write `~/.config/chatty/module_settings.json` (create the file if it is not there) and start Chatty again:
+**Add the team.** Its agents ship with Chatty but are experimental, so they are not on your roster until you name them. Quit Chatty, then write `~/.config/chatty/module_settings.json` (create the file if it is not there) and start Chatty again:
 
 ```json
 {

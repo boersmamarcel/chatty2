@@ -131,7 +131,10 @@ impl Tool for SendMessageTool {
                     }
                     return Ok(SendMessageOutput { status });
                 }
-                CallEvent::Progress(_) | CallEvent::InputRequired { .. } | CallEvent::Swarm(_) => {}
+                CallEvent::Progress(_)
+                | CallEvent::InputRequired { .. }
+                | CallEvent::InputWithdrawn { .. }
+                | CallEvent::Swarm(_) => {}
             }
         }
         Err(failed("the broker gave no answer".to_string()))

@@ -41,6 +41,6 @@ pub use permit::{
 pub use swarm::{FORWARD_INTERVAL, SwarmBatcher, SwarmEvent, SwarmItem};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
-    CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome, InvokeAgentParams,
-    MessageStatus, RefusalReason, SendMessageParams, SpawnContext, Transport,
+    CANCELLED_BY_USER, CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome,
+    InvokeAgentParams, MessageStatus, RefusalReason, SendMessageParams, SpawnContext, Transport,
 };

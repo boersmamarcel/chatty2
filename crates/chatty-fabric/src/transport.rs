@@ -149,6 +149,13 @@ pub enum CallEvent {
     /// worker's connection both carry the answer back down, so a question
     /// climbs any number of hops (BI-5).
     InputRequired { task: String, request: Value },
+    /// The question `task` was parked on is over without this caller's
+    /// answer: its asker withdrew it, because the run below it was stopped
+    /// (TB-7, AGE-749). The caller withdraws the copy it re-raised on its
+    /// own store, which un-parks its own task toward its caller in turn, so
+    /// the withdrawal climbs every hop to the root's human. A caller that
+    /// already answered has nothing left to withdraw.
+    InputWithdrawn { task: String },
     /// A batch of what one run nested under this call did, tagged by the
     /// broker (TB-1). Only a root call receives these: a worker's calls
     /// are nested runs themselves, whose events go to the root directly.
@@ -182,7 +189,17 @@ pub struct InvokeAgentOutcome {
     /// from the caller's pending list; absent from the JSON when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
+    /// The user stopped the callee (TB-7, AGE-749): its run and everything
+    /// under it were cancelled, and the caller carries on without it.
+    /// `success` is false and `error` reads [`CANCELLED_BY_USER`]. Absent
+    /// from the JSON when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancelled_by_user: bool,
 }
+
+/// The typed reason a stopped callee's caller reads, in its result's
+/// `error` and in the tool error its model sees (TB-7, AGE-749).
+pub const CANCELLED_BY_USER: &str = "cancelled_by_user";
 
 /// Why a call failed. Serialises as `{"kind": …, "message": …}`, the
 /// `error` of a v2 `call_error` frame.
@@ -241,6 +258,17 @@ pub trait Transport: Send + Sync {
     /// nothing waiting.
     fn take_run_messages(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Stop `node` — a broker-assigned node name, or the spec of one of the
+    /// root's own callees — and everything under it (TB-7, AGE-749): its
+    /// caller's call ends with a [`CANCELLED_BY_USER`] result and the rest
+    /// of the swarm keeps running. Only the root's direct handle can; the
+    /// default refuses.
+    fn cancel(&self, node: &str) -> Result<(), CallError> {
+        Err(CallError::Failed(format!(
+            "'{node}' cannot be stopped over this transport"
+        )))
     }
 }
 

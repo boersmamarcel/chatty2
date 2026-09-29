@@ -295,6 +295,10 @@ async fn reply(
                 lock(&parked).insert(id, task.clone());
                 (BrokerFrame::CallInputRequired { id, task, request }, false)
             }
+            Ok(CallEvent::InputWithdrawn { task }) => {
+                lock(&parked).remove(&id);
+                (BrokerFrame::CallInputWithdrawn { id, task }, false)
+            }
             Ok(CallEvent::Result(result)) => (BrokerFrame::CallResult { id, result }, true),
             // Only a root call hears its nested runs (TB-1); a worker's
             // call is one of them.

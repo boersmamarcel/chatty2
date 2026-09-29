@@ -165,6 +165,12 @@ pub struct ChatView {
     /// the row is finalized so parent-stream updates skip it. `None` when
     /// this conversation has no progress row.
     delegation_progress_msg_idx: Option<usize>,
+    /// Wall clock for the in-flight delegation row, started by
+    /// `start_delegation_progress` and stamped onto the row's trace by
+    /// `finalize_delegation_progress` — otherwise a `/agent` turn's
+    /// `total_duration` is never set, and the transcript always shows
+    /// "Worked for a moment" regardless of how long it actually ran.
+    delegation_started_at: Option<Instant>,
     /// The running stream's delegation rows, in the order they opened: each
     /// row's message index and the spec it delegated to. The swarm tree
     /// (TB-4) hangs each row's callee subtree under it; see `swarm.rs`.
@@ -640,6 +646,7 @@ impl ChatView {
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
             delegation_progress_msg_idx: None,
+            delegation_started_at: None,
             swarm_rows: Vec::new(),
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
@@ -2649,6 +2656,7 @@ impl ChatView {
                     });
                 })
             },
+            stop_node: Rc::new(move |name, cx| swarm::stop_swarm_node(&name, cx)),
         };
 
         // Folded turns keep receipts + the assistant message; only the
@@ -3554,6 +3562,56 @@ mod show_artifact_integration_tests {
 
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// AGE-758: a finished `/agent` (delegation) turn used to always render
+    /// "Worked for a moment" — `finalize_delegation_progress` dropped the
+    /// row's `live_trace` without ever stamping `total_duration`, so
+    /// `format_worked_for` (see `transcript::adapter`) never got a real
+    /// duration to show. `start_delegation_progress` now starts a clock and
+    /// `finalize_delegation_progress` stamps it before the trace is frozen.
+    #[gpui::test]
+    fn slash_agent_turn_reports_its_duration(cx: &mut gpui::TestAppContext) {
+        use chatty_core::models::message_types::ToolSource;
+
+        let chat_view = chat_view_harness(cx);
+
+        cx.update(|cx| {
+            chat_view.update(cx, |view, cx| {
+                view.start_delegation_progress(
+                    "[Agent: worker] do the thing",
+                    ToolSource::Local,
+                    cx,
+                );
+            });
+        });
+
+        // A real (if tiny) sleep so the stamped duration is not just a
+        // zero-length window between two `Instant::now()` calls.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        cx.update(|cx| {
+            chat_view.update(cx, |view, cx| {
+                view.finalize_delegation_progress(true, Some("done".to_string()), cx);
+            });
+        });
+
+        cx.update(|cx| {
+            let view = chat_view.read(cx);
+            let idx = view
+                .delegation_progress_msg_idx
+                .expect("the finalized row's index is kept so parent-stream updates skip it");
+            let trace_view = view.messages[idx]
+                .system_trace_view
+                .clone()
+                .expect("the delegation row always has a trace view");
+            let duration = trace_view.read(cx).get_trace().total_duration;
+            assert!(
+                duration.is_some_and(|d| d.as_millis() > 0),
+                "a finished /agent turn must carry its real elapsed time, not None \
+                 (which renders as \"Worked for a moment\" regardless of how long it ran)"
+            );
+        });
     }
 }
 

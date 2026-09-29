@@ -53,7 +53,7 @@ use serde_json::Value;
 use crate::models::token_usage::{ModelRef, TokenUsage};
 use crate::services::a2a_client::{USAGE_METADATA_KEY, usage_from_status_metadata};
 use crate::session::SessionEvent;
-use crate::tools::invoke_agent_tool::InvokeAgentProgress;
+use crate::tools::invoke_agent_tool::{InvokeAgentProgress, STOPPED_BY_USER};
 use crate::tools::plugin_tool::PLUGIN_TOOL_SEPARATOR;
 
 /// A node's place in a [`Tree`].
@@ -288,7 +288,9 @@ impl NodeStatus {
     fn ended(state: &str) -> Self {
         match state {
             "completed" => Self::Completed,
-            "canceled" => Self::Canceled,
+            // `cancelled` is the edge-log row of a run the user stopped
+            // (TB-7).
+            "canceled" | "cancelled" => Self::Canceled,
             "rejected" => Self::Refused {
                 reason: state.to_string(),
             },
@@ -623,7 +625,11 @@ impl SwarmTrace {
                 self.callees.entry(id).or_default().push(step.clone());
                 self.settle_steps(id);
             }
-            InvokeAgentProgress::Finished { success, usage, .. } => {
+            InvokeAgentProgress::Finished {
+                success,
+                usage,
+                result,
+            } => {
                 let lines: Vec<UsageLine> =
                     usage.iter().flat_map(UsageLine::from_token_usage).collect();
                 self.delegated = merge_lines(self.delegated.iter().chain(&lines));
@@ -634,6 +640,8 @@ impl SwarmTrace {
                     if node.status.is_running() {
                         node.status = if *success {
                             NodeStatus::Completed
+                        } else if result.as_deref() == Some(STOPPED_BY_USER) {
+                            NodeStatus::Canceled
                         } else {
                             NodeStatus::Failed
                         };

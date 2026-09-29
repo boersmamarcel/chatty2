@@ -40,6 +40,7 @@ impl ChatView {
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
         self.delegation_progress_msg_idx = None;
+        self.delegation_started_at = None;
         self.swarm_rows.clear();
         self.pending_approval = None;
         self.pending_clarification = None;
@@ -59,6 +60,10 @@ impl ChatView {
         source: ToolSource,
         cx: &mut Context<Self>,
     ) {
+        // Not `restore_delegation_progress`'s job: that also runs when
+        // switching back to a conversation with an already-running
+        // delegation, where "now" is not when the row actually started.
+        self.delegation_started_at = Some(std::time::Instant::now());
         let trace = SystemTrace::new_delegation(prompt, source);
         self.restore_delegation_progress(trace, cx);
     }
@@ -139,10 +144,14 @@ impl ChatView {
         let Some(idx) = self.delegation_progress_msg_idx else {
             return;
         };
+        let elapsed = self.delegation_started_at.take().map(|t| t.elapsed());
 
         if let Some(msg) = self.messages.get_mut(idx) {
             if let Some(ref mut trace) = msg.live_trace {
                 trace.finalize_delegation_progress(success, result);
+                if trace.total_duration.is_none() {
+                    trace.total_duration = elapsed;
+                }
             }
 
             // Push final trace state to the view entity.

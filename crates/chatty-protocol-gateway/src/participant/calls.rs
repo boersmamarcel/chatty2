@@ -84,26 +84,37 @@
 //! [`FORWARD_INTERVAL`], one batch per node, and the last of them before
 //! its result.
 //!
+//! The root can stop one run while the rest of the swarm keeps going (TB-7,
+//! AGE-749): [`BrokerCalls::cancel`] names a node — or, for one of the
+//! root's own callees the tree still knows only by its spec, that spec —
+//! and the call that started it ends with a [`CANCELLED_BY_USER`] result.
+//! Its worker is reaped as the call lets go of it, which closes its
+//! connection and so drops every call it made: the subtree goes the way a
+//! hung-up caller's does, permits and pending messages with it. The
+//! caller's own run carries on, and a question the stopped subtree had
+//! parked above it is withdrawn hop by hop ([`CallEvent::InputWithdrawn`]).
+//!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, every `send_message` call one message row, and every refused call
-//! one refusal row. A task row whose callee reported usage carries its
-//! price, or `unpriced`, when the broker has a [`UsagePricer`]. `list_agents` reads the directory and is not an edge
-//! between two nodes, so it writes none.
+//! one refusal row. A stopped call's task row says `cancelled`. A task row
+//! whose callee reported usage carries its price, or `unpriced`, when the
+//! broker has a [`UsagePricer`]. `list_agents` reads the directory and is
+//! not an edge between two nodes, so it writes none.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
-    AgentOrigin, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallStream, ChildCall,
-    ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL, InvokeAgentOutcome,
-    InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal,
-    RefusalReason, Remaining, SendMessageParams, SpawnContext, SwarmBatcher, SwarmItem, Transport,
-    UsagePricer, deadline_grace,
+    AgentOrigin, CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest,
+    CallStream, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL,
+    InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList,
+    ROOT_NAME, Refusal, RefusalReason, Remaining, SendMessageParams, SpawnContext, SwarmBatcher,
+    SwarmItem, Transport, UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use super::protocol::{CallStamp, DelegatedTask, TaskInput, TaskState};
@@ -160,6 +171,68 @@ pub struct BrokerCalls {
     /// Each root call in flight, by its root task id: where the runs
     /// nested under it report (TB-1).
     swarm: Swarm,
+    /// Every running call, by the node it runs: what
+    /// [`cancel`](BrokerCalls::cancel) stops (TB-7).
+    stops: Stops,
+}
+
+/// The running calls [`BrokerCalls::cancel`] can stop.
+type Stops = Arc<Mutex<Vec<Stoppable>>>;
+
+/// One running call: the node its callee runs as, the name its caller
+/// addressed, and the line that stops it.
+struct Stoppable {
+    id: u64,
+    node: String,
+    agent: String,
+    by_root: bool,
+    stop: oneshot::Sender<()>,
+}
+
+/// A running call's entry in [`Stops`]; leaves it when the call ends.
+struct StopGuard {
+    stops: Stops,
+    id: u64,
+}
+
+impl Drop for StopGuard {
+    fn drop(&mut self) {
+        lock_stops(&self.stops).retain(|entry| entry.id != self.id);
+    }
+}
+
+fn lock_stops(stops: &Stops) -> std::sync::MutexGuard<'_, Vec<Stoppable>> {
+    stops.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Numbers [`Stoppable`] entries, unique in this process.
+static NEXT_STOPPABLE: AtomicU64 = AtomicU64::new(0);
+
+/// Put the call running `node` for `caller`, addressed as `agent`, on
+/// `stops`: the receiver fires when the user stops it, and the guard takes
+/// it off again.
+fn stoppable(
+    stops: &Stops,
+    caller: &Caller,
+    agent: &str,
+    node: &str,
+) -> (oneshot::Receiver<()>, StopGuard) {
+    let id = NEXT_STOPPABLE.fetch_add(1, Ordering::Relaxed);
+    let (stop, stopped) = oneshot::channel();
+    lock_stops(stops).push(Stoppable {
+        id,
+        node: node.to_string(),
+        agent: agent.to_string(),
+        by_root: *caller == Caller::Root,
+        stop,
+    });
+    (
+        stopped,
+        StopGuard {
+            stops: stops.clone(),
+            id,
+        },
+    )
 }
 
 /// Root calls listening for their nested runs, by root task id.
@@ -203,10 +276,28 @@ struct Reporting {
     to: mpsc::UnboundedSender<Nested>,
     chain: CallChain,
     node: String,
+    /// Whether the run's end has been reported.
+    ended: AtomicBool,
+}
+
+/// A run whose call went away before its end — its caller was stopped or
+/// hung up (TB-7) — ends as canceled, so the root's tree does not show it
+/// running on.
+impl Drop for Reporting {
+    fn drop(&mut self) {
+        if !self.ended.load(Ordering::Relaxed) {
+            self.send(SwarmItem::Ended {
+                state: TaskState::Canceled.to_string(),
+            });
+        }
+    }
 }
 
 impl Reporting {
     fn send(&self, item: SwarmItem) {
+        if matches!(item, SwarmItem::Ended { .. }) {
+            self.ended.store(true, Ordering::Relaxed);
+        }
         let _ = self.to.send(Nested {
             node: self.node.clone(),
             chain: self.chain.clone(),
@@ -254,7 +345,38 @@ impl BrokerCalls {
             policy: None,
             pricer: None,
             swarm: Arc::default(),
+            stops: Arc::default(),
         }
+    }
+
+    /// Stop `node` and everything under it (TB-7, AGE-749): the call that
+    /// runs it ends with a [`CANCELLED_BY_USER`] result, and its caller
+    /// carries on. `node` is the name the broker admitted it under, or the
+    /// spec the root addressed one of its own callees by — the name its
+    /// caller's tree knows it by until the call ends. Every root callee of
+    /// that spec is stopped then. `Err` when nothing running goes by `node`.
+    pub fn cancel(&self, node: &str) -> Result<(), CallError> {
+        let mut stops = lock_stops(&self.stops);
+        let by_node = stops.iter().any(|entry| entry.node == node);
+        let (stopped, running): (Vec<_>, Vec<_>) = stops.drain(..).partition(|entry| {
+            if by_node {
+                entry.node == node
+            } else {
+                entry.by_root && entry.agent == node
+            }
+        });
+        *stops = running;
+        drop(stops);
+        if stopped.is_empty() {
+            return Err(CallError::Failed(format!(
+                "nothing running is named '{node}'"
+            )));
+        }
+        for entry in stopped {
+            info!(node = %entry.node, "The user stopped a run");
+            let _ = entry.stop.send(());
+        }
+        Ok(())
     }
 
     /// Log a refusal of a loopback HTTP request naming `what` — a role, a
@@ -530,6 +652,7 @@ impl BrokerCalls {
                 tokio::time::Instant::now() + left + deadline_grace(left)
             });
         let pricer = self.pricer.clone();
+        let stops = self.stops.clone();
         // A root call listens for the runs nested under it; a run a node's
         // call starts reports to its root call, if that is listening
         // (TB-1). Both are keyed by the chain the broker stamped.
@@ -598,10 +721,15 @@ impl BrokerCalls {
                 }
             };
             edge.to = running.participant().to_string();
+            let (mut stopped, _stoppable) = stoppable(&stops, &caller, &agent, running.participant());
+            let mut stopped_by_user = false;
+            // The task this call's callee is parked on, until it moves on.
+            let mut parked = None;
             let reporting = reports_to.map(|(to, chain)| Reporting {
                 to,
                 chain,
                 node: running.participant().to_string(),
+                ended: AtomicBool::new(false),
             });
             let report = |item: SwarmItem| {
                 if let Some(reporting) = reporting.as_ref() {
@@ -632,6 +760,10 @@ impl BrokerCalls {
                             Some("deadline: the call ran past its deadline and was stopped".to_string()),
                             None,
                         ));
+                        break;
+                    }
+                    Ok(()) = &mut stopped => {
+                        stopped_by_user = true;
                         break;
                     }
                     Some(nested) = next_nested(&mut listening) => {
@@ -689,12 +821,20 @@ impl BrokerCalls {
                                 // An approval names the agent that asked,
                                 // once: the first hop up (AGE-646).
                                 input.stamp_asker(running.participant(), &asker_chain);
+                                parked = Some(running.task_id.clone());
                                 yield Ok(CallEvent::InputRequired {
                                     task: running.task_id.clone(),
                                     request: json!(input),
                                 });
                             }
                             (TaskState::Working, _) => {
+                                // Moving on un-parks the task: answered, or
+                                // withdrawn under a stopped run (TB-7). A
+                                // caller that answered has nothing left to
+                                // withdraw.
+                                if let Some(task) = parked.take() {
+                                    yield Ok(CallEvent::InputWithdrawn { task });
+                                }
                                 if let Some(step) = message {
                                     yield Ok(CallEvent::Progress(json!({ "Step": step })));
                                 }
@@ -706,6 +846,23 @@ impl BrokerCalls {
                 }
             }
 
+            if stopped_by_user {
+                // The subtree goes now, not when the caller lets go of the
+                // stream: the worker is reaped, its connection closes, and
+                // every call it made is dropped with it.
+                drop(running);
+                report(SwarmItem::Ended { state: TaskState::Canceled.to_string() });
+                edge.write(EdgeKind::Task, "cancelled".to_string());
+                yield Ok(CallEvent::Result(json!(InvokeAgentOutcome {
+                    success: false,
+                    response,
+                    error: Some(CANCELLED_BY_USER.to_string()),
+                    metadata: None,
+                    messages: messages(),
+                    cancelled_by_user: true,
+                })));
+                return;
+            }
             let (state, message, metadata) = end.unwrap_or_else(|| {
                 debug!(agent = %agent, "A called task ended with no final status");
                 (
@@ -882,6 +1039,7 @@ fn outcome(
         error: if success { None } else { message },
         metadata,
         messages,
+        cancelled_by_user: false,
     })
 }
 
@@ -998,6 +1156,11 @@ impl Transport for DirectTransport {
     /// to open with (delivery point b).
     fn take_run_messages(&self) -> Vec<String> {
         self.calls.start_run(&Caller::Root)
+    }
+
+    /// The root stops one run of its swarm (TB-7).
+    fn cancel(&self, node: &str) -> Result<(), CallError> {
+        self.calls.cancel(node)
     }
 }
 

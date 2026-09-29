@@ -329,6 +329,35 @@ fn apply_gateway_result(
     }
 }
 
+/// Toggle the WASM module runtime on/off (Settings → Plugins), persist to
+/// disk, and start or stop the gateway/broker immediately via
+/// `refresh_runtime` — the same reload path a settings-file edit gets
+/// after a restart, run live instead so the tutorial's "quit and restart
+/// Chatty" step is no longer needed.
+pub fn toggle_module_runtime(cx: &mut App) {
+    let old_enabled = cx.global::<ModuleSettingsModel>().enabled;
+    let new_enabled = !old_enabled;
+    info!(
+        old = old_enabled,
+        new = new_enabled,
+        "Toggling module runtime"
+    );
+    cx.global_mut::<ModuleSettingsModel>().enabled = new_enabled;
+
+    let settings = cx.global::<ModuleSettingsModel>().clone();
+    cx.refresh_windows();
+
+    refresh_runtime(cx);
+
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::module_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save module settings");
+        }
+    })
+    .detach();
+}
+
 pub fn refresh_runtime(cx: &mut App) {
     let settings = cx.global::<ModuleSettingsModel>().clone();
     let llm_provider = build_llm_provider(cx).unwrap_or_else(|| {

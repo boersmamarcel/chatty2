@@ -16,6 +16,9 @@ One key gives access to many upstream models (Claude, GPT, Gemini, Mistral and m
 
 No key needed — a local instance is detected automatically. The URL field defaults to `http://localhost:11434`; change it and **Save** if Ollama runs elsewhere (another machine, a different port). **Test** shows *Running · N models*.
 
+> [!NOTE]
+> **Plain `http://` is only for your own network.** Provider URLs (and MCP server, remote agent and Hive registry URLs) may use `http://` only for `localhost`/loopback and private-LAN addresses (`10.x.x.x`, `172.16–31.x.x`, `192.168.x.x` — for example a model server on the Docker bridge, `http://172.17.0.1:8000`). Any other host must use `https://`; there is no override.
+
 Ollama models are added for you: Chatty discovers what is installed shortly after launch and keeps the roster in step, removing models you have deleted from Ollama and detecting per model whether it accepts images.
 
 > [!NOTE]

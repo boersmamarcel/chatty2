@@ -133,6 +133,18 @@ pub(crate) fn completion_model(
     provider_config: &ProviderConfig,
 ) -> Result<ModelHandle> {
     let identifier = model_config.model_identifier.as_str();
+    // SEC-16 / AGE-756: an OpenAI-compatible base URL carries the API key
+    // in a header, so a configured http:// endpoint outside loopback/the
+    // private LAN a local model server runs on (e.g. the docker bridge a
+    // containerized vLLM listens on) would send it in clear text.
+    if let Some(base_url) = provider_config
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        hive_client::ensure_secure_url(base_url).map_err(|e| anyhow!(e))?;
+    }
     match provider_config.provider_type {
         ProviderType::OpenRouter => {
             let key = provider_config
@@ -475,6 +487,42 @@ mod tests {
             .await
             .expect("tool_definitions with no prompt does no I/O");
         assert!(defs.is_empty(), "utility agent must be built with no tools");
+    }
+
+    /// SEC-16 / AGE-756: a self-hosted OpenAI-compatible endpoint pointed at
+    /// a real host over plain `http://` must be refused before the client
+    /// is even built — the API key travels in a header on every request.
+    #[test]
+    fn plain_http_provider_base_url_is_refused() {
+        let model_config = ModelConfig::new(
+            "test-model".into(),
+            "test-model".into(),
+            ProviderType::Ollama,
+            "test-model".into(),
+        );
+        let provider_config = ProviderConfig::new("remote-ollama".into(), ProviderType::Ollama)
+            .with_base_url("http://models.example.com:11434".into());
+
+        let err = completion_model(&model_config, &provider_config)
+            .expect_err("a plain-http remote model server must be refused");
+        assert!(format!("{err:#}").contains("https"), "{err:#}");
+    }
+
+    /// The docker bridge a local vLLM/Ollama listens behind must keep
+    /// working over `http://` (SEC-16's explicit stand-in requirement).
+    #[test]
+    fn docker_bridge_provider_base_url_is_allowed() {
+        let model_config = ModelConfig::new(
+            "test-model".into(),
+            "test-model".into(),
+            ProviderType::Ollama,
+            "test-model".into(),
+        );
+        let provider_config = ProviderConfig::new("local-vllm".into(), ProviderType::Ollama)
+            .with_base_url("http://172.17.0.1:8000".into());
+
+        completion_model(&model_config, &provider_config)
+            .expect("the docker bridge is a private-LAN address, allowed over http://");
     }
 
     /// AGE-400: `extra_params.think` becomes Ollama's request-level `think`
