@@ -74,7 +74,7 @@ curl -s --unix-socket "$dir/gateway.sock" http://localhost/mcp/echo \
 
 A client that can only reach an HTTP URL needs a local bridge from a port to the socket. The bridge answers anyone who can reach that port, so bind it to `127.0.0.1` and still send the token.
 
-Chatty refuses to start the gateway when the `chatty-run` folder is someone else's or can be opened by other users (anything but mode `700`); remove the folder and it is recreated correctly. On Windows the gateway does not start yet: it needs an owner-only folder there, which Chatty does not create yet, so external MCP access is macOS/Linux-only for now (AGE-778 tracks the Windows DACL).
+Chatty refuses to start the gateway when the `chatty-run` folder is someone else's or can be opened by other users (anything but mode `700`); remove the folder and it is recreated correctly. On Windows the gateway does not start yet: it needs an owner-only folder there, which Chatty does not create yet, so external MCP access (reaching a plugin's tools from another MCP client) is macOS/Linux-only for now.
 
 ## Next
 
