@@ -1,8 +1,9 @@
 # Showcase teams: real-model reliability runs (2026-09-29)
 
 **When to read this:** You want to know whether the shipped example teams
-(`data-analysis`, `research-brief`) work on a real model, and how reliably,
-or why `coder-reviewer` and the Benford team were not shipped (AGE-752).
+(`data-analysis`, `research-brief`, and the coding team `fix-and-verify`,
+AGE-757) work on a real model, and how reliably, or why `coder-reviewer` and
+the Benford team were not shipped (AGE-752).
 
 ## Setup
 
@@ -119,3 +120,50 @@ per finding.
 - The shared participant socket (`/run/user/1000/chatty/participants.sock`)
   is taken when a second chatty runs on the same machine. The broker warns
   and carries on.
+
+## `fix-and-verify` (AGE-757): `The project's tests fail. Find the bug and fix it without changing the tests.`
+
+The coding team that replaces `coder-reviewer`, after AGE-757 made a
+worker's linked worktree reachable from its sandboxed shell. Lead `fix-lead`
+(`coordinator`), `fix-coder` (`coder`), `code-reviewer` (`reviewer`, no
+shell). The team's `verification` is the fixture's
+`python3 -m unittest discover -s tests -t . -v`, run by Chatty in the
+coder's tree; the reviewer judges the diff and that evidence.
+
+The known answer (`teams/fix-and-verify/fixture/`): one test fails because
+an order of exactly the free-shipping threshold (50.00) is charged shipping.
+The fix is `>` → `>=` in `invoice.py`, with `tests/test_invoice.py`
+unchanged. *Success* means the fix is merged, the four tests pass on the
+merged tree, and the test file is untouched.
+
+Setup: headless `chatty-tui --team fix-and-verify --auto-approve` on a fresh
+`git init` of the fixture, same model and server as above
+(`Qwen3.8-27B-INT4`, 32k, `think = "false"`), endpoint budget 1 (one model
+request at a time), runs serialized. Wall is the whole run; agents counts
+delegations. D1 is the desktop run behind the tutorial's screenshot
+(`/agent fix-lead …`, gateway port 8548, the verification set in
+`module_settings.json`).
+
+| Run | Prompts | Success | Wall | Agents | Notes |
+|---|---|---|---|---|---|
+| F1 | first cut | yes | 3m52s | 2 | Approved first pass. The coder also changed `/ 100` to `/ 100.0` (a no-op, flagged by the reviewer) and ran `python` (2.7), whose `.pyc` files got committed. |
+| F2 | first cut | yes | 2m29s | 2 | Approved first pass, one-character fix. |
+| F3 | first cut | **no** | 8m03s | 4 | The lead told the coder to work on a branch it named; the coder switched to it with `git_switch_branch`, so Chatty's commit went there and the evidence for the coder's own branch showed no commits. Round 2 fixed it (exit 0), but the lead then looked for the commit in its own `git log`, did not find it, and the reviewer called the evidence fabricated. No merge. |
+| F4 | tuned | yes | 3m24s | 2 | Approved first pass. |
+| F5 | tuned | yes | 3m46s | 2 | Approved first pass. |
+| F6 | tuned | yes | 1m44s | 2 | Approved first pass. |
+| D1 | tuned, desktop | yes | about 3m | 3 | 229K tokens (lead 79.9K, coder 115.5K, reviewer 33.6K). The lead merged into its own branch `sub-agent/fix-lead-0`, as a desktop lead does. |
+
+Tuned prompts (what ships): 3 of 3 headless, plus the desktop run. First
+cut: 2 of 3. The tuning after F3 told the lead that each worker already has
+its own branch, which lives in the shared repository and not in the lead's
+tree, and to judge by the evidence block and the verdict; it told the coder
+never to create or switch branches, and the reviewer that its own worktree
+shows the code before the change, so it reads the change only through
+`git_diff <base>..<branch>`. The fixture gained a `.gitignore` for `*.pyc`.
+Tokens for the headless runs were not recorded: headless prints no usage,
+and the vLLM counters were shared with another run.
+
+Found on the way: the desktop's `/agent <leader>` takes the verification
+command from `module_settings.json`, not from the team's `team.json`, so a
+preset team's test command applies only under `--team`.
