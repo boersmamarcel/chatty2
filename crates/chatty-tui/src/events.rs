@@ -210,6 +210,7 @@ impl From<chatty_core::session::SessionEvent> for AppEvent {
                 id,
                 command,
                 is_sandboxed,
+                ..
             } => AppEvent::ApprovalRequested {
                 id,
                 command,

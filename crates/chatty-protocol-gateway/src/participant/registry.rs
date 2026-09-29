@@ -1001,7 +1001,7 @@ mod tests {
                 metadata: None,
                 input: Some(InputRequest {
                     id: "req-1".into(),
-                    questions: vec![InputQuestion {
+                    questions: vec![InputQuestion::Question {
                         id: "q1".into(),
                         question: "Which database?".into(),
                         options: vec!["Postgres".into(), "SQLite".into()],

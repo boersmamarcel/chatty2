@@ -433,6 +433,7 @@ mod tests {
                 id: "a-1".into(),
                 command: "ls".into(),
                 is_sandboxed: false,
+                detail: crate::models::execution_approval_store::ApprovalDetail::exec("ls"),
             },
             SessionEvent::Cancelled,
             SessionEvent::TurnEnded,

@@ -614,6 +614,7 @@ impl AgentSession {
                 id,
                 command,
                 is_sandboxed,
+                ..
             } => self.note_approval_requested(id, command, *is_sandboxed),
             SessionEvent::ApprovalResolved { id, approved } => {
                 self.note_approval_resolved(id, *approved)

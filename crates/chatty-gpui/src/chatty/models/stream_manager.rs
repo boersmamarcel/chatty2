@@ -673,6 +673,7 @@ impl StreamManager {
                 id,
                 command,
                 is_sandboxed,
+                ..
             } => {
                 cx.emit(StreamManagerEvent::ApprovalRequested {
                     conversation_id: conv_id.to_string(),
@@ -823,12 +824,14 @@ impl StreamManager {
                 id,
                 command,
                 is_sandboxed,
+                detail,
             } => self.handle_chunk(
                 conv_id,
                 StreamChunk::ApprovalRequested {
                     id,
                     command,
                     is_sandboxed,
+                    detail,
                 },
                 cx,
             ),

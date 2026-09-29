@@ -55,6 +55,8 @@ pub enum StreamChunk {
         id: String,
         command: String,
         is_sandboxed: bool,
+        /// What the approval is for, as it goes up a call chain (AGE-646).
+        detail: crate::models::execution_approval_store::ApprovalDetail,
     },
     ApprovalResolved {
         id: String,
@@ -692,6 +694,7 @@ pub async fn stream_prompt(
                         id: approval.id,
                         command: approval.command,
                         is_sandboxed: approval.is_sandboxed,
+                        detail: approval.detail,
                     });
                 }
 

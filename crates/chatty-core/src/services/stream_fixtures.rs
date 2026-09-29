@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::models::clarification_store::ClarifyingQuestion;
+use crate::models::execution_approval_store::ApprovalDetail;
 use crate::models::message_types::ToolSource;
 use crate::models::token_usage::ApiCallUsage;
 use crate::services::llm_service::{ResponseStream, StreamChunk};
@@ -170,6 +171,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     id: "approval-1".into(),
                     command: "rm -rf build".into(),
                     is_sandboxed: false,
+                    detail: ApprovalDetail::exec("rm -rf build"),
                 }),
                 ScriptedItem::Chunk(StreamChunk::ApprovalResolved {
                     id: "approval-1".into(),
@@ -196,6 +198,7 @@ pub fn scenarios() -> Vec<Scenario> {
                     id: "approval-1".into(),
                     command: "rm -rf build".into(),
                     is_sandboxed: false,
+                    detail: ApprovalDetail::exec("rm -rf build"),
                 }),
                 ScriptedItem::Chunk(StreamChunk::ApprovalResolved {
                     id: "approval-1".into(),

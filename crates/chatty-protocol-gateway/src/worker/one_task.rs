@@ -25,7 +25,7 @@
 //! The socket is read for the whole task, not only until the task arrives:
 //! a worker whose `ask_user` parked the task gets its answer as an `input`
 //! frame (AGE-306), which lands on the [`InputReceiver`] the turn was
-//! handed. What the turn does with it is [`answer_clarifications`] — the
+//! handed. What the turn does with it is [`answer_inputs`] — the
 //! embedder spawns that beside its turn with the session's store.
 //!
 //! # Calls (BI-4)
@@ -61,7 +61,7 @@ use crate::participant::{
 };
 
 #[cfg(doc)]
-use super::answer_clarifications;
+use super::answer_inputs;
 
 /// Where a running turn's events go. The same shape `chatty-tui`'s headless
 /// runner already takes as an observer, so the desktop hands it straight on.

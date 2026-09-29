@@ -186,12 +186,30 @@ impl SwarmKit {
         Self::start_with(None, roster, sse, ndjson, true).await
     }
 
+    /// As [`start`](Self::start), with every worker asking before each
+    /// command and write — no `--auto-approve`, `AlwaysAsk` — so an
+    /// approval goes up the call chain to the root (AGE-646).
+    pub async fn start_asking(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
+        Self::start_opts(None, roster, sse, ndjson, false, true).await
+    }
+
     async fn start_with(
         leader: Option<AgentSpec>,
         roster: Vec<AgentDef>,
         sse: Script,
         ndjson: Script,
         repo: bool,
+    ) -> Self {
+        Self::start_opts(leader, roster, sse, ndjson, repo, false).await
+    }
+
+    async fn start_opts(
+        leader: Option<AgentSpec>,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+        repo: bool,
+        asking: bool,
     ) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
@@ -285,7 +303,11 @@ impl SwarmKit {
             workspace_dir: Some(workspace.to_string_lossy().into_owned()),
             fetch_enabled: false,
             memory_enabled: false,
-            approval_mode: ApprovalMode::AutoApproveAll,
+            approval_mode: if asking {
+                ApprovalMode::AlwaysAsk
+            } else {
+                ApprovalMode::AutoApproveAll
+            },
             // A worker commits with the git tools: its sandboxed shell
             // cannot reach a linked worktree's repository.
             git_enabled: repo,
@@ -309,13 +331,13 @@ impl SwarmKit {
         }
 
         let executable = wrapper(&base, &worker_executable());
-        let mut specs = resolve_virtual_agents(
-            &models,
-            &providers,
-            &module_settings,
-            &specs,
-            &["--auto-approve".to_string()],
-        );
+        let common_args: Vec<String> = if asking {
+            Vec::new()
+        } else {
+            vec!["--auto-approve".to_string()]
+        };
+        let mut specs =
+            resolve_virtual_agents(&models, &providers, &module_settings, &specs, &common_args);
         // What `Broker::start` does with a team's `handoffs` (TD-2).
         for (spec, agent) in specs.iter_mut().zip(&roster) {
             spec.handoff = agent.handoff.clone().map(|schema| HandoffContract {
@@ -2069,7 +2091,7 @@ async fn one_broker_per_root() {
 // 1, 2 and 5)
 // ---------------------------------------------------------------------------
 
-const ROOT_MODEL: &str = "kit/root";
+pub(crate) const ROOT_MODEL: &str = "kit/root";
 
 /// The kit's running broker as the in-process root sees it: its direct
 /// handle, already started.
@@ -2100,16 +2122,20 @@ impl chatty_core::services::lazy_broker::LazyBroker for StartedBroker {
 /// the kit's SSE endpoint, it delegates through the kit's broker, and its
 /// shell asks a human before every command. The receiver gets each
 /// approval its tools raise; `approvals` answers them.
-struct KitRoot {
+pub(crate) struct KitRoot {
     agent: std::sync::Arc<chatty_core::factories::AgentClient>,
-    approvals: chatty_core::models::execution_approval_store::ExecutionApprovalStore,
+    pub approvals: chatty_core::models::execution_approval_store::ExecutionApprovalStore,
     raised: tokio::sync::mpsc::UnboundedReceiver<
         chatty_core::models::execution_approval_store::ApprovalNotification,
+    >,
+    /// Each approval that left the store: answered, or withdrawn.
+    pub resolved: tokio::sync::mpsc::UnboundedReceiver<
+        chatty_core::models::execution_approval_store::ApprovalResolution,
     >,
 }
 
 impl KitRoot {
-    async fn build(kit: &SwarmKit) -> Self {
+    pub(crate) async fn build(kit: &SwarmKit) -> Self {
         use chatty_core::factories::{AgentBuildContext, AgentClient, AgentServices};
         use chatty_core::models::clarification_store::ClarificationStore;
         use chatty_core::models::execution_approval_store::ExecutionApprovalStore;
@@ -2118,7 +2144,7 @@ impl KitRoot {
         let _ = chatty_core::init_repositories();
         let mut approvals = ExecutionApprovalStore::new();
         let (raised_tx, raised) = tokio::sync::mpsc::unbounded_channel();
-        let (resolved_tx, _resolved) = tokio::sync::mpsc::unbounded_channel();
+        let (resolved_tx, resolved) = tokio::sync::mpsc::unbounded_channel();
         approvals.set_notifiers(raised_tx, resolved_tx);
         let settings = ExecutionSettingsModel {
             enabled: true,
@@ -2155,12 +2181,13 @@ impl KitRoot {
             agent: std::sync::Arc::new(built.client),
             approvals,
             raised,
+            resolved,
         }
     }
 
     /// Run one prompt to its end through the production stream path, on a
     /// task of its own; its answer text.
-    fn run(&self, prompt: &str) -> tokio::task::JoinHandle<String> {
+    pub(crate) fn run(&self, prompt: &str) -> tokio::task::JoinHandle<String> {
         use chatty_core::services::StreamChunk;
         use futures::StreamExt;
         let agent = self.agent.clone();
@@ -2190,7 +2217,7 @@ impl KitRoot {
     }
 
     /// The next approval the root's tools raise.
-    async fn next_approval(
+    pub(crate) async fn next_approval(
         &mut self,
     ) -> chatty_core::models::execution_approval_store::ApprovalNotification {
         tokio::time::timeout(DEADLINE, self.raised.recv())
@@ -2199,9 +2226,14 @@ impl KitRoot {
             .expect("the approval channel is open")
     }
 
-    fn deny(&self, id: &str) {
+    pub(crate) fn deny(&self, id: &str) {
         use chatty_core::models::execution_approval_store::ApprovalDecision;
         assert!(self.approvals.resolve(id, ApprovalDecision::Denied));
+    }
+
+    pub(crate) fn approve(&self, id: &str) {
+        use chatty_core::models::execution_approval_store::ApprovalDecision;
+        assert!(self.approvals.resolve(id, ApprovalDecision::Approved));
     }
 }
 

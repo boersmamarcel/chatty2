@@ -389,12 +389,14 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 id,
                 command,
                 is_sandboxed,
+                detail,
             } => {
                 self.output_in_call = true;
                 (self.emit)(SessionEvent::ApprovalRequested {
                     id,
                     command,
                     is_sandboxed,
+                    detail,
                 })
             }
             StreamChunk::ApprovalResolved { id, approved } => {

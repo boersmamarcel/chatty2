@@ -66,6 +66,9 @@ pub enum SessionEvent {
         id: String,
         command: String,
         is_sandboxed: bool,
+        /// What the approval is for, in the shape a worker relays it up the
+        /// call chain in (AGE-646).
+        detail: crate::models::execution_approval_store::ApprovalDetail,
     },
     ApprovalResolved {
         id: String,

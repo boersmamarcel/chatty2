@@ -31,7 +31,8 @@ use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{ParticipantRegistry, open_connection};
 use chatty_protocol_gateway::worker::{
-    EventSink, InputReceiver, WorkerConnection, answer_clarifications, serve_one_task, worker_card,
+    EventSink, InputReceiver, InputStores, WorkerConnection, answer_inputs, serve_one_task,
+    worker_card,
 };
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use rig_agent::tool::{Tool, ToolContext};
@@ -142,7 +143,14 @@ fn scripted_session(sink: &EventSink, inputs: InputReceiver) -> ClarificationSto
             }
         }
     });
-    tokio::spawn(answer_clarifications(inputs, store.clone()));
+    tokio::spawn(answer_inputs(
+        inputs,
+        InputStores {
+            clarifications: store.clone(),
+            execution_approvals: Default::default(),
+            write_approvals: Default::default(),
+        },
+    ));
     store
 }
 

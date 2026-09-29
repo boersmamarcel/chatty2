@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 
 /// Decision for an execution approval request
 #[derive(Clone, Debug)]
@@ -11,12 +12,80 @@ pub enum ApprovalDecision {
     Denied,
 }
 
+/// Which store an approval belongs to: a command (shell, git, browser,
+/// plugin) or a filesystem write. Rides the A2A wire when an approval is
+/// relayed up the call chain (AGE-646), so its spelling is the wire's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalKind {
+    Exec,
+    Write,
+}
+
+/// The delegated agent an approval was raised by (AGE-646): its
+/// broker-assigned name and the chain of spec names it runs under, root
+/// first. The broker stamps it on the first hop up; every hop above keeps
+/// it, so the human's card names the agent that actually asked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalAsker {
+    pub agent: String,
+    pub chain: Vec<String>,
+}
+
+/// What an approval is for, in the shape it travels up the call chain in
+/// (AGE-646): the kind, the command or the path, a write's diff stat, and —
+/// once it has been relayed — who asked. The notification's `command` is the
+/// line a card shows; this is what a worker sends its parent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalDetail {
+    pub kind: ApprovalKind,
+    pub command_or_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asker: Option<ApprovalAsker>,
+}
+
+impl ApprovalDetail {
+    /// A command this agent's own tool wants to run.
+    pub fn exec(command: impl Into<String>) -> Self {
+        Self {
+            kind: ApprovalKind::Exec,
+            command_or_path: command.into(),
+            diff_stat: None,
+            asker: None,
+        }
+    }
+
+    /// The line an approval card shows for a relayed request: who asks,
+    /// through which chain, for what.
+    pub fn relayed_label(&self) -> String {
+        let what = match self.kind {
+            ApprovalKind::Exec => self.command_or_path.clone(),
+            ApprovalKind::Write => match &self.diff_stat {
+                Some(stat) => format!("[write] {} ({stat})", self.command_or_path),
+                None => format!("[write] {}", self.command_or_path),
+            },
+        };
+        match &self.asker {
+            Some(asker) => format!(
+                "{} ({}) asks: {what}",
+                asker.agent,
+                asker.chain.join(" \u{203a} ")
+            ),
+            None => what,
+        }
+    }
+}
+
 /// Notification that an approval request was created
 #[derive(Clone, Debug)]
 pub struct ApprovalNotification {
     pub id: String,
+    /// The line the approval card shows.
     pub command: String,
     pub is_sandboxed: bool,
+    pub detail: ApprovalDetail,
 }
 
 /// Notification that an approval was resolved
@@ -27,7 +96,7 @@ pub struct ApprovalResolution {
 }
 
 /// Inner state behind `PendingApprovals`: the in-flight requests plus the
-/// per-turn notifier the frontend installs (AGE-246 / D7) so a tool can
+/// per-turn notifiers the frontend installs (AGE-246 / D7) so a tool can
 /// announce a new request through the store it was handed, rather than a
 /// process-wide global that the next turn — on any conversation — would
 /// silently overwrite.
@@ -35,10 +104,13 @@ pub struct ApprovalResolution {
 /// Each pending request is just the channel to send its decision back to the
 /// waiting execution; the id/command/is_sandboxed metadata a UI needs is
 /// already carried separately by `ApprovalNotification`, sent at the same
-/// time a request is inserted here.
+/// time a request is inserted here. The resolution notifier lives here too,
+/// so every clone of the store — a worker's input loop holds one (AGE-646)
+/// — announces the answers it gives.
 pub struct PendingApprovalsState {
     requests: HashMap<String, oneshot::Sender<ApprovalDecision>>,
     notifier: Option<mpsc::UnboundedSender<ApprovalNotification>>,
+    resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
 }
 
 impl PendingApprovalsState {
@@ -46,12 +118,16 @@ impl PendingApprovalsState {
         Self {
             requests: HashMap::new(),
             notifier: None,
+            resolution_notifier: None,
         }
     }
 }
 
 /// Thread-safe storage for pending approvals (accessible from both GPUI and Tokio contexts)
 pub type PendingApprovals = Arc<Mutex<PendingApprovalsState>>;
+
+/// How long a request waits for its answer.
+const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Shared approval flow used by shell tools, git tools, and any future tool that
 /// requires user confirmation before executing.
@@ -68,13 +144,43 @@ pub async fn request_execution_approval(
     is_sandboxed: bool,
 ) -> anyhow::Result<bool> {
     use crate::settings::models::execution_settings::ApprovalMode;
-    use tracing::warn;
 
     match approval_mode {
         ApprovalMode::AutoApproveAll => return Ok(true),
         ApprovalMode::AutoApproveSandboxed if is_sandboxed => return Ok(true),
         _ => {}
     }
+
+    ask(
+        pending,
+        label.to_string(),
+        is_sandboxed,
+        ApprovalDetail::exec(label),
+    )
+    .await
+}
+
+/// Re-raise an approval a delegated agent asked for on this agent's own
+/// store (AGE-646), always asking: the worker below would not have asked if
+/// its mode — the root's, mirrored down — let it through. The card shows
+/// [`ApprovalDetail::relayed_label`].
+///
+/// Dropping the future — the turn it runs in was cancelled — withdraws the
+/// request and announces it resolved (denied), so no card outlives it.
+pub async fn request_relayed_execution_approval(
+    pending: &PendingApprovals,
+    detail: ApprovalDetail,
+) -> anyhow::Result<bool> {
+    ask(pending, detail.relayed_label(), false, detail).await
+}
+
+async fn ask(
+    pending: &PendingApprovals,
+    label: String,
+    is_sandboxed: bool,
+    detail: ApprovalDetail,
+) -> anyhow::Result<bool> {
+    use tracing::warn;
 
     let (tx, rx) = oneshot::channel();
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -86,8 +192,9 @@ pub async fn request_execution_approval(
             Some(notifier) => {
                 if let Err(e) = notifier.send(ApprovalNotification {
                     id: request_id.clone(),
-                    command: label.to_string(),
+                    command: label,
                     is_sandboxed,
+                    detail,
                 }) {
                     warn!(id = %request_id, error = ?e, "Failed to send approval notification");
                 }
@@ -98,13 +205,38 @@ pub async fn request_execution_approval(
         }
     }
 
-    match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+    // An answered request is already out of the store; this only acts on
+    // one nobody answered.
+    let _withdraw = Withdraw {
+        pending,
+        id: &request_id,
+    };
+    match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
         Ok(Ok(ApprovalDecision::Approved)) => Ok(true),
         Ok(Ok(ApprovalDecision::Denied)) => Ok(false),
         Ok(Err(_)) => Err(anyhow::anyhow!("Approval channel closed")),
-        Err(_) => {
-            pending.lock().requests.remove(&request_id);
-            Err(anyhow::anyhow!("Approval timeout (5 minutes)"))
+        Err(_) => Err(anyhow::anyhow!("Approval timeout (5 minutes)")),
+    }
+}
+
+/// Takes a request that was never answered back out of the store — on
+/// timeout, or when the waiting future is dropped — and tells the stream it
+/// is over, so the card that shows it retires.
+struct Withdraw<'a> {
+    pending: &'a PendingApprovals,
+    id: &'a str,
+}
+
+impl Drop for Withdraw<'_> {
+    fn drop(&mut self) {
+        let mut state = self.pending.lock();
+        if state.requests.remove(self.id).is_some()
+            && let Some(tx) = &state.resolution_notifier
+        {
+            let _ = tx.send(ApprovalResolution {
+                id: self.id.to_string(),
+                approved: false,
+            });
         }
     }
 }
@@ -114,14 +246,12 @@ pub async fn request_execution_approval(
 #[derive(Clone)]
 pub struct ExecutionApprovalStore {
     pending_requests: PendingApprovals,
-    resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
 }
 
 impl ExecutionApprovalStore {
     pub fn new() -> Self {
         Self {
             pending_requests: Arc::new(Mutex::new(PendingApprovalsState::new())),
-            resolution_notifier: None,
         }
     }
 
@@ -131,15 +261,16 @@ impl ExecutionApprovalStore {
     }
 
     /// Set the notification channels on an existing store for the current
-    /// turn: the approval notifier lives on `PendingApprovals` itself, since
-    /// that is the handle `request_execution_approval` actually holds.
+    /// turn. Both live on `PendingApprovals` itself, since that is the handle
+    /// `request_execution_approval` actually holds and every clone shares.
     pub fn set_notifiers(
         &mut self,
         approval_tx: mpsc::UnboundedSender<ApprovalNotification>,
         resolution_tx: mpsc::UnboundedSender<ApprovalResolution>,
     ) {
-        self.pending_requests.lock().notifier = Some(approval_tx);
-        self.resolution_notifier = Some(resolution_tx);
+        let mut state = self.pending_requests.lock();
+        state.notifier = Some(approval_tx);
+        state.resolution_notifier = Some(resolution_tx);
     }
 
     /// Resolve an approval request by ID, returning whether it existed
@@ -151,17 +282,26 @@ impl ExecutionApprovalStore {
             let _ = responder.send(decision);
 
             // Notify stream that approval was resolved
-            if let Some(tx) = &self.resolution_notifier {
+            if let Some(tx) = &state.resolution_notifier {
                 let _ = tx.send(ApprovalResolution {
                     id: id.to_string(),
                     approved,
                 });
             }
-
             true
         } else {
             false
         }
+    }
+
+    /// The ids waiting on an answer.
+    pub fn pending_ids(&self) -> Vec<String> {
+        self.pending_requests
+            .lock()
+            .requests
+            .keys()
+            .cloned()
+            .collect()
     }
 }
 

@@ -6,11 +6,16 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::models::clarification_store::{PendingClarifications, request_clarification};
+use crate::models::execution_approval_store::{
+    ApprovalKind, PendingApprovals, request_relayed_execution_approval,
+};
 use crate::models::message_types::ToolSource;
 use crate::models::token_usage::TokenUsage;
+use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::a2a_client::{
-    A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
-    trace_from_status_metadata, usage_from_status_metadata,
+    A2aApprovalRequest, A2aClarificationRequest, A2aClient, A2aStreamEvent, APPROVAL_DENIED,
+    APPROVAL_GRANTED, conversation_from_status_metadata, trace_from_status_metadata,
+    usage_from_status_metadata,
 };
 use crate::services::fabric_transport::progress_from_value;
 use crate::services::handoff::{HandoffLedger, HandoffReport};
@@ -18,6 +23,7 @@ use crate::services::lazy_broker::LazyBroker;
 use crate::services::run_budget::RunBudget;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
+use crate::tools::filesystem_write_tool::request_relayed_write_approval;
 use chatty_fabric::{
     AgentOrigin, CallError, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Refusal,
     Remaining, Transport,
@@ -202,6 +208,10 @@ pub struct InvokeAgentTool {
     /// leader may instead answer for its worker is an open question on the
     /// ADR; nothing selects such a policy today.
     clarifications: Option<PendingClarifications>,
+    /// This agent's own execution and write approval stores: where a
+    /// delegated agent's approval is re-raised (AGE-646). `None` means
+    /// nobody here can approve, and the request is denied.
+    approvals: Option<RelayedApprovals>,
     /// The hosted per-user spend cap (AGE-416 / ADR-0010), asked before any
     /// delegation starts. `None` — the desktop, chatty-tui, any leader
     /// without a cap — means no check at all.
@@ -238,6 +248,7 @@ impl InvokeAgentTool {
             local_agents: Vec::new(),
             warn_outside_fleet: false,
             clarifications: None,
+            approvals: None,
             spend_gate: None,
             run_budget: None,
             lazy_broker: None,
@@ -289,6 +300,18 @@ impl InvokeAgentTool {
     /// from one this agent asked itself.
     pub fn with_clarifications(mut self, pending: PendingClarifications) -> Self {
         self.clarifications = Some(pending);
+        self
+    }
+
+    /// Re-raise a delegated agent's execution and write approvals on this
+    /// agent's own approval stores (AGE-646) — the ones its own tools hold,
+    /// so at the root they reach the human's approval card like any other.
+    pub fn with_approvals(
+        mut self,
+        execution: PendingApprovals,
+        write: PendingWriteApprovals,
+    ) -> Self {
+        self.approvals = Some(RelayedApprovals { execution, write });
         self
     }
 
@@ -711,15 +734,21 @@ impl InvokeAgentTool {
                     self.send_progress(InvokeAgentProgress::Swarm(event));
                 }
                 Ok(CallEvent::InputRequired { task, request }) => {
-                    let answered = match serde_json::from_value::<A2aClarificationRequest>(request)
+                    let answered = if let Ok(approval) =
+                        serde_json::from_value::<A2aApprovalRequest>(request.clone())
                     {
-                        Ok(request) => {
-                            self.answer_over_fabric(transport, agent, &task, request)
-                                .await
+                        self.relay_approval(transport, agent, &task, approval).await;
+                        Ok(())
+                    } else {
+                        match serde_json::from_value::<A2aClarificationRequest>(request) {
+                            Ok(request) => {
+                                self.answer_over_fabric(transport, agent, &task, request)
+                                    .await
+                            }
+                            // A request that is neither has nothing to
+                            // answer.
+                            Err(_) => Ok(()),
                         }
-                        // A question with nothing to answer is an approval
-                        // the worker settles itself, as on the A2A path.
-                        Err(_) => Ok(()),
                     };
                     if let Err(e) = answered {
                         // Dropping the stream on the way out cancels the
@@ -961,6 +990,72 @@ impl InvokeAgentTool {
         request_clarification(pending, request.questions)
             .await
             .map_err(|e| format!("Agent '{agent}' asked a question that went unanswered: {e}"))
+    }
+}
+
+/// The approval stores a delegated agent's approvals are re-raised on
+/// (AGE-646).
+#[derive(Clone)]
+struct RelayedApprovals {
+    execution: PendingApprovals,
+    write: PendingWriteApprovals,
+}
+
+impl InvokeAgentTool {
+    /// A delegated agent — at any depth below — is waiting on an execution
+    /// or write approval (AGE-646): re-raise it on this agent's own store and
+    /// send the decision back down. Deny and timeout both go down as a
+    /// denial, which the worker's tool turns into an error; dropping this
+    /// future (a cancelled turn) withdraws the re-raised request.
+    async fn relay_approval(
+        &self,
+        transport: &dyn Transport,
+        agent: &str,
+        task_id: &str,
+        request: A2aApprovalRequest,
+    ) {
+        let mut answers = Vec::new();
+        for question in request.questions {
+            let granted = match self.approvals.as_ref() {
+                None => {
+                    warn!(agent = %agent, task = %task_id, "A delegated agent asked for an approval nobody here can give; denying");
+                    false
+                }
+                Some(stores) => {
+                    info!(
+                        agent = %agent,
+                        task = %task_id,
+                        request = %request.id,
+                        kind = ?question.detail.kind,
+                        "Delegated agent asked for an approval; escalating"
+                    );
+                    let decided = match question.detail.kind {
+                        ApprovalKind::Exec => {
+                            request_relayed_execution_approval(&stores.execution, question.detail)
+                                .await
+                        }
+                        ApprovalKind::Write => {
+                            request_relayed_write_approval(&stores.write, question.detail).await
+                        }
+                    };
+                    decided.unwrap_or_else(|e| {
+                        warn!(agent = %agent, error = %e, "A relayed approval went unanswered; denying");
+                        false
+                    })
+                }
+            };
+            answers.push(serde_json::json!({
+                "id": question.id,
+                "answer": if granted { APPROVAL_GRANTED } else { APPROVAL_DENIED },
+            }));
+        }
+        let input = serde_json::json!({ "requestId": request.id, "answers": answers });
+        // Unlike a lost answer to a question, a lost decision ends nothing
+        // here: the worker's own tool settles it (its timeout is a denial),
+        // and a worker that went away ends the call on its own.
+        if let Err(e) = transport.answer(task_id, input).await {
+            warn!(agent = %agent, task = %task_id, error = %e, "A relayed approval's decision could not be delivered");
+        }
     }
 }
 

@@ -534,6 +534,11 @@ impl BrokerCalls {
         // call starts reports to its root call, if that is listening
         // (TB-1). Both are keyed by the chain the broker stamped.
         let chain = stamp.as_ref().map(|stamp| stamp.chain.clone());
+        // The chain an approval from this callee names (AGE-646).
+        let asker_chain = chain
+            .as_ref()
+            .map(|chain| chain.chain.clone())
+            .unwrap_or_default();
         let mut listening = match (&caller, &chain) {
             (Caller::Root, Some(chain)) => Some(Listening::open(&self.swarm, &chain.root_task_id)),
             _ => None,
@@ -680,7 +685,10 @@ impl BrokerCalls {
                             // Back to whoever called, root or worker: a
                             // worker re-asks it on its own store, which
                             // parks its own task toward its caller.
-                            (TaskState::InputRequired, Some(input)) => {
+                            (TaskState::InputRequired, Some(mut input)) => {
+                                // An approval names the agent that asked,
+                                // once: the first hop up (AGE-646).
+                                input.stamp_asker(running.participant(), &asker_chain);
                                 yield Ok(CallEvent::InputRequired {
                                     task: running.task_id.clone(),
                                     request: json!(input),
@@ -691,8 +699,7 @@ impl BrokerCalls {
                                     yield Ok(CallEvent::Progress(json!({ "Step": step })));
                                 }
                             }
-                            // An approval the worker settles itself, or a
-                            // state nothing renders.
+                            // A state nothing renders.
                             _ => {}
                         }
                     }

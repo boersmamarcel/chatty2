@@ -4,7 +4,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use parking_lot::Mutex;
 
-use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
+use crate::models::execution_approval_store::{
+    ApprovalDetail, ApprovalKind, ApprovalNotification, ApprovalResolution,
+};
 
 /// Decision for a filesystem write approval request
 #[derive(Clone, Debug)]
@@ -36,6 +38,9 @@ pub enum WriteOperation {
         old_preview: String,
         new_preview: String,
     },
+    /// A write a delegated agent asked for, re-raised here (AGE-646): only
+    /// what came up the chain — the path, the diff stat and who asked.
+    Relayed(ApprovalDetail),
 }
 
 impl WriteOperation {
@@ -57,6 +62,44 @@ impl WriteOperation {
                 destination,
             } => format!("Move: {} → {}", source, destination),
             WriteOperation::ApplyDiff { path, .. } => format!("Edit file: {}", path),
+            WriteOperation::Relayed(detail) => detail.relayed_label(),
+        }
+    }
+
+    /// The operation as it travels up the call chain (AGE-646): the path it
+    /// touches and, where there is content, how many lines change.
+    pub fn detail(&self) -> ApprovalDetail {
+        let lines = |text: &str| text.lines().count();
+        let (path, diff_stat) = match self {
+            WriteOperation::WriteFile {
+                path,
+                content_preview,
+                ..
+            } => (path.clone(), Some(format!("+{}", lines(content_preview)))),
+            WriteOperation::DeleteFile { path } => (path.clone(), Some("deleted".to_string())),
+            WriteOperation::MoveFile {
+                source,
+                destination,
+            } => (format!("{source} \u{2192} {destination}"), None),
+            WriteOperation::ApplyDiff {
+                path,
+                old_preview,
+                new_preview,
+            } => (
+                path.clone(),
+                Some(format!(
+                    "+{} \u{2212}{}",
+                    lines(new_preview),
+                    lines(old_preview)
+                )),
+            ),
+            WriteOperation::Relayed(detail) => return detail.clone(),
+        };
+        ApprovalDetail {
+            kind: ApprovalKind::Write,
+            command_or_path: path,
+            diff_stat,
+            asker: None,
         }
     }
 
@@ -102,6 +145,9 @@ pub struct PendingWriteApprovalsState {
     // and `PendingClarificationsState` are used from within their own file).
     pub(crate) requests: HashMap<String, WriteApprovalRequest>,
     pub(crate) notifier: Option<mpsc::UnboundedSender<ApprovalNotification>>,
+    /// Here rather than on the store, so every clone announces the answers
+    /// it gives — a worker's input loop holds one (AGE-646).
+    pub(crate) resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
 }
 
 impl PendingWriteApprovalsState {
@@ -109,6 +155,7 @@ impl PendingWriteApprovalsState {
         Self {
             requests: HashMap::new(),
             notifier: None,
+            resolution_notifier: None,
         }
     }
 }
@@ -117,16 +164,15 @@ impl PendingWriteApprovalsState {
 pub type PendingWriteApprovals = Arc<Mutex<PendingWriteApprovalsState>>;
 
 /// Per-agent store for pending filesystem write approval requests
+#[derive(Clone)]
 pub struct WriteApprovalStore {
     pending_requests: PendingWriteApprovals,
-    resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
 }
 
 impl WriteApprovalStore {
     pub fn new() -> Self {
         Self {
             pending_requests: Arc::new(Mutex::new(PendingWriteApprovalsState::new())),
-            resolution_notifier: None,
         }
     }
 
@@ -135,10 +181,10 @@ impl WriteApprovalStore {
         self.pending_requests.clone()
     }
 
-    /// Set the notification channels for the current turn. The request
-    /// notifier lives on `PendingWriteApprovals` itself, since that is the
-    /// handle `request_write_approval` actually holds (AGE-246 / D7); the
-    /// resolution notifier lives here, since that is what `resolve` holds.
+    /// Set the notification channels for the current turn. Both live on
+    /// `PendingWriteApprovals` itself, since that is the handle
+    /// `request_write_approval` actually holds (AGE-246 / D7) and every clone
+    /// of this store shares it.
     ///
     /// Both, and not just the first: a store that can announce a request but
     /// not its answer leaves every client that learns the outcome from the
@@ -150,8 +196,9 @@ impl WriteApprovalStore {
         approval_tx: mpsc::UnboundedSender<ApprovalNotification>,
         resolution_tx: mpsc::UnboundedSender<ApprovalResolution>,
     ) {
-        self.pending_requests.lock().notifier = Some(approval_tx);
-        self.resolution_notifier = Some(resolution_tx);
+        let mut state = self.pending_requests.lock();
+        state.notifier = Some(approval_tx);
+        state.resolution_notifier = Some(resolution_tx);
     }
 
     /// Resolve an approval request by ID, returning whether it existed.
@@ -164,7 +211,7 @@ impl WriteApprovalStore {
             // Tell the stream the prompt is answered. Both decisions, not
             // just denial: a client that only hears about denials cannot
             // retire an approved prompt (AGE-346).
-            if let Some(tx) = &self.resolution_notifier {
+            if let Some(tx) = &state.resolution_notifier {
                 let _ = tx.send(ApprovalResolution {
                     id: id.to_string(),
                     approved,

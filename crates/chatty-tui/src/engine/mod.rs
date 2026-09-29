@@ -1947,6 +1947,9 @@ mod tests {
                     id: "a1".into(),
                     command: "rm -rf build".into(),
                     is_sandboxed: false,
+                    detail: chatty_core::models::execution_approval_store::ApprovalDetail::exec(
+                        "rm -rf build",
+                    ),
                 }),
                 ScriptedItem::Chunk(StreamChunk::ApprovalResolved {
                     id: "a1".into(),

@@ -18,6 +18,8 @@
 //! to tell the two apart. All that is left here is the hole the shared loop
 //! leaves for the turn, filled with the headless runner.
 
+#[cfg(test)]
+mod approval_relay;
 pub mod broker;
 #[cfg(test)]
 mod broker_delegation;
@@ -51,7 +53,7 @@ mod tui_swarm;
 mod typed_handoffs;
 
 use anyhow::{Context, Result, bail};
-use chatty_protocol_gateway::worker::{WorkerConnection, answer_clarifications, worker_card};
+use chatty_protocol_gateway::worker::{InputStores, WorkerConnection, answer_inputs, worker_card};
 use std::ffi::OsString;
 use std::os::fd::{FromRawFd, RawFd};
 use tokio::net::UnixStream;
@@ -146,12 +148,17 @@ pub async fn run_participant(
             // It runs under the tighter of its own budget and what its
             // caller left it (DP-3), before its clock starts.
             engine.narrow_budget(&task.budget);
-            // A question this turn asks goes up the chain as
-            // `input-required`; the answer comes back down here and lands on
-            // the store the turn's `ask_user` is waiting on (AGE-306).
-            tokio::spawn(answer_clarifications(
+            // A question or an approval this turn waits on goes up the
+            // chain as `input-required`; the answer comes back down here and
+            // lands on the store the turn's `ask_user`, command or write is
+            // waiting on (AGE-306, AGE-646).
+            tokio::spawn(answer_inputs(
                 inputs,
-                engine.session.clarifications().clone(),
+                InputStores {
+                    clarifications: engine.session.clarifications().clone(),
+                    execution_approvals: engine.session.execution_approvals().clone(),
+                    write_approvals: engine.session.write_approvals().clone(),
+                },
             ));
             run_headless(engine, event_rx, text).await
         })
