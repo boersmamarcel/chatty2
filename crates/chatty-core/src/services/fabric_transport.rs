@@ -127,7 +127,9 @@ impl Transport for SocketTransport {
             while let Some(item) = rx.recv().await {
                 let last = !matches!(
                     item,
-                    Ok(CallEvent::Progress(_)) | Ok(CallEvent::InputRequired { .. })
+                    Ok(CallEvent::Progress(_))
+                        | Ok(CallEvent::InputRequired { .. })
+                        | Ok(CallEvent::InputWithdrawn { .. })
                 );
                 yield item;
                 if last {
@@ -170,6 +172,13 @@ impl CallReplies {
     pub fn input_required(&self, id: u64, task: String, request: Value) {
         self.parked.lock().insert(task.clone(), id);
         self.deliver(id, Ok(CallEvent::InputRequired { task, request }), false);
+    }
+
+    /// A `call_input_withdrawn` frame: the question call `id`'s callee
+    /// parked `task` on is over without this worker's answer (TB-7).
+    pub fn input_withdrawn(&self, id: u64, task: String) {
+        self.parked.lock().remove(&task);
+        self.deliver(id, Ok(CallEvent::InputWithdrawn { task }), false);
     }
 
     /// A `call_result` frame: call `id` is over.

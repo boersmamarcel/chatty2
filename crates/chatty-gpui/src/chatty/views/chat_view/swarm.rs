@@ -13,6 +13,10 @@
 //! row's current tree each time it draws, so a transcript opened on a
 //! running agent keeps up with it; its breadcrumb and sub-agent list move
 //! the sheet up and down the tree, and Escape or its close button leave.
+//!
+//! A running agent's line and its sheet stop that agent and its subtree
+//! through the desktop's broker (TB-7, AGE-749); the broker's report of the
+//! stop is what turns its line to Canceled.
 
 use std::sync::Arc;
 
@@ -25,6 +29,23 @@ use super::ChatView;
 use crate::chatty::views::transcript::{
     AgentTranscript, SwarmFold, SwarmTree, adapt_swarm_tree, delegation_callees,
 };
+
+/// Stop `name` — a node of the running swarm, or the spec of the root's
+/// own callee — and everything under it, through the desktop's broker
+/// (TB-7). The rest of the swarm, and the turn, keep running.
+pub(super) fn stop_swarm_node(name: &str, cx: &mut App) {
+    let broker = cx
+        .try_global::<crate::settings::models::DiscoveredModulesModel>()
+        .and_then(|modules| modules.lazy_broker.clone());
+    let Some(broker) = broker else {
+        tracing::warn!(agent = %name, "Stop: no broker is running");
+        return;
+    };
+    match broker.cancel(name) {
+        Ok(()) => tracing::info!(agent = %name, "Stopped an agent of the swarm"),
+        Err(error) => tracing::warn!(agent = %name, %error, "Could not stop an agent"),
+    }
+}
 
 /// Wide enough for a tool row's headline and its result preview.
 const TRANSCRIPT_SHEET_WIDTH: f32 = 520.;
@@ -185,6 +206,7 @@ impl Render for SwarmNodeTranscript {
             Some((tree, ix)) => {
                 let this = cx.entity().downgrade();
                 AgentTranscript::new(tree, ix)
+                    .on_stop(std::rc::Rc::new(|name, cx| stop_swarm_node(&name, cx)))
                     .on_navigate(std::rc::Rc::new(move |name, _window, cx| {
                         this.update(cx, |this, cx| {
                             this.name = name;

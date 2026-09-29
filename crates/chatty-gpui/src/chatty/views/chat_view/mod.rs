@@ -2635,6 +2635,7 @@ impl ChatView {
                     });
                 })
             },
+            stop_node: Rc::new(move |name, cx| swarm::stop_swarm_node(&name, cx)),
         };
 
         // Folded turns keep receipts + the assistant message; only the

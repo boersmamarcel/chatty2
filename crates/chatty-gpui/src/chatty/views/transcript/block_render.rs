@@ -25,13 +25,17 @@ pub type OpenSwarmTranscript = Rc<dyn Fn(usize, String, &mut Window, &mut App)>;
 /// Fold one node of the tree under message `usize`, by name.
 pub type FoldSwarmTreeNode = Rc<dyn Fn(usize, String, SwarmFold, &mut App)>;
 
+/// Stop one running agent of the tree and its subtree, by name (TB-7).
+pub type StopSwarmTreeNode = Rc<dyn Fn(String, &mut App)>;
+
 /// What a swarm tree's lines do: fold the card (by block id), fold one of
-/// its nodes, and open one agent's transcript.
+/// its nodes, open one agent's transcript, and stop one agent.
 #[derive(Clone)]
 pub struct SwarmActions {
     pub toggle: ActivityToggle,
     pub fold_node: FoldSwarmTreeNode,
     pub open_node: OpenSwarmTranscript,
+    pub stop_node: StopSwarmTreeNode,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -137,6 +141,7 @@ pub fn render_typed_block(
                 card = card.on_fold(Rc::new(move |name, fold, cx| {
                     fold_node(message_index, name, fold, cx)
                 }));
+                card = card.on_stop(swarm.stop_node.clone());
             }
             card.into_any_element()
         }

@@ -320,6 +320,7 @@ fn route_reply(replies: &CallReplies, frame: &BrokerFrame) -> bool {
         BrokerFrame::CallInputRequired { id, task, request } => {
             replies.input_required(*id, task.clone(), request.clone())
         }
+        BrokerFrame::CallInputWithdrawn { id, task } => replies.input_withdrawn(*id, task.clone()),
         _ => return false,
     }
     true
@@ -481,7 +482,10 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event? {
                 CallEvent::Result(result) => return Ok(serde_json::from_value(result).unwrap()),
-                CallEvent::Progress(_) | CallEvent::InputRequired { .. } | CallEvent::Swarm(_) => {}
+                CallEvent::Progress(_)
+                | CallEvent::InputRequired { .. }
+                | CallEvent::InputWithdrawn { .. }
+                | CallEvent::Swarm(_) => {}
             }
         }
         panic!("call to {agent} ended without a result");

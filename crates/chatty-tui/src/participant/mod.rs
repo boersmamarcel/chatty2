@@ -40,6 +40,8 @@ mod slash_agent;
 #[cfg(test)]
 pub(crate) mod stand_in;
 #[cfg(test)]
+mod stop_one_agent;
+#[cfg(test)]
 mod swarm_forwarding;
 #[cfg(test)]
 pub(crate) mod swarm_kit;
