@@ -91,8 +91,12 @@ recorded through the kit on `main` before BI-3 (invariant 10 of the
 broker-identity spec). `pre_fabric_goldens_replay` replays them.
 `UPDATE_GOLDENS=1` does not touch them, and `assert_pre_fabric` never
 overwrites an existing file; a later PR may only delete one, with a reason in
-its PR body.
+its PR body. CI's `fabric-goldens` job runs the replay on its own and fails a
+pull request that modifies an existing golden (ADR-0020's first kill
+criterion, AGE-640).
 
 The hop-latency baseline (`measure_hop_latency`, run by the ignored
 `fabric_hop_latency_baseline`) is in
-[`research/fabric-hop-latency-baseline.md`](research/fabric-hop-latency-baseline.md).
+[`research/fabric-hop-latency-baseline.md`](research/fabric-hop-latency-baseline.md);
+the new path, measured the same way, is in
+[`research/fabric-hop-latency-2026-09-29.md`](research/fabric-hop-latency-2026-09-29.md).

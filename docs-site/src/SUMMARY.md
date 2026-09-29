@@ -64,6 +64,7 @@
     - [AppWorld decision](./dev/adrs/appworld-decision.md)
     - [ADR-0011 kill criteria: sub_agent vs the broker](./dev/adrs/adr-0011-broker-ab-2026-09-08.md)
     - [Fabric hop latency: baseline before BI-3](./dev/adrs/fabric-hop-latency-baseline.md)
+    - [Fabric hop latency: the new path against the baseline](./dev/adrs/fabric-hop-latency-2026-09-29.md)
     - [WASM plugin performance baseline (S7)](./dev/adrs/plugin-perf-2026-09-27.md)
     - [Resume spike: the frozen prompts](./dev/adrs/resume-spike-template.md)
     - [Modules M0–M4](./dev/research/modules/index.md)
