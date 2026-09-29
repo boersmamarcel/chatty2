@@ -1,7 +1,7 @@
 # Team smoke test
 
 **When to read this:** You are about to touch the broker, `--team`, the
-worker tree, or the `coder-reviewer` preset and want one end-to-end run that
+worker tree, or the `coder-reviewer` test team and want one end-to-end run that
 says whether a headless leader can still delegate, review, merge and pass a
 verifier. This is the run that found five product bugs in one evening
 (2026-09-13, AGE-400 to AGE-404) before it became a script (ADR-0011 C14,
@@ -25,12 +25,13 @@ One command, no arguments. It:
 3. Writes a throwaway `HOME` under `target/team-smoke/run-<stamp>/home/`:
    `providers.json` pointing at Ollama, `models.json` with the leader model
    (`extra_params.think=false`) and the coder model, and the
-   `coder-reviewer` preset copied into `~/.local/share/chatty/teams/` with
-   the two models and the verification command
-   (`python3 -m unittest discover -s tests -t . -v`) filled in. The
-   compiled-in preset carries neither, and `--team` looks in the data
-   directory before the presets, so the run exercises AGE-407's search order
-   and AGE-406's evidence hook without editing the task text.
+   `coder-reviewer` team (a test fixture since AGE-752, in
+   `crates/chatty-tui/tests/fixtures/team-workspace/.chatty/`, no longer a
+   shipped preset) copied into `~/.local/share/chatty/teams/` and
+   `~/.local/share/chatty/agents/` with the two models and the verification
+   command (`python3 -m unittest discover -s tests -t . -v`) filled in, so
+   the run exercises AGE-407's search order and AGE-406's evidence hook
+   without editing the task text.
 4. Creates the fixture repo from `scripts/team-smoke/fixture/`: a bank
    account module whose `withdraw` allows overdrafts and negative amounts,
    one passing `test_deposit`, and `tests/__init__.py` so `unittest`
@@ -134,4 +135,4 @@ The run needs a GPU and a local Ollama. The self-hosted runner has neither
 in its runner environment, so this is a local gate: run it before opening a
 PR that touches `crates/chatty-protocol-gateway`, `chatty-tui/src/participant/`,
 `chatty-core/src/services/{team,virtual_agents,worker_tree}.rs` or the
-preset under `crates/chatty-core/teams/`, and paste the summary in the PR.
+fixture team, and paste the summary in the PR.

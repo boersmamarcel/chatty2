@@ -28,9 +28,10 @@ const REVIEWER: &str = "local-reviewer";
 /// `module_settings.json` that declared a different team and a persisted
 /// 10-turn budget.
 fn team_settings(
-    workspace: Option<&std::path::Path>,
+    id: &str,
+    workspace: &std::path::Path,
 ) -> (ModuleSettingsModel, Vec<AgentSpec>, ExecutionSettingsModel) {
-    let team = load_team("coder-reviewer", workspace, None).expect("the team loads");
+    let team = load_team(id, Some(workspace), None).expect("the team loads");
     let module_settings = ModuleSettingsModel {
         // Two slots, so the second delegation does not wait on the first
         // stand-in child being reaped; queueing is C6's test.
@@ -76,7 +77,8 @@ async fn start_team_broker(
 #[tokio::test]
 async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_the_coder() {
     let dir = tempfile::tempdir().expect("a temp dir");
-    let (module_settings, agents, execution_settings) = team_settings(None);
+    let (module_settings, agents, execution_settings) =
+        team_settings(crate::team_fixture::TEAM, &crate::team_fixture::workspace());
     assert_eq!(module_settings.roster_names(None), [CODER, REVIEWER]);
     assert_eq!(
         execution_settings.max_agent_turns, 50,
@@ -151,11 +153,11 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
 }
 
 /// The issue's "Verify", second half: a team file in the workspace
-/// overrides the preset of the same id.
+/// overrides the preset of the same id (`data-analysis`).
 #[tokio::test]
 async fn a_team_file_in_the_workspace_overrides_the_preset() {
     let workspace = tempfile::tempdir().expect("a temp dir");
-    let team_dir = workspace.path().join(".chatty/teams/coder-reviewer");
+    let team_dir = workspace.path().join(".chatty/teams/data-analysis");
     std::fs::create_dir_all(&team_dir).unwrap();
     let agents_dir = workspace.path().join(".chatty/agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -167,18 +169,19 @@ async fn a_team_file_in_the_workspace_overrides_the_preset() {
     std::fs::write(
         team_dir.join("team.json"),
         r#"{
-          "leader": "coder-reviewer-leader",
+          "leader": "data-lead",
           "agents": ["ws-coder"],
           "verification": "make test",
-          "skill": "coder-reviewer",
+          "skill": "data-analysis",
           "max_agent_turns": 12
         }"#,
     )
     .unwrap();
 
-    let team = load_team("coder-reviewer", Some(workspace.path()), None).unwrap();
+    let team = load_team("data-analysis", Some(workspace.path()), None).unwrap();
     assert_eq!(team.source, TeamSource::Dir(team_dir));
-    let (module_settings, agents, execution_settings) = team_settings(Some(workspace.path()));
+    let (module_settings, agents, execution_settings) =
+        team_settings("data-analysis", workspace.path());
     assert_eq!(module_settings.roster_names(None), ["ws-coder"]);
     assert_eq!(
         module_settings.team.verification.as_deref(),

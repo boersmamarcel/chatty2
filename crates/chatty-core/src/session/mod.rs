@@ -1002,6 +1002,11 @@ impl PreparedTurn {
             Some(delegation) => Ok(delegation::delegation_stream(
                 self.agent.delegator().cloned(),
                 delegation,
+                delegation::HumanPrompts {
+                    approvals: self.approval_rx,
+                    resolutions: self.resolution_rx,
+                    clarifications: self.clarification_rx,
+                },
             )),
             None => {
                 stream_prompt(

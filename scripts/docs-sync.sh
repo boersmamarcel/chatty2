@@ -209,6 +209,11 @@ if [[ -d "$ROOT/assets/screenshots" ]]; then
   done
 fi
 
+# Sample data the user tutorials download from the site: the preset teams'
+# frozen fixtures (AGE-752).
+copy "$ROOT/crates/chatty-core/teams/data-analysis/fixture/orders.csv" \
+  "$SITE_SRC/assets/samples/orders.csv"
+
 # App icon for the site header.
 if [[ -f "$ROOT/assets/app_icon/ai-2.png" ]]; then
   copy "$ROOT/assets/app_icon/ai-2.png" "$SITE_SRC/assets/logo.png"

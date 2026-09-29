@@ -1,0 +1,5 @@
+{
+  "leader": "editor",
+  "agents": ["researcher", "writer", "reviewer"],
+  "max_agent_turns": 14
+}

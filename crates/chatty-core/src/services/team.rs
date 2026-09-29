@@ -36,15 +36,24 @@ use crate::agent_spec::{AgentSpec, load_agent_spec_from};
 use crate::services::handoff::{self, HandoffContract};
 use crate::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
 
-/// The presets compiled into the binary: `(id, team.json, SKILL.md)`.
+/// The presets compiled into the binary: `(id, team.json)`. None carries a
+/// `SKILL.md`: a preset leader's preamble is its playbook, so `/agent
+/// <leader>` runs it the same as `--team <id>`.
 ///
-/// `coder-reviewer`'s specs name no models on purpose: they come from the
-/// roster's default, `--model`, or a spec of your own that shadows one.
-pub const PRESETS: &[(&str, &str, &str)] = &[(
-    "coder-reviewer",
-    include_str!("../../teams/coder-reviewer/team.json"),
-    include_str!("../../teams/coder-reviewer/SKILL.md"),
-)];
+/// Every preset team is experimental (PL-S8): none is a documented default
+/// until a benchmark shows it beats a single agent. Their specs name no
+/// models on purpose: they come from the roster's default, `--model`, or a
+/// spec of your own that shadows one.
+pub const PRESETS: &[(&str, &str)] = &[
+    (
+        "data-analysis",
+        include_str!("../../teams/data-analysis/team.json"),
+    ),
+    (
+        "research-brief",
+        include_str!("../../teams/research-brief/team.json"),
+    ),
+];
 
 /// The relative directory a team of that id lives in under a workspace.
 pub const WORKSPACE_TEAMS_DIR: &str = ".chatty/teams";
@@ -236,10 +245,10 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         break;
     }
     if found.is_none()
-        && let Some((_, json, skill)) = PRESETS.iter().find(|(name, _, _)| *name == id)
+        && let Some((_, json)) = PRESETS.iter().find(|(name, _)| *name == id)
     {
         let file = TeamFile::parse(json).expect("a preset team.json parses");
-        found = Some((TeamSource::Preset, file, Some(skill.to_string())));
+        found = Some((TeamSource::Preset, file, None));
     }
     let Some((source, file, skill_content)) = found else {
         bail!(
@@ -252,7 +261,7 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
                 .join(", "),
             PRESETS
                 .iter()
-                .map(|(name, _, _)| *name)
+                .map(|(name, _)| *name)
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -358,52 +367,89 @@ mod tests {
         .unwrap();
     }
 
-    /// The shipped preset is the coder-reviewer team — a `coordinator`
-    /// leader, `local-coder` on the `coder` profile, `local-reviewer` on the
-    /// `reviewer` profile with the "verify, do not trust" preamble, the
-    /// skill beside it, a 50-turn budget, and no models.
+    /// AGE-752: every preset team loads; its leader delegates to exactly its
+    /// roster, may be called by name (`/agent <leader>`), says it is
+    /// experimental (PL-S8), and its workers are workers, not sub-leaders.
     #[test]
-    fn the_coder_reviewer_preset_parses_and_names_its_roles() {
-        let team = load_team("coder-reviewer", None, None).expect("the preset loads");
-        assert_eq!(team.source, TeamSource::Preset);
-        assert_eq!(team.file.leader, "coder-reviewer-leader");
-        assert_eq!(team.leader.tools.profile.as_deref(), Some("coordinator"));
-        assert!(team.leader.agent.model.is_none(), "no model in the preset");
-        assert!(team.leader.agent.preamble.is_some());
+    fn every_preset_team_loads_and_its_leader_delegates_to_its_roster() {
+        for (id, _) in PRESETS {
+            let team = load_team(id, None, None).expect("the preset loads");
+            assert_eq!(team.source, TeamSource::Preset);
+            assert_eq!(
+                team.leader.swarm.delegates_to, team.file.agents,
+                "{id}: the leader calls its roster and nobody else"
+            );
+            assert!(team.leader.swarm.exposed, "{id}: /agent reaches the leader");
+            assert!(
+                team.leader
+                    .agent
+                    .description
+                    .as_deref()
+                    .is_some_and(|d| d.starts_with("Experimental team lead")),
+                "{id}: {:?}",
+                team.leader.agent.description
+            );
+            for spec in &team.agents {
+                assert!(spec.swarm.exposed, "{id}: {} is callable", spec.agent.name);
+                assert!(
+                    spec.swarm.delegates_to.is_empty(),
+                    "{id}: {} is a worker, not a sub-leader",
+                    spec.agent.name
+                );
+            }
+        }
+        let analysis = load_team("data-analysis", None, None).unwrap();
+        assert_eq!(analysis.file.leader, "data-lead");
+        assert_eq!(analysis.file.agents, ["data-analyst", "reviewer"]);
+        assert!(analysis.skill().is_none(), "the playbook is the preamble");
+        let brief = load_team("research-brief", None, None).unwrap();
+        assert_eq!(brief.file.leader, "editor");
+        assert_eq!(brief.file.agents, ["researcher", "writer", "reviewer"]);
+    }
 
-        assert_eq!(team.file.agents, ["local-coder", "local-reviewer"]);
-        let names: Vec<_> = team.agents.iter().map(|a| a.agent.name.as_str()).collect();
-        assert_eq!(names, ["local-coder", "local-reviewer"]);
-        assert_eq!(team.agents[0].tools.profile.as_deref(), Some("coder"));
-        assert_eq!(team.agents[1].tools.profile.as_deref(), Some("reviewer"));
-        assert!(
-            team.agents[1]
-                .agent
-                .preamble
-                .as_deref()
-                .unwrap()
-                .starts_with("Verify, do not trust, verdict first."),
-            "{:?}",
-            team.agents[1].agent.preamble
-        );
-        assert!(team.agents.iter().all(|a| a.agent.model.is_none()));
-
-        assert_eq!(team.file.max_agent_turns, Some(50));
-        assert!(team.file.verification.is_none());
-        let skill = team.skill().expect("the skill ships beside the preset");
-        assert_eq!(skill.name, "coder-reviewer");
-        assert!(
-            skill.content.contains("git_merge"),
-            "the repaired merge step"
-        );
-        assert!(skill.content.contains("`range`"), "the repaired diff step");
-        assert!(
-            skill.content.contains("default branch"),
-            "default branch detection"
-        );
+    /// AGE-752: `data-analysis`'s sample orders have a known answer, so a
+    /// run on them has a right one: August revenue is 17.6% below July's,
+    /// and two planted causes carry almost all of the fall — EU `Pro` sales
+    /// stop from 11 August (about 70%) and the online `SUMMER30` code takes
+    /// 30% off `Starter` from 1 August without lifting volume (about 27%).
+    /// The fixture is frozen with the preset.
+    #[test]
+    fn the_data_analysis_orders_have_a_known_answer() {
+        let csv = include_str!("../../teams/data-analysis/fixture/orders.csv");
+        let mut lines = csv.lines();
         assert_eq!(
-            team.first_turn_instruction().as_deref(),
-            Some("read_skill coder-reviewer and follow it.")
+            lines.next(),
+            Some(
+                "order_id,date,region,channel,product,units,unit_price,\
+                 discount_pct,promo_code,customer_type,revenue"
+            )
+        );
+        let mut total = [0.0f64; 2];
+        let mut eu_pro = [0.0f64; 2];
+        let mut online_starter = [0.0f64; 2];
+        let mut rows = 0;
+        for line in lines {
+            let f: Vec<&str> = line.split(',').collect();
+            let month = usize::from(f[1].starts_with("2026-08"));
+            let revenue: f64 = f[10].parse().expect("a revenue");
+            total[month] += revenue;
+            if f[2] == "EU" && f[4] == "Pro" {
+                eu_pro[month] += revenue;
+            }
+            if f[3] == "online" && f[4] == "Starter" {
+                online_starter[month] += revenue;
+            }
+            rows += 1;
+        }
+        assert_eq!(rows, 793);
+        let fall = total[1] - total[0];
+        assert!(((fall / total[0]) * 100.0 + 17.6).abs() < 0.05, "{fall}");
+        let share = |seg: [f64; 2]| (seg[1] - seg[0]) / fall;
+        assert!((0.69..0.72).contains(&share(eu_pro)), "{}", share(eu_pro));
+        assert!(
+            (0.26..0.29).contains(&share(online_starter)),
+            "{}",
+            share(online_starter)
         );
     }
 
@@ -428,14 +474,14 @@ mod tests {
         .unwrap();
         write_team(
             &data_teams,
-            "coder-reviewer",
-            r#"{"leader":"coder-reviewer-leader","agents":["data-coder"],"skill":"coder-reviewer"}"#,
+            "data-analysis",
+            r#"{"leader":"data-lead","agents":["data-coder"],"skill":"data-analysis"}"#,
             Some("# data skill"),
         );
-        let team = load_team("coder-reviewer", Some(workspace.path()), Some(data.path())).unwrap();
+        let team = load_team("data-analysis", Some(workspace.path()), Some(data.path())).unwrap();
         assert_eq!(
             team.source,
-            TeamSource::Dir(data_teams.join("coder-reviewer"))
+            TeamSource::Dir(data_teams.join("data-analysis"))
         );
         assert_eq!(team.agents[0].agent.name, "data-coder");
         assert_eq!(team.skill().unwrap().content, "# data skill");
@@ -447,22 +493,22 @@ mod tests {
         );
         write_spec(
             workspace.path(),
-            "coder-reviewer-leader",
+            "data-lead",
             "model = \"big\"\npreamble = \"lead\"\n[tools]\nprofile = \"coordinator\"\n",
         );
         let ws_dir = write_team(
             &ws_teams,
-            "coder-reviewer",
+            "data-analysis",
             r#"{
-              "leader": "coder-reviewer-leader",
+              "leader": "data-lead",
               "agents": ["ws-coder"],
               "verification": "cargo test",
-              "skill": "coder-reviewer",
+              "skill": "data-analysis",
               "max_agent_turns": 7
             }"#,
             None,
         );
-        let team = load_team("coder-reviewer", Some(workspace.path()), Some(data.path())).unwrap();
+        let team = load_team("data-analysis", Some(workspace.path()), Some(data.path())).unwrap();
         assert_eq!(team.source, TeamSource::Dir(ws_dir));
         assert_eq!(team.leader.agent.model.as_deref(), Some("big"));
         assert_eq!(team.agents[0].agent.name, "ws-coder");
@@ -475,7 +521,7 @@ mod tests {
         assert_eq!(
             team.first_turn_instruction().as_deref(),
             Some(
-                "read_skill coder-reviewer and follow it. \
+                "read_skill data-analysis and follow it. \
                  The team's verification command is: `cargo test`"
             )
         );
@@ -496,11 +542,11 @@ mod tests {
         let mut execution_settings = ExecutionSettingsModel::default();
         let before = execution_settings.max_agent_turns;
 
-        let mut team = load_team("coder-reviewer", None, None).unwrap();
+        let mut team = load_team("data-analysis", None, None).unwrap();
         team.file.max_agent_turns = None;
         let run = team.run_module_settings(&on_disk);
-        assert_eq!(run.virtual_agents, ["local-coder", "local-reviewer"]);
-        assert_eq!(team.agent_names(), ["local-coder", "local-reviewer"]);
+        assert_eq!(run.virtual_agents, ["data-analyst", "reviewer"]);
+        assert_eq!(team.agent_names(), ["data-analyst", "reviewer"]);
         assert!(run.team.verification.is_none());
         assert_eq!(
             run.gateway_port, 9999,
@@ -532,11 +578,11 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         write_team(
             &workspace.path().join(WORKSPACE_TEAMS_DIR),
-            "coder-reviewer",
+            "data-analysis",
             "{ not json",
             None,
         );
-        let err = load_team("coder-reviewer", Some(workspace.path()), None).unwrap_err();
+        let err = load_team("data-analysis", Some(workspace.path()), None).unwrap_err();
         assert!(err.to_string().contains("not a team file"), "{err:#}");
     }
 
@@ -551,7 +597,7 @@ mod tests {
                 "`leader`",
             ),
             (
-                r#"{"leader":"coder-reviewer-leader","agents":[{"name":"local-coder","tools":"coder"}]}"#,
+                r#"{"leader":"data-lead","agents":[{"name":"local-coder","tools":"coder"}]}"#,
                 "`agents`",
             ),
         ] {
@@ -580,7 +626,7 @@ mod tests {
         let teams = workspace.path().join(WORKSPACE_TEAMS_DIR);
         let team_json = |handoffs: &str| {
             format!(
-                r#"{{"leader":"coder-reviewer-leader","agents":["local-coder","local-reviewer"],"handoffs":{handoffs}}}"#
+                r#"{{"leader":"data-lead","agents":["data-analyst","reviewer"],"handoffs":{handoffs}}}"#
             )
         };
         let schemas = teams.join("t").join("schemas");
@@ -594,23 +640,23 @@ mod tests {
         .unwrap();
         std::fs::write(
             schemas.join("review.json"),
-            r#"{"type":"object","x-must-be-read":{"local-coder":["files_changed"]}}"#,
+            r#"{"type":"object","x-must-be-read":{"data-analyst":["files_changed"]}}"#,
         )
         .unwrap();
 
         for (handoffs, says) in [
             (
-                r#"{"local-coder":"schemas/missing.json"}"#,
+                r#"{"data-analyst":"schemas/missing.json"}"#,
                 "failed to read",
             ),
-            (r#"{"local-coder":"schemas/not-json.json"}"#, "is not JSON"),
+            (r#"{"data-analyst":"schemas/not-json.json"}"#, "is not JSON"),
             (
-                r#"{"local-coder":"schemas/bad.json"}"#,
+                r#"{"data-analyst":"schemas/bad.json"}"#,
                 "not a valid JSON Schema",
             ),
             (r#"{"nobody":"schemas/change.json"}"#, "not in `agents`"),
             (
-                r#"{"local-reviewer":"schemas/review.json"}"#,
+                r#"{"reviewer":"schemas/review.json"}"#,
                 "has no handoff schema",
             ),
         ] {
@@ -627,18 +673,18 @@ mod tests {
             &teams,
             "t",
             &team_json(
-                r#"{"local-coder":"schemas/change.json","local-reviewer":"schemas/review.json"}"#,
+                r#"{"data-analyst":"schemas/change.json","reviewer":"schemas/review.json"}"#,
             ),
             None,
         );
         let team = load_team("t", Some(workspace.path()), None).unwrap();
-        assert_eq!(team.handoffs["local-coder"].role, "local-coder");
+        assert_eq!(team.handoffs["data-analyst"].role, "data-analyst");
         assert_eq!(
-            team.handoffs["local-coder"].schema["required"][0],
+            team.handoffs["data-analyst"].schema["required"][0],
             "files_changed"
         );
         assert!(team.handoff_ledger().is_some());
-        let preset = load_team("coder-reviewer", None, None).unwrap();
+        let preset = load_team("data-analysis", None, None).unwrap();
         assert!(preset.handoffs.is_empty() && preset.handoff_ledger().is_none());
     }
 
@@ -648,7 +694,7 @@ mod tests {
         write_team(
             &workspace.path().join(WORKSPACE_TEAMS_DIR),
             "t",
-            r#"{"leader":"coder-reviewer-leader","agents":["nobody"]}"#,
+            r#"{"leader":"data-lead","agents":["nobody"]}"#,
             None,
         );
         let err = format!(
@@ -664,7 +710,7 @@ mod tests {
         let err = load_team("nope", Some(workspace.path()), None).unwrap_err();
         let text = err.to_string();
         assert!(text.contains(".chatty/teams/nope"), "{text}");
-        assert!(text.contains("coder-reviewer"), "{text}");
+        assert!(text.contains("data-analysis"), "{text}");
         assert!(load_team("../x", None, None).is_err());
         assert!(load_team("", None, None).is_err());
     }

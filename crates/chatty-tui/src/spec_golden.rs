@@ -1,5 +1,6 @@
 //! Goldens for the `coder-reviewer` team (AGE-614): what its leader and
-//! workers are built with, and the leader's prompt-cache prefix.
+//! workers are built with, and the leader's prompt-cache prefix. The team
+//! no longer ships; it is the test fixture in `crate::team_fixture`.
 //!
 //! The goldens were recorded from `main` before agents became specs (this
 //! file's first commit built both the old way), so declaring the team as
@@ -87,10 +88,9 @@ fn context_for(
     local_agents: Vec<String>,
 ) -> (AgentBuildContext, Option<String>) {
     let cli = Cli::try_parse_from(argv).expect("the argv parses");
-    let team = cli
-        .team
-        .as_deref()
-        .map(|id| load_team(id, None, None).expect("the team loads"));
+    let team = cli.team.as_deref().map(|id| {
+        load_team(id, Some(&crate::team_fixture::workspace()), None).expect("the team loads")
+    });
     let mut spec = run_spec(&cli, team.as_ref(), None).expect("the spec is valid");
     let mut settings = base_settings(workspace);
     apply_run_limits(&cli, team.as_ref(), &mut spec, &mut settings).unwrap();
@@ -114,7 +114,7 @@ fn context_for(
 /// The `coder-reviewer` leader as `--team coder-reviewer --headless` builds
 /// it: its context and the model it asks for.
 fn leader_context(workspace: &str) -> (AgentBuildContext, Option<String>) {
-    let team = load_team("coder-reviewer", None, None).expect("the preset loads");
+    let team = crate::team_fixture::load();
     let argv = [
         "chatty-tui",
         "--team",
@@ -130,7 +130,7 @@ fn leader_context(workspace: &str) -> (AgentBuildContext, Option<String>) {
 /// Each `coder-reviewer` worker as its `chatty-tui` child builds itself from
 /// the argv the broker spawns it with.
 fn worker_contexts(workspace: &str) -> Vec<(String, AgentBuildContext, Option<String>)> {
-    let team = load_team("coder-reviewer", None, None).expect("the preset loads");
+    let team = crate::team_fixture::load();
     let module_settings = team.run_module_settings(&ModuleSettingsModel::default());
     resolve_virtual_agents(
         &[],

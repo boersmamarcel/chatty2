@@ -1323,21 +1323,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, InvokeAgentError::NotFound(_)), "{err}");
-        assert!(err.to_string().contains("benford-analyst"), "{err}");
+        assert!(err.to_string().contains("data-analyst"), "{err}");
     }
 
     /// A roster spec is reached through the broker, which this tool needs:
     /// without one it says so rather than falling through to anything.
     #[tokio::test]
     async fn a_roster_spec_needs_the_broker() {
-        let tool = InvokeAgentTool::new(vec![]).with_local_agents(["benford-analyst"]);
+        let tool = InvokeAgentTool::new(vec![]).with_local_agents(["data-analyst"]);
 
         let err = tool
             .call(
                 &mut ToolContext::new(),
                 InvokeAgentArgs {
-                    agent: "benford-analyst".to_string(),
-                    prompt: "1, 2, 3".to_string(),
+                    agent: "data-analyst".to_string(),
+                    prompt: "Sum column b of data.csv".to_string(),
                     include_trace: false,
                 },
             )

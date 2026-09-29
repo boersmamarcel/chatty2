@@ -32,8 +32,8 @@ The broker serves the **roster**: the specs `module_settings.json`'s `virtual_ag
 names (a `--team` names its own), or — when nothing is declared — `local-agent` and
 **every exposed spec** the workspace reaches, first definition of each name
 (`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). So the
-`benford-analyst` preset is an agent like any other: `list_agents` lists it,
-`invoke_agent` reaches it at `/a2a/benford-analyst`, and `/agent benford-analyst …` runs
+`data-analyst` preset is an agent like any other: `list_agents` lists it,
+`invoke_agent` reaches it at `/a2a/data-analyst`, and `/agent data-analyst …` runs
 it. A spec file that does not load is left out of the roster with a warning;
 Settings → Agents and `/agents` show it with its error.
 
@@ -839,18 +839,27 @@ as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
 `crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
-One preset ships, `coder-reviewer`: a `coordinator` leader, `local-coder` on the `coder`
-profile, `local-reviewer` on the `reviewer` profile with the "verify, do not trust,
-verdict first" preamble, the `coder-reviewer` skill beside it (the reviewer finds the
-default branch with `git_status` and reads `<default>..<branch>` with `git_diff`'s
-`range`; the leader merges with `git_merge` on APPROVE and then has the reviewer run the
-team's verification command on the merged tree, since a coordinator has no shell), and
-a 50-turn budget. It names no models: they come from the roster's default, `--model`, or
-a `team.json` of your own that overrides it.
+Two presets ship, both **experimental**: a team becomes a documented default only after
+a benchmark shows it beats a single agent (PL-S8). Their specs name no models, and a
+changed prompt is a new preset name, so a run of one stays comparable with an earlier one.
+
+| Team | Leader | Workers | Shows |
+|------|--------|---------|-------|
+| `data-analysis` | `data-lead` | `data-analyst`, `reviewer` | A business question answered with SQL (`query_data`, no shell), a reviewer that re-derives the numbers, and the saved `report.md` relayed to you for approval. `teams/data-analysis/fixture/orders.csv` is its sample: 793 orders over July–August with a known answer (August revenue −17.6%; EU `Pro` orders fall 47 → 14, about 70% of the fall; the online `SUMMER30` code takes 30% off `Starter` from 1 August without lifting volume, about 27%). |
+| `research-brief` | `editor` | `researcher`, `writer`, `reviewer` | Sourced writing from a folder of documents, a relayed write approval. `teams/research-brief/fixture/docs/` is its sample corpus. |
+
+Neither has a `SKILL.md`: the leader's preamble is the playbook, so `/agent data-lead …`
+on the desktop runs it the same as `--team data-analysis`. `reviewer` is shared by both.
+The user walkthrough is the docs-site tutorial *From one agent to a team*; the
+reliability runs behind both presets, and why `coder-reviewer` and the Benford team did
+not ship, are in `docs/research/showcase-runs-2026-09-29.md`. The old `coder-reviewer`
+team (`coordinator` leader, `local-coder`, `local-reviewer`, its `SKILL.md`) is now a
+test fixture only, `crates/chatty-tui/tests/fixtures/team-workspace/`: `spec_golden`'s
+recorded contexts and the team-mechanics tests load it from there.
 
 ```bash
-chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
-  -m "Fix the overdraft bug in src/account.py; the acceptance criterion is that tests/test_account.py passes."
+chatty-tui --team data-analysis --headless --model <model> \
+  -m "Revenue in orders.csv fell in August. Find out why."
 ```
 
 **Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`

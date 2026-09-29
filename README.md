@@ -32,6 +32,11 @@
 [Releases](https://github.com/boersmamarcel/chatty2/releases/latest), then add a provider and a model in
 Settings ([Getting started](https://boersmamarcel.github.io/chatty2/user/getting-started.html)).
 
+**A team of agents:** [From one agent to a team](https://boersmamarcel.github.io/chatty2/user/tutorial-swarm.html)
+asks a lead, an analyst and a reviewer why revenue fell in a sales export. You watch the live
+agent tree, approve the file a worker writes, read the bill per model and mix a local model
+into the team. Agent teams are supported and experimental.
+
 **Terminal, in one line:** `chatty-tui` needs no config to talk to a model server you already run:
 
 ```bash

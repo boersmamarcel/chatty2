@@ -1,8 +1,8 @@
 //! Benford's Law plugin — the two tools of a forensic Benford audit.
 //!
 //! A `chatty:plugin@0.3.0` plugin: it contributes tools, never a loop of its
-//! own. The `benford-analyst` agent spec (a preset in chatty-core) loads it
-//! and its model decides when to call them:
+//! own. An agent spec that lists it under `[[plugins]]` (the developer
+//! tutorial's `auditor`) loads it, and its model decides when to call them:
 //!
 //! | Tool | Input | Output |
 //! |------|-------|--------|

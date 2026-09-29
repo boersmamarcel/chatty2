@@ -3,7 +3,6 @@
 //! specs, a scripted fake model behind them.
 
 use chatty_core::agent_spec::{AgentSpec, load_agent_spec_from};
-use chatty_core::services::team::load_team;
 use chatty_core::testing::fake_model::{RecordedRequest, Reply, Script};
 
 use super::swarm_kit::{AgentDef, Endpoint, SwarmKit};
@@ -16,9 +15,10 @@ const CODER_MODEL: &str = "kit/coder";
 const REVIEWER_MODEL: &str = "kit/reviewer";
 
 /// A compiled-in preset, never a spec from the developer's data dir.
+/// A spec of the `coder-reviewer` test fixture (`crate::team_fixture`).
 fn preset(name: &str) -> AgentSpec {
-    load_agent_spec_from(name, None, None)
-        .expect("the preset loads")
+    load_agent_spec_from(name, Some(&crate::team_fixture::workspace()), None)
+        .expect("the fixture spec loads")
         .spec
 }
 
@@ -75,12 +75,12 @@ fn invoke(agent: &str, prompt: &str) -> Reply {
     )
 }
 
-/// Invariant 10: the `coder-reviewer` preset, its three specs run as real
+/// Invariant 10: the `coder-reviewer` team (now a test fixture), its three specs run as real
 /// workers, delegates exactly as before — leader → coder, leader → reviewer,
 /// no other edge — and only the leader is offered the delegation tools.
 #[tokio::test]
 async fn coder_reviewer_unchanged() {
-    let team = load_team("coder-reviewer", None, None).expect("the preset team loads");
+    let team = crate::team_fixture::load();
     assert_eq!(team.leader.agent.name, LEADER);
     let names: Vec<&str> = team.agents.iter().map(|a| a.agent.name.as_str()).collect();
     assert_eq!(names, [CODER, REVIEWER]);

@@ -1,9 +1,9 @@
 # benford
 
 Benford's Law plugin (`chatty:plugin@0.3.0`): the two tools of a forensic
-Benford audit. The auditing agent is a spec, not this module: the
-`benford-analyst` preset (`crates/chatty-core/agents/benford-analyst.toml`)
-is chatty's own harness with a forensic-auditor preamble and this plugin.
+Benford audit. The auditing agent is a spec, not this module: chatty's own
+harness with a forensic-auditor preamble that lists this plugin. The
+tutorial below writes one, `auditor`; no preset ships it.
 
 **Tutorial:** [give an agent the plugin](https://boersmamarcel.github.io/chatty2/dev/start/tutorial-benford-agent.html)
 (mdBook) · full source in this directory.
@@ -38,10 +38,12 @@ fabrication.
 
 ## Usage
 
-### As the `benford-analyst` agent
+### As an agent
+
+With the tutorial's `auditor` spec in `.chatty/agents/auditor.toml`:
 
 ```sh
-chatty-tui --agent benford-analyst --headless \
+chatty-tui --agent auditor --headless \
   -m "Analyze these invoice amounts: 1234 4521 891 2340 567 8901 234 456 789"
 ```
 

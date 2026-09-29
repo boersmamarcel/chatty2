@@ -1,0 +1,5 @@
+{
+  "leader": "data-lead",
+  "agents": ["data-analyst", "reviewer"],
+  "max_agent_turns": 16
+}
