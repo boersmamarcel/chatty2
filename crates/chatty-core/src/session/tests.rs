@@ -821,6 +821,7 @@ fn describe(event: &SessionEvent) -> String {
                 format!("Delegation(Finished success={success}, {result:?})")
             }
             InvokeAgentProgress::Swarm(event) => format!("Delegation(Swarm {})", event.node),
+            InvokeAgentProgress::Admitted(node) => format!("Delegation(Admitted {node:?})"),
         },
         SessionEvent::SwarmEvent(event) => format!(
             "SwarmEvent(node={:?}, chain={:?}, items={})",

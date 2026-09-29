@@ -721,6 +721,11 @@ impl BrokerCalls {
                 }
             };
             edge.to = running.participant().to_string();
+            // As soon as admitted, before anything else: a caller that
+            // only knew this callee by its spec can now name this one
+            // call precisely (AGE-762), which two parallel calls to the
+            // same spec need to be stoppable one at a time.
+            yield Ok(CallEvent::Progress(json!({ "Admitted": running.participant() })));
             let (mut stopped, _stoppable) = stoppable(&stops, &caller, &agent, running.participant());
             let mut stopped_by_user = false;
             // The task this call's callee is parked on, until it moves on.

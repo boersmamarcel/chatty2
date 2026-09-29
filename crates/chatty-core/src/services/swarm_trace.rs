@@ -242,6 +242,18 @@ impl AgentNode {
             call.outcome = outcome;
         }
     }
+
+    /// A node the user stopped never gets a result or error for whatever
+    /// tool call it was in the middle of — the run was reaped, not let to
+    /// finish (AGE-762) — so its transcript would otherwise show that call
+    /// as running forever. Mark every such call cancelled too.
+    fn cancel_open_tools(&mut self) {
+        for call in &mut self.tool_calls {
+            if call.outcome == ToolOutcome::Running {
+                call.outcome = ToolOutcome::Cancelled;
+            }
+        }
+    }
 }
 
 /// One tool call an agent made.
@@ -264,8 +276,15 @@ pub struct ToolCall {
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ToolOutcome {
     Running,
-    Done { result: String },
-    Failed { error: String },
+    Done {
+        result: String,
+    },
+    Failed {
+        error: String,
+    },
+    /// The user stopped the agent while this call was still running
+    /// (TB-7, AGE-762): it never got a result or an error, and never will.
+    Cancelled,
 }
 
 /// Where a node's run is.
@@ -592,7 +611,10 @@ impl SwarmTrace {
             SessionEvent::Delegation(progress) => return self.apply_delegation(progress),
             SessionEvent::SwarmEvent(batch) => return self.apply_swarm(batch),
             SessionEvent::Error(_) => root.status = NodeStatus::Failed,
-            SessionEvent::Cancelled => root.status = NodeStatus::Canceled,
+            SessionEvent::Cancelled => {
+                root.status = NodeStatus::Canceled;
+                root.cancel_open_tools();
+            }
             SessionEvent::TurnEnded => {
                 if root.status.is_running() {
                     root.status = NodeStatus::Completed;
@@ -645,10 +667,23 @@ impl SwarmTrace {
                         } else {
                             NodeStatus::Failed
                         };
+                        if node.status == NodeStatus::Canceled {
+                            node.cancel_open_tools();
+                        }
                     }
                 }
             }
             InvokeAgentProgress::Swarm(batch) => return self.apply_swarm(batch),
+            // Rename the just-opened node to the concrete name the broker
+            // admitted it under, as soon as that is known (AGE-762): two
+            // parallel calls to the same spec share nothing but this
+            // node's id until this arrives, so a stop by the shared spec
+            // name would otherwise hit both.
+            InvokeAgentProgress::Admitted(node) => {
+                if let Some(&id) = self.open.last() {
+                    self.tree.get_mut(id).name = node.clone();
+                }
+            }
         }
         self.revision += 1;
     }
@@ -709,7 +744,12 @@ impl SwarmTrace {
                         self.settle_usage(parent);
                     }
                 }
-                SwarmItem::Ended { state } => node.status = NodeStatus::ended(state),
+                SwarmItem::Ended { state } => {
+                    node.status = NodeStatus::ended(state);
+                    if node.status == NodeStatus::Canceled {
+                        node.cancel_open_tools();
+                    }
+                }
             }
         }
         if let Some(callee) = self.callee_above(id) {
@@ -736,6 +776,9 @@ impl SwarmTrace {
                 let node = self.tree.get_mut(id);
                 if node.status.is_running() {
                     node.status = NodeStatus::ended(&row.outcome);
+                    if node.status == NodeStatus::Canceled {
+                        node.cancel_open_tools();
+                    }
                 }
             }
             EdgeKind::Task => {
@@ -767,6 +810,9 @@ impl SwarmTrace {
                 let node = self.tree.get_mut(to);
                 if node.status.is_running() {
                     node.status = NodeStatus::ended(&row.outcome);
+                    if node.status == NodeStatus::Canceled {
+                        node.cancel_open_tools();
+                    }
                 }
             }
             // The root's own refusals already reached its turn as tool
@@ -903,7 +949,11 @@ impl SwarmTrace {
             for call in &self.tree.get(below).tool_calls {
                 *theirs.entry(('>', call.name.as_str())).or_default() += 1;
                 let finish = match call.outcome {
-                    ToolOutcome::Running => continue,
+                    // Neither ever got a step line with a finish marker
+                    // from the callee's own model: a cancelled call has
+                    // no more of one than a still-running one does
+                    // (AGE-762).
+                    ToolOutcome::Running | ToolOutcome::Cancelled => continue,
                     ToolOutcome::Done { .. } => '\u{2713}',
                     ToolOutcome::Failed { .. } => '\u{2717}',
                 };
@@ -1138,6 +1188,118 @@ mod tests {
         let tokens = |lines: Vec<UsageLine>| lines.iter().map(UsageLine::tokens).sum::<u64>();
         assert_eq!(tokens(trace.total()), 1200 + 120 + 15 + 10);
         assert_eq!(tokens(trace.total()), tokens(trace.billed()));
+    }
+
+    /// A root callee's node is named by its spec until the broker says
+    /// which node it admitted the call as (AGE-762); from then on it is
+    /// that concrete name, which is what lets two parallel calls to the
+    /// same spec — indistinguishable until each is admitted — be told
+    /// apart, and so stopped one at a time.
+    #[test]
+    fn a_callee_is_renamed_once_the_broker_admits_it() {
+        let mut trace = SwarmTrace::new();
+        trace.apply(&started("kit-stuck"));
+        let id = trace.node_named("kit-stuck").expect("named by spec so far");
+
+        trace.apply(&delegation(InvokeAgentProgress::Admitted(
+            "kit-stuck-0".to_string(),
+        )));
+
+        assert!(
+            trace.node_named("kit-stuck").is_none(),
+            "no longer known by the bare spec"
+        );
+        assert_eq!(
+            trace.node_named("kit-stuck-0"),
+            Some(id),
+            "the same node, renamed"
+        );
+        assert_eq!(trace.tree().get(id).name, "kit-stuck-0");
+    }
+
+    /// Two parallel calls to the same spec open two different nodes
+    /// (AGE-762): each is admitted under its own name, so `node_named`
+    /// resolves each independently once both have arrived, rather than
+    /// the second's `Admitted` clobbering the first's rename.
+    #[test]
+    fn two_parallel_callees_of_the_same_spec_are_admitted_distinctly() {
+        let mut trace = SwarmTrace::new();
+        trace.apply(&started("kit-stuck"));
+        let first = trace.node_named("kit-stuck").expect("the first, by spec");
+        trace.apply(&delegation(InvokeAgentProgress::Admitted(
+            "kit-stuck-0".to_string(),
+        )));
+
+        trace.apply(&started("kit-stuck"));
+        let second = trace
+            .node_named("kit-stuck")
+            .expect("the second, by spec, while the first is already renamed");
+        assert_ne!(first, second);
+        trace.apply(&delegation(InvokeAgentProgress::Admitted(
+            "kit-stuck-1".to_string(),
+        )));
+
+        assert_eq!(trace.node_named("kit-stuck-0"), Some(first));
+        assert_eq!(trace.node_named("kit-stuck-1"), Some(second));
+    }
+
+    /// A stopped root callee's open tool call is marked cancelled, not
+    /// left running forever (AGE-762): the run was reaped mid-call, so no
+    /// result or error for it will ever arrive.
+    #[test]
+    fn a_stopped_callees_open_tool_call_is_marked_cancelled() {
+        let mut trace = SwarmTrace::new();
+        trace.apply(&started("kit-stuck"));
+        trace.apply(&step("shell_execute"));
+        assert_eq!(
+            calls(&trace, "kit-stuck"),
+            [("shell_execute".into(), ToolOutcome::Running)]
+        );
+
+        trace.apply(&delegation(InvokeAgentProgress::Finished {
+            success: false,
+            result: Some(STOPPED_BY_USER.to_string()),
+            usage: Vec::new(),
+        }));
+
+        assert_eq!(
+            calls(&trace, "kit-stuck"),
+            [("shell_execute".into(), ToolOutcome::Cancelled)]
+        );
+    }
+
+    /// The same, for a nested node the broker reports ended by a stop
+    /// (AGE-762): its own open tool call is marked cancelled too, from the
+    /// batch that carries its `Ended { state: "canceled" }`.
+    #[test]
+    fn a_stopped_nested_nodes_open_tool_call_is_marked_cancelled() {
+        let chain = CallChain::root("t-1").extend("kit-leaf").unwrap();
+        let mut trace = SwarmTrace::new();
+        trace.apply(&batch(
+            "kit-leaf-0",
+            &chain,
+            vec![SwarmItem::ToolCallStarted {
+                id: "c1".into(),
+                name: "shell_execute".into(),
+            }],
+        ));
+        assert_eq!(
+            calls(&trace, "kit-leaf-0"),
+            [("shell_execute".into(), ToolOutcome::Running)]
+        );
+
+        trace.apply(&batch(
+            "kit-leaf-0",
+            &chain,
+            vec![SwarmItem::Ended {
+                state: "canceled".into(),
+            }],
+        ));
+
+        assert_eq!(
+            calls(&trace, "kit-leaf-0"),
+            [("shell_execute".into(), ToolOutcome::Cancelled)]
+        );
     }
 
     /// The root's callee reports through its delegation, whose steps mix

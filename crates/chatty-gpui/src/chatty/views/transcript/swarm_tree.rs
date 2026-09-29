@@ -806,6 +806,7 @@ fn tool_line(call: &ToolCall, cx: &App) -> AnyElement {
         ToolOutcome::Failed { error } => {
             (NodeStatus::Failed, Some(error.clone()), cx.theme().danger)
         }
+        ToolOutcome::Cancelled => (NodeStatus::Canceled, None, muted),
     };
     let detail = detail
         .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
