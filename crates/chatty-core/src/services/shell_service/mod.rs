@@ -314,10 +314,14 @@ const LOST_PROMPT_QUIET: Duration = Duration::from_secs(5);
 /// Build the init the shell runs before its first prompt: the login profile
 /// (when `load_login_profile`), then the user's secrets as exports, so a
 /// profile cannot override them, then where [`RUNNER`] is and [`SHELL_INIT`].
+/// A workspace that is a linked worktree (a worker's tree) also gets the
+/// host's git commit identity ([`worktree_git::identity`]) and
+/// [`worktree_git::GIT_INIT_GUARD`] (AGE-757).
 fn shell_init(
     load_login_profile: bool,
     secrets: &[(String, String)],
     runner: &std::path::Path,
+    workspace_dir: Option<&str>,
 ) -> String {
     let mut init = String::new();
     if load_login_profile {
@@ -345,6 +349,18 @@ fn shell_init(
         "__chatty_r={}\n",
         shell_escape(&runner.to_string_lossy())
     ));
+    if let Some(workspace) = workspace_dir
+        && worktree_git::worktree_git(std::path::Path::new(workspace)).is_some()
+    {
+        init.push_str(&format!(
+            "__chatty_ws={}\n",
+            shell_escape(workspace.trim_end_matches('/'))
+        ));
+        for (key, value) in worktree_git::identity(std::path::Path::new(workspace)) {
+            init.push_str(&format!("export {key}={}\n", shell_escape(&value)));
+        }
+        init.push_str(worktree_git::GIT_INIT_GUARD);
+    }
     init.push_str(SHELL_INIT);
     init
 }
@@ -881,7 +897,12 @@ impl ShellSession {
             let load_login_profile = self.load_login_profile.load(Ordering::Relaxed);
             let dir = session_dir()?;
             let runner = dir.path().join("run");
-            let init = shell_init(load_login_profile, &self.startup_env_vars, &runner);
+            let init = shell_init(
+                load_login_profile,
+                &self.startup_env_vars,
+                &runner,
+                self.workspace_dir.as_deref(),
+            );
             #[cfg(test)]
             let custom = self.test_shell.as_ref().map(|shell| shell(dir.path()));
             #[cfg(not(test))]
@@ -1159,6 +1180,20 @@ impl ShellSession {
         // Bind workspace at its original path so existing path references work
         if let Some(workspace) = workspace_dir {
             args.extend(["--bind", workspace, workspace].map(String::from));
+            // A linked worktree's git lives outside it (AGE-757).
+            if let Some(git) = worktree_git::worktree_git(std::path::Path::new(workspace)) {
+                let groups = [
+                    ("--ro-bind", git.read_only),
+                    ("--bind", git.read_write),
+                    ("--ro-bind", git.pinned),
+                ];
+                for (flag, paths) in groups {
+                    for path in paths {
+                        let path = path.to_string_lossy().into_owned();
+                        args.extend([flag.to_string(), path.clone(), path]);
+                    }
+                }
+            }
             args.extend(["--chdir", workspace].map(String::from));
         }
         args
@@ -1908,3 +1943,4 @@ fn shell_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+mod worktree_git;

@@ -70,6 +70,12 @@ pub const PRESETS: &[TeamPreset] = &[
         schemas: &[],
     },
     TeamPreset {
+        id: "fix-and-verify",
+        team_json: include_str!("../../teams/fix-and-verify/team.json"),
+        skill: None,
+        schemas: &[],
+    },
+    TeamPreset {
         id: "analyst-panel",
         team_json: include_str!("../../teams/analyst-panel/team.json"),
         skill: Some(include_str!("../../teams/analyst-panel/SKILL.md")),
@@ -458,6 +464,44 @@ mod tests {
         let brief = load_team("research-brief", None, None).unwrap();
         assert_eq!(brief.file.leader, "editor");
         assert_eq!(brief.file.agents, ["researcher", "writer", "reviewer"]);
+    }
+
+    /// AGE-757: `fix-and-verify` is a coding team whose tests Chatty runs:
+    /// the verification command is the fixture's own test suite, the coder
+    /// has a shell (so its tree is checked) and the reviewer has none (it
+    /// judges the diff and Chatty's evidence, not a run of its own).
+    #[test]
+    fn fix_and_verify_runs_the_projects_tests_on_the_coders_tree() {
+        let team = load_team("fix-and-verify", None, None).unwrap();
+        assert_eq!(team.file.leader, "fix-lead");
+        assert_eq!(team.file.agents, ["fix-coder", "code-reviewer"]);
+        assert_eq!(
+            team.file.verification.as_deref(),
+            Some("python3 -m unittest discover -s tests -t . -v")
+        );
+        let tools = |name: &str| {
+            let spec = team.agents.iter().find(|s| s.agent.name == name).unwrap();
+            (spec.tools.profile.clone(), spec.tools.disable.clone())
+        };
+        assert_eq!(tools("fix-coder"), (Some("coder".into()), vec![]));
+        assert_eq!(
+            tools("code-reviewer"),
+            (Some("reviewer".into()), vec!["shell".to_string()])
+        );
+    }
+
+    /// AGE-757: the fixture has one known bug: an order of exactly the
+    /// free-shipping threshold is charged shipping (`>` where the docstring
+    /// says "or more"). One test fails on it and the other three pass; the
+    /// fix is `>=` in `invoice.py`, with the tests untouched.
+    #[test]
+    fn the_fix_and_verify_fixture_has_one_known_bug() {
+        let code = include_str!("../../teams/fix-and-verify/fixture/invoice.py");
+        let tests = include_str!("../../teams/fix-and-verify/fixture/tests/test_invoice.py");
+        assert!(code.contains("if subtotal > FREE_SHIPPING_FROM:"));
+        assert!(code.contains("FREE_SHIPPING_FROM or more ships free"));
+        assert_eq!(tests.matches("    def test_").count(), 4);
+        assert!(tests.contains("def test_order_of_exactly_the_threshold_ships_free"));
     }
 
     /// AGE-752: `data-analysis`'s sample orders have a known answer, so a

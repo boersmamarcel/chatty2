@@ -343,8 +343,8 @@ impl SwarmKit {
             } else {
                 ApprovalMode::AutoApproveAll
             },
-            // A worker commits with the git tools: its sandboxed shell
-            // cannot reach a linked worktree's repository.
+            // The scripted workers commit with the git tools; their shell
+            // reaches the worktree's repository too (AGE-757).
             git_enabled: repo,
             ..ExecutionSettingsModel::default()
         };

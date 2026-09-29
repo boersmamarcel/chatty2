@@ -129,7 +129,7 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 `--team <id>` runs a fixed roster from a team directory (`teams/<id>/team.json` +
 `SKILL.md`) and implies `--broker`. Searched in `<workspace>/.chatty/teams/`, then
 the platform data directory's `chatty/teams/`, then the compiled-in presets
-(`data-analysis`, `research-brief`; both experimental):
+(`data-analysis`, `research-brief`, `fix-and-verify`; all experimental):
 
 ```bash
 chatty-tui --team data-analysis --headless --ollama --model qwen3:14b \
