@@ -50,15 +50,16 @@ running yet is not a disagreement, but a live one built for a different workspac
 `/agent <name> <prompt>` resolves `<name>` the same way in both frontends
 (`chatty_core::services::agent_command::resolve_agent_command`): an enabled remote A2A
 agent first (as in `invoke_agent`), then a spec on the local roster; otherwise the whole
-text is the prompt for the default sub-agent. A remote agent is called over A2A. On the
-desktop, a spec — and the default sub-agent, as `local-agent` — is a turn of the
-conversation handed to that agent through the conversation's own broker
-(`TurnInput::delegation`, `chatty_core::session::Delegation`, AGE-744): the model is not
-asked, the turn is the one `invoke_agent` call, so the delegation row and its swarm tree
-show exactly as for a model-issued call, and a worker that fails or exits ends the row
-with its error. It needs the module runtime on, like `invoke_agent`. chatty-tui still runs
-a spec as a headless `chatty-tui --agent <name>` (with `--model` only when the spec names
-none). The desktop's lazy broker hands the root its gateway's direct transport
+text is the prompt for the default sub-agent. A remote agent is called over A2A. On both
+the desktop and chatty-tui, a spec — and the default sub-agent, as `local-agent` — is a
+turn of the conversation handed to that agent through the conversation's own broker
+(`TurnInput::delegation`, `chatty_core::session::Delegation`, AGE-744/AGE-747): the model
+is not asked, the turn is the one `invoke_agent` call, so the delegation row and its swarm
+tree show exactly as for a model-issued call, and a worker that fails or exits ends the
+row with its error. It needs the module runtime on, like `invoke_agent`. There is no
+subprocess path: `chatty-tui --agent <name>` is still how you start the terminal app
+itself running as that spec, but `/agent` inside a running conversation never shells out
+to it. The desktop's lazy broker hands the root its gateway's direct transport
 (`LazyGatewayBroker::transport`), as a `--broker` chatty-tui root's does. chatty-tui's `/agents` lists the remote
 agents, the roster's specs with model, profile, plugins and grants, and every spec file
 the roster leaves out with the reason; the desktop shows the same on **Settings →

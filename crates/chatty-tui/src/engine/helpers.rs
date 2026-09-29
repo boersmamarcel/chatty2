@@ -5,9 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use anyhow::{Context, Result, bail};
-use tokio::sync::mpsc;
-
-use crate::events::AppEvent;
 
 pub(super) fn common_ancestor(left: &Path, right: &Path) -> Option<PathBuf> {
     let mut ancestor = PathBuf::new();
@@ -74,62 +71,6 @@ fn copy_via_command(program: &str, args: &[&str], text: &str) -> Result<()> {
         Ok(())
     } else {
         bail!("'{}' returned non-zero exit status", program)
-    }
-}
-
-pub(super) fn run_sub_agent_process(
-    executable: PathBuf,
-    agent_args: Vec<String>,
-    prompt: String,
-    auto_approve: bool,
-    event_tx: mpsc::UnboundedSender<AppEvent>,
-) -> Result<String> {
-    use std::io::BufRead as _;
-
-    let mut command = ProcessCommand::new(executable);
-    command
-        .arg("--headless")
-        .args(agent_args)
-        .arg("--message")
-        .arg(prompt)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if auto_approve {
-        command.arg("--auto-approve");
-    }
-
-    let mut child = command
-        .spawn()
-        .context("Failed to launch sub-agent process")?;
-
-    // Drain stderr in a background thread, forwarding each line as a progress event.
-    let stderr = child.stderr.take();
-    let stderr_thread = std::thread::spawn(move || {
-        if let Some(stderr) = stderr {
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                // Every line is the child's human-readable log now: ADR-0011's
-                // C4 removed the machine lines this used to filter out.
-                let _ = event_tx.send(AppEvent::DelegationProgress(line));
-            }
-        }
-    });
-
-    // Wait for the process and collect stdout (stderr was already taken above).
-    let output = child
-        .wait_with_output()
-        .context("Failed to wait for sub-agent process")?;
-
-    // Ensure the stderr thread has finished before we return.
-    let _ = stderr_thread.join();
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        bail!(
-            "exit code {:?}: sub-agent process failed",
-            output.status.code()
-        )
     }
 }
 

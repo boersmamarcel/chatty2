@@ -8,16 +8,15 @@ use rig_core::completion::Message;
 use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
-use chatty_core::agent_spec::{AgentSpec, SpecListing};
+use chatty_core::agent_spec::SpecListing;
 use chatty_core::models::conversation::ConversationMode;
-use chatty_core::services::agent_command::{
-    AgentCommandTarget, resolve_agent_command, spec_sub_agent_args,
-};
+use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
 use chatty_core::session::{
-    BRING_BACK_SUMMARY, HostedSession, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted,
+    BRING_BACK_SUMMARY, Delegation, HostedSession, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted,
     refuse_reason, take_online,
 };
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
+use chatty_core::tools::LOCAL_AGENT_NAME;
 
 use super::{ChatEngine, MessageRole, ModelPicker, ModelPickerItem, ToolPicker, ToolPickerItem};
 use crate::events::AppEvent;
@@ -579,7 +578,10 @@ impl ChatEngine {
     /// `/agent …` (PL-U5): the first word names a remote A2A agent or a
     /// spec on the local roster — the same roster `list_agents` lists — and
     /// the rest is its prompt; otherwise the whole text is the default
-    /// sub-agent's prompt. A spec runs as a headless `chatty-tui --agent`.
+    /// sub-agent's prompt. A local target runs as a turn of this
+    /// conversation, handed to that agent through its own broker, exactly
+    /// as a model-issued `invoke_agent` would (AGE-744/AGE-747) — there is
+    /// no subprocess path.
     pub fn launch_sub_agent(&mut self, prompt: &str) -> Result<()> {
         if self.is_sub_agent {
             bail!("Sub-agents cannot spawn further sub-agents");
@@ -593,9 +595,19 @@ impl ChatEngine {
         match resolve_agent_command(prompt, &self.remote_agents, &self.agent_roster) {
             AgentCommandTarget::Remote { config, prompt } => self.launch_a2a_agent(config, prompt),
             AgentCommandTarget::Spec { spec, prompt } => {
-                self.launch_subprocess_agent(Some(&spec), &prompt)
+                self.send_delegation(Delegation {
+                    agent: spec.agent.name,
+                    prompt,
+                });
+                Ok(())
             }
-            AgentCommandTarget::Default { prompt } => self.launch_subprocess_agent(None, &prompt),
+            AgentCommandTarget::Default { prompt } => {
+                self.send_delegation(Delegation {
+                    agent: LOCAL_AGENT_NAME.to_string(),
+                    prompt,
+                });
+                Ok(())
+            }
         }
     }
 
@@ -695,50 +707,6 @@ impl ChatEngine {
 
             if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
                 warn!(error = ?e, "Failed to deliver A2A agent completion event");
-            }
-        });
-
-        Ok(())
-    }
-
-    /// Launch a sub-agent by invoking chatty-tui in headless mode (subprocess fallback).
-    fn launch_subprocess_agent(&mut self, spec: Option<&AgentSpec>, prompt: &str) -> Result<()> {
-        let executable = std::env::current_exe().context("Failed to resolve chatty-tui binary")?;
-        let agent_args = spec_sub_agent_args(spec, &self.model_config.id);
-        let prompt_owned = prompt.to_string();
-        let auto_approve = matches!(
-            self.execution_settings.approval_mode,
-            chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
-        );
-        let event_tx = self.event_tx.clone();
-
-        self.add_system_message(match spec {
-            Some(spec) => format!("Launching agent '{}'...", spec.agent.name),
-            None => "Launching local sub-agent...".to_string(),
-        });
-        self.transcript.mark_last_as_delegation_row();
-
-        tokio::task::spawn_blocking(move || {
-            let message = match super::helpers::run_sub_agent_process(
-                executable,
-                agent_args,
-                prompt_owned,
-                auto_approve,
-                event_tx.clone(),
-            ) {
-                Ok(stdout) => {
-                    let stdout = stdout.trim().to_string();
-                    if stdout.is_empty() {
-                        "Sub-agent completed with no output.".to_string()
-                    } else {
-                        format!("Sub-agent response:\n{}", stdout)
-                    }
-                }
-                Err(e) => format!("Sub-agent failed: {}", e),
-            };
-
-            if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
-                warn!(error = ?e, "Failed to deliver sub-agent completion event");
             }
         });
 
