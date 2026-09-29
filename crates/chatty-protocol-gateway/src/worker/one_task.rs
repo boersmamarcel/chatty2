@@ -527,6 +527,7 @@ mod tests {
         }
         let (_task, _updates) = registry
             .submit_task(&name, DelegatedTask::new("call three agents"))
+            .await
             .expect("the caller is connected");
 
         let finished = Arc::new(Mutex::new(Vec::new()));

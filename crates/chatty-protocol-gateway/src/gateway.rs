@@ -148,8 +148,8 @@ pub struct ProtocolGateway {
     runners: BTreeMap<String, Arc<dyn VirtualAgent>>,
     /// Where each call's edge-log row goes (BI-4); `None` writes none.
     edges: Option<Arc<Mutex<EdgeLog>>>,
-    /// The spec rules a node's call is checked against (PL-S2); `None`
-    /// checks only the call chain.
+    /// The spec rules a node's call is checked against (PL-S2); `None` is
+    /// the local default, [`LocalPermissive`](crate::participant::LocalPermissive).
     call_policy: Option<Arc<dyn CallPolicy>>,
     /// Prices a callee's reported usage on its edge-log row (DP-3).
     usage_pricer: Option<Arc<dyn UsagePricer>>,

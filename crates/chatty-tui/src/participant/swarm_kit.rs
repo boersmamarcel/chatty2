@@ -1881,6 +1881,7 @@ async fn spawn_context_is_clamped() {
 
     let (_task, _updates) = registry
         .submit_task(&name, DelegatedTask::new("widen your context"))
+        .await
         .expect("the rogue node is connected");
     let refusals = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen = refusals.clone();
@@ -2381,6 +2382,7 @@ async fn no_mid_run_delivery() {
     }
     let (_task, _updates) = registry
         .submit_task(&courier, DelegatedTask::new("tell the root"))
+        .await
         .expect("the courier is connected");
     let status = std::sync::Arc::new(parking_lot::Mutex::new(None));
     let seen = status.clone();
