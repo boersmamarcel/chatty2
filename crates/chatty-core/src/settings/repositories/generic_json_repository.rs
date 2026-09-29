@@ -110,7 +110,9 @@ pub(crate) async fn write_atomic<T: Serialize>(path: &Path, value: &T) -> Reposi
 
     let temp_path = path.with_extension(format!(
         "{}.{}.tmp",
-        path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default(),
+        path.extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         std::process::id()
     ));
     tokio::fs::write(&temp_path, &json)
