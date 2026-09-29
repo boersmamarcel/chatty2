@@ -1,0 +1,24 @@
+{
+  "title": "The adjudicator's decision",
+  "type": "object",
+  "required": ["choice", "answer"],
+  "properties": {
+    "choice": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3,
+      "description": "The number of the candidate whose answer you adopt; 0 only when you reconcile several candidates into a new answer to an open-ended question."
+    },
+    "answer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The adopted answer: the chosen candidate's answer exactly as it gave it, or, when choice is 0, the reconciled answer."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One or two sentences: why this answer, and what was wrong with the others."
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,22 @@
+{
+  "title": "An analyst's answer to one data question",
+  "type": "object",
+  "required": ["answer"],
+  "properties": {
+    "answer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The answer alone, in the form the question asks for. For a question with one exact answer (a number, a name, a list) this is only that value, with no label and no explanation."
+    },
+    "method": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One to three sentences: which data you used and how you computed the answer."
+    },
+    "assumptions": {
+      "type": "string",
+      "description": "How you read anything the question left open, or an empty string."
+    }
+  },
+  "additionalProperties": false
+}
