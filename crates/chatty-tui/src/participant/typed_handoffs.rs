@@ -61,10 +61,11 @@ fn wire_line(kit: &SwarmKit, line: &str) -> String {
     normalize(kit, &format!("{direction}{frame}"))
 }
 
-/// Invariant 4: a team without `handoffs` puts exactly the bytes on the
-/// wire it did before TD-2. The golden was recorded on `main` before the
-/// change (canonical key order, clocks and the version scrubbed) and is
-/// never re-recorded.
+/// Invariant 4: a team without `handoffs` sends no handoff field. The
+/// golden pins the whole wire (canonical key order, clocks and the version
+/// scrubbed); it was recorded on `main` before TD-2 and re-recorded only by
+/// ADR-0021's envelope changes (EN-1, and step 3), each change explained by
+/// a row of that ADR's frame-to-method map.
 #[tokio::test]
 async fn handoff_absent_is_unchanged() {
     let kit = SwarmKit::start(
@@ -88,6 +89,9 @@ async fn handoff_absent_is_unchanged() {
     let mut lines = Vec::new();
     while let Ok(line) = tap.try_recv() {
         lines.push(wire_line(&kit, &line));
+    }
+    for line in &lines {
+        assert!(!line.contains("\"handoff\""), "a handoff field: {line}");
     }
     let recorded = format!("{}\n", lines.join("\n"));
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

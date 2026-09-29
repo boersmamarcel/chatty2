@@ -25,7 +25,6 @@
 use std::io;
 use std::time::Duration;
 
-use serde::Serialize;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
 use tokio::time::Instant;
 
@@ -108,26 +107,6 @@ fn oversized(max: usize) -> io::Error {
         io::ErrorKind::InvalidData,
         format!("a line is longer than the {max}-byte frame cap"),
     )
-}
-
-/// How many bytes `frame` encodes to as one line, newline excluded, without
-/// keeping the encoding.
-pub fn encoded_len<F: Serialize>(frame: &F) -> usize {
-    struct Count(usize);
-    impl io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    // A frame that cannot be encoded is not sent either; it counts as
-    // nothing here and fails where it is encoded.
-    let _ = serde_json::to_writer(&mut count, frame);
-    count.0
 }
 
 /// A token bucket: `burst` tokens, refilled at `per_second`.
@@ -219,12 +198,6 @@ mod tests {
             out[0].as_ref().unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
-    }
-
-    #[test]
-    fn encoded_len_counts_the_encoding() {
-        let value = serde_json::json!({"a": "b", "n": [1, 2, 3]});
-        assert_eq!(encoded_len(&value), value.to_string().len());
     }
 
     #[test]

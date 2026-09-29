@@ -31,9 +31,9 @@
 //! # Calls (BI-4)
 //!
 //! The same connection carries the worker's own calls: its `invoke_agent`
-//! and `list_agents` go up as `call` frames and their replies come down
-//! beside the task's answers. A callee's question comes down as
-//! `call_input_required` and the worker's answer goes up as `call_input`
+//! and `list_agents` go up as requests and their replies come down beside
+//! the task's messages. A callee's question comes down as
+//! `call.input_required` and the worker's answer goes up as `call.input`
 //! (BI-5), so a question from any depth reaches the root's human.
 //! [`WorkerConnection`] is a welcomed connection with a [`SocketTransport`]
 //! over it, so the worker connects first and

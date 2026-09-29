@@ -8,8 +8,9 @@
 //! (`chatty_protocol_gateway::participant::BrokerCalls`), never over the
 //! gateway's HTTP side (`crates/chatty-protocol-gateway/tests/
 //! loopback_scope.rs` covers that refusal). What is left here is the wire
-//! protocol itself: registration, the shared socket's refusal, and v1/v2
-//! framing.
+//! protocol itself: registration, the shared socket's refusal, and the v3
+//! envelope (ADR-0021 § 1). What closes a connection mid-session and what
+//! does not is pinned in `src/participant/connection_limits_tests.rs`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +18,9 @@ use std::time::Duration;
 
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_protocol_gateway::participant::{ParticipantRegistry, open_connection};
+use chatty_protocol_gateway::participant::{
+    PROTOCOL_VERSION, ParticipantRegistry, open_connection,
+};
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -115,8 +118,8 @@ impl StubParticipant {
             open_connection(participants, spec, None).expect("the broker makes a connection");
         let mut stub = Self::over(connection.worker_end, spec).await;
         let welcome = stub.next_frame().await;
-        assert_eq!(welcome["type"], "welcome", "the hello is answered");
-        assert_eq!(welcome["name"], connection.name);
+        assert_eq!(welcome["id"], 1, "the hello is answered: {welcome}");
+        assert_eq!(welcome["result"]["name"], connection.name);
         stub.name = connection.name;
         stub
     }
@@ -133,21 +136,22 @@ impl StubParticipant {
         };
 
         stub.send(json!({
-            "type": "hello",
-            "card": {
+            "id": 1,
+            "method": "session.hello",
+            "params": {"card": {
                 "name": card_name,
                 "description": "a stub worker",
                 "version": "0.1.0",
                 "skills": [{ "name": "echo", "description": "repeats the task" }],
-            }
+            }}
         }))
         .await;
         stub
     }
 
-    /// Send `frame` as v2.
+    /// Send `frame` as v3.
     async fn send(&mut self, mut frame: Value) {
-        frame["v"] = json!(2);
+        frame["v"] = json!(3);
         self.send_raw(frame).await;
     }
 
@@ -165,7 +169,7 @@ impl StubParticipant {
             .expect("the socket is readable")
             .expect("the broker did not close the socket");
         let frame: Value = serde_json::from_str(&line).expect("the broker sends JSON");
-        assert_eq!(frame["v"], 2, "every broker frame is v2: {frame}");
+        assert_eq!(frame["v"], 3, "every broker message is v3: {frame}");
         frame
     }
 
@@ -201,54 +205,57 @@ async fn closing_the_socket_deregisters_the_participant() {
     assert!(!harness.participants.is_registered(&name));
 }
 
-/// Read the shared socket's answer to `first_line`: an `error` frame, then
-/// the connection closed.
-async fn shared_socket_reply(socket: &PathBuf, first_line: &str) -> Value {
+/// Read the shared socket's answer to `first_line`, if any, and check that
+/// the connection is closed after it.
+async fn shared_socket_reply(socket: &PathBuf, first_line: &str) -> Option<Value> {
     let stream = UnixStream::connect(socket).await.unwrap();
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     write.write_all(first_line.as_bytes()).await.unwrap();
     write.write_all(b"\n").await.unwrap();
 
-    let reply: Value = serde_json::from_str(
-        &lines
-            .next_line()
-            .await
-            .unwrap()
-            .expect("the socket answers before it closes"),
-    )
-    .unwrap();
-    assert!(
-        lines.next_line().await.unwrap().is_none(),
-        "and then closes the connection"
-    );
+    let reply = lines
+        .next_line()
+        .await
+        .unwrap()
+        .map(|line| serde_json::from_str::<Value>(&line).unwrap());
+    if reply.is_some() {
+        assert!(
+            lines.next_line().await.unwrap().is_none(),
+            "and then closes the connection"
+        );
+    }
     reply
 }
 
 /// ADR-0020, invariant 1: nothing registers on the shared socket — not a v1
-/// `register` for a name the broker is about to hand out, not a v2 `hello`
-/// — and the name stays the broker's to give.
+/// `register` for a name the broker is about to hand out, not a v2 `hello`,
+/// not a v3 `session.hello` — and the name stays the broker's to give.
 #[tokio::test]
 async fn nothing_registers_on_the_shared_socket() {
     let harness = Harness::start().await;
 
-    let v1 = shared_socket_reply(
-        &harness.socket,
-        r#"{"type":"register","card":{"name":"stub-worker-0"}}"#,
-    )
-    .await;
-    assert_eq!(v1["v"], 2);
-    assert_eq!(v1["type"], "error");
-    assert!(v1["reason"].as_str().unwrap().contains("v2"), "{v1}");
+    let previous = PROTOCOL_VERSION - 1;
+    for old in [
+        r#"{"type":"register","card":{"name":"stub-worker-0"}}"#.to_string(),
+        format!(r#"{{"v":{previous},"type":"hello","card":{{"name":"stub-worker-0"}}}}"#),
+    ] {
+        assert_eq!(
+            shared_socket_reply(&harness.socket, &old).await,
+            None,
+            "an undecodable first line is closed without a reply: {old}"
+        );
+    }
 
     let hello = shared_socket_reply(
         &harness.socket,
-        r#"{"v":2,"type":"hello","card":{"name":"stub-worker-0"}}"#,
+        r#"{"v":3,"id":1,"method":"session.hello","params":{"card":{"name":"stub-worker-0"}}}"#,
     )
-    .await;
-    assert_eq!(hello["type"], "error");
+    .await
+    .expect("a hello is answered");
+    assert_eq!(hello["error"]["kind"], "refused");
     assert!(
-        hello["reason"]
+        hello["error"]["message"]
             .as_str()
             .unwrap()
             .contains("made by the broker"),
@@ -261,7 +268,7 @@ async fn nothing_registers_on_the_shared_socket() {
 }
 
 /// ADR-0020, invariant 3: the name in a registering card has no effect. A
-/// v2 worker whose card says `evil` is admitted, listed and served under
+/// worker whose card says `evil` is admitted, listed and served under
 /// the name the broker assigned — checked on the registry directly, since
 /// a role's card is no longer served over loopback (BI-7).
 #[tokio::test]
@@ -271,8 +278,7 @@ async fn card_name_is_ignored() {
     let assigned = connection.name.clone();
     let mut stub = StubParticipant::over(connection.worker_end, "evil").await;
 
-    let welcome = stub.next_frame().await;
-    assert_eq!(welcome["type"], "welcome");
+    let welcome = stub.next_frame().await["result"].clone();
     assert_eq!(welcome["name"], "local-coder-0");
     assert_eq!(welcome["name"], assigned);
     assert_eq!(welcome["scope"], "root");
@@ -308,40 +314,43 @@ async fn card_name_is_ignored() {
     assert_eq!(status, reqwest::StatusCode::NOT_FOUND, "`evil` is nobody");
 }
 
-/// A frame without `v` gets an error frame naming v2 and the connection is
-/// closed — as a worker's first frame, and mid-session.
+/// A line that is not v3 closes the connection without a reply — as a
+/// worker's first line, and mid-session (ADR-0021 § 1: an `error` answers
+/// only a decodable hello).
 #[tokio::test]
-async fn v1_frame_is_refused() {
+async fn a_line_that_is_not_v3_closes_the_connection() {
     let harness = Harness::start().await;
 
-    // A v1 `register` on a broker-made connection.
-    let connection = open_connection(&harness.participants, "old-worker", None).unwrap();
-    let name = connection.name.clone();
-    connection.worker_end.set_nonblocking(true).unwrap();
-    let (read, mut write) = UnixStream::from_std(connection.worker_end)
-        .unwrap()
-        .into_split();
-    let mut lines = BufReader::new(read).lines();
-    write
-        .write_all(b"{\"type\":\"register\",\"card\":{\"name\":\"old-worker\"}}\n")
-        .await
-        .unwrap();
-    let reply: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-    assert_eq!(reply["v"], 2);
-    assert_eq!(reply["type"], "error");
-    assert!(reply["reason"].as_str().unwrap().contains("v2"), "{reply}");
-    assert!(lines.next_line().await.unwrap().is_none(), "then closed");
-    assert!(!harness.participants.is_registered(&name));
+    let previous = PROTOCOL_VERSION - 1;
+    for first in [
+        r#"{"type":"register","card":{"name":"old-worker"}}"#.to_string(),
+        format!(r#"{{"v":{previous},"type":"hello","card":{{}}}}"#),
+        "not json".to_string(),
+    ] {
+        let connection = open_connection(&harness.participants, "old-worker", None).unwrap();
+        let name = connection.name.clone();
+        connection.worker_end.set_nonblocking(true).unwrap();
+        let (read, mut write) = UnixStream::from_std(connection.worker_end)
+            .unwrap()
+            .into_split();
+        let mut lines = BufReader::new(read).lines();
+        write
+            .write_all(format!("{first}\n").as_bytes())
+            .await
+            .unwrap();
+        assert!(
+            lines.next_line().await.unwrap().is_none(),
+            "closed with no reply: {first}"
+        );
+        assert!(!harness.participants.is_registered(&name));
+    }
 
-    // A welcomed worker that drops `v` from a later frame is closed too.
+    // A welcomed worker that sends an old-version frame later is closed too.
     let mut stub = StubParticipant::connect(&harness.participants, "drifting-worker").await;
     let name = stub.name.clone();
-    stub.send_raw(json!({ "type": "status", "taskId": "t", "state": "working" }))
+    stub.send_raw(json!({ "v": previous, "type": "status", "taskId": "t", "state": "working" }))
         .await;
-    let reply = stub.next_frame().await;
-    assert_eq!(reply["type"], "error");
-    assert!(reply["reason"].as_str().unwrap().contains("v2"), "{reply}");
-    assert!(stub.next_line().await.is_none(), "then closed");
+    assert!(stub.next_line().await.is_none(), "closed with no reply");
     harness.await_deregistration(&name).await;
 }
 
