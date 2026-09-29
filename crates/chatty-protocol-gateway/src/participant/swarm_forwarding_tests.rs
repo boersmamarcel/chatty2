@@ -160,6 +160,7 @@ impl VirtualAgent for Scripted {
             let (task_id, updates) = self
                 .registry
                 .submit_task(&name, task)
+                .await
                 .ok_or_else(|| anyhow::anyhow!("gone before its task"))?;
             let handle: Box<dyn WorkerHandle> = Box::new(Handle {
                 name,

@@ -124,12 +124,12 @@ pub(crate) fn with_evidence(
 }
 
 /// Submit `task` to an already-registered participant.
-pub(crate) fn submit(
+pub(crate) async fn submit(
     registry: &ParticipantRegistry,
     name: &str,
     task: DelegatedTask,
 ) -> Option<RunningTask> {
-    let (task_id, updates) = registry.submit_task(name, task)?;
+    let (task_id, updates) = registry.submit_task(name, task).await?;
     Some(RunningTask {
         guard: TaskGuard::new(registry.clone(), name.to_string(), task_id.clone()),
         task_id,

@@ -32,12 +32,13 @@
 //!   (ADR-0011 C2).
 
 mod calls;
+pub mod limits;
 mod protocol;
 mod registry;
 pub mod spawn_context;
 mod virtual_agent;
 
-pub use calls::{BrokerCalls, Caller, DirectTransport};
+pub use calls::{BrokerCalls, Caller, DirectTransport, LocalPermissive};
 pub use protocol::{
     ApprovalAsker, ApprovalKind, BrokerFrame, CallStamp, DelegatedTask, FrameError, InputAnswer,
     InputQuestion, InputRequest, PROTOCOL_VERSION, ParticipantCard, ParticipantFrame,

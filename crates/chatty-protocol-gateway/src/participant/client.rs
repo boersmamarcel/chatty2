@@ -17,9 +17,10 @@
 use anyhow::{Context, Result, bail};
 use chatty_fabric::{ConversationScope, NodeName};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tracing::debug;
 
+use super::limits::{BoundedLines, MAX_FRAME_BYTES};
 use super::protocol::{
     BrokerFrame, ParticipantCard, ParticipantFrame, TaskState, decode_frame, encode_frame,
 };
@@ -42,7 +43,7 @@ pub struct ParticipantConnection {
 /// task reports on the other half while it waits here for the answer to a
 /// question it asked (AGE-306), and neither side may hold the other up.
 pub struct ParticipantReader {
-    lines: Lines<BufReader<BoxedRead>>,
+    lines: BoundedLines<BufReader<BoxedRead>>,
 }
 
 /// The participant's frames, written one per line.
@@ -64,7 +65,7 @@ impl ParticipantConnection {
     {
         let (read, write) = tokio::io::split(stream);
         let mut reader = ParticipantReader {
-            lines: BufReader::new(Box::new(read) as BoxedRead).lines(),
+            lines: BoundedLines::new(BufReader::new(Box::new(read) as BoxedRead), MAX_FRAME_BYTES),
         };
         let mut writer = ParticipantWriter {
             write: Box::new(write) as BoxedWrite,

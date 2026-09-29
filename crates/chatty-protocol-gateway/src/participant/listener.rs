@@ -26,15 +26,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::calls::Caller;
-use super::protocol::{
-    BrokerFrame, FrameError, ParticipantFrame, TaskInput, decode_frame, encode_frame,
+use super::limits::{
+    BoundedLines, CALL_BURST, CALLS_PER_SECOND, MAX_FRAME_BYTES, MAX_IN_FLIGHT_CALLS,
+    OUTBOUND_QUEUE_FRAMES, RateLimit, encoded_len,
 };
+use super::protocol::{BrokerFrame, ParticipantFrame, TaskInput, decode_frame, encode_frame};
 use super::registry::{AdmittedNode, ParticipantRegistry};
 use chatty_fabric::{AgentOrigin, CallError, CallEvent, CallStream};
 use futures::StreamExt;
@@ -89,7 +91,7 @@ pub async fn serve(listener: UnixListener) {
 /// included — is told that this socket registers nobody.
 async fn refuse(stream: UnixStream) {
     let (read_half, mut write_half) = stream.into_split();
-    let mut lines = BufReader::new(read_half).lines();
+    let mut lines = BoundedLines::new(BufReader::new(read_half), MAX_FRAME_BYTES);
     // Bounded, so a peer that connects and says nothing does not hold a
     // task open for the life of the broker.
     let first = tokio::time::timeout(REFUSAL_READ_TIMEOUT, lines.next_line()).await;
@@ -145,13 +147,19 @@ pub fn open_connection(
 /// outbound queue for this participant, the read half owns registration and
 /// routing. When the read half returns, the participant is deregistered and
 /// the outbound sender is dropped, which ends the writer.
+///
+/// Bounded throughout (EN-0b, see [`limits`](super::limits)): a line over
+/// [`MAX_FRAME_BYTES`], or one that does not decode, closes this connection
+/// — the worker's own frame is the only thing that does. The outbound queue
+/// holds [`OUTBOUND_QUEUE_FRAMES`] and makes producers wait when full; a
+/// call past [`MAX_IN_FLIGHT_CALLS`] or the call rate is refused.
 pub async fn serve_connection<S>(stream: S, registry: ParticipantRegistry, node: AdmittedNode)
 where
     S: tokio::io::AsyncRead + AsyncWrite + Send + 'static,
 {
     let (read_half, write_half) = tokio::io::split(stream);
-    let mut lines = BufReader::new(read_half).lines();
-    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<BrokerFrame>();
+    let mut lines = BoundedLines::new(BufReader::new(read_half), MAX_FRAME_BYTES);
+    let (outbound_tx, outbound_rx) = mpsc::channel::<BrokerFrame>(OUTBOUND_QUEUE_FRAMES);
     let tap = registry.wire_tap();
     // Every line read is copied to the wire tap, if one is installed.
     let decode = |line: &str| {
@@ -168,7 +176,7 @@ where
     let name = match lines.next_line().await {
         Ok(Some(line)) => match decode(&line) {
             Ok(ParticipantFrame::Hello { card }) => {
-                let _ = outbound_tx.send(node.welcome());
+                let _ = outbound_tx.send(node.welcome()).await;
                 registry.register(node, card, outbound_tx.clone())
             }
             refused => {
@@ -179,7 +187,7 @@ where
                 };
                 warn!(node = node.name(), %reason, "Refusing a participant connection");
                 registry.abandon(node);
-                let _ = outbound_tx.send(BrokerFrame::Error { reason });
+                let _ = outbound_tx.send(BrokerFrame::Error { reason }).await;
                 drop(outbound_tx);
                 let _ = writer.await;
                 return;
@@ -208,36 +216,53 @@ where
     // question (BI-5): an answer is delivered only to the task its call
     // names, so a worker answers its own callees and nobody else's.
     let parked: Parked = Arc::default();
+    let mut rate = RateLimit::new(CALLS_PER_SECOND, CALL_BURST, tokio::time::Instant::now());
     loop {
         while calls.try_join_next().is_some() {}
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => match decode(&line) {
-                // A peer that stops speaking v2 is not ours to guess at.
-                Err(e @ (FrameError::MissingVersion | FrameError::WrongVersion(_))) => {
-                    warn!(participant = %name, error = %e, "Closing the connection: not v2");
-                    let _ = outbound_tx.send(BrokerFrame::Error {
-                        reason: e.to_string(),
-                    });
+                // A peer whose frame does not decode — not v2, or not a
+                // frame at all — is not ours to guess at. Its own frame
+                // closes its own connection, and nothing else.
+                Err(e) => {
+                    warn!(participant = %name, error = %e, "Closing the connection: an undecodable frame");
+                    let _ = outbound_tx
+                        .send(BrokerFrame::Error {
+                            reason: e.to_string(),
+                        })
+                        .await;
                     break;
                 }
-                // A malformed line is dropped, not fatal: one bad frame
-                // should not fail every task the participant still owes.
-                Err(e) => warn!(participant = %name, error = %e, "Ignoring a malformed frame"),
-                Ok(ParticipantFrame::Call { id, request }) => match registry.calls() {
-                    Some(broker) => {
-                        let stream = broker.call(Caller::Node(name.clone()), request);
-                        calls.spawn(reply(id, stream, outbound_tx.clone(), parked.clone()));
+                Ok(ParticipantFrame::Call { id, request }) => {
+                    let broker = match registry.calls() {
+                        None => Err("this broker takes no calls".to_string()),
+                        Some(_) if calls.len() >= MAX_IN_FLIGHT_CALLS => Err(format!(
+                            "too many calls in flight: at most {MAX_IN_FLIGHT_CALLS} per connection"
+                        )),
+                        Some(_) if !rate.try_take(tokio::time::Instant::now()) => Err(format!(
+                            "too many calls: at most {CALLS_PER_SECOND} per second per connection"
+                        )),
+                        Some(broker) => Ok(broker),
+                    };
+                    match broker {
+                        Ok(broker) => {
+                            let stream = broker.call(Caller::Node(name.clone()), request);
+                            calls.spawn(reply(id, stream, outbound_tx.clone(), parked.clone()));
+                        }
+                        Err(reason) => {
+                            debug!(participant = %name, call = id, %reason, "Refused a call");
+                            let _ = outbound_tx
+                                .send(BrokerFrame::CallError {
+                                    id,
+                                    error: CallError::Refused(reason),
+                                })
+                                .await;
+                        }
                     }
-                    None => {
-                        let _ = outbound_tx.send(BrokerFrame::CallError {
-                            id,
-                            error: CallError::Refused("this broker takes no calls".to_string()),
-                        });
-                    }
-                },
+                }
                 Ok(ParticipantFrame::CallInput { id, task, input }) => {
-                    answer_callee(&registry, &parked, &name, id, &task, input);
+                    answer_callee(&registry, &parked, &name, id, &task, input).await;
                 }
                 Ok(frame) => {
                     if !registry.on_frame(&name, frame) {
@@ -248,6 +273,16 @@ where
             },
             Ok(None) => {
                 debug!(participant = %name, "Participant closed its socket");
+                break;
+            }
+            // A line over the cap, or not UTF-8: the worker's own frame.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
+                warn!(participant = %name, error = %e, "Closing the connection: an unreadable line");
+                let _ = outbound_tx
+                    .send(BrokerFrame::Error {
+                        reason: e.to_string(),
+                    })
+                    .await;
                 break;
             }
             Err(e) => {
@@ -273,10 +308,16 @@ type Parked = Arc<Mutex<HashMap<u64, String>>>;
 /// Send call `id`'s events back as `call_progress` (and
 /// `call_input_required` when its callee asks a question), then one
 /// `call_result` or `call_error`.
+///
+/// A frame that would be over the worker's frame cap — a callee's result
+/// larger than this connection accepts — fails this call with a
+/// `call_error` and ends it; the connection and its other calls go on.
+/// Waits while the outbound queue is full, which holds the callee's stream
+/// back rather than buffering it.
 async fn reply(
     id: u64,
     mut stream: CallStream,
-    outbound: mpsc::UnboundedSender<BrokerFrame>,
+    outbound: mpsc::Sender<BrokerFrame>,
     parked: Parked,
 ) {
     // However the call ends, it has nothing parked any more.
@@ -305,20 +346,34 @@ async fn reply(
             Ok(CallEvent::Swarm(_)) => continue,
             Err(error) => (BrokerFrame::CallError { id, error }, true),
         };
-        if outbound.send(frame).is_err() || last {
+        let size = encoded_len(&frame);
+        if size > MAX_FRAME_BYTES {
+            warn!(
+                call = id,
+                size, "Failing a call: its frame is over the worker's frame cap"
+            );
+            let error = CallError::Failed(format!(
+                "the call's {size}-byte reply is over the receiver's {MAX_FRAME_BYTES}-byte frame cap"
+            ));
+            let _ = outbound.send(BrokerFrame::CallError { id, error }).await;
+            return;
+        }
+        if outbound.send(frame).await.is_err() || last {
             return;
         }
     }
-    let _ = outbound.send(BrokerFrame::CallError {
-        id,
-        error: CallError::Failed("the call ended without a result".to_string()),
-    });
+    let _ = outbound
+        .send(BrokerFrame::CallError {
+            id,
+            error: CallError::Failed("the call ended without a result".to_string()),
+        })
+        .await;
 }
 
 /// Deliver `node`'s answer to the question its call `id`'s callee parked
 /// `task` on. Anything else — a call with nothing parked, another task — is
 /// refused with a log line: the connection names who may answer what.
-fn answer_callee(
+async fn answer_callee(
     registry: &ParticipantRegistry,
     parked: &Parked,
     node: &str,
@@ -330,7 +385,7 @@ fn answer_callee(
         warn!(participant = %node, call = id, task, "Refused an answer for a task its call did not park");
         return;
     }
-    if let Err(error) = registry.answer_task(task, input) {
+    if let Err(error) = registry.answer_task(task, input).await {
         // The callee's task is gone; its call ends on its own.
         warn!(participant = %node, call = id, task, %error, "Could not deliver a worker's answer");
     }
@@ -350,6 +405,16 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut line = encode_frame(frame).map_err(io::Error::other)?;
+    // Every producer checks its frame against the cap first, so the worker
+    // is never sent a line it would close on; one that got past them is
+    // dropped here, with the connection kept.
+    if line.len() > MAX_FRAME_BYTES {
+        warn!(
+            size = line.len(),
+            "Dropping a frame over the worker's frame cap"
+        );
+        return Ok(());
+    }
     if let Some(tap) = tap {
         let _ = tap.send(format!("-> {line}"));
     }
@@ -362,7 +427,7 @@ where
 /// closed or the socket refuses a write.
 async fn write_frames<W>(
     mut write_half: W,
-    mut outbound: mpsc::UnboundedReceiver<BrokerFrame>,
+    mut outbound: mpsc::Receiver<BrokerFrame>,
     tap: Option<mpsc::UnboundedSender<String>>,
 ) where
     W: AsyncWrite + Unpin,
@@ -386,3 +451,7 @@ pub fn unbind(path: &PathBuf) {
         debug!(socket = %path.display(), error = %e, "Could not remove the participant socket");
     }
 }
+
+#[cfg(test)]
+#[path = "connection_limits_tests.rs"]
+mod connection_limits_tests;
