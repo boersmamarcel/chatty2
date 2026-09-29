@@ -131,7 +131,7 @@ A `module_settings.json` that still describes workers inline (the format before 
 | `budget.max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
 | `tools.disable` | Tool groups to remove on top of the role (`shell`, `fs-write`, `git`, …). |
 
-A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (`local-coder`, `local-reviewer`, `coder-reviewer-leader`, `benford-analyst`). `chatty-tui --agent <name>` runs the terminal app as any spec.
+A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (`local-coder`, `local-reviewer`, `coder-reviewer-leader`, `benford-analyst`, and the `analyst-panel` team's `panel-*` agents). `chatty-tui --agent <name>` runs the terminal app as any spec.
 
 The three roles:
 
@@ -156,6 +156,13 @@ One team ships built in, `coder-reviewer` — a leader that only delegates, a co
 ```bash
 chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
   -m "Fix the overdraft bug in src/account.py; the acceptance criterion is that tests/test_account.py passes."
+```
+
+A second, experimental team ships for data questions, `analyst-panel`: three analysts answer the question independently, and unless their answers agree, an adjudicator compares how each one got its answer and picks one. It is slower and costs about three to four times a single agent; use it where one analysis is often plausibly wrong. If your data comes with notes for analysts, put them in a `BRIEF.md` in the workspace root and every analyst reads it first:
+
+```bash
+chatty-tui --team analyst-panel --headless --ollama --model qwen3:14b \
+  -m "Which customers churned last quarter, and why? The data is in data/."
 ```
 
 `--model` (and `--tools` / `--preamble`) override the team's own leader settings when given. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/agents-and-specs.md#teams).
