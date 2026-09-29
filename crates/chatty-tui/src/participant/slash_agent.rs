@@ -304,7 +304,6 @@ async fn tui_slash_agent_delegates_through_broker() {
                 virtual_agents: vec![LEAD.to_string(), ANALYST.to_string()],
                 ..ModuleSettingsModel::default()
             },
-            broker_port: None,
             broker: Some(Arc::new(StartedBroker(kit.broker().transport()))),
             models: ModelsModel::default(),
             providers: Vec::new(),

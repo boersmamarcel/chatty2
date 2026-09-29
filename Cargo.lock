@@ -2090,6 +2090,7 @@ dependencies = [
  "chatty-module-registry",
  "chatty-wasm-runtime",
  "criterion",
+ "dirs 6.0.0",
  "futures",
  "hive-client",
  "libc",

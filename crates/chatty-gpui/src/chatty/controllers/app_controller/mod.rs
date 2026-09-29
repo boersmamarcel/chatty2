@@ -67,7 +67,7 @@ pub(crate) use conversation_ops_modify::move_ui_enabled;
 /// caught up with a workspace change yet. No broker running yet is not a
 /// disagreement — its own resolved roster is the best guess available
 /// until one starts (the lazy broker, BI-2/AGE-634, builds on first use).
-fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<String>)> {
+fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<Vec<String>> {
     let m = cx.try_global::<crate::settings::models::ModuleSettingsModel>()?;
     let discovered = cx.try_global::<crate::settings::models::DiscoveredModulesModel>();
     let broker_is_live = discovered.is_some_and(|d| d.gateway.is_some());
@@ -83,9 +83,9 @@ fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<St
             "conversation workspace and the running broker's roster workspace disagree; \
              listing no local agents rather than one the broker cannot reach"
         );
-        return Some((m.gateway_port, Vec::new()));
+        return Some(Vec::new());
     }
-    Some((m.gateway_port, m.roster_names(workspace)))
+    Some(m.roster_names(workspace))
 }
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
@@ -321,11 +321,10 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let memory_service = await_memory_service(cx).await;
     let embedding_service = get_embedding_service(cx);
     let skill_service = get_skill_service(cx);
-    let (gateway_port, local_agents) = cx
+    let local_agents = cx
         .update(|cx| gateway_and_roster(cx, built_workspace_dir.as_deref()))
         .ok()
-        .flatten()
-        .unzip();
+        .flatten();
     // The broker starts itself on this call if it has not already (BI-2,
     // AGE-634).
     let lazy_broker = cx
@@ -358,7 +357,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             skill_service: Some(skill_service),
             search_settings,
             embedding_service,
-            gateway_port,
             lazy_broker,
             local_agents: local_agents.unwrap_or_default(),
             remote_agents,

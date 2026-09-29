@@ -61,7 +61,7 @@ async fn start_team_broker(
         &["--auto-approve".to_string()],
     );
     Broker::start_at(
-        dir.join("participants.sock"),
+        dir.join("run").join("participants.sock"),
         scripted_worker_binary(dir, &completed_turn().await),
         module_settings.default_endpoint_budget,
         specs,

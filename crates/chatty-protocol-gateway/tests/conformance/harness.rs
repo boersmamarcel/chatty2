@@ -118,7 +118,7 @@ impl Gateway {
                 .unwrap_or_else(|e| panic!("{} loads: {e:#}", path.display()));
         }
 
-        let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)), 0);
+        let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)));
 
         #[cfg(unix)]
         let participants = gateway.participants();
@@ -127,7 +127,7 @@ impl Gateway {
             .await
             .expect("an ephemeral port");
         let base = format!("http://{}", tcp.local_addr().unwrap());
-        let router = gateway.build_router();
+        let router = with_launch_token(&gateway);
         tokio::spawn(async move {
             axum::serve(tcp, router).await.ok();
         });
@@ -218,4 +218,22 @@ pub async fn run_client(
         String::from_utf8_lossy(&output.stderr),
     );
     output
+}
+
+/// The gateway's router with its launch token added to every request: this
+/// test's own listener stands in for a caller that holds the token (EN-0d).
+pub fn with_launch_token(gateway: &ProtocolGateway) -> axum::Router {
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    gateway
+        .build_router()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::extract::Request| {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer.clone());
+                request
+            },
+        ))
 }

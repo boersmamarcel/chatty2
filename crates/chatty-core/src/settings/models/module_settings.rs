@@ -22,10 +22,6 @@ pub struct ModuleSettingsModel {
     /// - Windows: `%APPDATA%\chatty\modules\`
     #[serde(default = "default_module_dir")]
     pub module_dir: String,
-    /// TCP port for the local protocol gateway.
-    /// Defaults to `8420`.
-    #[serde(default = "default_gateway_port")]
-    pub gateway_port: u16,
     /// How many delegated workers the broker runs at once against one model
     /// endpoint when nothing more specific is known (ADR-0011 C6).
     ///
@@ -173,10 +169,6 @@ pub fn normalize_module_dir(module_dir: String) -> String {
     }
 }
 
-fn default_gateway_port() -> u16 {
-    8420
-}
-
 fn default_endpoint_budget() -> usize {
     1
 }
@@ -186,7 +178,6 @@ impl Default for ModuleSettingsModel {
         Self {
             enabled: false,
             module_dir: default_module_dir(),
-            gateway_port: default_gateway_port(),
             default_endpoint_budget: default_endpoint_budget(),
             endpoint_budgets: HashMap::new(),
             virtual_agents: Vec::new(),
@@ -216,7 +207,6 @@ mod tests {
     fn default_settings_have_correct_values() {
         let settings = ModuleSettingsModel::default();
         assert!(!settings.enabled);
-        assert_eq!(settings.gateway_port, 8420);
         assert!(!settings.module_dir.is_empty());
     }
 
@@ -225,21 +215,18 @@ mod tests {
         let original = ModuleSettingsModel {
             enabled: true,
             module_dir: "/custom/modules".to_string(),
-            gateway_port: 9999,
             ..ModuleSettingsModel::default()
         };
         let json = serde_json::to_string(&original).unwrap();
         let restored: ModuleSettingsModel = serde_json::from_str(&json).unwrap();
         assert!(restored.enabled);
         assert_eq!(restored.module_dir, "/custom/modules");
-        assert_eq!(restored.gateway_port, 9999);
     }
 
     #[test]
     fn serde_defaults_on_empty_object() {
         let restored: ModuleSettingsModel = serde_json::from_str("{}").unwrap();
         assert!(!restored.enabled);
-        assert_eq!(restored.gateway_port, 8420);
         // module_dir should use the platform default
         assert_eq!(restored.module_dir, default_module_dir());
     }
@@ -302,8 +289,7 @@ mod tests {
         let restored: ModuleSettingsModel = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.endpoint_budgets.get("http://box:11434"), Some(&3));
 
-        let old: ModuleSettingsModel =
-            serde_json::from_str(r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
+        let old: ModuleSettingsModel = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert_eq!(old.default_endpoint_budget, 1);
         assert!(old.endpoint_budgets.is_empty());
     }
@@ -321,8 +307,7 @@ mod tests {
         );
         assert_eq!(settings.roster_names(None)[0], "local-agent");
 
-        let old: ModuleSettingsModel =
-            serde_json::from_str(r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
+        let old: ModuleSettingsModel = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert!(old.virtual_agents.is_empty());
     }
 
@@ -392,8 +377,7 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&declared).unwrap()).unwrap();
         assert_eq!(round_tripped.team, declared.team);
 
-        let old: ModuleSettingsModel =
-            serde_json::from_str(r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
+        let old: ModuleSettingsModel = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert!(old.team.verification.is_none());
         assert!(
             !serde_json::to_string(&old).unwrap().contains("team"),

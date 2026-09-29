@@ -51,13 +51,13 @@ struct Harness {
 impl Harness {
     async fn start() -> Self {
         let dir = tempfile::tempdir().expect("a temp dir for the socket");
-        let socket = dir.path().join("participants.sock");
+        let socket = dir.path().join("run").join("participants.sock");
 
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
             ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
         ));
-        let gateway = ProtocolGateway::new(modules, 0).with_participant_socket(&socket);
+        let gateway = ProtocolGateway::new(modules).with_participant_socket(&socket);
         let participants = gateway.participants();
 
         let listener = chatty_protocol_gateway::participant::bind(&socket)
@@ -69,7 +69,7 @@ impl Harness {
             .await
             .expect("an ephemeral port");
         let base_url = format!("http://{}", tcp.local_addr().unwrap());
-        let router = gateway.build_router();
+        let router = with_launch_token(&gateway);
         tokio::spawn(async move {
             axum::serve(tcp, router).await.ok();
         });
@@ -343,4 +343,22 @@ async fn v1_frame_is_refused() {
     assert!(reply["reason"].as_str().unwrap().contains("v2"), "{reply}");
     assert!(stub.next_line().await.is_none(), "then closed");
     harness.await_deregistration(&name).await;
+}
+
+/// The gateway's router with its launch token added to every request: this
+/// test's own listener stands in for a caller that holds the token (EN-0d).
+fn with_launch_token(gateway: &ProtocolGateway) -> axum::Router {
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    gateway
+        .build_router()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::extract::Request| {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer.clone());
+                request
+            },
+        ))
 }

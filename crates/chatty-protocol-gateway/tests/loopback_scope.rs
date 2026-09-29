@@ -46,7 +46,7 @@ struct Harness {
 impl Harness {
     async fn start() -> Self {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let socket = dir.path().join("participants.sock");
+        let socket = dir.path().join("run").join("participants.sock");
 
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
@@ -54,7 +54,7 @@ impl Harness {
         ));
         let edge_log = EdgeLog::open(dir.path()).expect("the edge log opens");
         let edges_path = edge_log.path();
-        let gateway = ProtocolGateway::new(modules, 0)
+        let gateway = ProtocolGateway::new(modules)
             .with_participant_socket(&socket)
             .with_edge_log(edge_log);
         let participants = gateway.participants();
@@ -93,7 +93,7 @@ impl Harness {
             .await
             .expect("an ephemeral port");
         let base_url = format!("http://{}", tcp.local_addr().unwrap());
-        let router = gateway.build_router();
+        let router = with_launch_token(&gateway);
         tokio::spawn(async move {
             axum::serve(tcp, router).await.ok();
         });
@@ -220,4 +220,22 @@ async fn loopback_ignores_caller_header() {
         refusal_body(),
         "the header claims a caller identity; the response is the plain refusal regardless"
     );
+}
+
+/// The gateway's router with its launch token added to every request: this
+/// test's own listener stands in for a caller that holds the token (EN-0d).
+fn with_launch_token(gateway: &ProtocolGateway) -> axum::Router {
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    gateway
+        .build_router()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::extract::Request| {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer.clone());
+                request
+            },
+        ))
 }

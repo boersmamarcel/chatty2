@@ -101,7 +101,7 @@ fn gateway_router_with_echo(dir: &PathBuf) -> axum::Router {
     let mut registry = ModuleRegistry::new(provider, ResourceLimits::default()).unwrap();
     registry.load(dir).expect("failed to load echo plugin");
     let registry = Arc::new(RwLock::new(registry));
-    ProtocolGateway::new(registry, 0).build_router()
+    with_launch_token(&ProtocolGateway::new(registry))
 }
 
 async fn get_json(router: axum::Router, path: &str) -> (StatusCode, Value) {
@@ -363,4 +363,22 @@ async fn step_12_plugin_has_no_openai_or_a2a_route() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The gateway's router with its launch token added to every request: this
+/// test's own listener stands in for a caller that holds the token (EN-0d).
+fn with_launch_token(gateway: &ProtocolGateway) -> axum::Router {
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    gateway
+        .build_router()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::extract::Request| {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer.clone());
+                request
+            },
+        ))
 }

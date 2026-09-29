@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn the_run_settings_carry_the_roster_verification_and_turn_budget() {
         let mut on_disk = ModuleSettingsModel {
-            gateway_port: 9999,
+            default_endpoint_budget: 7,
             virtual_agents: vec!["stale".to_string()],
             ..Default::default()
         };
@@ -783,7 +783,7 @@ mod tests {
         assert_eq!(team.agent_names(), ["data-analyst", "reviewer"]);
         assert!(run.team.verification.is_none());
         assert_eq!(
-            run.gateway_port, 9999,
+            run.default_endpoint_budget, 7,
             "everything else is the on-disk value"
         );
         assert_eq!(on_disk.virtual_agents, ["stale"]);

@@ -375,11 +375,6 @@ pub struct ChatEngine {
     pub provider_config: ProviderConfig,
     pub execution_settings: ExecutionSettingsModel,
     pub module_settings: ModuleSettingsModel,
-    /// The `--broker` leader's own gateway port, held apart from
-    /// `module_settings` so `/modules` can never persist it (AGE-382).
-    /// Always `None` now that the broker starts lazily (BI-2, AGE-634): the
-    /// port is not known until `broker` below actually starts it.
-    pub broker_port: Option<u16>,
     /// The `--broker`/`--team` leader's own gateway, not started yet (BI-2,
     /// AGE-634): `list_agents`/`invoke_agent` start it on first use.
     pub broker: Option<Arc<dyn LazyBroker>>,
@@ -557,11 +552,6 @@ pub struct ChatEngineConfig {
     pub provider_config: ProviderConfig,
     pub execution_settings: ExecutionSettingsModel,
     pub module_settings: ModuleSettingsModel,
-    /// The `--broker` leader's own gateway port, held apart from
-    /// `module_settings` so `/modules` can never persist it (AGE-382).
-    /// Always `None` now that the broker starts lazily (BI-2, AGE-634): the
-    /// port is not known until `broker` below actually starts it.
-    pub broker_port: Option<u16>,
     /// The `--broker`/`--team` leader's own gateway, not started yet (BI-2,
     /// AGE-634): `list_agents`/`invoke_agent` start it on first use.
     pub broker: Option<Arc<dyn LazyBroker>>,
@@ -615,7 +605,6 @@ impl ChatEngine {
             provider_config: config.provider_config,
             execution_settings: config.execution_settings,
             module_settings: config.module_settings,
-            broker_port: config.broker_port,
             broker: config.broker,
             models: config.models,
             providers: config.providers,
@@ -787,10 +776,6 @@ impl ChatEngine {
                 skill_service: Some(self.skill_service.clone()),
                 search_settings: self.search_settings.clone(),
                 embedding_service: self.embedding_service.clone(),
-                gateway_port: self.broker_port.or(self
-                    .module_settings
-                    .enabled
-                    .then_some(self.module_settings.gateway_port)),
                 lazy_broker: self.broker.clone(),
                 local_agents: self.local_agents(),
                 remote_agents: self.remote_agents.clone(),
@@ -1644,7 +1629,6 @@ mod tests {
                 ),
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
-                broker_port: None,
                 broker: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
@@ -2029,7 +2013,6 @@ mod tests {
                 ),
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: ModuleSettingsModel::default(),
-                broker_port: None,
                 broker: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),

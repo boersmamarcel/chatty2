@@ -1097,7 +1097,6 @@ fn main() {
                     cx.update(|cx| {
                         info!(
                             enabled = settings.enabled,
-                            port = settings.gateway_port,
                             dir = %settings.module_dir,
                             "Module settings loaded from disk"
                         );

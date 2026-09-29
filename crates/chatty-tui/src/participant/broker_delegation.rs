@@ -56,7 +56,7 @@ async fn list_agents_offers_local_agent_once_the_broker_is_started() {
     let module_settings = ModuleSettingsModel::default();
     let dir = tempfile::tempdir().expect("a temp dir for the socket");
     let broker = Broker::start_at(
-        dir.path().join("participants.sock"),
+        dir.path().join("run").join("participants.sock"),
         worker_executable(),
         module_settings.default_endpoint_budget,
         resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
@@ -105,7 +105,7 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
     assert!(!expected_answer.is_empty(), "the scenario has an answer");
 
     let broker = Broker::start_at(
-        dir.path().join("participants.sock"),
+        dir.path().join("run").join("participants.sock"),
         scripted_worker_binary(dir.path(), &events),
         module_settings.default_endpoint_budget,
         resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),
@@ -173,7 +173,7 @@ async fn delegate(
     let module_settings = ModuleSettingsModel::default();
     let dir = tempfile::tempdir().expect("a temp dir for the socket");
     let broker = Broker::start_at(
-        dir.path().join("participants.sock"),
+        dir.path().join("run").join("participants.sock"),
         scripted_worker_binary(dir.path(), &events),
         module_settings.default_endpoint_budget,
         resolve_virtual_agents(&[], &[], &module_settings, &[], &[]),

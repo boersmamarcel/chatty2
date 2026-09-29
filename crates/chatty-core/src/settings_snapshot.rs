@@ -515,7 +515,6 @@ mod tests {
             module_settings: ModuleSettingsModel {
                 enabled: true,
                 module_dir: "/opt/chatty-test-modules".to_string(),
-                gateway_port: 9000,
                 default_endpoint_budget: 4,
                 endpoint_budgets: {
                     let mut budgets = std::collections::HashMap::new();

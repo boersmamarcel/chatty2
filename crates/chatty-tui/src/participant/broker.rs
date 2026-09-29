@@ -20,10 +20,12 @@
 //! registry behind it is empty. A plugin is never an agent (PL-U5): a
 //! worker loads the plugins its spec lists itself.
 //!
-//! Unlike the desktop, which binds a fixed configured port and one
-//! well-known socket path, a headless leader is meant to run many at once
-//! (benchmarking a team, CI, a script), so both are ephemeral: the HTTP port
-//! is OS-assigned, and the socket path is suffixed with this process's pid.
+//! Unlike the desktop, which binds one well-known socket path, a headless
+//! leader is meant to run many at once (benchmarking a team, CI, a script),
+//! so its sockets are suffixed with this process's pid. Both — the shared
+//! participant socket and the gateway's own, which requires its per-launch
+//! token on every route (ADR-0021 § 4, EN-0d) — live in the owner-only
+//! runtime directory; there is no TCP listener.
 //!
 //! A leader configured by flags (`--ollama`, `--openai-compat-url`,
 //! `--api-key`) has no config dir a child could read, so those flags are
@@ -48,14 +50,14 @@ use chatty_core::tools::worker_executable;
 use chatty_fabric::{EdgeLog, EndpointBudget, HandoffContract, Transport};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
-#[cfg(test)]
-use chatty_protocol_gateway::RouteCounter;
+use chatty_protocol_gateway::access::{PrivateDir, SocketServer};
 use chatty_protocol_gateway::participant::{
     LocalRunner, ParticipantRegistry, TaskEvidence, WorkerWorkspace, WorkspaceFactory,
     WorkspaceRequest,
 };
+#[cfg(test)]
+use chatty_protocol_gateway::{GatewayToken, RouteCounter};
 use chatty_wasm_runtime::{LlmProvider, ResourceLimits};
-use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 /// The tests' stand-in for the leader's [`PluginLlmProvider`]: the
@@ -75,17 +77,20 @@ impl LlmProvider for NoopProvider {
     }
 }
 
-/// The gateway a `--broker` leader runs: an ephemeral HTTP port, a
+/// The gateway a `--broker` leader runs: its token-guarded socket, a
 /// pid-suffixed participant socket, and the virtual agents behind it.
 pub struct Broker {
-    /// The ephemeral port `invoke_agent`/`list_agents` reach it on.
-    pub port: u16,
     socket: PathBuf,
+    /// The gateway's own listener. Nothing in this process uses it — the
+    /// leader's calls go over [`transport`](Self::transport) — but every
+    /// listener serving the router requires the launch token (EN-0d).
+    gateway: SocketServer,
+    #[cfg(test)]
+    token: GatewayToken,
     // Only read by the test-only `participants()` accessor below; the
     // runners it was built for already hold their own clone.
     #[cfg(test)]
     participants: ParticipantRegistry,
-    server: JoinHandle<()>,
     participant_listener: JoinHandle<()>,
     /// This process's own handle into the broker: the leader's calls run
     /// on it directly, with no socket and no HTTP hop (ADR-0020, BI-4).
@@ -150,7 +155,7 @@ impl Broker {
         Self::serve(
             llm,
             root,
-            socket_path(),
+            socket_path()?,
             worker_executable(),
             module_settings.default_endpoint_budget,
             specs,
@@ -251,7 +256,7 @@ impl Broker {
         let shared = Arc::new(tokio::sync::RwLock::new(registry));
         // A call is checked against the roster's specs before anything is
         // spawned (PL-S2), the root's against the spec it runs as (AGE-745).
-        let mut gateway = ProtocolGateway::new(shared, 0)
+        let mut gateway = ProtocolGateway::new(shared)
             .with_call_policy(Arc::new(SpecPolicy::for_agents(&specs).with_root(root)));
         if let Some(prices) = prices {
             gateway = gateway.with_usage_pricer(Arc::new(prices));
@@ -284,28 +289,28 @@ impl Broker {
         #[cfg(test)]
         let routes = gateway.route_counter();
 
-        // `gateway.start()` binds its own listener from `self.port`, which
-        // leaves no way to learn an OS-assigned port before it is needed
-        // below — so bind it here instead, exactly as the broker's own
-        // tests (`equivalence.rs`, `input_required_chain.rs`) do.
-        let tcp = TcpListener::bind("127.0.0.1:0")
-            .await
-            .context("failed to bind an ephemeral port for the broker gateway")?;
-        let port = tcp
-            .local_addr()
-            .context("failed to read the broker gateway's bound port")?
-            .port();
-        let router = gateway.build_router();
-        let server = tokio::spawn(async move {
-            axum::serve(tcp, router).await.ok();
-        });
+        // The gateway's socket goes beside the participant socket, in the
+        // directory `participant::bind` already checked is this user's
+        // alone, pid-suffixed like it.
+        let dir = socket
+            .parent()
+            .context("the participant socket has a directory")?;
+        let dir = PrivateDir::open(dir).context("the broker's socket directory")?;
+        let server = SocketServer::bind(
+            &dir,
+            &format!("gateway-{}", std::process::id()),
+            gateway.build_router(),
+            gateway.token(),
+        )
+        .context("failed to serve the broker gateway")?;
 
         Ok(Self {
-            port,
             socket,
+            gateway: server,
+            #[cfg(test)]
+            token: gateway.token().clone(),
             #[cfg(test)]
             participants,
-            server,
             participant_listener,
             transport,
             #[cfg(test)]
@@ -334,11 +339,51 @@ impl Broker {
         self.participants.clone()
     }
 
-    /// The TCP addresses this broker is bound to (BI-2, AGE-634). A running
-    /// `Broker` always has exactly one: its ephemeral loopback gateway port.
-    /// [`LazyBroker`] is what a caller checks *before* one exists.
-    pub fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
-        vec![std::net::SocketAddr::from(([127, 0, 0, 1], self.port))]
+    /// The sockets this broker serves on (BI-2, AGE-634): the gateway's
+    /// and the shared participant socket. [`LazyBroker`] is what a caller
+    /// checks *before* they exist.
+    pub fn bound_sockets(&self) -> Vec<PathBuf> {
+        vec![
+            self.gateway.socket_path().to_path_buf(),
+            self.socket.clone(),
+        ]
+    }
+
+    /// The gateway's socket and token file.
+    #[cfg(test)]
+    pub(crate) fn gateway(&self) -> &SocketServer {
+        &self.gateway
+    }
+
+    /// The gateway's launch token.
+    #[cfg(test)]
+    pub(crate) fn token(&self) -> &GatewayToken {
+        &self.token
+    }
+
+    /// A raw HTTP GET over the gateway's socket, with `token` as its bearer
+    /// when given: the whole response, status line first.
+    #[cfg(test)]
+    pub(crate) async fn http_get(&self, path: &str, token: Option<&str>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::UnixStream::connect(self.gateway.socket_path())
+            .await
+            .expect("the gateway is listening");
+        let auth = token
+            .map(|token| format!("Authorization: Bearer {token}\r\n"))
+            .unwrap_or_default();
+        stream
+            .write_all(
+                format!(
+                    "GET {path} HTTP/1.1\r\nHost: localhost\r\n{auth}Connection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+        response
     }
 
     /// Stop serving. Workers already spawned are reaped by `LocalRunner`'s
@@ -347,7 +392,7 @@ impl Broker {
     /// rather than consuming: [`PendingBroker::shutdown`] (BI-2, AGE-634)
     /// only ever sees this through a shared reference into its `OnceCell`.
     pub fn shutdown(&self) {
-        self.server.abort();
+        self.gateway.stop();
         self.participant_listener.abort();
         chatty_protocol_gateway::participant::unbind(&self.socket);
     }
@@ -472,20 +517,18 @@ impl PendingBroker {
 
 #[async_trait::async_trait]
 impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
-    async fn ensure_started(&self) -> anyhow::Result<String> {
-        let broker = self.once.get_or_try_init(|| (self.start)()).await?;
-        Ok(format!("http://localhost:{}", broker.port))
-    }
-
-    /// The leader reaches its broker directly, not over its own loopback
-    /// port (ADR-0020, BI-4).
+    /// The leader reaches its broker directly, not over its own gateway
+    /// socket (ADR-0020, BI-4).
     async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
         let broker = self.once.get_or_try_init(|| (self.start)()).await?;
         Ok(Some(broker.transport()))
     }
 
-    fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
-        self.once.get().map(Broker::bound_addrs).unwrap_or_default()
+    fn bound_sockets(&self) -> Vec<PathBuf> {
+        self.once
+            .get()
+            .map(Broker::bound_sockets)
+            .unwrap_or_default()
     }
 
     fn shutdown(&self) {
@@ -550,15 +593,13 @@ fn local_runners(
 }
 
 /// Where the shared participant socket is bound, refusing every
-/// registration: the runtime directory when there is one, otherwise the
-/// temp directory (mirrors chatty-gpui's `broker_runner::
-/// socket_path`), suffixed with this process's pid so two `--broker`
-/// leaders on one host never share a socket.
-fn socket_path() -> PathBuf {
-    dirs::runtime_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("chatty")
-        .join(format!("participants-{}.sock", std::process::id()))
+/// registration: the owner-only runtime directory (mirrors chatty-gpui's
+/// `broker_runner::socket_path`), suffixed with this process's pid so two
+/// `--broker` leaders on one host never share a socket. The gateway's own
+/// socket goes beside it.
+fn socket_path() -> Result<PathBuf> {
+    Ok(chatty_protocol_gateway::access::default_runtime_dir()?
+        .join(format!("participants-{}.sock", std::process::id())))
 }
 
 /// Give each worker its own `git worktree` under the tree its spawn
@@ -621,7 +662,7 @@ mod tests {
     /// either way. The `TempDir` must outlive the broker using it.
     fn test_socket() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("a temp dir for the socket");
-        let socket = dir.path().join("participants.sock");
+        let socket = dir.path().join("run").join("participants.sock");
         (dir, socket)
     }
 
@@ -650,7 +691,7 @@ mod tests {
             None,
         );
         assert!(
-            pending.bound_addrs().is_empty(),
+            pending.bound_sockets().is_empty(),
             "constructing a PendingBroker must not start anything"
         );
 
@@ -670,11 +711,12 @@ mod tests {
                 .expect("list_agents succeeds even with nothing registered yet");
         }
 
-        let addrs = broker.bound_addrs();
+        let addrs = broker.bound_sockets();
         assert_eq!(
             addrs.len(),
-            1,
-            "exactly one broker is bound after the first list_agents call: {addrs:?}"
+            2,
+            "exactly one broker (its gateway and participant sockets) is bound after the \
+             first list_agents call: {addrs:?}"
         );
 
         // A second call reuses the same broker instead of starting another.
@@ -689,7 +731,7 @@ mod tests {
                 .expect("a second list_agents call succeeds too");
         }
         assert_eq!(
-            broker.bound_addrs(),
+            broker.bound_sockets(),
             addrs,
             "a second call does not start a second broker"
         );
@@ -699,10 +741,10 @@ mod tests {
     /// asked for. A call that never reaches for the broker — here,
     /// `invoke_agent` for a name that is neither a local worker nor a
     /// module — must not start it either, so the desktop's "module gateway
-    /// off" case (where nothing ever needs the broker) opens no TCP port
-    /// just because a `LazyBroker` happens to be configured.
+    /// off" case (where nothing ever needs the broker) binds nothing just
+    /// because a `LazyBroker` happens to be configured.
     #[tokio::test]
-    async fn lazy_broker_opens_no_new_tcp_port() {
+    async fn lazy_broker_binds_nothing_until_used() {
         let module_settings = ModuleSettingsModel::default();
         let (_dir, socket) = test_socket();
         let pending = PendingBroker::new_at(
@@ -734,13 +776,13 @@ mod tests {
             "an unknown agent name is refused, not delegated"
         );
         assert!(
-            broker.bound_addrs().is_empty(),
+            broker.bound_sockets().is_empty(),
             "a call that never reaches for the broker must not start it"
         );
     }
 
     #[tokio::test]
-    async fn starts_on_an_ephemeral_port_with_no_workspace_or_models() {
+    async fn starts_with_no_workspace_or_models() {
         let module_settings = ModuleSettingsModel::default();
         let (_dir, socket) = test_socket();
         let broker = Broker::start_at(
@@ -752,8 +794,14 @@ mod tests {
         )
         .await
         .expect("the broker starts with nothing configured");
-        assert_ne!(broker.port, 0, "an ephemeral port was actually assigned");
+        for socket in broker.bound_sockets() {
+            assert!(socket.exists(), "{} is bound", socket.display());
+        }
         broker.shutdown();
+        assert!(
+            !broker.gateway().socket_path().exists(),
+            "shutdown removes the gateway socket"
+        );
     }
 
     /// Do item 3: the socket is suffixed with this process's pid, so two
@@ -764,7 +812,7 @@ mod tests {
     /// test that also used the real (non-injected) path.
     #[test]
     fn the_socket_is_suffixed_with_this_processs_pid() {
-        let socket = socket_path();
+        let socket = socket_path().expect("a runtime directory");
         assert!(
             socket
                 .to_string_lossy()
@@ -859,6 +907,116 @@ mod tests {
             "local-agent is not in the directory: {names:?}"
         );
 
+        broker.shutdown();
+    }
+
+    /// EN-0d (ADR-0021 § 4): the `--broker` leader's own gateway listener
+    /// serves `build_router()`, so it refuses every route without the
+    /// launch token, and lives in the owner-only directory with the token
+    /// in a `0600` file beside it — no TCP port.
+    #[tokio::test]
+    async fn broker_leader_listener_requires_token() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let module_settings = ModuleSettingsModel::default();
+        let (dir, socket) = test_socket();
+        let broker = Broker::start_at(
+            socket,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            default_specs(&[], &[], &module_settings),
+            None,
+        )
+        .await
+        .expect("the broker starts");
+
+        let gateway = broker.gateway();
+        let run = dir.path().join("run");
+        assert_eq!(gateway.socket_path().parent(), Some(run.as_path()));
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&run), 0o700);
+        assert_eq!(mode(gateway.token_path()), 0o600);
+        let token = std::fs::read_to_string(gateway.token_path()).unwrap();
+        assert_eq!(token, broker.token().as_str());
+
+        for path in [
+            "/",
+            "/.well-known/agent.json",
+            "/a2a/local-agent/.well-known/agent.json",
+            "/mcp/anything/sse",
+        ] {
+            for wrong in [None, Some("not-the-token")] {
+                let response = broker.http_get(path, wrong).await;
+                assert!(
+                    response.starts_with("HTTP/1.1 401"),
+                    "GET {path} with {wrong:?}: {response}"
+                );
+            }
+        }
+        let response = broker.http_get("/", Some(&token)).await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+        broker.shutdown();
+        assert!(
+            !gateway.token_path().exists(),
+            "shutdown removes the token file"
+        );
+    }
+
+    /// EN-0d: the token reaches nobody through argv — not this process's,
+    /// not a worker's. A delegated worker (the stand-in, which records its
+    /// argv) is spawned, and neither command line carries it.
+    #[tokio::test]
+    async fn token_not_in_process_args() {
+        use chatty_core::session::SessionEvent;
+        use chatty_fabric::{CallEvent, CallRequest};
+        use futures::StreamExt;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let executable = super::super::stand_in::scripted_worker_binary(
+            dir.path(),
+            &[SessionEvent::Text("done".to_string())],
+        );
+        let module_settings = ModuleSettingsModel::default();
+        let broker = Broker::start_at(
+            dir.path().join("run").join("participants.sock"),
+            executable,
+            module_settings.default_endpoint_budget,
+            default_specs(&[], &[], &module_settings),
+            None,
+        )
+        .await
+        .expect("the broker starts");
+        let token = broker.token().as_str().to_string();
+
+        let mut stream = broker
+            .transport()
+            .call(CallRequest::InvokeAgent(
+                serde_json::from_value(serde_json::json!({
+                    "agent": LOCAL_AGENT_NAME,
+                    "prompt": "hi",
+                }))
+                .expect("invoke params"),
+            ))
+            .await
+            .expect("the call starts");
+        while let Some(event) = stream.next().await {
+            if matches!(event, Ok(CallEvent::Result(_)) | Err(_)) {
+                break;
+            }
+        }
+
+        let argv = super::super::stand_in::recorded_argv(dir.path(), 1).await;
+        assert!(!argv.is_empty());
+        for line in &argv {
+            assert!(!line.contains(&token), "a worker's argv carries the token");
+        }
+        let own = std::fs::read("/proc/self/cmdline").unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&own).contains(&token),
+            "this process's argv carries the token"
+        );
         broker.shutdown();
     }
 

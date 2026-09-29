@@ -156,7 +156,6 @@ mod schema_docs {
 
         let modules = serde_json::to_value(ModuleSettingsModel::default()).unwrap();
         assert_eq!(modules["enabled"], false);
-        assert_eq!(modules["gateway_port"], 8420);
         let dir = modules["module_dir"].as_str().unwrap();
         assert!(
             dir.ends_with("chatty/modules") || dir.ends_with("chatty\\modules"),

@@ -182,7 +182,7 @@ Typing `/` in the input opens an inline slash-command menu. Use `↑/↓` to sel
 | `/model [query]` | Switch model (`/model` opens picker) |
 | `/tools [name]` | Toggle tool groups (`/tools` opens picker) |
 | `/add-dir <directory>` | Expand workspace access to include a directory |
-| `/modules …` | Module runtime settings (enable, directory, gateway port) |
+| `/modules …` | Module runtime settings (enable, directory) |
 | `/agent [name] <prompt>` | Launch a headless `chatty-tui` sub-agent, or send the prompt to a named A2A agent |
 | `/clear`, `/new` | Clear conversation history and start fresh |
 | `/compact` | Summarize older messages to reduce context usage |

@@ -26,14 +26,20 @@ there is no gRPC, no WebSocket (except MCP SSE), and no binary framing:
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
 | Participant connection | broker-made `socketpair` per worker (`open_connection`) | newline-delimited JSON, v2 |
 
+All of it is served on a Unix socket in an owner-only directory, never on a
+TCP port (see [Running](#running)).
+
 ### What every route enforces
 
+- **The launch token.** Every route, and the fallback, answers **401**
+  without `Authorization: Bearer <token>`, where the token is the gateway's
+  per-launch one (`ProtocolGateway::token()`, written to `gateway.token`
+  beside the socket, `0600`; ADR-0021 § 4).
 - **Loopback callers only.** A request whose `Host` is not a loopback name
   (`localhost`, `127.0.0.0/8`, `[::1]`), or whose `Origin` is present and not
-  loopback (`null` included), gets **403**. Binding to 127.0.0.1 does not stop
-  DNS rebinding: a browser page that re-resolves its own name to 127.0.0.1
-  reaches the socket, and from there every module's `llm::complete`. A
-  request without `Host` (not a browser's) is served.
+  loopback (`null` included), gets **403**, a guard against DNS rebinding
+  for any listener an embedder puts in front of the socket. A request
+  without `Host` (not a browser's) is served.
 - **The `/a2a/{name}` surface is modules and the remote-runner forward only
   (BI-7, ADR-0020).** Once a worker calls over its own connection (BI-4), a
   `{name}` that is a role — a registered participant or a virtual agent —
@@ -312,14 +318,21 @@ silently running the worker unisolated.
 
 This crate is a library, not a binary — it has no `[[bin]]` target and no
 `--modules-dir` CLI. An embedder constructs a `ModuleRegistry`, calls
-`scan_directory`, and passes it to `ProtocolGateway::new(registry, port)`.
+`scan_directory`, and passes it to `ProtocolGateway::new(registry)`.
 The desktop (`chatty-gpui`) and `chatty-tui --broker` both do this; see their
 module-settings / broker wiring for a worked example, or
 `crates/chatty-protocol-gateway/tests/` for a minimal one.
 
-The gateway binds to `127.0.0.1:<port>` — never `0.0.0.0` — on whatever port
-the embedder passes to `ProtocolGateway::new`; the desktop defaults that port
-to `8420`.
+`start()` serves on `gateway.sock` in an owner-only directory
+(`access::default_runtime_dir()`: `$XDG_RUNTIME_DIR/chatty-run`, else
+`<cache dir>/chatty-run`; `with_runtime_dir` overrides it), and writes the
+per-launch token to `gateway.token` (`0600`) beside it. Every route of every
+listener serving `build_router()` answers 401 without
+`Authorization: Bearer <token>`. It refuses to start when the directory is a
+symlink, someone else's, or open to group or others, and it never unlinks a
+socket this user does not own. There is no TCP listener. On Windows `start()`
+fails with `access::WINDOWS_UNSUPPORTED` (an owner-only DACL is not
+implemented yet).
 
 ## Being a worker (`worker` feature)
 

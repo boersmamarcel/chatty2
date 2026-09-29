@@ -55,6 +55,27 @@ A module is a **plugin**: tools an agent runs, never an agent of its own. Instal
 
 If a module fails to load — an invalid `module.toml`, a missing `.wasm` file, a name that clashes with another installed module, or an installed `.wasm` that changed on disk since it was installed (`hash mismatch`) — its row shows **Failed to load:** with the reason, instead of failing silently. Reinstall a module that fails with a hash mismatch.
 
+## Use a plugin from another MCP client
+
+A plugin whose `module.toml` sets `[protocols] mcp = true` is also served to MCP clients outside Chatty, by the desktop's module gateway (**Enable module runtime** in **Settings → Plugins**). The gateway starts the first time an agent delegates, and **Settings → Plugins** then shows where it runs.
+
+The gateway has no network port. It listens on a Unix socket in a folder only you can open, and answers only a caller that sends the token Chatty writes there each time it starts the gateway:
+
+- **Socket:** `gateway.sock` in `$XDG_RUNTIME_DIR/chatty-run`. Without `XDG_RUNTIME_DIR` (macOS, some Linux setups) the folder is `chatty-run` in your cache folder: `~/Library/Caches` or `~/.cache`.
+- **Token:** `gateway.token`, next to the socket, readable only by you. Send it as `Authorization: Bearer <token>`; it changes every launch, so read it from the file each time.
+
+```sh
+dir="$XDG_RUNTIME_DIR/chatty-run"
+curl -s --unix-socket "$dir/gateway.sock" http://localhost/mcp/echo \
+  -H "Authorization: Bearer $(cat "$dir/gateway.token")" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+A client that can only reach an HTTP URL needs a local bridge from a port to the socket. The bridge answers anyone who can reach that port, so bind it to `127.0.0.1` and still send the token.
+
+Chatty refuses to start the gateway when the `chatty-run` folder is someone else's or can be opened by other users (anything but mode `700`); remove the folder and it is recreated correctly. On Windows the gateway does not start yet: it needs an owner-only folder there, which Chatty does not create yet.
+
 ## Next
 
 - [Agents & tools](./agents-and-tools.md)

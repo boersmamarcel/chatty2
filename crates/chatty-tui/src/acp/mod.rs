@@ -230,10 +230,6 @@ impl Server {
                 )),
                 search_settings: config.search_settings.clone(),
                 embedding_service: config.embedding_service.clone(),
-                gateway_port: config.broker_port.or(config
-                    .module_settings
-                    .enabled
-                    .then_some(config.module_settings.gateway_port)),
                 lazy_broker: config.broker.clone(),
                 local_agents: config
                     .module_settings

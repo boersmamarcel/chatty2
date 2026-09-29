@@ -18,8 +18,12 @@
 //! its own (PL-D1 option B), so it is served over MCP only, and only when its
 //! `[protocols] mcp` flag is set; otherwise it answers 404. There is no
 //! OpenAI route and no module A2A route (PL-U3). Every route refuses a
-//! non-loopback `Host` or `Origin` (DNS rebinding) and a body over
-//! [`MAX_REQUEST_BYTES`].
+//! request without the gateway's per-launch token, a non-loopback `Host` or
+//! `Origin` (DNS rebinding) and a body over [`MAX_REQUEST_BYTES`].
+//!
+//! The gateway listens on a Unix socket in an owner-only directory, never on
+//! a TCP port, with its token in a `0600` file beside it (ADR-0021 § 4; see
+//! [`access`]).
 //!
 //! `{agent}` resolves a *local participant* — a process registered over the
 //! participant socket (see [`participant`]) — or a virtual agent.
@@ -43,12 +47,13 @@
 //! let registry = ModuleRegistry::new(provider, ResourceLimits::default())?;
 //! let shared = Arc::new(RwLock::new(registry));
 //!
-//! let mut gateway = ProtocolGateway::new(shared, 8080);
+//! let mut gateway = ProtocolGateway::new(shared);
 //! gateway.start().await?;
 //! # Ok(())
 //! # }
 //! ```
 
+pub mod access;
 mod gateway;
 mod handlers;
 mod loopback;
@@ -60,4 +65,5 @@ pub mod participant;
 #[cfg(feature = "worker")]
 pub mod worker;
 
+pub use access::GatewayToken;
 pub use gateway::{GatewayState, MAX_REQUEST_BYTES, ProtocolGateway, RouteCounter};

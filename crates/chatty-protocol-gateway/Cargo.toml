@@ -23,6 +23,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 uuid = { workspace = true }
+dirs = { workspace = true }
 # The fabric's `Transport` is an async trait returning a boxed stream (BI-4).
 futures = { workspace = true }
 async-trait = { workspace = true }

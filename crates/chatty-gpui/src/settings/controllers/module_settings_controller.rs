@@ -240,10 +240,7 @@ fn apply_scan_snapshot(
         state.scanning = false;
         state.last_scanned_dir = settings.module_dir.clone();
         state.gateway_status = if settings.enabled {
-            format!(
-                "Starting gateway on http://127.0.0.1:{}",
-                settings.gateway_port
-            )
+            "Starting gateway".to_string()
         } else {
             "Module runtime disabled".to_string()
         };
@@ -264,8 +261,20 @@ fn apply_scan_snapshot(
     true
 }
 
+/// Where an external MCP client finds the running gateway: its socket and
+/// the `0600` file holding its launch token (ADR-0021 § 4).
+fn gateway_running_status(gateway: &ProtocolGateway) -> String {
+    match (gateway.socket_path(), gateway.token_path()) {
+        (Some(socket), Some(token)) => format!(
+            "Gateway running on {} (token in {})",
+            socket.display(),
+            token.display()
+        ),
+        _ => "Gateway running".to_string(),
+    }
+}
+
 fn apply_gateway_result(
-    settings: &ModuleSettingsModel,
     generation: u64,
     result: Result<ProtocolGateway>,
     gateway_workspace: Option<std::path::PathBuf>,
@@ -282,10 +291,7 @@ fn apply_gateway_result(
 
         match result {
             Ok(gateway) => {
-                state.gateway_status = format!(
-                    "Gateway running on http://127.0.0.1:{}",
-                    settings.gateway_port
-                );
+                state.gateway_status = gateway_running_status(&gateway);
                 state.gateway = Some(gateway);
                 state.gateway_workspace = gateway_workspace;
                 true
@@ -414,10 +420,8 @@ pub fn refresh_runtime(cx: &mut App) {
                     if state.refresh_generation != generation {
                         return false;
                     }
-                    state.gateway_status = format!(
-                        "Gateway will start on the first delegation (http://127.0.0.1:{})",
-                        settings.gateway_port
-                    );
+                    state.gateway_status =
+                        "Gateway will start on the first delegation".to_string();
                     state.lazy_broker = Some(broker);
                     true
                 })
@@ -445,13 +449,13 @@ pub fn refresh_runtime(cx: &mut App) {
             // virtual-agent runners to resolve one for.
             #[cfg_attr(not(unix), allow(unused_mut))]
             let mut gateway_workspace: Option<std::path::PathBuf> = None;
-            // What `LazyGatewayBroker` hands `invoke_agent`: the port, and
+            // What `LazyGatewayBroker` hands `invoke_agent`: the socket, and
             // the root's direct handle into this broker (AGE-744).
             let mut started = None;
             let gateway_result = match registry_result {
                 Ok(registry) => {
                     let shared = Arc::new(tokio::sync::RwLock::new(registry));
-                    let mut gateway = ProtocolGateway::new(shared, settings.gateway_port);
+                    let mut gateway = ProtocolGateway::new(shared);
 
                     // Attach hive client and runner URL for remote execution support
                     let hive_settings_result = cx.update(|cx| {
@@ -521,14 +525,14 @@ pub fn refresh_runtime(cx: &mut App) {
                     // settings declare, else `local-agent` and every
                     // exposed spec (C10, PL-U5) — spawns one child per
                     // delegated task, on a connection the broker makes for
-                    // it (ADR-0020); the shared socket beside the HTTP port
+                    // it (ADR-0020); the shared socket beside the gateway's
                     // refuses every registration. Unix only — the runners do
                     // not exist on Windows, so the gateway there is just the
                     // gateway.
                     #[cfg(unix)]
                     {
                         let participants = gateway.participants();
-                        broker_runner::serve_socket(&broker_runner::socket_path());
+                        broker_runner::serve_socket(broker_runner::socket_path());
                         let (resolved_workspace, specs) = cx
                             .update(|cx| {
                                 let exec = cx.global::<ExecutionSettingsModel>();
@@ -617,7 +621,7 @@ pub fn refresh_runtime(cx: &mut App) {
                         }
                     }
 
-                    lazy_gateway_broker::start(&mut gateway, settings.gateway_port)
+                    lazy_gateway_broker::start(&mut gateway)
                         .await
                         .map(|gateway_started| {
                             started = Some(gateway_started);
@@ -629,7 +633,7 @@ pub fn refresh_runtime(cx: &mut App) {
 
             let error_text = gateway_result.as_ref().err().map(|e| e.to_string());
             let _ = cx.update(|cx| {
-                apply_gateway_result(&settings, generation, gateway_result, gateway_workspace, cx);
+                apply_gateway_result(generation, gateway_result, gateway_workspace, cx);
             });
             let _ = reply.send(started.ok_or_else(|| {
                 error_text.unwrap_or_else(|| "the gateway did not start".to_string())

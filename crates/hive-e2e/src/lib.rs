@@ -426,19 +426,34 @@ impl LlmProvider for NoLocalLlm {
 }
 
 /// chatty's protocol gateway with no local modules, forwarding remote ones
-/// to `runner` as the user `client` is signed in as. Returns its base URL
-/// (an ephemeral loopback port).
+/// to `runner` as the user `client` is signed in as. Returns its base URL:
+/// a test-only loopback listener that adds the launch token itself.
 pub async fn start_gateway(client: Arc<HiveRegistryClient>, runner: &str) -> String {
     let registry = ModuleRegistry::new(Arc::new(NoLocalLlm), ResourceLimits::default())
         .expect("an empty module registry");
-    let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)), 0)
+    let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)))
         .with_hive_client(client)
         .with_runner_url(runner);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("an ephemeral port");
     let base = format!("http://{}", listener.local_addr().expect("an address"));
-    let router = gateway.build_router();
+    // This test listener stands in for a caller holding the gateway's
+    // launch token (EN-0d): it adds it to every request.
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    let router = gateway.build_router().layer(axum::middleware::map_request(
+        move |mut request: axum::extract::Request| {
+            let bearer = bearer.clone();
+            async move {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer);
+                request
+            }
+        },
+    ));
     tokio::spawn(async move {
         axum::serve(listener, router).await.ok();
     });

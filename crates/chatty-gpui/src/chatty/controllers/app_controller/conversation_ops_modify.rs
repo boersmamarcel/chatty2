@@ -234,12 +234,11 @@ impl ChattyApp {
                         let memory_service = await_memory_service(cx).await;
                         let embedding_service = get_embedding_service(cx);
                         let skill_service = get_skill_service(cx);
-                        let (gateway_port, local_agents) = cx
+                        let local_agents = cx
                             .update(|cx| gateway_and_roster(cx, built_workspace_dir.as_deref()))
                             .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
                             .ok()
-                            .flatten()
-                            .unzip();
+                            .flatten();
                         // The broker starts itself on this call if it has
                         // not already (BI-2, AGE-634).
                         let lazy_broker = cx
@@ -273,7 +272,6 @@ impl ChattyApp {
                                 skill_service: Some(skill_service),
                                 search_settings,
                                 embedding_service,
-                                gateway_port,
                                 lazy_broker,
                                 local_agents: local_agents.unwrap_or_default(),
                                 remote_agents,

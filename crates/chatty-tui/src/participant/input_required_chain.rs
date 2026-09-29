@@ -73,15 +73,9 @@ impl Broker {
         let modules = Arc::new(RwLock::new(
             ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
         ));
-        let gateway = ProtocolGateway::new(modules, 0);
+        let gateway = ProtocolGateway::new(modules);
         let participants = gateway.participants();
         let transport = gateway.transport();
-
-        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let router = gateway.build_router();
-        tokio::spawn(async move {
-            axum::serve(tcp, router).await.ok();
-        });
 
         Self {
             participants,
