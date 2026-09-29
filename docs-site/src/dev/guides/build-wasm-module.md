@@ -101,7 +101,7 @@ cargo test -p chatty-tui --test plugins_headless
 ## Verify
 
 - `chatty-tui --agent my-agent --headless -m "…"` calls `my-plugin__<tool>`.
-- With the desktop's module gateway on, `POST http://localhost:8420/mcp/my-plugin` `tools/list` shows your tools (if `[protocols] mcp = true`).
+- With the desktop's module gateway on, `tools/list` on `/mcp/my-plugin` over its socket, with its launch token, shows your tools (if `[protocols] mcp = true`; see [Use a plugin from another MCP client](../../user/extensions.md#use-a-plugin-from-another-mcp-client)).
 - A plugin built against another WIT world is refused at load with `module targets …; this chatty supports chatty:plugin@0.3.0 — rebuild it with the current SDK`.
 
 ## Checklist

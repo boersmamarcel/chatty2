@@ -169,10 +169,14 @@ The next tutorial gives a real agent a plugin:
 ## Expose it to external MCP clients
 
 With `[protocols] mcp = true`, the desktop's protocol gateway (Settings →
-Modules, gateway on) also serves the tools to any MCP client:
+Plugins, module runtime on) also serves the tools to any MCP client that holds
+its launch token, over a Unix socket rather than a port
+([Use a plugin from another MCP client](../../user/extensions.md#use-a-plugin-from-another-mcp-client)):
 
 ```sh
-curl -s -X POST http://localhost:8420/mcp/echo \
+dir="$XDG_RUNTIME_DIR/chatty-run"
+curl -s --unix-socket "$dir/gateway.sock" http://localhost/mcp/echo \
+  -H "Authorization: Bearer $(cat "$dir/gateway.token")" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
        "params":{"name":"reverse","arguments":{"input":"hello"}}}'

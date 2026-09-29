@@ -140,10 +140,13 @@ If the server answers with a `Content-Type` other than `text/event-stream`, the 
 
 ## Protocol gateway
 
-The gateway (`chatty-protocol-gateway`) is a local HTTP server, bound to
-`127.0.0.1` (not `0.0.0.0`) on a port the embedding app chooses — the desktop
-defaults to `8420` (`module_settings.json`'s `gateway_port`; there is no UI
-field for it yet). It serves every loaded plugin's tools over MCP
+The gateway (`chatty-protocol-gateway`) is a local HTTP server on a Unix
+socket, never a TCP port (ADR-0021 § 4): `gateway.sock` (the desktop) or
+`gateway-<pid>.sock` (a `--broker` leader) in `$XDG_RUNTIME_DIR/chatty-run`,
+else `<cache dir>/chatty-run`. That directory is created `0700` and checked
+before use (owned by this user, no group or other bits), or the gateway does
+not start. Every route requires the per-launch token, which is written to
+`gateway.token` (`0600`) beside the socket and never passed in argv. It serves every loaded plugin's tools over MCP
 ([plugins.md](plugins.md#serving-a-plugin-over-mcp)), and the broker's agents (local
 participants and virtual agents) over A2A:
 

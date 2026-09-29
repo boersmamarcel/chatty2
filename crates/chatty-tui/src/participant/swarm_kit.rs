@@ -544,6 +544,10 @@ fn wrapper(base: &Path, real: &Path) -> PathBuf {
     let dir = |name: &str| {
         let path = base.join(name);
         std::fs::create_dir_all(&path).expect("xdg dir");
+        // Owner-only, as a real `XDG_RUNTIME_DIR` is: the gateway refuses
+        // anything looser (ADR-0021 § 4).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("xdg dir is owner-only");
         path.to_string_lossy().into_owned()
     };
     let script = format!(
@@ -1343,25 +1347,6 @@ async fn nested_delegation_over_the_connection() {
     );
 }
 
-/// A raw loopback HTTP GET against the broker's gateway, for the counter's
-/// own sanity check.
-async fn http_get(port: u16, path: &str) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("the gateway is listening");
-    stream
-        .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
-        )
-        .await
-        .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).await.unwrap();
-    response
-}
-
 /// Invariant 4: across the nested delegation — the leader's call, the
 /// middle worker's directory read and its call to the grandchild — no
 /// request for a role or the directory reaches the gateway's HTTP side.
@@ -1388,16 +1373,20 @@ async fn no_worker_call_uses_loopback() {
         "the directory was read over loopback"
     );
 
-    // The counter counts: the same role and the directory, over HTTP — both
-    // refused now (BI-7), never served.
-    let port = kit.broker().port;
+    // The counter counts: the same role and the directory, over the
+    // gateway's socket with its token — both refused now (BI-7), never
+    // served.
+    let broker = kit.broker();
+    let token = Some(broker.token().as_str());
     assert!(
-        http_get(port, &format!("/a2a/{GRANDCHILD}/.well-known/agent.json"))
+        broker
+            .http_get(&format!("/a2a/{GRANDCHILD}/.well-known/agent.json"), token)
             .await
             .contains("403 Forbidden")
     );
     assert!(
-        http_get(port, "/.well-known/agent.json")
+        broker
+            .http_get("/.well-known/agent.json", token)
             .await
             .contains("403 Forbidden")
     );
@@ -2143,11 +2132,12 @@ async fn one_broker_per_root() {
             }
         }
     }
-    assert_eq!(
-        sockets,
-        [kit.socket()],
-        "only the root binds a participant socket"
-    );
+    // The root's broker binds two: the shared participant socket and its
+    // gateway's own (EN-0d). No worker binds any.
+    sockets.sort();
+    let mut roots = kit.broker().bound_sockets();
+    roots.sort();
+    assert_eq!(sockets, roots, "only the root binds sockets");
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,17 +2153,13 @@ pub(crate) struct StartedBroker(pub(crate) std::sync::Arc<dyn chatty_fabric::Tra
 
 #[async_trait::async_trait]
 impl chatty_core::services::lazy_broker::LazyBroker for StartedBroker {
-    async fn ensure_started(&self) -> anyhow::Result<String> {
-        anyhow::bail!("the kit's root reaches its broker only through its direct handle")
-    }
-
     async fn transport(
         &self,
     ) -> anyhow::Result<Option<std::sync::Arc<dyn chatty_fabric::Transport>>> {
         Ok(Some(self.0.clone()))
     }
 
-    fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+    fn bound_sockets(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
 

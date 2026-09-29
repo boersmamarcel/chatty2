@@ -5,7 +5,7 @@
 //! Building and starting the gateway needs `gpui::AsyncApp`, which is
 //! `!Send` (GPUI is single-threaded), while this handle must be
 //! `Send + Sync` to live behind `Arc<dyn LazyBroker>` and be called from a
-//! tool running on tokio's own threads. So `ensure_started` does not do the
+//! tool running on tokio's own threads. So `transport` does not do the
 //! work itself: it asks the task `module_settings_controller::refresh_runtime`
 //! spawned on GPUI's own executor to do it — that task is still on
 //! `AsyncApp`, and answers over a one-shot reply channel — and waits for the
@@ -14,36 +14,40 @@
 //!
 //! The desktop's root conversation is its broker's root (ADR-0020: one
 //! broker per root process), so what the start task answers with is the
-//! gateway's direct [`Transport`] as well as its port: `invoke_agent` reaches
-//! the local roles through that handle, never over loopback HTTP (AGE-744).
+//! gateway's direct [`Transport`] as well as its socket: `invoke_agent`
+//! reaches the local roles through that handle, never over the gateway's
+//! socket (AGE-744).
 
-use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chatty_fabric::Transport;
 
-/// What a started gateway hands back: the port it bound, and this process's
-/// direct handle into it (`ProtocolGateway::transport`).
+/// What a started gateway hands back: the socket it serves on, and this
+/// process's direct handle into it (`ProtocolGateway::transport`).
 #[derive(Clone)]
 pub struct StartedGateway {
-    pub port: u16,
+    pub socket: PathBuf,
     pub transport: Arc<dyn Transport>,
 }
 
-/// A reply to one [`LazyGatewayBroker::ensure_started`] request: the started
+/// A reply to one start request: the started
 /// gateway, or the reason it failed to start.
 pub type StartReply = tokio::sync::oneshot::Sender<Result<StartedGateway, String>>;
 
-/// Start `gateway` on `port` as the desktop's broker. Its direct handle is
-/// taken here, after every virtual agent is on it, so the call path reaches
-/// all of them.
+/// Start `gateway` as the desktop's broker. Its direct handle is taken
+/// here, after every virtual agent is on it, so the call path reaches all
+/// of them.
 pub async fn start(
     gateway: &mut chatty_protocol_gateway::ProtocolGateway,
-    port: u16,
 ) -> anyhow::Result<StartedGateway> {
     let transport = gateway.transport();
     gateway.start().await?;
-    Ok(StartedGateway { port, transport })
+    let socket = gateway
+        .socket_path()
+        .ok_or_else(|| anyhow::anyhow!("the gateway started with no socket"))?
+        .to_path_buf();
+    Ok(StartedGateway { socket, transport })
 }
 
 /// See the module docs.
@@ -80,21 +84,16 @@ impl LazyGatewayBroker {
 
 #[async_trait::async_trait]
 impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
-    async fn ensure_started(&self) -> anyhow::Result<String> {
-        let started = self.started().await?;
-        Ok(format!("http://localhost:{}", started.port))
-    }
-
     /// The root reaches its broker directly (ADR-0020, BI-4).
     async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
         Ok(Some(self.started().await?.transport.clone()))
     }
 
-    fn bound_addrs(&self) -> Vec<SocketAddr> {
-        match self.once.get() {
-            Some(started) => vec![SocketAddr::from(([127, 0, 0, 1], started.port))],
-            None => Vec::new(),
-        }
+    fn bound_sockets(&self) -> Vec<PathBuf> {
+        self.once
+            .get()
+            .map(|started| vec![started.socket.clone()])
+            .unwrap_or_default()
     }
 
     /// The root's messages come from its broker's direct handle; a broker

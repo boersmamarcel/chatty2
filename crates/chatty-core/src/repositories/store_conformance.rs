@@ -654,7 +654,7 @@ mod tests {
             ModuleSettingsModel {
                 enabled: true,
                 module_dir: "/opt/chatty-test-modules".to_string(),
-                gateway_port: 9000,
+                default_endpoint_budget: 3,
                 ..ModuleSettingsModel::default()
             },
         )

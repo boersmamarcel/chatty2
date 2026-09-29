@@ -51,22 +51,19 @@ const REFUSAL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// Bind a participant socket at `path`.
 ///
-/// A stale socket file from a crashed broker is removed first: a Unix socket
-/// left on disk is not a running process, and refusing to start because of
-/// one would make a crash need manual cleanup. A *live* broker on the same
-/// path is a different matter, and `bind` still fails with `AddrInUse` for
-/// it — removing the file would not have taken the port from it either.
+/// Its directory must be this user's alone (created `0700` if missing;
+/// refused when it is someone else's or open to group or others, ADR-0021
+/// § 4). A stale socket file from a crashed broker is removed first, but
+/// only when this user owns it: a Unix socket left on disk is not a running
+/// process, and refusing to start because of one would make a crash need
+/// manual cleanup. A *live* broker on the same path is a different matter,
+/// and `bind` fails with `AddrInUse` for it.
 pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
     let path = path.as_ref();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        crate::access::PrivateDir::open(parent)?;
     }
-    // A blocking connect is the probe: it either reaches a listener or it
-    // does not, and it needs no runtime, unlike tokio's.
-    if path.exists() && std::os::unix::net::UnixStream::connect(path).is_err() {
-        debug!(socket = %path.display(), "Removing a stale participant socket");
-        let _ = std::fs::remove_file(path);
-    }
+    crate::access::remove_stale_socket(path, crate::access::current_uid())?;
     UnixListener::bind(path)
 }
 

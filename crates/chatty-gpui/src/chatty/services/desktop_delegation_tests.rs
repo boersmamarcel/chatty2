@@ -111,16 +111,20 @@ fn desktop_broker(worker: PathBuf) -> Arc<LazyGatewayBroker> {
         };
         let registry = ModuleRegistry::new(Arc::new(NoopProvider), ResourceLimits::default())
             .expect("the module registry builds");
-        let mut gateway = ProtocolGateway::new(Arc::new(tokio::sync::RwLock::new(registry)), 0);
+        // Its socket goes in a directory of the test's own, never the
+        // user's runtime directory.
+        let dir = tempfile::tempdir().expect("a socket directory");
+        let mut gateway = ProtocolGateway::new(Arc::new(tokio::sync::RwLock::new(registry)))
+            .with_runtime_dir(dir.path().join("run"));
         let runner = LocalRunner::new(worker, gateway.participants()).with_agent_name(ANALYST);
         gateway = gateway.with_virtual_agent(Arc::new(runner));
-        let started = lazy_gateway_broker::start(&mut gateway, 0)
+        let started = lazy_gateway_broker::start(&mut gateway)
             .await
             .map_err(|e| e.to_string());
         let _ = reply.send(started);
         // The gateway serves for as long as the test runs.
         std::future::pending::<()>().await;
-        drop(gateway);
+        drop((gateway, dir));
     });
     Arc::new(LazyGatewayBroker::new(request_tx))
 }
