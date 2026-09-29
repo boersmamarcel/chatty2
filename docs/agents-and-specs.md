@@ -822,7 +822,7 @@ A schema may add read rules, `"x-must-be-read": {"coder": ["files_changed"]}`: e
 value of the coder's latest `files_changed` must appear in this role's handoff. The
 leader checks them and records a miss as the `handoff_misread` failure tag, with no
 retry. A headless `--team` leader's `--usage-file` carries
-`handoff_invalid_by_role` (role → invalid answers) and `failure_tags`, each absent when
+`handoff_invalid_by_role` (role → invalid answers) and `failure_tags`, and every run that delegates carries `delegated_by_agent` (agent → the tokens it reported), each absent when
 empty. A team without `handoffs` behaves exactly as before, down to the bytes on the
 worker's socket.
 
@@ -839,7 +839,7 @@ as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
 `crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
-One preset ships, `coder-reviewer`: a `coordinator` leader, `local-coder` on the `coder`
+The `coder-reviewer` preset: a `coordinator` leader, `local-coder` on the `coder`
 profile, `local-reviewer` on the `reviewer` profile with the "verify, do not trust,
 verdict first" preamble, the `coder-reviewer` skill beside it (the reviewer finds the
 default branch with `git_status` and reads `<default>..<branch>` with `git_diff`'s
@@ -852,6 +852,22 @@ a `team.json` of your own that overrides it.
 chatty-tui --team coder-reviewer --headless --ollama --model qwen3:14b \
   -m "Fix the overdraft bug in src/account.py; the acceptance criterion is that tests/test_account.py passes."
 ```
+
+A second preset, `analyst-panel` (experimental, AGE-754), is for data questions: a
+`coordinator` leader `panel-lead` whose `delegates_to` is exactly its roster; three
+identical analysts `panel-analyst-1..3` on the `coder` profile (30 turns and 12 minutes
+each, inside the leader's 45-minute deadline); a read-only adjudicator
+`panel-adjudicator` (the `coordinator` profile with no one to delegate to, so it compares
+the analysts' traces and cannot re-solve); and `panel-writer` for a question that asks
+for its answer in a file. The analysts' and the adjudicator's handoffs are typed
+(`schemas/analyst.json`: `answer`, `method`, `assumptions`; `schemas/adjudicator.json`:
+`choice`, `answer`, `reason`), and a preset's schemas are compiled into the binary beside
+its `team.json` (`TeamPreset::schemas`). The skill has the leader delegate to the three
+analysts with `include_trace`, compare their normalised answers, send anything short of
+a unanimous panel to the adjudicator with every trace, and deliver the chosen answer
+verbatim; a failed analyst drops out rather than being re-asked. Dataset-specific help
+(helper code, conventions) is not part of the preset: the analysts read a `BRIEF.md` in
+the workspace root when there is one. Measurement: `docs/research/`.
 
 **Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`
 sometimes writes its tool call inside the thinking channel; Ollama surfaces tool calls

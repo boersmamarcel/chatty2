@@ -74,6 +74,24 @@ pub const PRESETS: &[(&str, &str)] = &[
         "local-reviewer",
         include_str!("../agents/local-reviewer.toml"),
     ),
+    (
+        "panel-adjudicator",
+        include_str!("../agents/panel-adjudicator.toml"),
+    ),
+    (
+        "panel-analyst-1",
+        include_str!("../agents/panel-analyst-1.toml"),
+    ),
+    (
+        "panel-analyst-2",
+        include_str!("../agents/panel-analyst-2.toml"),
+    ),
+    (
+        "panel-analyst-3",
+        include_str!("../agents/panel-analyst-3.toml"),
+    ),
+    ("panel-lead", include_str!("../agents/panel-lead.toml")),
+    ("panel-writer", include_str!("../agents/panel-writer.toml")),
 ];
 
 /// One agent, as declared.
@@ -1273,6 +1291,12 @@ cap_usd = 2.0
                 "coder-reviewer-leader",
                 "local-coder",
                 "local-reviewer",
+                "panel-adjudicator",
+                "panel-analyst-1",
+                "panel-analyst-2",
+                "panel-analyst-3",
+                "panel-lead",
+                "panel-writer",
             ]
         );
         assert_eq!(roster[0], AgentSpec::named(crate::tools::LOCAL_AGENT_NAME));
@@ -1356,6 +1380,12 @@ cap_usd = 2.0
                 "benford-analyst",
                 "coder-reviewer-leader",
                 "local-reviewer",
+                "panel-adjudicator",
+                "panel-analyst-1",
+                "panel-analyst-2",
+                "panel-analyst-3",
+                "panel-lead",
+                "panel-writer",
             ]
         );
         assert_eq!(roster[0].agent.preamble.as_deref(), Some("Be brief."));

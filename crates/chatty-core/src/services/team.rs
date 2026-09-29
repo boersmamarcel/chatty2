@@ -36,15 +36,45 @@ use crate::agent_spec::{AgentSpec, load_agent_spec_from};
 use crate::services::handoff::{self, HandoffContract};
 use crate::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
 
-/// The presets compiled into the binary: `(id, team.json, SKILL.md)`.
+/// A team compiled into the binary: its `team.json`, the `SKILL.md` beside
+/// it, and the handoff schemas its `handoffs` names, by the same relative
+/// path the file uses.
+#[derive(Clone, Copy, Debug)]
+pub struct TeamPreset {
+    pub id: &'static str,
+    pub team_json: &'static str,
+    pub skill: &'static str,
+    /// `(path relative to the team directory, schema JSON)`.
+    pub schemas: &'static [(&'static str, &'static str)],
+}
+
+/// The presets compiled into the binary.
 ///
-/// `coder-reviewer`'s specs name no models on purpose: they come from the
-/// roster's default, `--model`, or a spec of your own that shadows one.
-pub const PRESETS: &[(&str, &str, &str)] = &[(
-    "coder-reviewer",
-    include_str!("../../teams/coder-reviewer/team.json"),
-    include_str!("../../teams/coder-reviewer/SKILL.md"),
-)];
+/// Their specs name no models on purpose: they come from the roster's
+/// default, `--model`, or a spec of your own that shadows one.
+pub const PRESETS: &[TeamPreset] = &[
+    TeamPreset {
+        id: "coder-reviewer",
+        team_json: include_str!("../../teams/coder-reviewer/team.json"),
+        skill: include_str!("../../teams/coder-reviewer/SKILL.md"),
+        schemas: &[],
+    },
+    TeamPreset {
+        id: "analyst-panel",
+        team_json: include_str!("../../teams/analyst-panel/team.json"),
+        skill: include_str!("../../teams/analyst-panel/SKILL.md"),
+        schemas: &[
+            (
+                "schemas/analyst.json",
+                include_str!("../../teams/analyst-panel/schemas/analyst.json"),
+            ),
+            (
+                "schemas/adjudicator.json",
+                include_str!("../../teams/analyst-panel/schemas/adjudicator.json"),
+            ),
+        ],
+    },
+];
 
 /// The relative directory a team of that id lives in under a workspace.
 pub const WORKSPACE_TEAMS_DIR: &str = ".chatty/teams";
@@ -236,10 +266,10 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         break;
     }
     if found.is_none()
-        && let Some((_, json, skill)) = PRESETS.iter().find(|(name, _, _)| *name == id)
+        && let Some(preset) = PRESETS.iter().find(|preset| preset.id == id)
     {
-        let file = TeamFile::parse(json).expect("a preset team.json parses");
-        found = Some((TeamSource::Preset, file, Some(skill.to_string())));
+        let file = TeamFile::parse(preset.team_json).expect("a preset team.json parses");
+        found = Some((TeamSource::Preset, file, Some(preset.skill.to_string())));
     }
     let Some((source, file, skill_content)) = found else {
         bail!(
@@ -252,7 +282,7 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
                 .join(", "),
             PRESETS
                 .iter()
-                .map(|(name, _, _)| *name)
+                .map(|preset| preset.id)
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -268,7 +298,7 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         .iter()
         .map(|name| spec(name))
         .collect::<Result<Vec<_>>>()?;
-    let handoffs = load_handoffs(&file, &source)
+    let handoffs = load_handoffs(id, &file, &source)
         .with_context(|| format!("team '{id}' names a handoff schema that does not load"))?;
     Ok(Team {
         id: id.to_string(),
@@ -282,27 +312,48 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
 }
 
 /// Read and compile every schema `file.handoffs` names, from the team's
-/// directory. A role must be on the roster (the leader hands off to
-/// nobody), and a schema's `x-must-be-read` may only name roles that have a
-/// schema of their own.
+/// directory or, for a preset, from the schemas compiled in beside it. A
+/// role must be on the roster (the leader hands off to nobody), and a
+/// schema's `x-must-be-read` may only name roles that have a schema of
+/// their own.
 fn load_handoffs(
+    id: &str,
     file: &TeamFile,
     source: &TeamSource,
 ) -> Result<BTreeMap<String, HandoffContract>> {
     if file.handoffs.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let TeamSource::Dir(dir) = source else {
-        bail!("a preset's handoff schemas are not compiled into the binary");
-    };
     let mut contracts = BTreeMap::new();
     for (role, relative) in &file.handoffs {
         if !file.agents.contains(role) {
             bail!("`handoffs` names '{role}', which is not in `agents`");
         }
-        let path = dir.join(relative);
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {role}'s schema {}", path.display()))?;
+        let (path, text) = match source {
+            TeamSource::Dir(dir) => {
+                let path = dir.join(relative);
+                let text = std::fs::read_to_string(&path).with_context(|| {
+                    format!("failed to read {role}'s schema {}", path.display())
+                })?;
+                (path, text)
+            }
+            TeamSource::Preset => {
+                let text = PRESETS
+                    .iter()
+                    .find(|preset| preset.id == id)
+                    .and_then(|preset| {
+                        preset
+                            .schemas
+                            .iter()
+                            .find(|(path, _)| *path == relative.as_str())
+                    })
+                    .map(|(_, text)| text.to_string())
+                    .with_context(|| {
+                        format!("preset '{id}' does not compile in {role}'s schema {relative}")
+                    })?;
+                (PathBuf::from(relative), text)
+            }
+        };
         let schema: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("{role}'s schema {} is not JSON", path.display()))?;
         handoff::compile(&schema).map_err(|e| {
@@ -405,6 +456,143 @@ mod tests {
             team.first_turn_instruction().as_deref(),
             Some("read_skill coder-reviewer and follow it.")
         );
+    }
+
+    /// The analyst-panel preset (AGE-754): a coordinator leader allowed to
+    /// delegate to exactly its roster, three identical analysts with turn
+    /// and time budgets inside the leader's deadline, a read-only
+    /// adjudicator, a writer, and both handoff schemas compiled in.
+    #[test]
+    fn the_analyst_panel_preset_loads_with_its_handoffs_and_budgets() {
+        let team = load_team("analyst-panel", None, None).expect("the preset loads");
+        assert_eq!(team.source, TeamSource::Preset);
+        assert_eq!(team.file.leader, "panel-lead");
+        assert_eq!(team.leader.tools.profile.as_deref(), Some("coordinator"));
+        assert_eq!(team.leader.swarm.delegates_to, team.file.agents);
+        assert_eq!(team.leader.budget.max_duration.as_deref(), Some("45m"));
+        assert!(team.leader.agent.model.is_none(), "no model in the preset");
+
+        let analysts: Vec<_> = team
+            .agents
+            .iter()
+            .filter(|a| a.agent.name.starts_with("panel-analyst-"))
+            .collect();
+        assert_eq!(analysts.len(), 3);
+        for analyst in &analysts {
+            assert_eq!(analyst.tools.profile.as_deref(), Some("coder"));
+            assert_eq!(analyst.budget.max_agent_turns, Some(30));
+            assert_eq!(analyst.budget.max_duration.as_deref(), Some("12m"));
+            assert_eq!(
+                analyst.swarm.callers.as_deref(),
+                Some(&["panel-lead".to_string()][..])
+            );
+            assert!(analyst.agent.model.is_none());
+            // Identical but for the name: a homogeneous panel.
+            assert_eq!(analyst.agent.preamble, analysts[0].agent.preamble);
+        }
+        let adjudicator = team
+            .agents
+            .iter()
+            .find(|a| a.agent.name == "panel-adjudicator")
+            .unwrap();
+        assert_eq!(adjudicator.tools.profile.as_deref(), Some("coordinator"));
+        assert!(
+            adjudicator.swarm.delegates_to.is_empty(),
+            "the adjudicator delegates to nobody"
+        );
+
+        assert_eq!(
+            team.handoffs.keys().collect::<Vec<_>>(),
+            [
+                "panel-adjudicator",
+                "panel-analyst-1",
+                "panel-analyst-2",
+                "panel-analyst-3"
+            ]
+        );
+        assert!(team.handoff_ledger().is_some());
+        assert_eq!(
+            team.first_turn_instruction().as_deref(),
+            Some("read_skill analyst-panel and follow it.")
+        );
+        let skill = team.skill().unwrap();
+        assert!(skill.content.contains("include_trace: true"));
+        assert!(skill.content.contains("## When a step fails"));
+    }
+
+    /// The analyst handoff is what turns a reply cut off mid-sentence into
+    /// an invalid handoff (and its one re-prompt) instead of a lost answer;
+    /// the adjudicator's names a candidate by number.
+    #[test]
+    fn the_analyst_panel_handoffs_reject_a_truncated_reply() {
+        let team = load_team("analyst-panel", None, None).unwrap();
+        let analyst = &team.handoffs["panel-analyst-2"];
+        assert!(matches!(
+            handoff::check(analyst, "The"),
+            handoff::HandoffOutcome::Invalid { .. }
+        ));
+        assert!(matches!(
+            handoff::check(
+                analyst,
+                "```json\n{\"answer\": \"\", \"method\": \"sum\"}\n```"
+            ),
+            handoff::HandoffOutcome::Invalid { .. }
+        ));
+        assert_eq!(
+            handoff::check(
+                analyst,
+                "Done.\n```json\n{\"answer\": \"42.5\", \"method\": \"sum of amount\", \"assumptions\": \"\"}\n```"
+            ),
+            handoff::HandoffOutcome::Valid(serde_json::json!({
+                "answer": "42.5", "method": "sum of amount", "assumptions": ""
+            }))
+        );
+
+        let adjudicator = &team.handoffs["panel-adjudicator"];
+        assert!(matches!(
+            handoff::check(
+                adjudicator,
+                "```json\n{\"choice\": 4, \"answer\": \"x\", \"reason\": \"y\"}\n```"
+            ),
+            handoff::HandoffOutcome::Invalid { .. }
+        ));
+        assert!(matches!(
+            handoff::check(
+                adjudicator,
+                "```json\n{\"choice\": 2, \"answer\": \"x\", \"reason\": \"y\"}\n```"
+            ),
+            handoff::HandoffOutcome::Valid(_)
+        ));
+        // Only what the leader acts on is required: a decision without its
+        // reason still delivers an answer (a dev-10 smoke lost one that way).
+        assert!(matches!(
+            handoff::check(
+                adjudicator,
+                "```json\n{\"choice\": 1, \"answer\": \"x\"}\n```"
+            ),
+            handoff::HandoffOutcome::Valid(_)
+        ));
+        assert!(matches!(
+            handoff::check(analyst, "```json\n{\"answer\": \"NL\"}\n```"),
+            handoff::HandoffOutcome::Valid(_)
+        ));
+    }
+
+    /// A preset whose `handoffs` names a schema it does not compile in fails
+    /// to load, as a missing file in a team directory does.
+    #[test]
+    fn every_preset_compiles_in_the_schemas_it_names() {
+        for preset in PRESETS {
+            let file = TeamFile::parse(preset.team_json).unwrap();
+            for relative in file.handoffs.values() {
+                assert!(
+                    preset.schemas.iter().any(|(path, _)| path == relative),
+                    "preset {} names {relative} but does not compile it in",
+                    preset.id
+                );
+            }
+            load_team(preset.id, None, None).unwrap();
+        }
     }
 
     /// A team file in the workspace beats the preset of the same id, the
