@@ -412,6 +412,7 @@ impl LocalRunner {
         let (task_id, updates) = self
             .registry
             .submit_task(&name, task)
+            .await
             .ok_or_else(|| anyhow!("worker '{name}' disconnected before it could be given work"))?;
         worker.task_id = Some(task_id.clone());
 
