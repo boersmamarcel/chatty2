@@ -27,11 +27,9 @@ You give a sales export to a three-agent team and ask it a real question: *reven
 
 ## 1. Set up
 
-**Switch on the module runtime.** The team runs on the local agent broker, which comes with the module runtime. Settings has no switch for it yet. Quit Chatty, then set `"enabled": true` in `~/.config/chatty/module_settings.json` (create the file if it is not there) and start Chatty again:
+**Switch on the module runtime.** The team runs on the local agent broker, which comes with the module runtime. In **Settings → Plugins**, turn on **Enable module runtime**. It starts (or stops) right away — no restart needed.
 
-```json
-{ "enabled": true }
-```
+![Settings → Plugins: Enable module runtime turns the broker on live](../assets/screenshots/swarm-00-module-runtime-toggle.png)
 
 **Get the sample data.** `orders.csv` has 793 orders from July and August: date, region, channel, product, units, price, discount, promo code and revenue. Something happened in August.
 
@@ -216,7 +214,7 @@ When `memo-writer` wants to create `memo.md`, you get the same kind of card as i
 
 | You see | Why | Fix |
 |---|---|---|
-| Settings → Agents says the module runtime is off | No local agents run without it | Step 1: `"enabled": true` in `module_settings.json` |
+| Settings → Agents says the module runtime is off | No local agents run without it | Step 1: **Enable module runtime** in Settings → Plugins |
 | No approval card at all | The approval mode is **Auto-approve sandboxed** (the default), which lets writes inside the workspace through | Switch to **Always ask** in Settings → Code Execution to see each write and command first |
 | The reviewer appears twice in the tree | It asked for changes, and the lead fixed the report and sent it back | This is the review loop working. The lead sends the report back only once. |
 | A run takes a long time on a local model | Every agent's turns share one model server, one request at a time | Expect five to ten minutes on a single local GPU. A hosted lead (step 7) makes it faster. |

@@ -13,8 +13,8 @@
 
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
         test-gateway lint fmt fmt-check typecheck wasm-modules wasm-template \
-        test-benford lint-module-sdk test-billing-sdk run-gpui \
-        run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
+        test-benford lint-module-sdk test-billing-sdk example-plugin-benford \
+        run-gpui run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
         docs-check-nav docs-check-frontmatter docs-check-leakage \
         docs-check-reference docs-check animations
 
@@ -35,6 +35,7 @@ help:
 	@echo "  make wasm-modules  Build every WASM module and test fixture (needed by tests)"
 	@echo "  make wasm-template cargo-generate a module from templates/module and build it (needs cargo-generate)"
 	@echo "  make test-benford  the benford plugin's own unit tests, on the host target"
+	@echo "  make example-plugin-benford  Build the benford example plugin and install it (one command; MODULE_DIR overrides where)"
 	@echo "  make lint-module-sdk  clippy chatty-module-sdk for wasm32-wasip2"
 	@echo "  make test-billing-sdk  hive-billing-sdk's tests, on the host target"
 	@echo "  make run-gpui      cargo run -p chatty-gpui"
@@ -126,6 +127,20 @@ wasm-template:
 # be explicit (AGE-600).
 test-benford:
 	cargo test --manifest-path modules/benford/Cargo.toml --target x86_64-unknown-linux-gnu
+
+# One-command build + install of the benford example plugin (AGE-758):
+# the plugin-authoring tutorial's Step 2 used to spell out build-then-copy
+# by hand. Installs into the module directory the desktop app scans by
+# default (`ModuleSettingsModel::default_module_dir`'s Linux/macOS path via
+# XDG_DATA_HOME, or ~/.local/share); override MODULE_DIR for anywhere else,
+# e.g. a non-default workspace-local `.chatty/modules/`.
+MODULE_DIR ?= $(if $(XDG_DATA_HOME),$(XDG_DATA_HOME),$(HOME)/.local/share)/chatty/modules/benford
+example-plugin-benford:
+	cargo build --manifest-path modules/benford/Cargo.toml --target wasm32-wasip2 --release
+	mkdir -p "$(MODULE_DIR)"
+	cp modules/benford/target/wasm32-wasip2/release/benford.wasm "$(MODULE_DIR)/benford.wasm"
+	cp modules/benford/module.toml "$(MODULE_DIR)/module.toml"
+	@echo "Installed the benford plugin into $(MODULE_DIR)"
 
 lint-module-sdk:
 	cargo clippy --manifest-path crates/chatty-module-sdk/Cargo.toml --target wasm32-wasip2 -- -D warnings
