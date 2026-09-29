@@ -388,6 +388,7 @@ impl A2aClient {
     ///
     /// Returns `None` when the endpoint is unreachable or returns unexpected JSON.
     pub async fn fetch_agent_card(&self, config: &A2aAgentConfig) -> Result<AgentCard> {
+        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
         // Strip trailing slash and append the well-known path.
         let base = config.url.trim_end_matches('/');
         let card_url = format!("{}/.well-known/agent.json", base);
@@ -469,6 +470,7 @@ impl A2aClient {
     ///
     /// Returns the plain-text response extracted from the task artifacts.
     pub async fn send_message(&self, config: &A2aAgentConfig, prompt: &str) -> Result<String> {
+        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
         let url = config.url.trim_end_matches('/').to_string();
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -534,6 +536,7 @@ impl A2aClient {
     ) -> Result<BoxStream<'static, Result<A2aStreamEvent>>> {
         use reqwest::header;
 
+        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
         let url = config.url.trim_end_matches('/').to_string();
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -669,6 +672,7 @@ impl A2aClient {
         request_id: &str,
         answers: &[ClarificationAnswer],
     ) -> Result<()> {
+        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
         let url = config.url.trim_end_matches('/').to_string();
         let text = answers
             .iter()
@@ -1248,5 +1252,52 @@ mod tests {
             supports_streaming: true,
         };
         assert!(card.supports_streaming);
+    }
+
+    /// SEC-16 / AGE-756: a remote A2A agent configured with a plain
+    /// `http://` URL to a real host must be refused before any request
+    /// leaves — never dialed, so a prompt, an answer, or the agent's bearer
+    /// token never has the chance to cross the wire in clear text.
+    #[tokio::test]
+    async fn plain_http_remote_agent_is_refused() {
+        let client = A2aClient::new();
+        let remote = agent("http://voucher-agent.example.com/a2a");
+
+        let err = client
+            .fetch_agent_card(&remote)
+            .await
+            .expect_err("a plain-http remote agent card fetch must be refused");
+        assert!(format!("{err:#}").contains("https"), "{err:#}");
+
+        let err = client
+            .send_message(&remote, "hi")
+            .await
+            .expect_err("a plain-http remote agent send must be refused");
+        assert!(format!("{err:#}").contains("https"), "{err:#}");
+
+        let err = client
+            .send_task_input(&remote, "task-1", "req-1", &[])
+            .await
+            .expect_err("a plain-http remote agent answer must be refused");
+        assert!(format!("{err:#}").contains("https"), "{err:#}");
+    }
+
+    /// A loopback A2A agent — e.g. a locally running dev worker — keeps
+    /// working over `http://`; only a real remote host requires TLS.
+    #[tokio::test]
+    async fn loopback_http_is_allowed() {
+        let client = A2aClient::new();
+        let local = agent("http://127.0.0.1:1/a2a");
+
+        // The gate itself must not be what refuses this: it fails for a
+        // mundane reason (nothing listens on this port), not as insecure.
+        let err = client
+            .send_message(&local, "hi")
+            .await
+            .expect_err("nothing listens on this port");
+        assert!(
+            !format!("{err:#}").contains("plain http"),
+            "a loopback agent must not be rejected as insecure: {err:#}"
+        );
     }
 }
