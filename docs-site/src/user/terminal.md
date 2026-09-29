@@ -55,6 +55,7 @@ temporary file and a rename, so a reader never sees half an object.
 | `duration_ms` | Wall-clock time since the run started |
 | `exit` | `running`, `completed`, `deadline` (the `--max-duration` budget was spent), `error` (non-zero exit) or `cancelled` (a signal) |
 | `model` | The model identifier the run used |
+| `delegated_by_agent` | Agent name → `input_tokens`, `output_tokens` and `model_calls` its delegations reported (already part of the totals); absent when the run delegated nothing |
 
 Totals are summed per model call across every pass, plus what delegated agents
 reported spending; `tool_calls` counts this agent's own calls. A request cut off

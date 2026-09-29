@@ -26,6 +26,7 @@
 //! | `duration_ms` | Wall-clock time since the run started |
 //! | `exit` | `running`, `completed`, `deadline`, `error` or `cancelled` |
 //! | `model` | The model identifier the run was started with |
+//! | `delegated_by_agent` | Agent name → `input_tokens`, `output_tokens`, `model_calls` its delegations reported (part of the totals above); absent when nothing was delegated |
 //! | `handoff_invalid_by_role` | A `--team` leader's roles → how many of their handoffs failed their schema (TD-2); absent when none did |
 //! | `failure_tags` | `["handoff_misread"]` when a handoff skipped a field its read rules require (TD-2); absent otherwise |
 //!
@@ -77,6 +78,17 @@ pub struct RunTotals {
     pub tool_calls: u64,
     pub tool_calls_failed: u64,
     pub turns: u64,
+    /// The delegated share of the totals, per agent that reported it.
+    pub delegated_by_agent: BTreeMap<String, AgentTotals>,
+}
+
+/// What one delegated agent reported spending over the run (AGE-754: a
+/// team's tokens per role).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AgentTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub model_calls: u64,
 }
 
 impl RunTotals {
@@ -103,11 +115,18 @@ impl RunTotals {
             .iter()
             .map(|call| u64::from(call.reasoning_tokens))
             .sum::<u64>();
-        self.model_calls += if usage.calls.is_empty() {
+        let model_calls = if usage.calls.is_empty() {
             u64::from(usage.api_turn_count)
         } else {
             usage.calls.len() as u64
         };
+        self.model_calls += model_calls;
+        if let Some(agent) = &usage.delegated_to {
+            let totals = self.delegated_by_agent.entry(agent.clone()).or_default();
+            totals.input_tokens += u64::from(usage.prompt_tokens());
+            totals.output_tokens += u64::from(usage.output_tokens);
+            totals.model_calls += model_calls;
+        }
     }
 
     /// The object the file holds.
@@ -128,6 +147,7 @@ impl RunTotals {
             duration_ms,
             exit,
             model: model.to_string(),
+            delegated_by_agent: self.delegated_by_agent.clone(),
             handoff_invalid_by_role: BTreeMap::new(),
             failure_tags: Vec::new(),
         }
@@ -151,6 +171,8 @@ pub struct UsageReport {
     pub duration_ms: u64,
     pub exit: RunExit,
     pub model: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub delegated_by_agent: BTreeMap<String, AgentTotals>,
     /// TD-1's scorecard reads these two (TD-2, AGE-693).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub handoff_invalid_by_role: BTreeMap<String, u32>,
@@ -449,6 +471,37 @@ mod tests {
         assert_eq!(totals.input_tokens, 35);
         assert_eq!(totals.output_tokens, 8);
         assert_eq!(totals.model_calls, 5);
+    }
+
+    /// AGE-754: a team's tokens per role — each delegated line naming its
+    /// agent is also counted under that agent, and the file carries the
+    /// breakdown only when there is one.
+    #[test]
+    fn delegated_usage_is_broken_down_by_agent() {
+        let mut totals = RunTotals::default();
+        let mut analyst = TokenUsage::with_turn_count(100, 10, 2);
+        analyst.delegated_to = Some("panel-analyst-1".to_string());
+        totals.add_delegated(&analyst);
+        totals.add_delegated(&analyst);
+        let mut judge = TokenUsage::with_turn_count(50, 5, 1);
+        judge.delegated_to = Some("panel-adjudicator".to_string());
+        totals.add_delegated(&judge);
+        // A plugin's spend names no agent: in the totals only.
+        totals.add_delegated(&TokenUsage::with_turn_count(7, 7, 1));
+
+        assert_eq!(totals.input_tokens, 257);
+        let report = totals.report(RunExit::Completed, 1, "m");
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["delegated_by_agent"],
+            serde_json::json!({
+                "panel-adjudicator": {"input_tokens": 50, "output_tokens": 5, "model_calls": 1},
+                "panel-analyst-1": {"input_tokens": 200, "output_tokens": 20, "model_calls": 4},
+            })
+        );
+        let none =
+            serde_json::to_value(RunTotals::default().report(RunExit::Completed, 1, "m")).unwrap();
+        assert!(none.get("delegated_by_agent").is_none());
     }
 
     #[test]

@@ -822,7 +822,7 @@ A schema may add read rules, `"x-must-be-read": {"coder": ["files_changed"]}`: e
 value of the coder's latest `files_changed` must appear in this role's handoff. The
 leader checks them and records a miss as the `handoff_misread` failure tag, with no
 retry. A headless `--team` leader's `--usage-file` carries
-`handoff_invalid_by_role` (role → invalid answers) and `failure_tags`, each absent when
+`handoff_invalid_by_role` (role → invalid answers) and `failure_tags`, and every run that delegates carries `delegated_by_agent` (agent → the tokens it reported), each absent when
 empty. A team without `handoffs` behaves exactly as before, down to the bytes on the
 worker's socket.
 
