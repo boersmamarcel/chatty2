@@ -354,7 +354,7 @@ fn render_approval(lines: &mut Vec<Line>, approval: &ApprovalInfo, streaming: bo
     } else {
         "host"
     };
-    lines.push(Line::from(vec![
+    let mut spans = vec![
         Span::raw("  "),
         Span::styled(glyph, style),
         Span::raw(" "),
@@ -362,7 +362,21 @@ fn render_approval(lines: &mut Vec<Line>, approval: &ApprovalInfo, streaming: bo
         Span::styled(format!(" [{scope}] "), theme::muted()),
         Span::styled(approval.command.clone(), theme::text()),
         Span::styled(format!(" — {verdict}"), style),
-    ]));
+    ];
+    // Relayed from a delegated agent (AGE-751): the asker and its chain go
+    // after the command, never inside it — no string built by folding the
+    // asker into what would otherwise be parsed back apart.
+    if let Some(asker) = &approval.asker {
+        spans.push(Span::styled(
+            format!(
+                " (asked by {} via {})",
+                asker.agent,
+                asker.chain.join(" \u{203a} ")
+            ),
+            theme::muted(),
+        ));
+    }
+    lines.push(Line::from(spans));
 }
 
 /// `± path +12 −3`.
@@ -883,6 +897,7 @@ mod tests {
                     command: "rm -rf build".into(),
                     is_sandboxed: false,
                     decision: Some(true),
+                    asker: None,
                 }),
                 MessageBlock::Diff(DiffStat {
                     path: "src/lib.rs".into(),
@@ -918,6 +933,7 @@ mod tests {
             command: "cargo publish".into(),
             is_sandboxed: true,
             decision: None,
+            asker: None,
         };
         let mut lines = Vec::new();
         render_approval(&mut lines, &approval, true);
@@ -933,6 +949,34 @@ mod tests {
         assert_eq!(
             lines.iter().map(line_text).collect::<Vec<_>>(),
             vec!["  – Approve [sandboxed] cargo publish — cancelled".to_string()]
+        );
+    }
+
+    /// AGE-751: a relayed approval's y/n prompt names the asking agent and
+    /// its chain outside the command — never folded into the command text a
+    /// naive string-parse could mangle.
+    #[test]
+    fn the_y_n_prompt_names_a_relayed_approvals_asker() {
+        let approval = ApprovalInfo {
+            id: "a1".into(),
+            command: "[shell] echo hi".into(),
+            is_sandboxed: false,
+            decision: None,
+            asker: Some(
+                chatty_core::models::execution_approval_store::ApprovalAsker {
+                    agent: "kit-coder-0".into(),
+                    chain: vec!["root".into(), "kit-lead".into(), "kit-coder".into()],
+                },
+            ),
+        };
+        let mut lines = Vec::new();
+        render_approval(&mut lines, &approval, true);
+        assert_eq!(
+            lines.iter().map(line_text).collect::<Vec<_>>(),
+            vec![
+                "  ? Approve [host] [shell] echo hi — waiting for y/n (asked by kit-coder-0 via root \u{203a} kit-lead \u{203a} kit-coder)"
+                    .to_string()
+            ]
         );
     }
 

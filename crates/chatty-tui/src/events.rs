@@ -43,6 +43,10 @@ pub enum AppEvent {
         id: String,
         command: String,
         is_sandboxed: bool,
+        /// Who asked, when this approval was relayed up a call chain
+        /// (AGE-646): shown outside the command, never folded into it
+        /// (AGE-751).
+        asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
     },
     ApprovalResolved {
         id: String,
@@ -130,11 +134,13 @@ impl std::fmt::Debug for AppEvent {
                 id,
                 command,
                 is_sandboxed,
+                asker,
             } => f
                 .debug_struct("ApprovalRequested")
                 .field("id", id)
                 .field("command", command)
                 .field("is_sandboxed", is_sandboxed)
+                .field("asker", asker)
                 .finish(),
             Self::ApprovalResolved { id, approved } => f
                 .debug_struct("ApprovalResolved")
@@ -210,11 +216,12 @@ impl From<chatty_core::session::SessionEvent> for AppEvent {
                 id,
                 command,
                 is_sandboxed,
-                ..
+                detail,
             } => AppEvent::ApprovalRequested {
                 id,
                 command,
                 is_sandboxed,
+                asker: detail.asker,
             },
             SessionEvent::ApprovalResolved { id, approved } => {
                 AppEvent::ApprovalResolved { id, approved }

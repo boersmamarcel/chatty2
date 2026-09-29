@@ -57,23 +57,17 @@ impl ApprovalDetail {
         }
     }
 
-    /// The line an approval card shows for a relayed request: who asks,
-    /// through which chain, for what.
-    pub fn relayed_label(&self) -> String {
-        let what = match self.kind {
+    /// The command or path this approval is for, with no asker folded in
+    /// (AGE-751): `[shell] echo hi`, or `[write] path (+3 -1)`. This is what
+    /// `ApprovalNotification::command` carries; a card that wants to name
+    /// the asker reads `asker` separately, never parses this string.
+    pub fn description(&self) -> String {
+        match self.kind {
             ApprovalKind::Exec => self.command_or_path.clone(),
             ApprovalKind::Write => match &self.diff_stat {
                 Some(stat) => format!("[write] {} ({stat})", self.command_or_path),
                 None => format!("[write] {}", self.command_or_path),
             },
-        };
-        match &self.asker {
-            Some(asker) => format!(
-                "{} ({}) asks: {what}",
-                asker.agent,
-                asker.chain.join(" \u{203a} ")
-            ),
-            None => what,
         }
     }
 }
@@ -82,7 +76,9 @@ impl ApprovalDetail {
 #[derive(Clone, Debug)]
 pub struct ApprovalNotification {
     pub id: String,
-    /// The line the approval card shows.
+    /// The command or path only — never the asker (AGE-751): a card wraps
+    /// this whole string as the thing being run/written, so folding
+    /// `"agent asks: "` in here would land inside the backticks.
     pub command: String,
     pub is_sandboxed: bool,
     pub detail: ApprovalDetail,
@@ -162,8 +158,9 @@ pub async fn request_execution_approval(
 
 /// Re-raise an approval a delegated agent asked for on this agent's own
 /// store (AGE-646), always asking: the worker below would not have asked if
-/// its mode — the root's, mirrored down — let it through. The card shows
-/// [`ApprovalDetail::relayed_label`].
+/// its mode — the root's, mirrored down — let it through. The notification's
+/// `command` is [`ApprovalDetail::description`]; the asker travels in
+/// `detail.asker` for the card to show separately (AGE-751).
 ///
 /// Dropping the future — the turn it runs in was cancelled — withdraws the
 /// request and announces it resolved (denied), so no card outlives it.
@@ -171,7 +168,8 @@ pub async fn request_relayed_execution_approval(
     pending: &PendingApprovals,
     detail: ApprovalDetail,
 ) -> anyhow::Result<bool> {
-    ask(pending, detail.relayed_label(), false, detail).await
+    let command = detail.description();
+    ask(pending, command, false, detail).await
 }
 
 async fn ask(

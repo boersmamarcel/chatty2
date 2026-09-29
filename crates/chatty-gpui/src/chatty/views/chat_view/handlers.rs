@@ -467,6 +467,7 @@ impl ChatView {
         id: String,
         command: String,
         is_sandboxed: bool,
+        asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
         cx: &mut Context<Self>,
     ) {
         debug!(approval_id = %id, command = %command, sandboxed = is_sandboxed, "UI: handle_approval_requested called");
@@ -478,6 +479,7 @@ impl ChatView {
                 command: command.clone(),
                 is_sandboxed,
                 conversation_id: conv_id.clone(),
+                asker: asker.clone(),
             });
         }
 
@@ -488,6 +490,7 @@ impl ChatView {
             is_sandboxed,
             state: ApprovalState::Pending,
             created_at: SystemTime::now(),
+            asker,
         };
 
         // Update live trace and create/update system_trace_view entity

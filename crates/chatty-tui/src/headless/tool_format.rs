@@ -79,7 +79,17 @@ pub(super) fn format_approval_requested(approval: &ApprovalInfo) -> String {
     } else {
         "host"
     };
-    format!("  ? Approve [{scope}] {}", approval.command)
+    let mut line = format!("  ? Approve [{scope}] {}", approval.command);
+    // Relayed from a delegated agent (AGE-751): who asked, and the chain it
+    // runs under, after the command — never folded into it.
+    if let Some(asker) = &approval.asker {
+        line.push_str(&format!(
+            " (asked by {} via {})",
+            asker.agent,
+            asker.chain.join(" \u{203a} ")
+        ));
+    }
+    line
 }
 
 pub(super) fn format_approval_resolved(approved: bool) -> String {

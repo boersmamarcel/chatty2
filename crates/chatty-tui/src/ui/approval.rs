@@ -25,7 +25,7 @@ pub fn render_approval_prompt(frame: &mut Frame, area: Rect, engine: &ChatEngine
         approval.command.clone()
     };
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             " APPROVE? ",
             Style::default()
@@ -35,12 +35,27 @@ pub fn render_approval_prompt(frame: &mut Frame, area: Rect, engine: &ChatEngine
         ),
         sandboxed_indicator,
         Span::raw(command_display),
+    ];
+    // Relayed from a delegated agent (AGE-751): who asked, and its chain,
+    // outside the command — never folded into the string above.
+    if let Some(asker) = &approval.asker {
+        spans.push(Span::styled(
+            format!(
+                " (asked by {} via {}) ",
+                asker.agent,
+                asker.chain.join(" \u{203a} ")
+            ),
+            theme::muted(),
+        ));
+    }
+    spans.extend([
         Span::styled("  ", Style::default()),
         Span::styled("[y]", theme::success().add_modifier(Modifier::BOLD)),
         Span::raw("es / "),
         Span::styled("[n]", theme::error().add_modifier(Modifier::BOLD)),
         Span::raw("o"),
     ]);
+    let line = Line::from(spans);
 
     let paragraph = Paragraph::new(line).block(
         Block::default()

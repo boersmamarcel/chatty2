@@ -614,8 +614,8 @@ impl AgentSession {
                 id,
                 command,
                 is_sandboxed,
-                ..
-            } => self.note_approval_requested(id, command, *is_sandboxed),
+                detail,
+            } => self.note_approval_requested(id, command, *is_sandboxed, detail.asker.clone()),
             SessionEvent::ApprovalResolved { id, approved } => {
                 self.note_approval_resolved(id, *approved)
             }
@@ -736,7 +736,13 @@ impl AgentSession {
     }
 
     /// `SessionEvent::ApprovalRequested`: the pending approval, in the trace.
-    pub fn note_approval_requested(&mut self, id: &str, command: &str, is_sandboxed: bool) {
+    pub fn note_approval_requested(
+        &mut self,
+        id: &str,
+        command: &str,
+        is_sandboxed: bool,
+        asker: Option<crate::models::execution_approval_store::ApprovalAsker>,
+    ) {
         if let Some(conversation) = self.conversation.as_mut() {
             let trace = conversation.ensure_streaming_trace();
             let index = trace.items.len();
@@ -746,6 +752,7 @@ impl AgentSession {
                 is_sandboxed,
                 state: ApprovalState::Pending,
                 created_at: std::time::SystemTime::now(),
+                asker,
             });
             trace.set_active_tool(index);
         }

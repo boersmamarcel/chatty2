@@ -100,6 +100,9 @@ pub struct PendingApprovalInfo {
     pub command: String,
     pub is_sandboxed: bool,
     pub conversation_id: String,
+    /// Who asked, when relayed up a call chain (AGE-646), shown outside the
+    /// command rather than folded into it (AGE-751).
+    pub asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
 }
 
 /// A clarification request the agent is currently blocked on.
@@ -1248,6 +1251,7 @@ impl ChatView {
                             command: approval.command.clone(),
                             is_sandboxed: approval.is_sandboxed,
                             conversation_id: conversation_id.clone(),
+                            asker: approval.asker.clone(),
                         });
                     }
                     TraceItem::ClarificationPrompt(clarification)
@@ -3149,6 +3153,7 @@ impl Render for ChatView {
                     is_sandboxed: pending.is_sandboxed,
                     state: chatty_core::models::message_types::ApprovalState::Pending,
                     created_at: std::time::SystemTime::now(),
+                    asker: pending.asker,
                 };
                 this.child(
                     div().px_4().child(
@@ -3592,6 +3597,7 @@ mod fingerprint_tests {
                 is_sandboxed: false,
                 state: ApprovalState::Pending,
                 created_at: std::time::SystemTime::UNIX_EPOCH,
+                asker: None,
             },
         }
     }

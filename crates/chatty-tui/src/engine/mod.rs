@@ -69,6 +69,7 @@ pub struct PendingApproval {
     pub id: String,
     pub command: String,
     pub is_sandboxed: bool,
+    pub asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
 }
 
 /// Clarifying questions the agent is blocked on, answered one at a time.
@@ -127,6 +128,7 @@ pub struct ApprovalInfo {
     pub command: String,
     pub is_sandboxed: bool,
     pub decision: Option<bool>,
+    pub asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1127,15 +1129,21 @@ impl ChatEngine {
                 id,
                 command,
                 is_sandboxed,
+                asker,
             } => {
                 self.session
-                    .note_approval_requested(&id, &command, is_sandboxed);
-                self.transcript
-                    .approval_requested(id.clone(), command.clone(), is_sandboxed);
+                    .note_approval_requested(&id, &command, is_sandboxed, asker.clone());
+                self.transcript.approval_requested(
+                    id.clone(),
+                    command.clone(),
+                    is_sandboxed,
+                    asker.clone(),
+                );
                 self.pending_approval = Some(PendingApproval {
                     id,
                     command,
                     is_sandboxed,
+                    asker,
                 });
                 EngineAction::Redraw
             }

@@ -5,7 +5,8 @@
 #   start.sh [--display :99] [--size 1600x1000] [--dir /tmp/shot-run]
 #            [--workspace /path/to/ws] [--bin target/debug/chatty]
 #
-# --dir      scratch dir: config/ (XDG_CONFIG_HOME), shots/, app.log
+# --dir      scratch dir: config/ (XDG_CONFIG_HOME), data/ (XDG_DATA_HOME),
+#            shots/, app.log
 # --workspace  written into config/chatty/execution_settings.json as
 #            workspace_dir (what the file explorer and the tools root at);
 #            defaults to <dir>/ws, created if missing
@@ -28,10 +29,12 @@ ROOT="$(cd "$(dirname "$0")/../../../.." && pwd)"
 BIN="${BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/chatty}"
 [ -x "$BIN" ] || { echo "no binary at $BIN — cargo build -p chatty-gpui first" >&2; exit 1; }
 WS="${WS:-$DIR/ws}"
-mkdir -p "$DIR/config/chatty" "$DIR/shots" "$WS"
+mkdir -p "$DIR/config/chatty" "$DIR/data" "$DIR/shots" "$WS"
 
 # Only the settings the UI needs; everything else takes its defaults. Never
-# point XDG_CONFIG_HOME at ~/.config — that is the user's real database.
+# point XDG_CONFIG_HOME (or XDG_DATA_HOME) at the user's real ~/.config or
+# ~/.local/share — without a scratch XDG_DATA_HOME too, the module registry
+# scans the real ~/.local/share/chatty/modules (AGE-746).
 if [ ! -f "$DIR/config/chatty/execution_settings.json" ]; then
   cat > "$DIR/config/chatty/execution_settings.json" <<JSON
 {
@@ -61,7 +64,7 @@ if ! pgrep -f "Xvfb $DISPLAY_NO" >/dev/null; then
   sleep 1.5
 fi
 
-DISPLAY="$DISPLAY_NO" XDG_CONFIG_HOME="$DIR/config" \
+DISPLAY="$DISPLAY_NO" XDG_CONFIG_HOME="$DIR/config" XDG_DATA_HOME="$DIR/data" \
   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
   nohup "$BIN" >"$DIR/app.log" 2>&1 &
 APP_PID=$!
