@@ -4,15 +4,29 @@
 //! internet-enabled navigation policy both need to refuse the same private,
 //! loopback, link-local, and cloud-metadata targets. One denylist here, so
 //! the two can't drift apart the way two hand-copied lists would.
+//!
+//! A check is not enough on its own: a client that resolves the name again
+//! to connect can be sent somewhere else (DNS rebinding). Clients that
+//! connect use [`GuardedResolver`], which checks the addresses it hands the
+//! connector — one lookup for both (AGE-537, AGE-767).
 
-use std::net::IpAddr;
+use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::sync::Arc;
+
 use tracing::warn;
 
 /// Validate that `url`'s host is not a private, internal, loopback, or
 /// cloud-metadata target. Resolves hostnames to catch DNS rebinding /
 /// split-horizon attacks where a public name resolves to a private IP.
+///
+/// Fails closed: a name that does not resolve, or resolves to nothing, is
+/// refused (AGE-537). This is a check only — a request made afterwards
+/// resolves again, so a caller that connects must use a client built with
+/// [`GuardedResolver`], which checks the addresses it connects to.
 pub fn check_public_host(url: &str) -> Result<(), String> {
-    check_public_host_impl(url, false)
+    check_host_with(url, false, &system_lookup_blocking)
 }
 
 /// Same as [`check_public_host`], except when `allow_private_network_access`
@@ -29,46 +43,224 @@ pub fn check_public_host_with_bypass(
     url: &str,
     allow_private_network_access: bool,
 ) -> Result<(), String> {
-    check_public_host_impl(url, allow_private_network_access)
+    check_host_with(url, allow_private_network_access, &system_lookup_blocking)
 }
 
-fn check_public_host_impl(url: &str, allow_private_network_access: bool) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url}: {e}"))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| format!("{url} has no host"))?;
+/// The part of [`check_public_host`] that needs no DNS: the scheme-free
+/// URL parses, its host is not a denylisted name, and an IP-literal host is
+/// public. A hostname passes here and is checked where it is resolved, by
+/// the [`GuardedResolver`] of the client that connects to it.
+pub fn check_public_url_without_lookup(url: &str) -> Result<(), String> {
+    let host = parse_host(url)?;
+    if is_blocked_hostname(&host) {
+        return Err(blocked_hostname_error(&host));
+    }
+    if let Some(ip) = ip_literal(&host)
+        && !public_only(&host, ip)
+    {
+        return Err(blocked_ip_error(ip));
+    }
+    Ok(())
+}
 
-    if is_blocked_hostname(host) {
-        return Err(format!(
-            "requests to '{host}' are blocked for security (SSRF protection)"
-        ));
+fn parse_host(url: &str) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL {url}: {e}"))?;
+    parsed
+        .host_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{url} has no host"))
+}
+
+/// The host as an IP address, if it is an IP literal. `host_str()` returns
+/// IPv6 in brackets ("[::1]"); `IpAddr` wants it without.
+fn ip_literal(host: &str) -> Option<IpAddr> {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .ok()
+}
+
+fn blocked_hostname_error(host: &str) -> String {
+    format!("requests to '{host}' are blocked for security (SSRF protection)")
+}
+
+fn blocked_ip_error(ip: IpAddr) -> String {
+    format!("requests to private/internal IP '{ip}' are blocked for security (SSRF protection)")
+}
+
+/// A blocking system lookup, for the synchronous checks above.
+fn system_lookup_blocking(host: &str) -> std::io::Result<Vec<IpAddr>> {
+    std::net::ToSocketAddrs::to_socket_addrs(&(host, 80))
+        .map(|addrs| addrs.map(|addr| addr.ip()).collect())
+}
+
+fn check_host_with(
+    url: &str,
+    allow_private_network_access: bool,
+    lookup: &dyn Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+) -> Result<(), String> {
+    let host = parse_host(url)?;
+
+    if is_blocked_hostname(&host) {
+        return Err(blocked_hostname_error(&host));
     }
 
-    // Strip brackets for IPv6: host_str() returns "[::1]" but IpAddr expects "::1".
-    let ip_str = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+    if let Some(ip) = ip_literal(&host) {
         if is_blocked_ip(&ip, allow_private_network_access) {
-            return Err(format!(
-                "requests to private/internal IP '{ip}' are blocked for security (SSRF protection)"
-            ));
+            return Err(blocked_ip_error(ip));
         }
         return Ok(());
     }
 
-    // Hostname: resolve and check the resolved address too.
-    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
-        for addr in addrs {
-            if is_blocked_ip(&addr.ip(), allow_private_network_access) {
-                warn!(host = %host, resolved_ip = %addr.ip(), "Blocked DNS-resolved private IP");
-                return Err(format!(
-                    "'{host}' resolves to private/internal IP {} (SSRF protection)",
-                    addr.ip()
-                ));
-            }
+    // Hostname: resolve and check every resolved address. A name that does
+    // not resolve is refused, never waved through (AGE-537).
+    let addrs = lookup(&host)
+        .map_err(|e| format!("'{host}' could not be resolved, refusing (SSRF protection): {e}"))?;
+    if addrs.is_empty() {
+        return Err(format!(
+            "'{host}' resolved to no address, refusing (SSRF protection)"
+        ));
+    }
+    for ip in addrs {
+        if is_blocked_ip(&ip, allow_private_network_access) {
+            warn!(host = %host, resolved_ip = %ip, "Blocked DNS-resolved private IP");
+            return Err(format!(
+                "'{host}' resolves to private/internal IP {ip} (SSRF protection)"
+            ));
         }
     }
 
     Ok(())
+}
+
+// ── Resolve once, connect to what was checked ──────────────────────────────
+
+/// Which resolved addresses a [`GuardedResolver`] lets a client connect to,
+/// given the host name they were resolved for. `true` admits the address.
+pub type AddressPolicy = fn(host: &str, ip: IpAddr) -> bool;
+
+/// The open-web policy (`fetch`): no denylisted name, no private, loopback,
+/// link-local or otherwise reserved address.
+pub fn public_only(host: &str, ip: IpAddr) -> bool {
+    !is_blocked_hostname(host) && !is_private_ip(&ip)
+}
+
+/// The A2A edge policy (ADR-0021 step 0, AGE-767) for a user-configured
+/// remote agent.
+///
+/// - Link-local, including cloud metadata, is never reachable.
+/// - `localhost` must resolve to loopback and nothing else.
+/// - An IP literal is the address the user configured; it needs no DNS and
+///   cannot be rebound, so it is admitted (TLS is enforced separately by
+///   `hive_client::ensure_secure_url`).
+/// - Any other name must resolve to public addresses only, so a public
+///   agent's DNS can never be turned into a path to this machine or its
+///   network. An agent on a private network is configured by its IP.
+pub fn a2a_peer(host: &str, ip: IpAddr) -> bool {
+    if is_link_local_ip(&ip) {
+        return false;
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return ip.is_loopback();
+    }
+    if ip_literal(host).is_some() {
+        return true;
+    }
+    public_only(host, ip)
+}
+
+/// The IP-literal half of [`a2a_peer`], for the URL itself: reqwest never
+/// hands a literal to the resolver, so the resolver cannot refuse it.
+pub fn check_a2a_url_without_lookup(url: &str) -> Result<(), String> {
+    let host = parse_host(url)?;
+    match ip_literal(&host) {
+        Some(ip) if !a2a_peer(&host, ip) => Err(blocked_ip_error(ip)),
+        _ => Ok(()),
+    }
+}
+
+/// A DNS lookup the [`GuardedResolver`] runs exactly once per connection.
+/// Tests substitute a stub; production uses [`SystemLookup`].
+pub trait HostLookup: Send + Sync {
+    fn lookup(
+        &self,
+        host: &str,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>>;
+}
+
+/// The system resolver, off the async runtime's worker threads.
+pub struct SystemLookup;
+
+impl HostLookup for SystemLookup {
+    fn lookup(
+        &self,
+        host: &str,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>> {
+        let host = host.to_string();
+        Box::pin(async move {
+            Ok(tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .map(|addr| addr.ip())
+                .collect())
+        })
+    }
+}
+
+/// A reqwest DNS resolver that checks what it resolves and hands the client
+/// exactly those addresses to connect to.
+///
+/// The check and the connection share one lookup, so a name cannot pass
+/// with one answer and be connected to under another (DNS rebinding, the
+/// TOCTOU of a separate pre-check). A lookup error, an empty answer, or any
+/// address the policy refuses fails the connection: fail closed (AGE-537).
+///
+/// Only names reach a resolver; IP literals must be checked up front. A
+/// client using this must also disable proxies (`no_proxy`), or the name
+/// resolved would be the proxy's, not the target's.
+pub struct GuardedResolver {
+    lookup: Arc<dyn HostLookup>,
+    policy: AddressPolicy,
+}
+
+impl GuardedResolver {
+    pub fn new(lookup: Arc<dyn HostLookup>, policy: AddressPolicy) -> Self {
+        Self { lookup, policy }
+    }
+
+    /// Resolve `host` once and admit or refuse the whole answer.
+    pub async fn resolve_checked(&self, host: &str) -> Result<Vec<IpAddr>, String> {
+        let addrs = self.lookup.lookup(host).await.map_err(|e| {
+            format!("'{host}' could not be resolved, refusing (SSRF protection): {e}")
+        })?;
+        if addrs.is_empty() {
+            return Err(format!(
+                "'{host}' resolved to no address, refusing (SSRF protection)"
+            ));
+        }
+        if let Some(ip) = addrs.iter().find(|ip| !(self.policy)(host, **ip)) {
+            warn!(host = %host, resolved_ip = %ip, "Refused to connect to a resolved address");
+            return Err(format!(
+                "'{host}' resolves to private/internal IP {ip}, refusing (SSRF protection)"
+            ));
+        }
+        Ok(addrs)
+    }
+}
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let lookup = Arc::clone(&self.lookup);
+        let policy = self.policy;
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let guard = GuardedResolver { lookup, policy };
+            let addrs = guard.resolve_checked(&host).await?;
+            // The port is the connector's to set; 0 is a placeholder.
+            let addrs: reqwest::dns::Addrs =
+                Box::new(addrs.into_iter().map(|ip| SocketAddr::new(ip, 0)));
+            Ok(addrs)
+        })
+    }
 }
 
 /// Whether `ip` should be rejected, given whether the caller has opted into
@@ -245,8 +437,105 @@ mod tests {
 
     #[test]
     fn check_public_host_allows_public() {
-        assert!(check_public_host("https://example.com").is_ok());
-        assert!(check_public_host("https://docs.rs/rig-core/latest").is_ok());
+        let public = |_: &str| Ok(vec!["93.184.216.34".parse().unwrap()]);
+        assert!(check_host_with("https://example.com", false, &public).is_ok());
+        assert!(check_host_with("https://docs.rs/rig-core/latest", false, &public).is_ok());
+    }
+
+    /// AGE-537: a name the guard cannot resolve is refused, not let through.
+    #[test]
+    fn check_public_host_fails_closed_on_resolution_error() {
+        let failing = |_: &str| Err(std::io::Error::other("stub: no such host"));
+        let err = check_host_with("https://example.com", false, &failing).unwrap_err();
+        assert!(err.contains("could not be resolved"), "{err}");
+
+        let empty = |_: &str| Ok(Vec::new());
+        let err = check_host_with("https://example.com", false, &empty).unwrap_err();
+        assert!(err.contains("no address"), "{err}");
+    }
+
+    #[test]
+    fn check_public_host_refuses_a_name_resolving_private() {
+        let private = |_: &str| Ok(vec!["10.0.0.7".parse().unwrap()]);
+        assert!(check_host_with("https://example.com", false, &private).is_err());
+    }
+
+    #[test]
+    fn check_without_lookup_refuses_literals_and_names_but_not_hostnames() {
+        assert!(check_public_url_without_lookup("http://127.0.0.1/").is_err());
+        assert!(check_public_url_without_lookup("http://[::1]/").is_err());
+        assert!(check_public_url_without_lookup("http://localhost:8080/").is_err());
+        assert!(check_public_url_without_lookup("http://foo.internal/").is_err());
+        assert!(check_public_url_without_lookup("https://8.8.8.8/").is_ok());
+        // A hostname is left to the resolver that connects to it.
+        assert!(check_public_url_without_lookup("https://example.com/").is_ok());
+    }
+
+    struct Stub(Vec<std::io::Result<Vec<IpAddr>>>, std::sync::Mutex<usize>);
+
+    impl HostLookup for Stub {
+        fn lookup(
+            &self,
+            _host: &str,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>> {
+            let mut calls = self.1.lock().unwrap();
+            let answer = match &self.0[*calls] {
+                Ok(addrs) => Ok(addrs.clone()),
+                Err(e) => Err(std::io::Error::other(e.to_string())),
+            };
+            *calls += 1;
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn resolver(
+        answers: Vec<std::io::Result<Vec<IpAddr>>>,
+        policy: AddressPolicy,
+    ) -> GuardedResolver {
+        GuardedResolver::new(Arc::new(Stub(answers, std::sync::Mutex::new(0))), policy)
+    }
+
+    #[tokio::test]
+    async fn guarded_resolver_admits_public_and_refuses_private_or_failed() {
+        let public: IpAddr = "93.184.216.34".parse().unwrap();
+        let guard = resolver(
+            vec![
+                Ok(vec![public]),
+                Ok(vec![public, "127.0.0.1".parse().unwrap()]),
+                Err(std::io::Error::other("stub")),
+                Ok(vec![]),
+            ],
+            public_only,
+        );
+        assert_eq!(
+            guard.resolve_checked("example.com").await.unwrap(),
+            vec![public]
+        );
+        // One private address in the answer refuses the whole answer.
+        assert!(guard.resolve_checked("example.com").await.is_err());
+        assert!(guard.resolve_checked("example.com").await.is_err());
+        assert!(guard.resolve_checked("example.com").await.is_err());
+    }
+
+    #[test]
+    fn a2a_peer_policy() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        // A configured literal is the user's choice, except link-local.
+        assert!(a2a_peer("10.0.0.5", ip("10.0.0.5")));
+        assert!(a2a_peer("127.0.0.1", ip("127.0.0.1")));
+        assert!(!a2a_peer("169.254.169.254", ip("169.254.169.254")));
+        // localhost means loopback and nothing else.
+        assert!(a2a_peer("localhost", ip("127.0.0.1")));
+        assert!(a2a_peer("localhost", ip("::1")));
+        assert!(!a2a_peer("localhost", ip("10.0.0.5")));
+        // Any other name must stay public.
+        assert!(a2a_peer("agent.example.com", ip("93.184.216.34")));
+        assert!(!a2a_peer("agent.example.com", ip("127.0.0.1")));
+        assert!(!a2a_peer("agent.example.com", ip("192.168.1.9")));
+
+        assert!(check_a2a_url_without_lookup("http://169.254.169.254/").is_err());
+        assert!(check_a2a_url_without_lookup("http://127.0.0.1:8420/a2a").is_ok());
+        assert!(check_a2a_url_without_lookup("https://agent.example.com/").is_ok());
     }
 
     #[test]
@@ -323,6 +612,7 @@ mod tests {
 
     #[test]
     fn check_public_host_with_bypass_on_still_allows_public_hosts() {
-        assert!(check_public_host_with_bypass("https://example.com", true).is_ok());
+        let public = |_: &str| Ok(vec!["93.184.216.34".parse().unwrap()]);
+        assert!(check_host_with("https://example.com", true, &public).is_ok());
     }
 }
