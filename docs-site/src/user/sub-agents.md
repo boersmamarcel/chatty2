@@ -120,6 +120,8 @@ A spec file is picked up as soon as it exists (on the desktop, **Settings → Ag
 }
 ```
 
+On the desktop, the `enabled` field is the **Enable module runtime** switch in **Settings → Plugins**; it starts or stops the local agent broker right away, with no restart.
+
 A `module_settings.json` that still describes workers inline (the format before agent specs) no longer loads; move each entry into its own spec file.
 
 | Field | What it does |
