@@ -61,6 +61,7 @@ async fn a_spec_with_a_plugin_is_listed_and_reached_like_any_local_agent() {
         &module_settings,
         &roster,
         &["--auto-approve".to_string()],
+        Some(workspace.path()),
     );
     let broker = Broker::start_at(
         dir.path().join("run").join("participants.sock"),

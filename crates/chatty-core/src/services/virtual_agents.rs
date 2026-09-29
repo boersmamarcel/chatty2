@@ -18,6 +18,8 @@
 //!
 //! [`AgentBuildContext::from_spec`]: crate::factories::AgentBuildContext::from_spec
 
+use std::path::Path;
+
 use crate::agent_spec::AgentSpec;
 use crate::factories::agent_factory::tool_profile;
 use crate::settings::models::ModuleSettingsModel;
@@ -26,6 +28,7 @@ use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
 use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::LOCAL_AGENT_NAME;
 
+use super::team;
 use super::worker_endpoint::resolve_worker_endpoint;
 
 /// The flag a worker's spec rides on.
@@ -68,13 +71,15 @@ pub struct VirtualAgentSpec {
 /// team's verification command. `common_args` is appended to every agent's
 /// argv after its spec — `--auto-approve` when the leader runs unattended,
 /// and the leader's provider flags when it was configured by flags rather
-/// than by a config dir the child would read too.
+/// than by a config dir the child would read too. `workspace` is consulted
+/// for a `.chatty/teams/` team that claims one of `agents` (AGE-763).
 pub fn resolve_virtual_agents(
     models: &[ModelConfig],
     providers: &[ProviderConfig],
     module_settings: &ModuleSettingsModel,
     agents: &[AgentSpec],
     common_args: &[String],
+    workspace: Option<&Path>,
 ) -> Vec<VirtualAgentSpec> {
     let default_agent = [AgentSpec::named(LOCAL_AGENT_NAME)];
     let declared: &[AgentSpec] = if agents.is_empty() {
@@ -111,7 +116,7 @@ pub fn resolve_virtual_agents(
                 description: describe(spec, models),
                 args,
                 endpoint,
-                verification: verification_for(spec, module_settings),
+                verification: verification_for(spec, module_settings, workspace),
                 handoff: None,
                 spec: spec.clone(),
             }
@@ -134,7 +139,18 @@ const SHELL_TOOL_NAME: &str = "shell_execute";
 /// profile has to allow `shell_execute` *and* `disable` has to leave `shell`
 /// enabled, so a `reviewer` runs the suite unless it also disables `shell`,
 /// and a `coordinator` never does regardless of `disable`.
-fn verification_for(spec: &AgentSpec, module_settings: &ModuleSettingsModel) -> Option<String> {
+///
+/// The command itself is whichever team — a preset or a workspace one —
+/// claims this agent by name (AGE-763): `/agent <leader>` and its roster get
+/// their own team's tests this way, the same as `--team <id>` does by
+/// copying its `verification` into `module_settings.team.verification`
+/// before this ever runs. When no team claims this agent, `module_settings`'
+/// own `team.verification` is the fallback, exactly as before.
+fn verification_for(
+    spec: &AgentSpec,
+    module_settings: &ModuleSettingsModel,
+    workspace: Option<&Path>,
+) -> Option<String> {
     let profile_has_shell = match spec.tools.profile.as_deref() {
         // An unknown profile name fails the spec's validation, and so the
         // child at start-up, so what this answers for it never matters.
@@ -148,7 +164,10 @@ fn verification_for(spec: &AgentSpec, module_settings: &ModuleSettingsModel) -> 
         .any(|group| canonical_tool_group(group) == SHELL_TOOL_GROUP);
     let has_shell = profile_has_shell && not_disabled;
     has_shell
-        .then(|| module_settings.team.verification.clone())
+        .then(|| {
+            team::verification_for_member(&spec.agent.name, workspace)
+                .or_else(|| module_settings.team.verification.clone())
+        })
         .flatten()
 }
 
@@ -246,6 +265,7 @@ mod tests {
             &ModuleSettingsModel::default(),
             &[],
             &["--auto-approve".to_string()],
+            None,
         );
 
         assert_eq!(specs.len(), 1);
@@ -279,8 +299,14 @@ mod tests {
             "http://localhost:11434".to_string(),
         ];
         let roster = team();
-        let specs =
-            resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &roster, &common);
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &roster,
+            &common,
+            None,
+        );
 
         assert_eq!(specs.len(), 2);
         for (resolved, declared) in specs.iter().zip(&roster) {
@@ -314,6 +340,7 @@ mod tests {
             &ModuleSettingsModel::default(),
             std::slice::from_ref(&auditor),
             &[],
+            None,
         );
         assert_eq!(spec_in(&specs[0].args).plugins, auditor.plugins);
     }
@@ -330,6 +357,7 @@ mod tests {
             &ModuleSettingsModel::default(),
             &[lead, AgentSpec::named("kit-worker")],
             &[],
+            None,
         );
         for spec in &specs {
             assert_eq!(spec.args.len(), 2, "{:?}", spec.args);
@@ -341,7 +369,14 @@ mod tests {
     /// leader can pick a reviewer by reading `list_agents`.
     #[test]
     fn the_description_carries_the_model_and_the_disabled_groups() {
-        let specs = resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &team(), &[]);
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &team(),
+            &[],
+            None,
+        );
 
         assert!(
             specs[0].description.contains("Model: qwen."),
@@ -388,7 +423,7 @@ mod tests {
             .endpoint_budgets
             .insert("http://other:8000/v1".to_string(), 3);
 
-        let specs = resolve_virtual_agents(&models, &providers, &settings, &roster, &[]);
+        let specs = resolve_virtual_agents(&models, &providers, &settings, &roster, &[], None);
 
         assert_eq!(
             specs[0].endpoint,
@@ -413,7 +448,7 @@ mod tests {
         let mut settings = ModuleSettingsModel::default();
         settings.team.verification = Some("cargo test".to_string());
 
-        let specs = resolve_virtual_agents(&[], &[], &settings, &team(), &[]);
+        let specs = resolve_virtual_agents(&[], &[], &settings, &team(), &[], None);
 
         assert_eq!(specs[0].verification.as_deref(), Some("cargo test"));
         assert_eq!(
@@ -444,7 +479,7 @@ mod tests {
             ..ModuleSettingsModel::default()
         };
 
-        let specs = resolve_virtual_agents(&[], &[], &settings, &roster, &[]);
+        let specs = resolve_virtual_agents(&[], &[], &settings, &roster, &[], None);
 
         assert_eq!(
             specs[0].verification, None,
@@ -460,7 +495,14 @@ mod tests {
 
     #[test]
     fn no_declared_verification_command_means_none_is_run() {
-        let specs = resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &team(), &[]);
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &team(),
+            &[],
+            None,
+        );
         assert!(specs.iter().all(|spec| spec.verification.is_none()));
     }
 
@@ -474,6 +516,7 @@ mod tests {
             &ModuleSettingsModel::default(),
             &[agent("local-mystery", Some("no-such-model"))],
             &[],
+            None,
         );
         assert_eq!(specs[0].endpoint, None);
     }
@@ -491,10 +534,16 @@ mod tests {
                 .to_string(),
         );
 
-        let description =
-            resolve_virtual_agents(&[], &[], &ModuleSettingsModel::default(), &[reviewer], &[])
-                .swap_remove(0)
-                .description;
+        let description = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &[reviewer],
+            &[],
+            None,
+        )
+        .swap_remove(0)
+        .description;
 
         assert!(
             description.contains("Tool profile: reviewer."),
@@ -511,6 +560,60 @@ mod tests {
         assert!(
             !description.contains("run the tests and report"),
             "only the first sentence, not the whole standing instruction: {description}"
+        );
+    }
+
+    /// AGE-763: the desktop's `/agent fix-lead <task>` reaches the broker
+    /// through the default, undeclared roster — every exposed spec,
+    /// `fix-lead` among them — with no `module_settings.team.verification`
+    /// set (the desktop never writes one for a built-in preset). `fix-lead`
+    /// is `fix-and-verify`'s leader, so the roster's own shell-having
+    /// member, `fix-coder`, still gets that team's own test command, exactly
+    /// as `--team fix-and-verify` gives it — and nobody else's evidence
+    /// picks it up.
+    #[test]
+    fn slash_agent_team_leader_uses_team_verification() {
+        let roster = crate::agent_spec::load_roster(&[], None).expect("the default roster loads");
+        assert!(
+            roster.iter().any(|spec| spec.agent.name == "fix-lead"),
+            "fix-lead is on the default roster /agent resolves against"
+        );
+
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &roster,
+            &[],
+            None,
+        );
+
+        let fix_coder = specs
+            .iter()
+            .find(|spec| spec.name == "fix-coder")
+            .expect("fix-coder is on the default roster");
+        assert_eq!(
+            fix_coder.verification.as_deref(),
+            Some("python3 -m unittest discover -s tests -t . -v"),
+            "the leader's own team supplies the verification command, not module settings"
+        );
+
+        let code_reviewer = specs
+            .iter()
+            .find(|spec| spec.name == "code-reviewer")
+            .expect("code-reviewer is on the default roster");
+        assert_eq!(
+            code_reviewer.verification, None,
+            "code-reviewer disables the shell group, so it never produced a build to check"
+        );
+
+        let data_analyst = specs
+            .iter()
+            .find(|spec| spec.name == "data-analyst")
+            .expect("data-analyst is on the default roster");
+        assert_eq!(
+            data_analyst.verification, None,
+            "data-analysis's own team declares no verification command"
         );
     }
 

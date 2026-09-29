@@ -213,7 +213,7 @@ chatty-tui --team fix-and-verify --headless --auto-approve --model <model> \
 
 The team's `verification` is this sample's command, `python3 -m unittest discover -s tests -t . -v`. For your own project, put a `.chatty/teams/fix-and-verify/team.json` with the same `leader` and `agents` and your own test command. It shadows the built-in team, and the specs stay the built-in ones.
 
-On the desktop, `/agent fix-lead <task>` runs the same team, and the swarm tree shows the lead, the coder's run and the review as they happen. The desktop does not read `team.json`, so it runs the tests only when `module_settings.json` in your config directory has `"team": {"verification": "<your test command>"}`. Without it, the coder's evidence block has no test result and the reviewer asks for changes. On the desktop the lead is a worker too, so it merges into its own branch, `sub-agent/fix-lead-0`, and that branch is what you merge.
+On the desktop, `/agent fix-lead <task>` runs the same team, and the swarm tree shows the lead, the coder's run and the review as they happen. `fix-lead` is this team's leader, so the coder's evidence block still carries the team's own test command, `python3 -m unittest discover -s tests -t . -v` (or your own, from a `.chatty/teams/fix-and-verify/team.json` in the workspace) — exactly as `--team fix-and-verify` runs it. On the desktop the lead is a worker too, so it merges into its own branch, `sub-agent/fix-lead-0`, and that branch is what you merge.
 
 ![The fix-and-verify team in the swarm tree: the lead, fix-coder and code-reviewer](../assets/screenshots/fix-and-verify-tree.png)
 

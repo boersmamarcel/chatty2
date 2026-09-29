@@ -777,7 +777,8 @@ pub(super) mod named_virtual_agents {
         let (settings, agents) = team();
         let mut common_args = vec!["--auto-approve".to_string()];
         common_args.extend(provider_flags.iter().cloned());
-        let specs = resolve_virtual_agents(&models, &providers, &settings, &agents, &common_args);
+        let specs =
+            resolve_virtual_agents(&models, &providers, &settings, &agents, &common_args, None);
         Broker::start_at(
             dir.join("run").join("participants.sock"),
             scripted_worker_binary(dir, &completed_turn().await),
@@ -1071,6 +1072,7 @@ mod declared_roles {
             &ModuleSettingsModel::default(),
             &reviewer_team(),
             &[],
+            None,
         );
         let argv = ["chatty-tui".to_string()]
             .into_iter()
@@ -1228,6 +1230,7 @@ mod declared_roles {
             &ModuleSettingsModel::default(),
             &reviewer_team(),
             &[],
+            None,
         );
         let broker = Broker::start_at(
             dir.path().join("run").join("participants.sock"),
