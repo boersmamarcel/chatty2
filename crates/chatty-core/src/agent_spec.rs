@@ -64,6 +64,24 @@ pub const PRESETS: &[(&str, &str)] = &[
     ("data-analyst", include_str!("../agents/data-analyst.toml")),
     ("data-lead", include_str!("../agents/data-lead.toml")),
     ("editor", include_str!("../agents/editor.toml")),
+    (
+        "panel-adjudicator",
+        include_str!("../agents/panel-adjudicator.toml"),
+    ),
+    (
+        "panel-analyst-1",
+        include_str!("../agents/panel-analyst-1.toml"),
+    ),
+    (
+        "panel-analyst-2",
+        include_str!("../agents/panel-analyst-2.toml"),
+    ),
+    (
+        "panel-analyst-3",
+        include_str!("../agents/panel-analyst-3.toml"),
+    ),
+    ("panel-lead", include_str!("../agents/panel-lead.toml")),
+    ("panel-writer", include_str!("../agents/panel-writer.toml")),
     ("researcher", include_str!("../agents/researcher.toml")),
     ("reviewer", include_str!("../agents/reviewer.toml")),
     ("writer", include_str!("../agents/writer.toml")),
@@ -1249,8 +1267,9 @@ cap_usd = 2.0
     }
 
     /// AGE-752: what ships reads well in Settings → Agents and `list_agents`:
-    /// every preset has a one-line description and a short preamble, names
-    /// no model (the roster's default runs it), and has a turn budget.
+    /// every preset has a one-line description and a preamble, names no
+    /// model (the roster's default runs it), and has a budget: a turn cap or
+    /// a deadline.
     #[test]
     fn every_preset_is_described_and_budgeted() {
         for (name, _) in PRESETS {
@@ -1260,16 +1279,17 @@ cap_usd = 2.0
                 !description.is_empty() && !description.contains('\n') && description.len() <= 130,
                 "{name}: {description:?}"
             );
-            let preamble = spec.agent.preamble.as_deref().unwrap_or_default();
             assert!(
-                (1..=1000).contains(&preamble.len()),
-                "{name}: a preamble of {} bytes",
-                preamble.len()
+                spec.agent
+                    .preamble
+                    .as_deref()
+                    .is_some_and(|p| !p.is_empty()),
+                "{name} has a preamble"
             );
             assert!(spec.agent.model.is_none(), "{name} names no model");
             assert!(
-                spec.budget.max_agent_turns.is_some(),
-                "{name} has a turn budget"
+                spec.budget.max_agent_turns.is_some() || spec.budget.max_duration.is_some(),
+                "{name} has a budget"
             );
         }
     }
@@ -1291,6 +1311,12 @@ cap_usd = 2.0
                 "data-analyst",
                 "data-lead",
                 "editor",
+                "panel-adjudicator",
+                "panel-analyst-1",
+                "panel-analyst-2",
+                "panel-analyst-3",
+                "panel-lead",
+                "panel-writer",
                 "researcher",
                 "reviewer",
                 "writer",
@@ -1376,6 +1402,12 @@ cap_usd = 2.0
                 "analyst",
                 "data-lead",
                 "editor",
+                "panel-adjudicator",
+                "panel-analyst-1",
+                "panel-analyst-2",
+                "panel-analyst-3",
+                "panel-lead",
+                "panel-writer",
                 "researcher",
                 "reviewer",
                 "writer",

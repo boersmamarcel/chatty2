@@ -224,6 +224,6 @@ When `memo-writer` wants to create `memo.md`, you get the same kind of card as i
 
 ## Next
 
-- More teams, all experimental: `research-brief` ships with this release (a folder of documents to a sourced brief, see [Sub-agents](./sub-agents.md#teams)), and `analyst-panel` (several analysts answer on their own, a judge picks the best answer) ships separately.
+- More teams, all experimental: `research-brief` ships with this release (a folder of documents to a sourced brief, see [Sub-agents](./sub-agents.md#teams)), and `analyst-panel`, where three analysts answer on their own and an adjudicator picks one when they disagree.
 - [Tutorial: a small agentic team](./tutorial-team.md): the terminal version, a coding team with its own playbook
 - [Security & approvals](./security.md)

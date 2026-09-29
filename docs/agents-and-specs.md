@@ -822,7 +822,7 @@ A schema may add read rules, `"x-must-be-read": {"coder": ["files_changed"]}`: e
 value of the coder's latest `files_changed` must appear in this role's handoff. The
 leader checks them and records a miss as the `handoff_misread` failure tag, with no
 retry. A headless `--team` leader's `--usage-file` carries
-`handoff_invalid_by_role` (role → invalid answers) and `failure_tags`, each absent when
+`handoff_invalid_by_role` (role → invalid answers) and `failure_tags`, and every run that delegates carries `delegated_by_agent` (agent → the tokens it reported), each absent when
 empty. A team without `handoffs` behaves exactly as before, down to the bytes on the
 worker's socket.
 
@@ -839,8 +839,8 @@ as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
 `crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
-Two presets ship, both **experimental**: a team becomes a documented default only after
-a benchmark shows it beats a single agent (PL-S8). Their specs name no models, and a
+Three presets ship, all **experimental**: teams are supported, and a team becomes a
+documented default only after a benchmark shows it beats a single agent (PL-S8). Their specs name no models, and a
 changed prompt is a new preset name, so a run of one stays comparable with an earlier one.
 
 | Team | Leader | Workers | Shows |
@@ -848,8 +848,9 @@ changed prompt is a new preset name, so a run of one stays comparable with an ea
 | `data-analysis` | `data-lead` | `data-analyst`, `reviewer` | A business question answered with SQL (`query_data`, no shell), a reviewer that re-derives the numbers, and the saved `report.md` relayed to you for approval. `teams/data-analysis/fixture/orders.csv` is its sample: 793 orders over July–August with a known answer (August revenue −17.6%; EU `Pro` orders fall 47 → 14, about 70% of the fall; the online `SUMMER30` code takes 30% off `Starter` from 1 August without lifting volume, about 27%). |
 | `research-brief` | `editor` | `researcher`, `writer`, `reviewer` | Sourced writing from a folder of documents, a relayed write approval. `teams/research-brief/fixture/docs/` is its sample corpus. |
 
-Neither has a `SKILL.md`: the leader's preamble is the playbook, so `/agent data-lead …`
-on the desktop runs it the same as `--team data-analysis`. `reviewer` is shared by both.
+`data-analysis` and `research-brief` have no `SKILL.md`: the leader's preamble is the
+playbook, so `/agent data-lead …` on the desktop runs it the same as `--team data-analysis`.
+`reviewer` is shared by both.
 The user walkthrough is the docs-site tutorial *From one agent to a team*; the
 reliability runs behind both presets, and why `coder-reviewer` and the Benford team did
 not ship, are in `docs/research/showcase-runs-2026-09-29.md`. The old `coder-reviewer`
@@ -861,6 +862,22 @@ recorded contexts and the team-mechanics tests load it from there.
 chatty-tui --team data-analysis --headless --model <model> \
   -m "Revenue in orders.csv fell in August. Find out why."
 ```
+
+The third preset, `analyst-panel` (experimental, AGE-754), is for data questions: a
+`coordinator` leader `panel-lead` whose `delegates_to` is exactly its roster; three
+identical analysts `panel-analyst-1..3` on the `coder` profile (30 turns and 12 minutes
+each, inside the leader's 45-minute deadline); a read-only adjudicator
+`panel-adjudicator` (the `coordinator` profile with no one to delegate to, so it compares
+the analysts' traces and cannot re-solve); and `panel-writer` for a question that asks
+for its answer in a file. The analysts' and the adjudicator's handoffs are typed
+(`schemas/analyst.json`: `answer`, `method`, `assumptions`; `schemas/adjudicator.json`:
+`choice`, `answer`, `reason`), and a preset's schemas are compiled into the binary beside
+its `team.json` (`TeamPreset::schemas`). The skill has the leader delegate to the three
+analysts with `include_trace`, compare their normalised answers, send anything short of
+a unanimous panel to the adjudicator with every trace, and deliver the chosen answer
+verbatim; a failed analyst drops out rather than being re-asked. Dataset-specific help
+(helper code, conventions) is not part of the preset: the analysts read a `BRIEF.md` in
+the workspace root when there is one. Measurement: `docs/research/`.
 
 **Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`
 sometimes writes its tool call inside the thinking channel; Ollama surfaces tool calls
