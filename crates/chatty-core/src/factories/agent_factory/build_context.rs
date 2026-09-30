@@ -487,6 +487,7 @@ mod tests {
                 api_key: None,
                 enabled: true,
                 skills: Vec::new(),
+                allow_private_network: false,
             }],
             plugin_host: PluginHost {
                 module_roots: vec![PathBuf::from("/modules")],

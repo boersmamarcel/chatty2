@@ -436,6 +436,7 @@ mod tests {
                 api_key: Some("a2a-key".to_string()),
                 enabled: true,
                 skills: vec!["translate".to_string()],
+                allow_private_network: false,
             }],
             execution_settings: ExecutionSettingsModel {
                 enabled: true,

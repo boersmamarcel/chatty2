@@ -209,6 +209,7 @@ mod schema_docs {
             api_key: None,
             enabled: true,
             skills: vec![],
+            allow_private_network: false,
         };
         let json = serde_json::to_value(&a2a).unwrap();
         assert!(json.get("api_key").is_none());

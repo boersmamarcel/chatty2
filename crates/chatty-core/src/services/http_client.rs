@@ -100,7 +100,7 @@ pub(crate) fn open_web_client_with(
         .no_proxy()
         .dns_resolver(std::sync::Arc::new(GuardedResolver::new(
             lookup,
-            public_only,
+            std::sync::Arc::new(public_only),
         )))
         .build()
         .expect("Failed to initialize HTTP client (TLS backend error)")

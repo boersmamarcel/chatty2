@@ -1158,6 +1158,7 @@ mod tests {
             api_key: None,
             enabled,
             skills: vec![],
+            allow_private_network: false,
         }
     }
 
