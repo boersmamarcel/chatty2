@@ -36,6 +36,9 @@ pub struct SwarmActions {
     pub fold_node: FoldSwarmTreeNode,
     pub open_node: OpenSwarmTranscript,
     pub stop_node: StopSwarmTreeNode,
+    /// The top node of this turn's delegation run, when it has one: what ↗
+    /// on its delegation row opens (AGE-813).
+    pub run: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -83,6 +86,14 @@ pub fn render_typed_block(
             if let Some(toggle) = on_activity_toggle {
                 let block_id = id.0;
                 group = group.on_toggle(move |cx| toggle(block_id, cx));
+            }
+            if let Some(swarm) = swarm
+                && let Some(name) = swarm.run.clone()
+            {
+                let open_node = swarm.open_node.clone();
+                group = group.open_run(Some(Rc::new(move |window, cx| {
+                    open_node(message_index, name.clone(), window, cx)
+                })));
             }
             group.into_any_element()
         }

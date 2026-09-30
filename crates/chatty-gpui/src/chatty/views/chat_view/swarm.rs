@@ -80,6 +80,16 @@ impl ChatView {
                 continue;
             };
             if trace.tree().children(top).is_empty() {
+                // No sub-agents: the row stays plain, but ↗ on it can still
+                // open this one agent's run (AGE-813).
+                let mut run = adapt_swarm_tree(trace, top, book);
+                if let Some(previous) = self.delegation_runs.get(idx) {
+                    run = run.with_folds_of(previous);
+                }
+                if self.delegation_runs.get(idx).map(|r| &**r) != Some(&run) {
+                    self.delegation_runs.insert(*idx, Arc::new(run));
+                    changed = true;
+                }
                 continue;
             }
             let Some(msg) = self.messages.get_mut(*idx) else {
@@ -103,21 +113,28 @@ impl ChatView {
     /// drawn as running was stopped with the turn.
     pub fn settle_swarm_trees(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
-        for (idx, _) in &self.swarm_rows {
-            let Some(msg) = self.messages.get_mut(*idx) else {
-                continue;
-            };
-            let Some(tree) = msg.swarm_tree.as_ref().filter(|t| t.running() > 0) else {
-                continue;
-            };
+        let settle = |tree: &Arc<SwarmTree>| {
             let mut settled = SwarmTree::clone(tree);
             for node in &mut settled.nodes {
                 if node.status.is_running() {
                     node.status = NodeStatus::Canceled;
                 }
             }
-            msg.swarm_tree = Some(Arc::new(settled));
-            changed = true;
+            Arc::new(settled)
+        };
+        for (idx, _) in &self.swarm_rows {
+            if let Some(msg) = self.messages.get_mut(*idx)
+                && let Some(tree) = msg.swarm_tree.as_ref().filter(|t| t.running() > 0)
+            {
+                msg.swarm_tree = Some(settle(tree));
+                changed = true;
+            }
+            if let Some(run) = self.delegation_runs.get_mut(idx)
+                && run.running() > 0
+            {
+                *run = settle(run);
+                changed = true;
+            }
         }
         if changed {
             cx.notify();
@@ -145,6 +162,22 @@ impl ChatView {
         };
         msg.swarm_tree = Some(Arc::new(next));
         cx.notify();
+    }
+
+    /// The run under message `msg_idx`: its swarm tree, or the one-node tree
+    /// of a worker that delegated to no one.
+    pub(super) fn run_tree(&self, msg_idx: usize) -> Option<Arc<SwarmTree>> {
+        self.messages
+            .get(msg_idx)
+            .and_then(|msg| msg.swarm_tree.clone())
+            .or_else(|| self.delegation_runs.get(&msg_idx).cloned())
+    }
+
+    /// The top agent of the run under message `msg_idx`: what ↗ on its
+    /// delegation row opens. `None` before the broker has reported a worker.
+    pub(super) fn delegation_run_name(&self, msg_idx: usize) -> Option<String> {
+        self.run_tree(msg_idx)
+            .and_then(|tree| tree.nodes.first().map(|node| node.name.clone()))
     }
 
     /// Open `name`'s transcript, from the tree under message `msg_idx`.
@@ -195,12 +228,10 @@ impl SwarmNodeTranscript {
 
 impl Render for SwarmNodeTranscript {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tree = self.chat_view.upgrade().and_then(|view| {
-            view.read(cx)
-                .messages
-                .get(self.msg_idx)
-                .and_then(|msg| msg.swarm_tree.clone())
-        });
+        let tree = self
+            .chat_view
+            .upgrade()
+            .and_then(|view| view.read(cx).run_tree(self.msg_idx));
         let found = tree.and_then(|tree| tree.index_of(&self.name).map(|ix| (tree, ix)));
         match found {
             Some((tree, ix)) => {

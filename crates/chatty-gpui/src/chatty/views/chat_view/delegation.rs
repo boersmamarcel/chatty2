@@ -29,6 +29,9 @@ impl ChatView {
             .is_some_and(|m| matches!(m.role, MessageRole::Assistant))
         {
             self.messages.pop();
+            // A run lives and dies with its row.
+            let len = self.messages.len();
+            self.delegation_runs.retain(|idx, _| *idx < len);
             cx.notify();
         }
     }
@@ -42,6 +45,7 @@ impl ChatView {
         self.delegation_progress_msg_idx = None;
         self.delegation_started_at = None;
         self.swarm_rows.clear();
+        self.delegation_runs.clear();
         self.pending_approval = None;
         self.pending_clarification = None;
         self.agent_task_snapshot = None;
