@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -5,9 +7,35 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::skeleton::Skeleton;
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
+use gpui_component::{ActiveTheme, Disableable as _, Icon, IconName, Sizable};
 
 use super::verb::tool_row_label;
+
+/// What ↗ does on a delegation row: open the worker's own run.
+pub type OpenRun = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Tooltip of ↗ on a delegation row with no worker run to open yet.
+pub const NO_RUN_TOOLTIP: &str = "No run to open: this agent's run is not available";
+
+/// What ↗ does on a row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenState {
+    /// A delegation row with a worker run: ↗ opens it.
+    Run,
+    /// A delegation row with no worker run yet: ↗ is disabled, with a tooltip.
+    NoRun,
+    /// Any other tool: unchanged.
+    Generic,
+}
+
+/// Whether ↗ is disabled, and its tooltip, for a row in `state`.
+fn open_button(state: OpenState) -> (bool, &'static str) {
+    match state {
+        OpenState::Run => (false, "Open this agent's run"),
+        OpenState::NoRun => (true, NO_RUN_TOOLTIP),
+        OpenState::Generic => (false, "Open"),
+    }
+}
 
 /// Compact tool-call row. Verb tense encodes state; path and +/- are separate.
 #[derive(IntoElement)]
@@ -19,11 +47,33 @@ pub struct ToolRow {
     /// same redacted text, no way to tell a retry from a second call
     /// (AGE-187). Anything above 1 is labelled.
     attempt: usize,
+    /// Opens the worker's run, for a delegation (`invoke_agent`) row. `None`
+    /// on such a row means there is no run to open yet, and ↗ is disabled.
+    open_run: Option<OpenRun>,
 }
 
 impl ToolRow {
     pub fn new(tool: ToolCallBlock) -> Self {
-        Self { tool, attempt: 1 }
+        Self {
+            tool,
+            attempt: 1,
+            open_run: None,
+        }
+    }
+
+    /// What ↗ does on this row.
+    fn open_state(&self) -> OpenState {
+        match (&self.tool.tool_name[..], &self.open_run) {
+            ("invoke_agent", Some(_)) => OpenState::Run,
+            ("invoke_agent", None) => OpenState::NoRun,
+            _ => OpenState::Generic,
+        }
+    }
+
+    /// What ↗ opens on a delegation row (AGE-813).
+    pub fn open_run(mut self, open_run: Option<OpenRun>) -> Self {
+        self.open_run = open_run;
+        self
     }
 
     pub fn attempt(mut self, attempt: usize) -> Self {
@@ -79,7 +129,9 @@ fn source_icon(source: &ToolSource) -> Option<IconName> {
 impl RenderOnce for ToolRow {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let attempt = self.attempt;
+        let open_state = self.open_state();
         let tool = self.tool;
+        let open_run = self.open_run;
         let id = if tool.id.is_empty() {
             tool.tool_name.clone()
         } else {
@@ -175,13 +227,23 @@ impl RenderOnce for ToolRow {
             .child(
                 Clipboard::new(ElementId::Name(format!("tool-copy-{id}").into())).value(copy_value),
             )
-            .child(
-                Button::new(ElementId::Name(format!("tool-open-{id}").into()))
+            .child({
+                let open = Button::new(ElementId::Name(format!("tool-open-{id}").into()))
                     .ghost()
                     .xsmall()
                     .icon(Icon::new(IconName::ExternalLink))
-                    .tooltip("Open"),
-            );
+                    .debug_selector(|| format!("tool-open-{}", tool.tool_name));
+                // Never a silent no-op: a disabled ↗ says why (AGE-813).
+                let (disabled, tooltip) = open_button(open_state);
+                let open = open.disabled(disabled).tooltip(tooltip);
+                match (open_state, open_run) {
+                    // The worker's own run: its steps and tool calls.
+                    (OpenState::Run, Some(open_run)) => {
+                        open.on_click(move |_, window, cx| open_run(window, cx))
+                    }
+                    _ => open,
+                }
+            });
 
         let Some(err) = err else {
             return row.into_any_element();
@@ -230,7 +292,57 @@ impl RenderOnce for ToolRow {
 
 #[cfg(test)]
 mod tests {
-    use super::{error_headline, shell_command, strip_error_prefixes};
+    use super::{
+        NO_RUN_TOOLTIP, OpenRun, OpenState, ToolRow, error_headline, open_button, shell_command,
+        strip_error_prefixes,
+    };
+    use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
+    use std::rc::Rc;
+
+    fn tool(name: &str) -> ToolCallBlock {
+        ToolCallBlock {
+            id: "t".into(),
+            tool_name: name.into(),
+            display_name: name.into(),
+            input: "{}".into(),
+            output: None,
+            output_preview: None,
+            state: ToolCallState::Success,
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::Local,
+            execution_engine: None,
+        }
+    }
+
+    #[test]
+    fn open_button_is_disabled_with_a_tooltip_only_without_a_run() {
+        assert_eq!(open_button(OpenState::NoRun), (true, NO_RUN_TOOLTIP));
+        assert!(!open_button(OpenState::Run).0);
+        assert!(!open_button(OpenState::Generic).0);
+        assert!(!NO_RUN_TOOLTIP.is_empty());
+    }
+
+    /// AGE-813: ↗ on a delegation row with a worker run opens it; with none
+    /// it is disabled (never a silent no-op); other tools are untouched.
+    #[test]
+    fn open_on_a_delegation_row_needs_a_run() {
+        let run: OpenRun = Rc::new(|_, _| {});
+        assert_eq!(
+            ToolRow::new(tool("invoke_agent"))
+                .open_run(Some(run))
+                .open_state(),
+            OpenState::Run
+        );
+        assert_eq!(
+            ToolRow::new(tool("invoke_agent")).open_state(),
+            OpenState::NoRun
+        );
+        assert_eq!(
+            ToolRow::new(tool("read_file")).open_state(),
+            OpenState::Generic
+        );
+    }
 
     /// Only shell commands get "Show in terminal", with the command as sent.
     #[test]

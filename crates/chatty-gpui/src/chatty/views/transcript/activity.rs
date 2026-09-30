@@ -7,7 +7,7 @@ use gpui_component::collapsible::Collapsible as CollapsibleEl;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
-use super::tool_row::ToolRow;
+use super::tool_row::{OpenRun, ToolRow};
 use super::verb::tool_row_label;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +230,7 @@ pub struct ActivityGroup {
     open: bool,
     settled: bool,
     on_toggle: Option<ActivityToggle>,
+    open_run: Option<OpenRun>,
 }
 
 impl ActivityGroup {
@@ -239,7 +240,15 @@ impl ActivityGroup {
             open: true,
             settled: true,
             on_toggle: None,
+            open_run: None,
         }
+    }
+
+    /// What ↗ opens on a delegation row of this group: the worker's run
+    /// (AGE-813). `None` leaves that ↗ disabled.
+    pub fn open_run(mut self, open_run: Option<OpenRun>) -> Self {
+        self.open_run = open_run;
+        self
     }
 
     pub fn open(mut self, open: bool) -> Self {
@@ -313,6 +322,7 @@ impl RenderOnce for ActivityGroup {
 
         let header = div()
             .id("activity-header")
+            .debug_selector(|| "activity-header".into())
             .flex()
             .flex_row()
             .items_center()
@@ -379,7 +389,9 @@ impl RenderOnce for ActivityGroup {
                                 } else {
                                     1
                                 };
-                                ToolRow::new(tool).attempt(attempt)
+                                ToolRow::new(tool)
+                                    .attempt(attempt)
+                                    .open_run(self.open_run.clone())
                             })
                             .collect::<Vec<_>>()
                     }),

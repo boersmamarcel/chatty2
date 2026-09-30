@@ -105,7 +105,7 @@ pub use swarm_tree::{
 };
 pub use table::{extract_table_preview, render_table_preview_card};
 pub use ticker::HeadlineTicker;
-pub use tool_row::ToolRow;
+pub use tool_row::{NO_RUN_TOOLTIP, OpenRun, ToolRow};
 pub use types::{Block, BlockId, Turn, TurnRole};
 
 pub const HEADLINE_TICK_MS: u64 = 550;
