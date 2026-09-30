@@ -645,6 +645,24 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         m
     };
 
+    // The team's roster for this run: `--model` runs every member on that
+    // model, pinned ones included (AGE-808), as it does the leader.
+    let run_roster = team
+        .as_ref()
+        .map(|team| team.run_roster(cli.model.as_deref()));
+    // AGE-808: a pinned model that cannot run fails here, naming the agent,
+    // the pin and the override: this process's own spec, and a team's whole
+    // roster before any worker is spawned. With `--model` nothing is pinned
+    // for this run, and a mistyped flag gets the "not found" list below.
+    if cli.model.is_none() {
+        chatty_core::services::team::check_model_providers(
+            std::iter::once(&spec).chain(run_roster.iter().flatten()),
+            models.models(),
+            &providers,
+        )
+        .context("the agents' models cannot run")?;
+    }
+
     // Resolve which model to use: the spec's (--model already applied to
     // it), else the roster's default.
     let mut model_config = resolve_model(spec.agent.model.as_deref(), &models)?;
@@ -694,8 +712,8 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     let run_broker = starts_a_broker(&cli);
     // The roster's specs: the team's, else the names module settings list,
     // else every exposed spec (PL-U5).
-    let broker_agents = match team.as_ref() {
-        Some(team) => team.agents.clone(),
+    let broker_agents = match run_roster {
+        Some(roster) => roster,
         None if run_broker => chatty_core::agent_spec::load_roster(
             &module_settings.virtual_agents,
             execution_settings.workspace_dir.as_deref().map(Path::new),

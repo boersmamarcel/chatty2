@@ -176,7 +176,9 @@ chatty-tui --team analyst-panel --headless --ollama --model qwen3:14b \
   -m "Which customers churned last quarter, and why? The data is in data/."
 ```
 
-`--model` (and `--tools` / `--preamble`) override the team's own leader settings when given. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/agents-and-specs.md#teams).
+Another, also experimental, writes architecture documents: `architecture-review` writes an ADR or a design doc from your repository and has it reviewed in rounds by three fresh reviewers (maintainability, security and a devil's advocate) until a round finds nothing that must be fixed. It is the one built-in team that names its own models, hosted Claude models through OpenRouter, so a run costs hosted-model tokens, and it will not start without an OpenRouter key unless you run it on your own model (`--model <model>` does that for the whole team). How to run it and how to swap the models: [An architecture-review team](./tutorial-team.md#a-built-in-architecture-review-team-architecture-review).
+
+`--model` runs every agent of the team on that model for the run, including agents whose spec names a model of its own; `--tools` and `--preamble` override the leader's settings. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/agents-and-specs.md#teams).
 
 A team can also make what one role hands the next explicit and checkable: `team.json`'s optional `handoffs` names a JSON Schema per role, as a path relative to the team directory. A worker running as that role must end its final answer with a fenced `json` block matching the schema — get it wrong once and Chatty sends the answer back listing the schema errors; get it wrong again and the delegation fails, with the errors visible to the leader. A team with no `handoffs` behaves exactly as before.
 
