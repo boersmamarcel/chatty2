@@ -29,8 +29,8 @@ pub fn plugins_page() -> SettingPage {
 
 /// The module runtime switch: what used to require quitting Chatty and
 /// hand-editing `module_settings.json`'s `enabled` field, then restarting
-/// (see the swarm tutorial). `toggle_module_runtime` starts or stops the
-/// gateway/broker live, so no restart is needed either way.
+/// `toggle_module_runtime` rebuilds the gateway live, so no restart is
+/// needed either way. The broker is there whatever it says (AGE-759).
 fn module_runtime_group() -> SettingGroup {
     SettingGroup::new().title("Module runtime").items(vec![
         SettingItem::new(
@@ -44,8 +44,8 @@ fn module_runtime_group() -> SettingGroup {
             .default_value(false),
         )
         .description(
-            "Runs the WASM module runtime and the local agent broker (the gateway plugins and \
-             delegated agents use). Off by default.",
+            "Loads WASM modules and serves them on the gateway's HTTP port. Off by default. \
+             Delegated agents do not need it: the local agent broker runs either way.",
         ),
     ])
 }

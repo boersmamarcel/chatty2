@@ -27,9 +27,13 @@ You give a sales export to a three-agent team and ask it a real question: *reven
 
 ## 1. Set up
 
-**Switch on the module runtime.** The team runs on the local agent broker, which comes with the module runtime. In **Settings → Plugins**, turn on **Enable module runtime**. It starts (or stops) right away — no restart needed.
+**Add the team.** Its agents ship with Chatty but are experimental, so they are not on your roster until you name them. Quit Chatty, then write `~/.config/chatty/module_settings.json` (create the file if it is not there) and start Chatty again:
 
-![Settings → Plugins: Enable module runtime turns the broker on live](../assets/screenshots/swarm-00-module-runtime-toggle.png)
+```json
+{
+  "virtual_agents": ["local-agent", "data-lead", "data-analyst", "reviewer"]
+}
+```
 
 **Get the sample data.** `orders.csv` has 793 orders from July and August: date, region, channel, product, units, price, discount, promo code and revenue. Something happened in August.
 
@@ -196,7 +200,7 @@ max_agent_turns = 4
 - The `coordinator` profile can read and delegate, but it cannot write or run commands. The `coder` profile can write files. Each file it writes still asks you first.
 - `[budget]` caps each agent's model turns, so a confused agent stops instead of running on.
 
-Open **Settings → Agents** and click **Reload**. Both agents appear. Then paste the findings from step 6 into:
+Add `"memo-lead"` and `"memo-writer"` to `virtual_agents` in `module_settings.json` and restart Chatty: a roster you name is exactly those agents. Open **Settings → Agents**; both agents appear. Then paste the findings from step 6 into:
 
 ```text
 /agent memo-lead Write a memo to the sales director. Findings: <paste the answer and findings from the report>
@@ -214,7 +218,7 @@ When `memo-writer` wants to create `memo.md`, you get the same kind of card as i
 
 | You see | Why | Fix |
 |---|---|---|
-| Settings → Agents says the module runtime is off | No local agents run without it | Step 1: **Enable module runtime** in Settings → Plugins |
+| `data-lead` shows **Preset · not in the roster**, and `/agent data-lead …` goes to the default agent | The team's agents are not in `virtual_agents` | Step 1: name all three in `module_settings.json`, then restart |
 | No approval card at all | The approval mode is **Auto-approve sandboxed** (the default), which lets writes inside the workspace through | Switch to **Always ask** in Settings → Code Execution to see each write and command first |
 | The reviewer appears twice in the tree | It asked for changes, and the lead fixed the report and sent it back | This is the review loop working. The lead sends the report back only once. |
 | A run takes a long time on a local model | Every agent's turns share one model server, one request at a time | Expect five to ten minutes on a single local GPU. A hosted lead (step 7) makes it faster. |

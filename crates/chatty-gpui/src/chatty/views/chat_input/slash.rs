@@ -5,9 +5,10 @@
 //! - `SlashCommand` (an alias for `chatty_core::slash_commands::SlashCommandSpec`
 //!   — the catalog itself is shared with the TUI, see AGE-172) / `SkillEntry` /
 //!   `SlashMenuItem` types.
-//! - `slash_menu_items_for` / `slash_menu_items_with_skills` — pure
-//!   filtering helpers (also called from `chat_view` and from unit
-//!   tests).
+//! - `slash_menu_items_for` / `slash_menu_items_with_skills` /
+//!   `agent_menu_items` / `slash_menu_items` — pure filtering helpers
+//!   (also called from unit tests).
+//! - `reachable_agents` — the agents the `/agent ` picker lists (AGE-761).
 //! - `ChatInputState` methods that manage the picker's open/closed
 //!   state, selection index, and command application.
 //! - `render_slash_menu` — the popover element shown above the input.
@@ -19,8 +20,11 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::scroll::ScrollableElement;
+use std::path::Path;
 
 use super::{ChatInputEvent, ChatInputState};
+use crate::settings::models::{AgentSpecsModel, ExtensionsModel};
+use chatty_core::settings::models::extensions_store::ExtensionKind;
 
 // ---------------------------------------------------------------------------
 // Slash command menu
@@ -39,12 +43,25 @@ pub struct SkillEntry {
     pub description: String,
 }
 
-/// A combined item in the slash-command picker: either a built-in command or a
-/// dynamic skill loaded from the filesystem.
+/// An agent the `/agent ` picker offers (AGE-761).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentPickerEntry {
+    /// The name `/agent <name> <prompt>` dispatches to.
+    pub name: String,
+    /// The spec's description, or what a remote agent's config says about it.
+    pub description: String,
+}
+
+/// A combined item in the slash-command picker: a built-in command, a
+/// dynamic skill loaded from the filesystem, or — after `/agent ` — an agent
+/// the conversation can reach (AGE-761).
 #[derive(Clone, Debug, PartialEq)]
 pub enum SlashMenuItem {
     Command(&'static SlashCommand),
     Skill(SkillEntry),
+    Agent(AgentPickerEntry),
+    /// The `/agent ` picker's only row when there is no agent to offer.
+    NoAgents,
 }
 
 impl SlashMenuItem {
@@ -53,6 +70,8 @@ impl SlashMenuItem {
         match self {
             SlashMenuItem::Command(cmd) => cmd.command.to_string(),
             SlashMenuItem::Skill(skill) => format!("/{}", skill.name),
+            SlashMenuItem::Agent(agent) => agent.name.clone(),
+            SlashMenuItem::NoAgents => "No agents available".to_string(),
         }
     }
 
@@ -61,6 +80,8 @@ impl SlashMenuItem {
         match self {
             SlashMenuItem::Command(cmd) => cmd.description,
             SlashMenuItem::Skill(skill) => &skill.description,
+            SlashMenuItem::Agent(agent) => &agent.description,
+            SlashMenuItem::NoAgents => "",
         }
     }
 
@@ -70,7 +91,7 @@ impl SlashMenuItem {
             SlashMenuItem::Command(cmd) => cmd.execute_immediately,
             // Skills are not execute-immediately — we insert a prompt the user
             // can review and optionally extend before pressing Enter.
-            SlashMenuItem::Skill(_) => false,
+            SlashMenuItem::Skill(_) | SlashMenuItem::Agent(_) | SlashMenuItem::NoAgents => false,
         }
     }
 
@@ -79,12 +100,20 @@ impl SlashMenuItem {
         match self {
             SlashMenuItem::Command(cmd) => cmd.insert_text.to_string(),
             SlashMenuItem::Skill(skill) => format!("Use the '{}' skill: ", skill.name),
+            SlashMenuItem::Agent(agent) => format!("/agent {} ", agent.name),
+            SlashMenuItem::NoAgents => String::new(),
         }
     }
 
     /// Returns true when this item represents a filesystem skill.
     pub fn is_skill(&self) -> bool {
         matches!(self, SlashMenuItem::Skill(_))
+    }
+
+    /// Whether Enter, Tab or a click can apply it: every row but the empty
+    /// agent picker's placeholder (AGE-761).
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self, SlashMenuItem::NoAgents)
     }
 }
 
@@ -148,6 +177,108 @@ pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> 
     items
 }
 
+/// The `/agent ` picker's query: the one word after `/agent `, `None` when
+/// the picker is not in play — before the space, or once a second space
+/// follows the name (AGE-761).
+fn agent_query(input_text: &str) -> Option<&str> {
+    // gpui-component appends Enter's newline to the buffer before it fires
+    // `PressEnter`; that is not a space the user typed.
+    let text = input_text.trim_start().trim_end_matches(['\n', '\r']);
+    let query = text.strip_prefix("/agent ")?;
+    (!query.contains(char::is_whitespace)).then_some(query)
+}
+
+/// The `/agent ` picker's rows for `input_text` (AGE-761), `None` when the
+/// picker is not in play. Names starting with the query come first, then
+/// names containing it. With no agent at all, a bare `/agent ` shows the
+/// one "No agents available" row; a typed word then closes the picker so
+/// Enter sends it to the default sub-agent.
+pub fn agent_menu_items(
+    input_text: &str,
+    agents: &[AgentPickerEntry],
+) -> Option<Vec<SlashMenuItem>> {
+    let query = agent_query(input_text)?.to_lowercase();
+    if agents.is_empty() {
+        return Some(if query.is_empty() {
+            vec![SlashMenuItem::NoAgents]
+        } else {
+            Vec::new()
+        });
+    }
+    let (mut items, substring): (Vec<_>, Vec<_>) = agents
+        .iter()
+        .filter(|agent| agent.name.to_lowercase().contains(&query))
+        .partition(|agent| agent.name.to_lowercase().starts_with(&query));
+    items.extend(substring);
+    Some(
+        items
+            .into_iter()
+            .map(|agent| SlashMenuItem::Agent(agent.clone()))
+            .collect(),
+    )
+}
+
+/// Every picker row for `input_text`: the `/agent ` picker's once it is in
+/// play (AGE-761), else commands and skills.
+pub fn slash_menu_items(
+    input_text: &str,
+    skills: &[SkillEntry],
+    agents: &[AgentPickerEntry],
+) -> Vec<SlashMenuItem> {
+    agent_menu_items(input_text, agents)
+        .unwrap_or_else(|| slash_menu_items_with_skills(input_text, skills))
+}
+
+/// The agents `/agent` can reach from a conversation whose effective
+/// workspace is `workspace` (AGE-761): the local roster its `invoke_agent`
+/// is given (`gateway_and_roster`), then the enabled remote A2A agents
+/// (`ExtensionsModel`). A remote agent wins a name both have, as it does
+/// when `/agent` dispatches.
+pub fn reachable_agents(cx: &mut App, workspace: Option<&Path>) -> Vec<AgentPickerEntry> {
+    // The same names the conversation's `invoke_agent` gets, so the picker
+    // never offers an agent no broker can reach (AGE-759).
+    let roster = crate::chatty::controllers::app_controller::gateway_and_roster(cx, workspace)
+        .unwrap_or_default();
+    // Enabled the way `/agent` dispatch reads it: the extension's own switch.
+    let remote: Vec<AgentPickerEntry> = cx
+        .try_global::<ExtensionsModel>()
+        .map(|extensions| {
+            extensions
+                .extensions
+                .iter()
+                .filter(|extension| extension.enabled)
+                .filter_map(|extension| match &extension.kind {
+                    ExtensionKind::A2aAgent(config) => Some(AgentPickerEntry {
+                        name: config.name.clone(),
+                        description: extension.description.clone(),
+                    }),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let listings = if roster.is_empty() {
+        Vec::new()
+    } else {
+        AgentSpecsModel::listings(cx)
+    };
+    let mut agents: Vec<AgentPickerEntry> = roster
+        .into_iter()
+        .filter(|name| !remote.iter().any(|agent| agent.name == *name))
+        .map(|name| AgentPickerEntry {
+            description: listings
+                .iter()
+                .find(|listing| listing.name == name && !listing.shadowed)
+                .and_then(|listing| listing.spec.as_ref().ok())
+                .and_then(|spec| spec.agent.description.clone())
+                .unwrap_or_default(),
+            name,
+        })
+        .collect();
+    agents.extend(remote);
+    agents
+}
+
 // ---------------------------------------------------------------------------
 // ChatInputState — slash menu state methods
 // ---------------------------------------------------------------------------
@@ -160,7 +291,57 @@ impl ChatInputState {
     /// Whether the slash-command picker should be shown given the current input.
     pub fn is_slash_menu_open(&self, cx: &mut Context<Self>) -> bool {
         let text = self.input.read(cx).text().to_string();
-        !slash_menu_items_with_skills(&text, &self.available_skills).is_empty()
+        !self.slash_menu_items(&text).is_empty()
+    }
+
+    /// The picker's rows for `text`: commands and skills, or the `/agent `
+    /// picker's agents — none once Escape dismissed that picker and the
+    /// text has not changed since (AGE-761).
+    pub fn slash_menu_items(&self, text: &str) -> Vec<SlashMenuItem> {
+        if agent_query(text).is_some()
+            && self.agent_picker_dismissed_for.as_deref()
+                == Some(text.trim_end_matches(['\n', '\r']))
+        {
+            return Vec::new();
+        }
+        slash_menu_items(text, &self.available_skills, &self.available_agents)
+    }
+
+    /// Whether the `/agent ` picker is showing for `text` (AGE-761).
+    pub fn is_agent_picker_open(&self, text: &str) -> bool {
+        agent_query(text).is_some() && !self.slash_menu_items(text).is_empty()
+    }
+
+    /// Escape on the `/agent ` picker: close it but keep what was typed
+    /// (AGE-761). The next edit opens it again.
+    pub fn dismiss_agent_picker(&mut self, text: &str) {
+        self.agent_picker_dismissed_for = Some(text.trim_end_matches(['\n', '\r']).to_string());
+    }
+
+    /// Re-read the agents the `/agent ` picker offers each time it opens
+    /// for `text` (AGE-761), for the conversation's own effective workspace.
+    pub fn refresh_agents_if_picker_opened(&mut self, text: &str, cx: &mut Context<Self>) {
+        let open = agent_query(text).is_some();
+        if open && !self.agent_picker_open {
+            let default_workspace = cx
+                .try_global::<crate::settings::models::ExecutionSettingsModel>()
+                .and_then(|settings| settings.workspace_dir.clone())
+                .map(std::path::PathBuf::from);
+            let workspace = chatty_core::agent_spec::roster_workspace(
+                default_workspace.as_deref(),
+                self.working_dir.as_deref(),
+            )
+            .map(Path::to_path_buf);
+            self.available_agents = reachable_agents(cx, workspace.as_deref());
+        }
+        self.agent_picker_open = open;
+    }
+
+    /// Replace the agents the `/agent ` picker offers (AGE-761).
+    #[cfg(test)]
+    pub fn set_available_agents(&mut self, agents: Vec<AgentPickerEntry>, cx: &mut Context<Self>) {
+        self.available_agents = agents;
+        cx.notify();
     }
 
     /// Current highlighted index in the picker.
@@ -180,12 +361,16 @@ impl ChatInputState {
         // If there is no leading '/' or the text already contains whitespace
         // (menu would be closed anyway), treat as no active query.
         let trimmed = new_text.trim();
-        let query_raw: &str =
-            if trimmed.starts_with('/') && !trimmed.chars().any(char::is_whitespace) {
-                &trimmed[1..]
-            } else {
-                ""
-            };
+        // The `/agent ` picker's query keeps its own key: it can never
+        // equal a command query, which has no space (AGE-761).
+        let agent_key = agent_query(new_text).map(|query| format!("agent {query}"));
+        let query_raw: &str = if let Some(key) = agent_key.as_deref() {
+            key
+        } else if trimmed.starts_with('/') && !trimmed.chars().any(char::is_whitespace) {
+            &trimmed[1..]
+        } else {
+            ""
+        };
 
         // Compare without allocating; only convert to owned when storing.
         let changed = self
@@ -233,12 +418,15 @@ impl ChatInputState {
     ///   into the input on the next render frame via `pending_slash_insert`.
     pub fn apply_slash_command(&mut self, cx: &mut Context<Self>) {
         let input_text = self.input.read(cx).text().to_string();
-        let items = slash_menu_items_with_skills(&input_text, &self.available_skills);
+        let items = self.slash_menu_items(&input_text);
         if items.is_empty() {
             return;
         }
         let selected = self.slash_menu_selected.min(items.len().saturating_sub(1));
         let item = &items[selected];
+        if !item.is_selectable() {
+            return;
+        }
         self.slash_menu_selected = 0;
         self.slash_menu_scroll_handle.scroll_to_item(0);
         self.last_slash_query = None; // reset so next '/' starts fresh
@@ -278,6 +466,10 @@ pub(super) fn render_slash_menu(
     let theme_bg = cx.theme().background;
     let theme_border = cx.theme().border;
     let theme_secondary = cx.theme().secondary;
+    let theme_muted = cx.theme().muted_foreground;
+    let agent_picker = items
+        .iter()
+        .any(|item| matches!(item, SlashMenuItem::Agent(_) | SlashMenuItem::NoAgents));
 
     div()
         .w_full()
@@ -296,6 +488,17 @@ pub(super) fn render_slash_menu(
                 .track_scroll(scroll_handle)
                 .overflow_y_scroll()
                 .children(items.iter().enumerate().map(|(idx, item)| {
+                    // The empty agent picker's placeholder: muted, and
+                    // nothing to hover or click (AGE-761).
+                    if !item.is_selectable() {
+                        return div()
+                            .id("slash-no-agents")
+                            .px_3()
+                            .py_2()
+                            .text_sm()
+                            .text_color(theme_muted)
+                            .child(item.display_command());
+                    }
                     let state_for_click = state.clone();
                     let display_command = item.display_command();
                     let description = item.description().to_string();
@@ -363,6 +566,10 @@ pub(super) fn render_slash_menu(
                 .py_1()
                 .text_xs()
                 .text_color(rgb(0x9ca3af))
-                .child("↑↓ navigate  ·  Enter to apply  ·  Esc to dismiss"),
+                .child(if agent_picker {
+                    "↑↓ navigate  ·  Enter or Tab to insert  ·  Esc to dismiss"
+                } else {
+                    "↑↓ navigate  ·  Enter to apply  ·  Esc to dismiss"
+                }),
         )
 }

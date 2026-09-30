@@ -66,10 +66,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{
-    ChatInput, ChatInputEvent, ChatInputState, ModelOption, PrStatusBarView,
-    slash_menu_items_with_skills,
-};
+use super::chat_input::{ChatInput, ChatInputEvent, ChatInputState, ModelOption, PrStatusBarView};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{ApprovalState, ClarificationState, SystemTrace, TraceItem};
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
@@ -514,6 +511,7 @@ impl ChatView {
                         if new_text.trim() == "/" {
                             cx.emit(ChatInputEvent::SlashMenuOpened);
                         }
+                        state.refresh_agents_if_picker_opened(&new_text, cx);
                         state.reset_slash_menu_selection_if_query_changed(&new_text);
                         state.reset_at_menu_selection_if_query_changed(&new_text);
 
@@ -547,8 +545,33 @@ impl ChatView {
         // here prevents the InputState's MoveUp/MoveDown cursor-movement
         // actions from running.
         let input_for_interceptor = chat_input_state.clone();
-        let slash_menu_interceptor = cx.intercept_keystrokes(move |event, _window, cx| {
+        let slash_menu_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             let key = event.keystroke.key.as_str();
+            // Tab inserts the `/agent ` picker's highlighted agent; Escape
+            // closes the picker but keeps the text, where the input's own
+            // clean-on-escape would clear it (AGE-761). Only while the
+            // composer has focus: the terminal dock wants both keys.
+            if (key == "tab" || key == "escape") && !event.keystroke.modifiers.modified() {
+                let handled = input_for_interceptor.update(cx, |state, cx| {
+                    let text = state.input.read(cx).text().to_string();
+                    if !state.input.read(cx).focus_handle(cx).is_focused(window)
+                        || !state.is_agent_picker_open(&text)
+                    {
+                        return false;
+                    }
+                    if key == "tab" {
+                        state.apply_slash_command(cx);
+                    } else {
+                        state.dismiss_agent_picker(&text);
+                    }
+                    cx.notify();
+                    true
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+                return;
+            }
             // Only intercept plain ↑ / ↓ (no modifier keys).
             if (key != "up" && key != "down")
                 || event.keystroke.modifiers.control
@@ -558,14 +581,12 @@ impl ChatView {
                 return;
             }
             // Check whether the slash-command picker is currently showing.
-            let (input_text, skills) = {
+            let (input_text, items) = {
                 let state = input_for_interceptor.read(cx);
-                (
-                    state.input.read(cx).text().to_string(),
-                    state.available_skills().to_vec(),
-                )
+                let input_text = state.input.read(cx).text().to_string();
+                let items = state.slash_menu_items(&input_text);
+                (input_text, items)
             };
-            let items = slash_menu_items_with_skills(&input_text, &skills);
             if !items.is_empty() {
                 let num = items.len();
                 input_for_interceptor.update(cx, |state, cx| {
