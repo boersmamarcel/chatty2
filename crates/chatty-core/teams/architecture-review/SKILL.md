@@ -10,7 +10,7 @@ Description: Bring one architecture document, an ADR or a design doc, to accepta
 
 ## Merging
 
-The proposer works on its own branch, and nobody else sees its document until you merge that branch: a reviewer started before the merge reviews a file that does not exist. So whenever the proposer's answer ends with an `evidence` block, your very next tool call is `git_merge` with `{"branch": "<the branch line of that block>", "no_ff": true}`, before any other delegation. The one exception is the polish (step 6). Without an `evidence` block (the workspace is not a git repository) there is nothing to merge. On a conflict, list the files and stop, not converged; never resolve it yourself. Never read the document yourself to check it is there.
+The proposer works on its own branch, and nobody else sees its document until you merge that branch: a reviewer started before the merge reviews a file that does not exist. So whenever the proposer's answer ends with an `evidence` block, your very next tool call is `git_merge` with `{"branch": "<the branch line of that block>", "no_ff": true}`, before any other delegation. The one exception is the polish (step 6). Without an `evidence` block (the workspace is not a git repository) there is nothing to merge. On a conflict, list the files and stop, not converged; never resolve it yourself. Never read the document yourself to check it is there. If you have no `git_merge` tool in a git repository, stop before the first delegation and reply that the run needs the git tools (`--enable git`).
 
 ## Steps
 

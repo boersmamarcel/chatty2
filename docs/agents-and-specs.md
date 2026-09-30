@@ -949,7 +949,7 @@ verdict go to `<document>.review.md` beside it. To check a document's format:
 cargo run -p chatty-core --example check_architecture_doc -- docs/adr/ADR-0001-*.md
 ```
 
-It is the one preset that pins models, so it is also the one that needs a hosted provider:
+The run needs the git tools (`--enable git`), since the leader merges the proposer's branches with `git_merge`. It is the one preset that pins models, so it is also the one that needs a hosted provider:
 `chatty-tui` checks every pinned model of the run (`team::check_model_providers`) before
 anything starts, and without OpenRouter configured it fails naming OpenRouter and each agent
 with its model. The same check names each agent's pin when no configured model matches it (an Azure-only

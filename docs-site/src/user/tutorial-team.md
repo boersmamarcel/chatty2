@@ -228,18 +228,18 @@ Rounds repeat until one finds no `must-fix` at all, not counting any the propose
 Run it from the root of a git repository, with a clean tree:
 
 ```bash
-chatty-tui --team architecture-review --auto-approve \
+chatty-tui --team architecture-review --enable git --auto-approve \
   -m "Write an ADR for adding a per-agent private-network flag to A2A remote agents."
 ```
 
-Leave `--headless` off so the lead can ask you its questions. In a headless run with `--disable ask_user`, the questions go to the review file.
+`--enable git` gives the lead `git_merge`: the proposer writes on its own branch, and the lead merges it before each review so the reviewers read the current document. Leave `--headless` off so the lead can ask you its questions. In a headless run with `--disable ask_user`, the questions go to the review file.
 
 **Models, and what they cost.** This is the one built-in team that names its models. The lead, the proposer and the three reviewers run `anthropic/claude-opus-5`, and the verifier runs the cheaper `anthropic/claude-sonnet-5`, both through OpenRouter. A run costs hosted-model tokens for all six agents, over as many as 10 rounds. Without an OpenRouter key the team does not start: the error lists each agent with the model it names, and the two ways to run it on a model you have. They follow.
 
 **One model for the whole team.** `--model` runs every agent of a `--team` run on that model, including agents whose spec names a model of its own:
 
 ```bash
-chatty-tui --team architecture-review --model <model> --auto-approve \
+chatty-tui --team architecture-review --model <model> --enable git --auto-approve \
   -m "Write an ADR for adding a per-agent private-network flag to A2A remote agents."
 ```
 
@@ -250,7 +250,7 @@ chatty-tui --team architecture-review --model <model> --auto-approve \
 3. **Run the whole team on that deployment:**
 
    ```bash
-   chatty-tui --team architecture-review --model <deployment> --auto-approve \
+   chatty-tui --team architecture-review --model <deployment> --enable git --auto-approve \
      -m "Write an ADR for adding a per-agent private-network flag to A2A remote agents."
    ```
 
