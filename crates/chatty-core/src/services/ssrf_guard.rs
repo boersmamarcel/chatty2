@@ -137,7 +137,11 @@ fn check_host_with(
 
 /// Which resolved addresses a [`GuardedResolver`] lets a client connect to,
 /// given the host name they were resolved for. `true` admits the address.
-pub type AddressPolicy = fn(host: &str, ip: IpAddr) -> bool;
+///
+/// An `Arc<dyn Fn>` rather than a bare `fn` pointer so a policy can close
+/// over a per-agent setting (AGE-806's `allow_private_network`), not just
+/// dispatch on the arguments.
+pub type AddressPolicy = Arc<dyn Fn(&str, IpAddr) -> bool + Send + Sync>;
 
 /// The open-web policy (`fetch`): no denylisted name, no private, loopback,
 /// link-local or otherwise reserved address.
@@ -167,6 +171,40 @@ pub fn a2a_peer(host: &str, ip: IpAddr) -> bool {
         return true;
     }
     public_only(host, ip)
+}
+
+/// [`a2a_peer`], but for an agent with AGE-806's per-agent
+/// `allow_private_network` opt-in turned on: a *name* that resolves to a
+/// private range (RFC-1918, CGN/Tailscale `100.64.0.0/10`, ULA) is admitted
+/// too, with the same bypass semantics as the browser's per-workspace
+/// toggle (`check_public_host_with_bypass`, AGE-459) — not just a configured
+/// IP literal, which [`a2a_peer`] already admits unconditionally.
+///
+/// Unchanged, flag or not:
+/// - Link-local, including cloud metadata (`169.254.0.0/16`, `fe80::/10`),
+///   is never reachable — checked first, before the flag is ever consulted.
+/// - `localhost` must resolve to loopback and nothing else.
+/// - The hostname denylist (`is_blocked_hostname`: `.internal`, `.local`,
+///   the GCP metadata name) still applies.
+///
+/// With `allow_private_network` false this is exactly [`a2a_peer`].
+pub fn a2a_peer_with_bypass(allow_private_network: bool) -> AddressPolicy {
+    Arc::new(move |host: &str, ip: IpAddr| {
+        if is_link_local_ip(&ip) {
+            return false;
+        }
+        if host.eq_ignore_ascii_case("localhost") {
+            return ip.is_loopback();
+        }
+        if ip_literal(host).is_some() {
+            return true;
+        }
+        if allow_private_network {
+            !is_blocked_hostname(host)
+        } else {
+            public_only(host, ip)
+        }
+    })
 }
 
 /// The IP-literal half of [`a2a_peer`], for the URL itself: reqwest never
@@ -250,7 +288,7 @@ impl GuardedResolver {
 impl reqwest::dns::Resolve for GuardedResolver {
     fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
         let lookup = Arc::clone(&self.lookup);
-        let policy = self.policy;
+        let policy = Arc::clone(&self.policy);
         let host = name.as_str().to_string();
         Box::pin(async move {
             let guard = GuardedResolver { lookup, policy };
@@ -505,7 +543,7 @@ mod tests {
                 Err(std::io::Error::other("stub")),
                 Ok(vec![]),
             ],
-            public_only,
+            Arc::new(public_only),
         );
         assert_eq!(
             guard.resolve_checked("example.com").await.unwrap(),
@@ -536,6 +574,71 @@ mod tests {
         assert!(check_a2a_url_without_lookup("http://169.254.169.254/").is_err());
         assert!(check_a2a_url_without_lookup("http://127.0.0.1:8420/a2a").is_ok());
         assert!(check_a2a_url_without_lookup("https://agent.example.com/").is_ok());
+    }
+
+    /// AGE-806: with the opt-in off, `a2a_peer_with_bypass(false)` matches
+    /// `a2a_peer` exactly — an agent without the flag keeps today's
+    /// behaviour, including refusing a name that resolves private.
+    #[test]
+    fn a2a_peer_with_bypass_off_matches_a2a_peer() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let policy = a2a_peer_with_bypass(false);
+        for (host, addr) in [
+            ("10.0.0.5", "10.0.0.5"),
+            ("127.0.0.1", "127.0.0.1"),
+            ("169.254.169.254", "169.254.169.254"),
+            ("localhost", "127.0.0.1"),
+            ("localhost", "::1"),
+            ("localhost", "10.0.0.5"),
+            ("agent.example.com", "93.184.216.34"),
+            ("agent.example.com", "127.0.0.1"),
+            ("agent.example.com", "192.168.1.9"),
+        ] {
+            assert_eq!(
+                policy(host, ip(addr)),
+                a2a_peer(host, ip(addr)),
+                "{host} / {addr}"
+            );
+        }
+    }
+
+    /// AGE-806: with the opt-in on, a *name* resolving to a LAN or Tailscale
+    /// (CGN) address is admitted — the gap the issue closes.
+    #[test]
+    fn a2a_peer_with_bypass_on_admits_lan_and_tailscale_names() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let policy = a2a_peer_with_bypass(true);
+        assert!(policy("agent.lan", ip("192.168.1.9")));
+        assert!(policy("agent.lan", ip("10.0.0.5")));
+        assert!(policy("agent.lan", ip("172.16.0.5")));
+        // Tailscale's CGNAT range.
+        assert!(policy("worker.tailnet", ip("100.64.1.2")));
+        // IPv6 ULA.
+        assert!(policy("agent.lan", ip("fd7a:115c:a1e0::1")));
+        assert!(policy("agent.lan", ip("fd00::1")));
+    }
+
+    /// AGE-806: cloud metadata and IPv6 link-local stay refused even with
+    /// the opt-in on.
+    #[test]
+    fn a2a_peer_with_bypass_on_still_refuses_link_local_metadata() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let policy = a2a_peer_with_bypass(true);
+        assert!(!policy("agent.lan", ip("169.254.169.254")));
+        assert!(!policy("agent.lan", ip("169.254.1.1")));
+        assert!(!policy("agent.lan", ip("fe80::1")));
+        // localhost still means loopback and nothing else, flag or not.
+        assert!(!policy("localhost", ip("10.0.0.5")));
+    }
+
+    /// AGE-806: the hostname denylist (`.internal`, `.local`, the GCP
+    /// metadata name) is unaffected by the opt-in.
+    #[test]
+    fn a2a_peer_with_bypass_on_still_blocks_denylisted_hostnames() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let policy = a2a_peer_with_bypass(true);
+        assert!(!policy("printer.local", ip("192.168.1.9")));
+        assert!(!policy("metadata.google.internal", ip("169.254.169.254")));
     }
 
     #[test]

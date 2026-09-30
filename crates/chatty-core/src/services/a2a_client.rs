@@ -22,7 +22,7 @@ use crate::models::clarification_store::{
 use crate::models::execution_approval_store::ApprovalDetail;
 use crate::models::token_usage::{ModelRef, TokenUsage};
 use crate::services::ssrf_guard::{
-    AddressPolicy, GuardedResolver, HostLookup, SystemLookup, a2a_peer,
+    AddressPolicy, GuardedResolver, HostLookup, SystemLookup, a2a_peer, a2a_peer_with_bypass,
     check_a2a_url_without_lookup,
 };
 use crate::settings::models::a2a_store::A2aAgentConfig;
@@ -335,9 +335,17 @@ impl Default for A2aLimits {
 /// fails is a refusal. It never follows a redirect, never uses a proxy,
 /// bounds what a peer may send ([`A2aLimits`]), and sends no credential but
 /// the one configured for the agent it calls (ADR-0021 step 0, AGE-767).
+///
+/// Two `reqwest::Client`s share everything but their `GuardedResolver`
+/// policy: `http` is [`a2a_peer`] (the default, no private ranges), and
+/// `http_private_network` is [`a2a_peer_with_bypass`]`(true)`, used only for
+/// a call whose [`A2aAgentConfig::allow_private_network`] is set (AGE-806).
+/// Reqwest's DNS resolver is fixed per `Client`, so the per-agent opt-in
+/// picks between the two rather than reconfiguring one.
 #[derive(Clone)]
 pub struct A2aClient {
     http: reqwest::Client,
+    http_private_network: reqwest::Client,
     limits: A2aLimits,
 }
 
@@ -506,8 +514,12 @@ fn task_outcome(value: &Value) -> Result<String> {
 
 impl A2aClient {
     pub fn new() -> Self {
+        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
         Self {
-            http: edge_http(Arc::new(SystemLookup), a2a_peer, |builder| {
+            http: edge_http(Arc::clone(&lookup), Arc::new(a2a_peer), |builder| {
+                builder.timeout(Duration::from_secs(30))
+            }),
+            http_private_network: edge_http(lookup, a2a_peer_with_bypass(true), |builder| {
                 builder.timeout(Duration::from_secs(30))
             }),
             limits: A2aLimits::default(),
@@ -518,10 +530,16 @@ impl A2aClient {
     ///
     /// Bounds silence rather than duration — see [`DELEGATION_READ_TIMEOUT`].
     pub fn for_delegation() -> Self {
+        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
         Self {
             http: edge_http(
-                Arc::new(SystemLookup),
-                a2a_peer,
+                Arc::clone(&lookup),
+                Arc::new(a2a_peer),
+                delegation_timeouts(DELEGATION_READ_TIMEOUT),
+            ),
+            http_private_network: edge_http(
+                lookup,
+                a2a_peer_with_bypass(true),
                 delegation_timeouts(DELEGATION_READ_TIMEOUT),
             ),
             limits: A2aLimits::default(),
@@ -532,8 +550,18 @@ impl A2aClient {
     /// can wait for. The production one is minutes; nothing in CI should be.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_delegation_with_read_timeout(read: Duration) -> Self {
+        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
         Self {
-            http: edge_http(Arc::new(SystemLookup), a2a_peer, delegation_timeouts(read)),
+            http: edge_http(
+                Arc::clone(&lookup),
+                Arc::new(a2a_peer),
+                delegation_timeouts(read),
+            ),
+            http_private_network: edge_http(
+                lookup,
+                a2a_peer_with_bypass(true),
+                delegation_timeouts(read),
+            ),
             limits: A2aLimits {
                 idle_timeout: read,
                 ..A2aLimits::default()
@@ -542,13 +570,20 @@ impl A2aClient {
     }
 
     /// A delegation client resolving names through `lookup`, a stub in
-    /// tests, under the production [`a2a_peer`] policy.
+    /// tests, under the production [`a2a_peer`] policy — and, for an agent
+    /// with the opt-in, [`a2a_peer_with_bypass`]`(true)` over the same
+    /// stubbed `lookup`.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_lookup(lookup: Arc<dyn HostLookup>) -> Self {
         Self {
             http: edge_http(
+                Arc::clone(&lookup),
+                Arc::new(a2a_peer),
+                delegation_timeouts(DELEGATION_READ_TIMEOUT),
+            ),
+            http_private_network: edge_http(
                 lookup,
-                a2a_peer,
+                a2a_peer_with_bypass(true),
                 delegation_timeouts(DELEGATION_READ_TIMEOUT),
             ),
             limits: A2aLimits::default(),
@@ -562,6 +597,17 @@ impl A2aClient {
         self
     }
 
+    /// Which of the two clients to use for `config`: the default, or —
+    /// only when its AGE-806 opt-in is set — the one whose resolver admits
+    /// private ranges for the addresses this agent's name resolves to.
+    fn http_for(&self, config: &A2aAgentConfig) -> &reqwest::Client {
+        if config.allow_private_network {
+            &self.http_private_network
+        } else {
+            &self.http
+        }
+    }
+
     /// Fetch the agent card from `<base_url>/.well-known/agent.json`.
     ///
     /// Returns `None` when the endpoint is unreachable or returns unexpected JSON.
@@ -573,7 +619,7 @@ impl A2aClient {
 
         debug!(url = %card_url, "Fetching A2A agent card");
 
-        let req = authorized(self.http.get(&card_url), config);
+        let req = authorized(self.http_for(config).get(&card_url), config);
         let resp = send_checked(req, &card_url, "agent card request").await?;
         let body = read_json_capped(resp, self.limits.max_event_bytes, "agent card").await?;
 
@@ -648,7 +694,7 @@ impl A2aClient {
 
         debug!(url = %url, agent = %config.name, "Sending A2A message/send");
 
-        let req = authorized(self.http.post(&url).json(&body), config);
+        let req = authorized(self.http_for(config).post(&url).json(&body), config);
         let resp = send_checked(req, &url, "message/send").await?;
         let value =
             read_json_capped(resp, self.limits.max_event_bytes, "message/send response").await?;
@@ -700,7 +746,7 @@ impl A2aClient {
 
         debug!(url = %url, agent = %config.name, "Sending A2A message/stream");
 
-        let req = authorized(self.http.post(&url).json(&body), config);
+        let req = authorized(self.http_for(config).post(&url).json(&body), config);
         let resp = send_checked(req, &url, "message/stream").await?;
 
         // Check Content-Type — if not SSE, the server likely doesn't support
@@ -868,7 +914,7 @@ impl A2aClient {
 
         debug!(url = %url, agent = %config.name, task = %task_id, "Answering a parked A2A task");
 
-        let req = authorized(self.http.post(&url).json(&body), config);
+        let req = authorized(self.http_for(config).post(&url).json(&body), config);
         let resp = send_checked(req, &url, "message/send").await?;
         let value =
             read_json_capped(resp, self.limits.max_event_bytes, "message/send response").await?;
@@ -1283,6 +1329,7 @@ mod tests {
             api_key: None,
             enabled: true,
             skills: vec![],
+            allow_private_network: false,
         }
     }
 
@@ -1620,6 +1667,101 @@ mod tests {
             .expect_err("a public name resolving to loopback must be refused");
         assert!(format!("{err:#}").contains("SSRF"), "{err:#}");
         assert_never_connected(&listener, "a refused address must never be dialed").await;
+    }
+
+    // ── AGE-806: per-agent opt-in for private-network agents ───────────────
+
+    /// Without the opt-in (the default, `allow_private_network: false`), a
+    /// hostname that resolves to a private address is refused — unchanged
+    /// from before the flag existed.
+    #[tokio::test]
+    async fn a2a_private_address_refused_without_opt_in() {
+        let lookup = Scripted::new(vec![Ok(vec![ip("10.0.0.5")])]);
+        let client = A2aClient::with_lookup(lookup);
+        let remote = agent("https://agent.lan.example/a2a");
+        assert!(!remote.allow_private_network);
+
+        let err = client
+            .send_message(&remote, "hi")
+            .await
+            .expect_err("a name resolving to a private address must be refused without the opt-in");
+        assert!(format!("{err:#}").contains("SSRF"), "{err:#}");
+    }
+
+    /// With the opt-in on, a hostname resolving to a LAN or Tailscale (CGN)
+    /// address is admitted by the resolver: the attempt then fails for an
+    /// ordinary reason — nothing listens on this port — never as SSRF. Same
+    /// technique as `loopback_http_is_allowed`: the gate itself must not be
+    /// what refuses this. The exact ranges (RFC-1918, `100.64.0.0/10`, ULA)
+    /// are covered address-by-address in `ssrf_guard`'s
+    /// `a2a_peer_with_bypass_on_admits_lan_and_tailscale_names`; this proves
+    /// the A2A client actually wires the per-agent flag through to the
+    /// resolver it dials with.
+    #[tokio::test]
+    async fn a2a_lan_and_tailscale_admitted_with_opt_in() {
+        let lookup = Scripted::new(vec![Ok(vec![ip("127.0.0.1")])]);
+        let client = A2aClient::with_lookup(lookup);
+        let mut remote = agent("https://agent.lan.example:1/a2a");
+        remote.allow_private_network = true;
+
+        let err = client
+            .send_message(&remote, "hi")
+            .await
+            .expect_err("nothing listens on this port");
+        assert!(
+            !format!("{err:#}").contains("SSRF"),
+            "the opt-in must admit a resolved private address: {err:#}"
+        );
+    }
+
+    /// Cloud metadata (`169.254.0.0/16`) stays refused even with the opt-in
+    /// on — that carve-out is applied before the flag is ever consulted.
+    #[tokio::test]
+    async fn a2a_opt_in_still_refuses_link_local_metadata() {
+        let lookup = Scripted::new(vec![Ok(vec![ip("169.254.169.254")])]);
+        let client = A2aClient::with_lookup(lookup);
+        let mut remote = agent("https://agent.lan.example/a2a");
+        remote.allow_private_network = true;
+
+        let err = client
+            .send_message(&remote, "hi")
+            .await
+            .expect_err("cloud metadata must stay refused even with the opt-in");
+        assert!(format!("{err:#}").contains("SSRF"), "{err:#}");
+    }
+
+    /// The opt-in lives on the agent config, not the client or a global
+    /// setting: one client, one resolved address, and only one of the two
+    /// agents has the flag set.
+    #[tokio::test]
+    async fn a2a_opt_in_is_per_agent() {
+        let lookup = Scripted::new(vec![
+            Ok(vec![ip("127.0.0.1")]), // agent-a, opted in
+            Ok(vec![ip("127.0.0.1")]), // agent-b, not opted in
+        ]);
+        let client = A2aClient::with_lookup(lookup);
+
+        let mut agent_a = agent("https://agent-a.lan.example:1/a2a");
+        agent_a.allow_private_network = true;
+        let err_a = client
+            .send_message(&agent_a, "hi")
+            .await
+            .expect_err("nothing listens on this port");
+        assert!(
+            !format!("{err_a:#}").contains("SSRF"),
+            "agent-a's own opt-in must admit it: {err_a:#}"
+        );
+
+        let mut agent_b = agent("https://agent-b.lan.example:1/a2a");
+        agent_b.allow_private_network = false;
+        let err_b = client
+            .send_message(&agent_b, "hi")
+            .await
+            .expect_err("agent-b has no opt-in, so the same address must be refused");
+        assert!(
+            format!("{err_b:#}").contains("SSRF"),
+            "agent-a's opt-in must not leak to agent-b: {err_b:#}"
+        );
     }
 
     #[tokio::test]

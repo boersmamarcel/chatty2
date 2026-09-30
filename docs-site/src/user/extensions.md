@@ -47,6 +47,14 @@ The server appears under **Installed** with an **↗ External** badge. The agent
 > [!TIP]
 > Servers to try, with their start commands, are collected on the [curated MCP catalog](../dev/architecture/curated-mcp-catalog.md) page. Write your own against the [MCP specification](https://modelcontextprotocol.io/).
 
+## Remote A2A agents and private networks
+
+A remote **A2A** agent (installed from the marketplace or added as a custom extension) is called over HTTP, the same as an MCP server. By default it can only be reached at a public address or `localhost`: a name that resolves to your LAN, your Tailscale tailnet, or any other private range is refused, so a malicious or compromised marketplace agent can't be pointed at your own network.
+
+If you run an agent yourself on your LAN or tailnet, turn on its **Private network** toggle (next to **Enable**/**Disable** under **Installed**) to let that one agent reach a private address. It admits the same ranges as the browser's **Allow Browser Access to Private Network** toggle: RFC-1918 LAN addresses, Tailscale's CGNAT range, and IPv6 unique-local addresses. Cloud-metadata addresses (`169.254.x.x`) and IPv6 link-local addresses stay refused either way. A private-network agent still needs `https://`: plain `http://` only ever works for `localhost`.
+
+Turn this on only for an agent whose address you control. The check runs against whatever address the agent's name resolves to at the moment of each call, not once when you add it — so if the name is ever pointed somewhere else (DNS rebinding), the opt-in lets that new address through too, private range or not.
+
 ## Build your own module
 
 Modules are small programs that run inside Chatty, locally or on the Hive runner. The developer guide [Build a WASM module](../dev/guides/build-wasm-module.md) walks through it, with two worked examples: [write a plugin (echo)](../dev/start/tutorial-echo-agent.md) and [give an agent the plugin (benford)](../dev/start/tutorial-benford-agent.md).

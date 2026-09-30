@@ -81,11 +81,32 @@ pub struct A2aAgentConfig {
     pub api_key: Option<String>,// Optional Bearer token
     pub enabled: bool,          // Toggle on/off
     pub skills: Vec<String>,    // Cached from agent card discovery
+    pub allow_private_network: bool, // AGE-806: opt this agent into RFC-1918/CGN/ULA
 }
 ```
 
 Runtime connection status is tracked in `A2aAgentsModel` (a GPUI global) but **not
 persisted** — it is refreshed at startup by fetching agent cards.
+
+### Reaching a private network (AGE-806)
+
+Every call goes through the SSRF guard's `GuardedResolver`
+(`crates/chatty-core/src/services/ssrf_guard.rs`) with an `AddressPolicy` chosen per
+call from `config.allow_private_network` (`A2aClient::http_for`), not once at client
+construction: `a2a_peer` (default) or `a2a_peer_with_bypass(true)` (opted in). Both
+resolve a name once and check the addresses actually dialed — never a separate
+pre-check — so the rebinding protection from AGE-537/AGE-767 holds either way; the
+opt-in only widens which addresses the check admits.
+
+With the opt-in, a *name* that resolves into RFC-1918, `100.64.0.0/10` (CGN/Tailscale)
+or ULA is admitted, using the same bypass semantics as the browser tool's
+per-workspace toggle (`check_public_host_with_bypass`, AGE-459). A configured IP
+literal was already admitted unconditionally before this flag existed (the address is
+the user's explicit choice, not resolved). Link-local (`169.254.0.0/16`, cloud
+metadata, and `fe80::/10`) is refused regardless of the flag, and `localhost` still
+means loopback and nothing else. The AGE-756 TLS rule is unchanged: plain `http://`
+only ever works for a loopback host string, so a private-network agent reached by name
+needs `https://`.
 
 ### Protocol
 

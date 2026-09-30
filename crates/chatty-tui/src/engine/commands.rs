@@ -85,9 +85,14 @@ pub(crate) fn format_agents_summary(
     }
     for agent in remote_agents {
         out.push_str(&format!(
-            "  {} — remote A2A agent at {}{}\n",
+            "  {} — remote A2A agent at {}{}{}\n",
             agent.name,
             agent.url,
+            if agent.allow_private_network {
+                " (private network allowed)"
+            } else {
+                ""
+            },
             if agent.enabled { "" } else { " (disabled)" }
         ));
     }
@@ -1142,6 +1147,7 @@ mod tests {
             api_key: None,
             enabled: false,
             skills: Vec::new(),
+            allow_private_network: false,
         };
 
         let text = format_agents_summary(&[remote], &roster, &listings);
@@ -1168,6 +1174,40 @@ mod tests {
         assert!(left_out.contains("does not load"), "{text}");
         assert!(left_out.contains("hidden"), "{text}");
         assert!(left_out.contains("exposed = false"), "{text}");
+    }
+
+    /// AGE-806: `/agents` shows the per-agent private-network opt-in, so a
+    /// user can see which remote agents can reach a LAN/Tailscale address.
+    #[test]
+    fn agents_shows_the_private_network_opt_in() {
+        let opted_in = A2aAgentConfig {
+            name: "lan-worker".to_string(),
+            url: "https://192.168.1.9/a2a".to_string(),
+            api_key: None,
+            enabled: true,
+            skills: Vec::new(),
+            allow_private_network: true,
+        };
+        let default = A2aAgentConfig {
+            name: "public-worker".to_string(),
+            url: "https://example.com/a2a".to_string(),
+            api_key: None,
+            enabled: true,
+            skills: Vec::new(),
+            allow_private_network: false,
+        };
+
+        let text = format_agents_summary(&[opted_in, default], &[], &[]);
+        assert!(
+            text.contains(
+                "lan-worker — remote A2A agent at https://192.168.1.9/a2a (private network allowed)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("public-worker — remote A2A agent at https://example.com/a2a\n"),
+            "{text}"
+        );
     }
 
     #[test]
