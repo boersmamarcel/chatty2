@@ -238,7 +238,6 @@ pub fn reachable_agents(cx: &mut App, workspace: Option<&Path>) -> Vec<AgentPick
     // The same names the conversation's `invoke_agent` gets, so the picker
     // never offers an agent no broker can reach (AGE-759).
     let roster = crate::chatty::controllers::app_controller::gateway_and_roster(cx, workspace)
-        .map(|(_, names)| names)
         .unwrap_or_default();
     // Enabled the way `/agent` dispatch reads it: the extension's own switch.
     let remote: Vec<AgentPickerEntry> = cx

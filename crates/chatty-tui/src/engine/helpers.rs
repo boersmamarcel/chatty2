@@ -104,6 +104,9 @@ pub(crate) fn delegation_line(
         }),
         // A nested run's batch is not a line of this delegation (TB-1).
         InvokeAgentProgress::Swarm(_) => String::new(),
+        // Not a transcript line: the swarm tree's identity for this call,
+        // not something to print (AGE-762).
+        InvokeAgentProgress::Admitted(_) => String::new(),
     }
 }
 

@@ -654,7 +654,7 @@ mod tests {
             ModuleSettingsModel {
                 enabled: true,
                 module_dir: "/opt/chatty-test-modules".to_string(),
-                gateway_port: 9000,
+                default_endpoint_budget: 3,
                 ..ModuleSettingsModel::default()
             },
         )
@@ -748,6 +748,7 @@ mod tests {
                 api_key: Some("a2a-key".to_string()),
                 enabled: true,
                 skills: vec!["translate".to_string()],
+                allow_private_network: false,
             },
             A2aAgentConfig {
                 name: "agent-b".to_string(),
@@ -755,6 +756,7 @@ mod tests {
                 api_key: None,
                 enabled: false,
                 skills: vec![],
+                allow_private_network: false,
             },
         )
         .await;

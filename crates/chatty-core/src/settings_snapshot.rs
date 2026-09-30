@@ -436,6 +436,7 @@ mod tests {
                 api_key: Some("a2a-key".to_string()),
                 enabled: true,
                 skills: vec!["translate".to_string()],
+                allow_private_network: false,
             }],
             execution_settings: ExecutionSettingsModel {
                 enabled: true,
@@ -515,7 +516,6 @@ mod tests {
             module_settings: ModuleSettingsModel {
                 enabled: true,
                 module_dir: "/opt/chatty-test-modules".to_string(),
-                gateway_port: 9000,
                 default_endpoint_budget: 4,
                 endpoint_budgets: {
                     let mut budgets = std::collections::HashMap::new();

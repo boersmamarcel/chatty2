@@ -73,6 +73,39 @@ pub fn no_redirect_client(timeout_secs: u64) -> reqwest::Client {
         .expect("Failed to initialize HTTP client (TLS backend error)")
 }
 
+/// [`no_redirect_client`] for open-web requests (`fetch`): every name it
+/// connects to is resolved once, through a
+/// [`GuardedResolver`](crate::services::ssrf_guard::GuardedResolver) with the
+/// public-only policy, so the address checked is the address connected to
+/// (AGE-537). No proxy: a proxy would resolve the target itself, out of the
+/// guard's sight.
+pub fn open_web_client(timeout_secs: u64) -> reqwest::Client {
+    open_web_client_with(
+        timeout_secs,
+        std::sync::Arc::new(crate::services::ssrf_guard::SystemLookup),
+    )
+}
+
+/// [`open_web_client`] resolving through `lookup` — a stub, in tests.
+pub(crate) fn open_web_client_with(
+    timeout_secs: u64,
+    lookup: std::sync::Arc<dyn crate::services::ssrf_guard::HostLookup>,
+) -> reqwest::Client {
+    use crate::services::ssrf_guard::{GuardedResolver, public_only};
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .user_agent(USER_AGENT)
+        .default_headers(accept_language_header())
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(GuardedResolver::new(
+            lookup,
+            std::sync::Arc::new(public_only),
+        )))
+        .build()
+        .expect("Failed to initialize HTTP client (TLS backend error)")
+}
+
 /// Build a minimal HTTP client (no custom user-agent) for probing endpoints.
 ///
 /// Used for short-lived metadata requests where a branded user-agent is not

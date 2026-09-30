@@ -138,6 +138,7 @@ fn worker_contexts(workspace: &str) -> Vec<(String, AgentBuildContext, Option<St
         &module_settings,
         &team.agents,
         &["--auto-approve".to_string()],
+        Some(&crate::team_fixture::workspace()),
     )
     .into_iter()
     .map(|spec| {
@@ -196,6 +197,23 @@ async fn recording_server() -> (String, Arc<Mutex<Vec<Value>>>) {
     (format!("http://127.0.0.1:{port}"), bodies)
 }
 
+/// A broker the leader has but never starts: its delegation tools are built
+/// and nothing is bound.
+struct NeverStarted;
+
+#[async_trait::async_trait]
+impl chatty_core::services::lazy_broker::LazyBroker for NeverStarted {
+    async fn transport(
+        &self,
+    ) -> anyhow::Result<Option<std::sync::Arc<dyn chatty_fabric::Transport>>> {
+        anyhow::bail!("the golden never starts its broker")
+    }
+
+    fn bound_sockets(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+}
+
 /// The leader's system message and tool schema are the prompt-cache prefix:
 /// every turn of every run of the team starts with these bytes.
 #[tokio::test]
@@ -205,7 +223,7 @@ async fn leader_prefix_is_byte_identical() {
     let workspace_str = workspace.path().to_string_lossy().into_owned();
     let (ctx, _) = leader_context(&workspace_str);
     let ctx = AgentBuildContext {
-        gateway_port: Some(1),
+        lazy_broker: Some(std::sync::Arc::new(NeverStarted)),
         pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),
         pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
         pending_write_approvals: Some(WriteApprovalStore::new().get_pending_approvals()),

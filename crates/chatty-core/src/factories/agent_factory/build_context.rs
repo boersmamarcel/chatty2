@@ -67,17 +67,14 @@ pub struct AgentBuildContext {
     pub skill_service: Option<SkillService>,
     pub search_settings: Option<SearchSettingsModel>,
     pub embedding_service: Option<EmbeddingService>,
-    pub gateway_port: Option<u16>,
     /// A broker that has not necessarily started yet (BI-2, AGE-634): when
-    /// set, `list_agents`/`invoke_agent` start it themselves on first use
-    /// instead of expecting `gateway_port` to already be live. Hosts that
-    /// still resolve a port eagerly (tests, `chatty-server` in `hive`) leave
-    /// this `None`.
+    /// set, `list_agents`/`invoke_agent` start it themselves on first use.
+    /// Hosts with no local broker (`chatty-server` in `hive`) leave this
+    /// `None`.
     pub lazy_broker: Option<Arc<dyn LazyBroker>>,
     /// The broker's virtual agents by name — `local-agent`, or what
     /// `module_settings.virtual_agents` declares (ADR-0011 C10). Only
-    /// addressable while `gateway_port`, `lazy_broker` or `fabric_transport`
-    /// is set.
+    /// addressable while `lazy_broker` or `fabric_transport` is set.
     pub local_agents: Vec<String>,
     pub remote_agents: Vec<A2aAgentConfig>,
     /// Conversation this turn belongs to. Only consulted when the `browser`
@@ -212,7 +209,6 @@ pub struct AgentServices {
     pub skill_service: Option<SkillService>,
     pub search_settings: Option<SearchSettingsModel>,
     pub embedding_service: Option<EmbeddingService>,
-    pub gateway_port: Option<u16>,
     /// A broker that has not necessarily started yet (BI-2, AGE-634). See
     /// [`AgentBuildContext::lazy_broker`].
     pub lazy_broker: Option<Arc<dyn LazyBroker>>,
@@ -264,7 +260,6 @@ impl AgentBuildContext {
             skill_service,
             search_settings,
             embedding_service,
-            gateway_port,
             lazy_broker,
             local_agents,
             remote_agents,
@@ -290,7 +285,6 @@ impl AgentBuildContext {
             skill_service,
             search_settings,
             embedding_service,
-            gateway_port,
             lazy_broker,
             local_agents,
             remote_agents,
@@ -485,7 +479,6 @@ mod tests {
             skill_service: None,
             search_settings: Some(search),
             embedding_service: None,
-            gateway_port: Some(4242),
             lazy_broker: None,
             local_agents: vec!["local-coder".to_string()],
             remote_agents: vec![A2aAgentConfig {
@@ -494,6 +487,7 @@ mod tests {
                 api_key: None,
                 enabled: true,
                 skills: Vec::new(),
+                allow_private_network: false,
             }],
             plugin_host: PluginHost {
                 module_roots: vec![PathBuf::from("/modules")],
@@ -510,7 +504,6 @@ mod tests {
             vec![("KEY".to_string(), "value".to_string())]
         );
         assert_eq!(ctx.search_settings.as_ref().unwrap().max_results, 42);
-        assert_eq!(ctx.gateway_port, Some(4242));
         assert_eq!(ctx.local_agents, vec!["local-coder".to_string()]);
         assert_eq!(ctx.remote_agents.len(), 1);
         assert_eq!(ctx.remote_agents[0].name, "remote");

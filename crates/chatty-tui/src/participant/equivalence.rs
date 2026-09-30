@@ -109,12 +109,12 @@ impl LlmProvider for NoopProvider {
 /// never over the port).
 async fn start_runner(
     executable: std::path::PathBuf,
-) -> (u16, ParticipantRegistry, Arc<dyn chatty_fabric::Transport>) {
+) -> (ParticipantRegistry, Arc<dyn chatty_fabric::Transport>) {
     let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
     let modules = Arc::new(RwLock::new(
         ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
     ));
-    let gateway = ProtocolGateway::new(modules, 0);
+    let gateway = ProtocolGateway::new(modules);
     let participants = gateway.participants();
     let runner = LocalRunner::new(executable, participants.clone())
         .with_agent_name(LOCAL_AGENT_NAME)
@@ -125,14 +125,7 @@ async fn start_runner(
     // `with_virtual_agent` call, exactly as `Broker::start_at` does.
     let transport = gateway.transport();
 
-    let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = tcp.local_addr().unwrap().port();
-    let router = gateway.build_router();
-    tokio::spawn(async move {
-        axum::serve(tcp, router).await.ok();
-    });
-
-    (port, participants, transport)
+    (participants, transport)
 }
 
 /// The parent's progress, and the response `invoke_agent` hands the model.
@@ -149,8 +142,7 @@ struct BrokerRun {
 /// parent saw.
 async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
     let dir = tempfile::tempdir().expect("a dir for the stand-in worker");
-    let (_port, _registry, transport) =
-        start_runner(scripted_worker_binary(dir.path(), &events)).await;
+    let (_registry, transport) = start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
     let tool = InvokeAgentTool::new(vec![])
         .with_local_agents([LOCAL_AGENT_NAME])
@@ -178,7 +170,9 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
             InvokeAgentProgress::Finished {
                 usage: reported, ..
             } => usage = reported,
-            InvokeAgentProgress::Started { .. } | InvokeAgentProgress::Swarm(_) => {}
+            InvokeAgentProgress::Started { .. }
+            | InvokeAgentProgress::Swarm(_)
+            | InvokeAgentProgress::Admitted(_) => {}
         }
     }
 
@@ -489,12 +483,12 @@ mod evidence {
         verification: Option<String>,
         edits: bool,
         executable: PathBuf,
-    ) -> (u16, ParticipantRegistry, Arc<dyn chatty_fabric::Transport>) {
+    ) -> (ParticipantRegistry, Arc<dyn chatty_fabric::Transport>) {
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
             ModuleRegistry::new(provider, ResourceLimits::default()).unwrap(),
         ));
-        let gateway = ProtocolGateway::new(modules, 0);
+        let gateway = ProtocolGateway::new(modules);
         let registry = gateway.participants();
 
         let runner = LocalRunner::new(executable, registry.clone())
@@ -538,14 +532,7 @@ mod evidence {
         let gateway = gateway.with_virtual_agent(Arc::new(runner));
         let transport = gateway.transport();
 
-        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = tcp.local_addr().unwrap().port();
-        let router = gateway.build_router();
-        tokio::spawn(async move {
-            axum::serve(tcp, router).await.ok();
-        });
-
-        (port, registry, transport)
+        (registry, transport)
     }
 
     /// Delegate one task to `local-agent` and return the answer the model
@@ -599,7 +586,7 @@ mod evidence {
         repo(dir.path()).await;
         let events = completed_turn().await;
         let bin = tempfile::tempdir().expect("a dir for the stand-in worker");
-        let (_port, _registry, transport) = start_runner_gateway(
+        let (_registry, transport) = start_runner_gateway(
             dir.path().to_path_buf(),
             Some(VERIFICATION.into()),
             true,
@@ -650,7 +637,7 @@ mod evidence {
         repo(dir.path()).await;
         let events = completed_turn().await;
         let bin = tempfile::tempdir().expect("a dir for the stand-in worker");
-        let (_port, _registry, transport) = start_runner_gateway(
+        let (_registry, transport) = start_runner_gateway(
             dir.path().to_path_buf(),
             Some(VERIFICATION.into()),
             false,
@@ -687,7 +674,7 @@ mod evidence {
             kind: StreamErrorKind::Other,
             message: "the worker crashed".to_string(),
         })];
-        let (_port, _registry, transport) = start_runner_gateway(
+        let (_registry, transport) = start_runner_gateway(
             dir.path().to_path_buf(),
             None,
             true,
@@ -790,9 +777,10 @@ pub(super) mod named_virtual_agents {
         let (settings, agents) = team();
         let mut common_args = vec!["--auto-approve".to_string()];
         common_args.extend(provider_flags.iter().cloned());
-        let specs = resolve_virtual_agents(&models, &providers, &settings, &agents, &common_args);
+        let specs =
+            resolve_virtual_agents(&models, &providers, &settings, &agents, &common_args, None);
         Broker::start_at(
-            dir.join("participants.sock"),
+            dir.join("run").join("participants.sock"),
             scripted_worker_binary(dir, &completed_turn().await),
             settings.default_endpoint_budget,
             specs,
@@ -1084,6 +1072,7 @@ mod declared_roles {
             &ModuleSettingsModel::default(),
             &reviewer_team(),
             &[],
+            None,
         );
         let argv = ["chatty-tui".to_string()]
             .into_iter()
@@ -1241,9 +1230,10 @@ mod declared_roles {
             &ModuleSettingsModel::default(),
             &reviewer_team(),
             &[],
+            None,
         );
         let broker = Broker::start_at(
-            dir.path().join("participants.sock"),
+            dir.path().join("run").join("participants.sock"),
             // No child is spawned by `list_agents`; the runner only needs a
             // path it could spawn.
             PathBuf::from("/bin/sh"),
@@ -1348,8 +1338,7 @@ mod spend_cap {
     #[tokio::test]
     async fn a_leader_over_its_cap_is_refused_and_nothing_spawns() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let (_port, registry, transport) =
-            start_runner(scripted_worker_binary(dir.path(), &[])).await;
+        let (registry, transport) = start_runner(scripted_worker_binary(dir.path(), &[])).await;
 
         let tool = leader_tool(
             transport,
@@ -1400,7 +1389,7 @@ mod spend_cap {
             policy(),
         )
         .await;
-        let (_port, _registry, transport) =
+        let (_registry, transport) =
             start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
         let response = delegate(&leader_tool(transport, None))
@@ -1426,7 +1415,7 @@ mod spend_cap {
         )
         .await;
         let dir = tempfile::tempdir().expect("a temp dir");
-        let (_port, _registry, transport) =
+        let (_registry, transport) =
             start_runner(scripted_worker_binary(dir.path(), &events)).await;
 
         let tool = leader_tool(transport, Some(Arc::new(FixedSpendGate::permitting())));

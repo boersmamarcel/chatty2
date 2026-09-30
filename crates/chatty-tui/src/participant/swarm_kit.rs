@@ -167,6 +167,20 @@ impl SwarmKit {
         Self::start_with(None, roster, sse, ndjson, false).await
     }
 
+    /// As [`start`](Self::start), with every endpoint's concurrency budget
+    /// raised to `budget` instead of the system default of one (AGE-305):
+    /// what a deployment with a model server that serves more than one
+    /// request at a time configures, and what lets two calls to the same
+    /// spec actually run at once rather than queue for the same permit.
+    pub async fn start_with_endpoint_budget(
+        budget: usize,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_opts(None, roster, sse, ndjson, false, false, budget).await
+    }
+
     /// As [`start`](Self::start), with the root running as `leader` — a
     /// `--team` leader, an `--agent <spec>` root — whose own calls the
     /// broker checks against its spec (AGE-745).
@@ -190,7 +204,16 @@ impl SwarmKit {
     /// command and write — no `--auto-approve`, `AlwaysAsk` — so an
     /// approval goes up the call chain to the root (AGE-646).
     pub async fn start_asking(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
-        Self::start_opts(None, roster, sse, ndjson, false, true).await
+        Self::start_opts(
+            None,
+            roster,
+            sse,
+            ndjson,
+            false,
+            true,
+            ModuleSettingsModel::default().default_endpoint_budget,
+        )
+        .await
     }
 
     async fn start_with(
@@ -200,9 +223,19 @@ impl SwarmKit {
         ndjson: Script,
         repo: bool,
     ) -> Self {
-        Self::start_opts(leader, roster, sse, ndjson, repo, false).await
+        Self::start_opts(
+            leader,
+            roster,
+            sse,
+            ndjson,
+            repo,
+            false,
+            ModuleSettingsModel::default().default_endpoint_budget,
+        )
+        .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_opts(
         leader: Option<AgentSpec>,
         roster: Vec<AgentDef>,
@@ -210,6 +243,7 @@ impl SwarmKit {
         ndjson: Script,
         repo: bool,
         asking: bool,
+        endpoint_budget: usize,
     ) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
@@ -296,6 +330,7 @@ impl SwarmKit {
         }
         let module_settings = ModuleSettingsModel {
             virtual_agents: roster.iter().map(|agent| agent.name.clone()).collect(),
+            default_endpoint_budget: endpoint_budget,
             ..ModuleSettingsModel::default()
         };
         let execution = ExecutionSettingsModel {
@@ -336,8 +371,14 @@ impl SwarmKit {
         } else {
             vec!["--auto-approve".to_string()]
         };
-        let mut specs =
-            resolve_virtual_agents(&models, &providers, &module_settings, &specs, &common_args);
+        let mut specs = resolve_virtual_agents(
+            &models,
+            &providers,
+            &module_settings,
+            &specs,
+            &common_args,
+            Some(&workspace),
+        );
         // What `Broker::start` does with a team's `handoffs` (TD-2).
         for (spec, agent) in specs.iter_mut().zip(&roster) {
             spec.handoff = agent.handoff.clone().map(|schema| HandoffContract {
@@ -509,6 +550,10 @@ fn wrapper(base: &Path, real: &Path) -> PathBuf {
     let dir = |name: &str| {
         let path = base.join(name);
         std::fs::create_dir_all(&path).expect("xdg dir");
+        // Owner-only, as a real `XDG_RUNTIME_DIR` is: the gateway refuses
+        // anything looser (ADR-0021 § 4).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+            .expect("xdg dir is owner-only");
         path.to_string_lossy().into_owned()
     };
     let script = format!(
@@ -595,6 +640,9 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             // The broker's batches of nested runs (TB-1) are not the
             // delegation's own progress, which is what the goldens record.
             InvokeAgentProgress::Swarm(_) => continue,
+            // Recorded before this existed (AGE-762): a golden with it
+            // would no longer replay byte for byte.
+            InvokeAgentProgress::Admitted(_) => continue,
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),
@@ -891,8 +939,8 @@ async fn pre_fabric_goldens_replay() {
 
 /// Invariant 1: a process that did not receive a broker-made connection
 /// cannot register as any node. A same-user process dials the shared socket
-/// and claims the name the broker is about to give its first worker, the v1
-/// way and the v2 way; both are refused and closed, and the real worker —
+/// and claims the name the broker is about to give its first worker, the v1,
+/// v2 and v3 ways; each is refused and closed, and the real worker —
 /// spawned on the connection the broker made — still gets its task.
 #[tokio::test]
 async fn squatting_on_the_shared_socket_is_refused() {
@@ -906,9 +954,22 @@ async fn squatting_on_the_shared_socket_is_refused() {
     .await;
     let first_worker = format!("{WORKER}-0");
 
-    for claim in [
-        serde_json::json!({ "type": "register", "card": { "name": first_worker } }),
-        serde_json::json!({ "v": 2, "type": "hello", "card": { "name": first_worker } }),
+    // The version before this one, as an older worker would write it.
+    let previous = chatty_protocol_gateway::participant::PROTOCOL_VERSION - 1;
+    for (claim, answered) in [
+        (
+            serde_json::json!({ "type": "register", "card": { "name": first_worker } }),
+            false,
+        ),
+        (
+            serde_json::json!({ "v": previous, "type": "hello", "card": { "name": first_worker } }),
+            false,
+        ),
+        (
+            serde_json::json!({ "v": 3, "id": 1, "method": "session.hello",
+                                "params": { "card": { "name": first_worker } } }),
+            true,
+        ),
     ] {
         let stream = tokio::net::UnixStream::connect(kit.socket())
             .await
@@ -919,15 +980,23 @@ async fn squatting_on_the_shared_socket_is_refused() {
             .write_all(format!("{claim}\n").as_bytes())
             .await
             .unwrap();
-        let reply: serde_json::Value = serde_json::from_str(
-            &lines
-                .next_line()
-                .await
-                .unwrap()
-                .expect("the squatter is answered"),
-        )
-        .unwrap();
-        assert_eq!(reply["type"], "error", "{claim} is refused: {reply}");
+        // A hello is refused with an `error` for its id; a line that is not
+        // one is closed without a reply (ADR-0021).
+        if answered {
+            let reply: serde_json::Value = serde_json::from_str(
+                &lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("the squatter is answered"),
+            )
+            .unwrap();
+            assert_eq!(reply["id"], 1, "{claim} is refused: {reply}");
+            assert_eq!(
+                reply["error"]["kind"], "refused",
+                "{claim} is refused: {reply}"
+            );
+        }
         assert!(
             lines.next_line().await.unwrap().is_none(),
             "and its connection closed"
@@ -1240,18 +1309,43 @@ async fn nested_delegation_over_the_connection() {
     .filter_map(|event| progress_text_for_event(event, &mut names))
     .collect();
     assert_eq!(grandchild_lines, ["read_file", "\u{2713} read_file"]);
+
+    // The leader sees exactly these six lines. Their relative delivery
+    // order across the two paths that produce them (the middle worker's
+    // own steps, and the grandchild's steps forwarded through it) is not
+    // itself a guarantee: only the order within each causally-linked pair
+    // is. Assert the set, then the causal order that matters.
+    let lines = progress_lines(&run);
+    let mut sorted = lines.clone();
+    sorted.sort();
+    let mut expected = vec![
+        "list_agents".to_string(),
+        "\u{2713} list_agents".to_string(),
+        "invoke_agent".to_string(),
+        "read_file".to_string(),
+        "\u{2713} read_file".to_string(),
+        "\u{2713} invoke_agent".to_string(),
+    ];
+    expected.sort();
     assert_eq!(
-        progress_lines(&run),
-        [
-            "list_agents",
-            "\u{2713} list_agents",
-            "invoke_agent",
-            "read_file",
-            "\u{2713} read_file",
-            "\u{2713} invoke_agent",
-        ],
-        "the leader sees the grandchild's steps inside the middle worker's delegation"
+        sorted, expected,
+        "the leader sees the grandchild's steps inside the middle worker's delegation: {lines:?}"
     );
+    let pos = |line: &str| {
+        lines
+            .iter()
+            .position(|l| l == line)
+            .unwrap_or_else(|| panic!("{line:?} missing from {lines:?}"))
+    };
+    // Each call precedes its own result.
+    assert!(pos("list_agents") < pos("\u{2713} list_agents"));
+    assert!(pos("invoke_agent") < pos("\u{2713} invoke_agent"));
+    assert!(pos("read_file") < pos("\u{2713} read_file"));
+    // list_agents finishes before the delegation to the grandchild starts.
+    assert!(pos("\u{2713} list_agents") < pos("invoke_agent"));
+    // The grandchild's whole round trip sits inside the delegation's span.
+    assert!(pos("invoke_agent") < pos("read_file"));
+    assert!(pos("\u{2713} read_file") < pos("\u{2713} invoke_agent"));
 
     // One edge-log row per call, named by the connections: the root's call
     // to the middle worker, and the middle worker's to the grandchild.
@@ -1280,25 +1374,6 @@ async fn nested_delegation_over_the_connection() {
     );
 }
 
-/// A raw loopback HTTP GET against the broker's gateway, for the counter's
-/// own sanity check.
-async fn http_get(port: u16, path: &str) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("the gateway is listening");
-    stream
-        .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
-        )
-        .await
-        .unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).await.unwrap();
-    response
-}
-
 /// Invariant 4: across the nested delegation — the leader's call, the
 /// middle worker's directory read and its call to the grandchild — no
 /// request for a role or the directory reaches the gateway's HTTP side.
@@ -1325,16 +1400,20 @@ async fn no_worker_call_uses_loopback() {
         "the directory was read over loopback"
     );
 
-    // The counter counts: the same role and the directory, over HTTP — both
-    // refused now (BI-7), never served.
-    let port = kit.broker().port;
+    // The counter counts: the same role and the directory, over the
+    // gateway's socket with its token — both refused now (BI-7), never
+    // served.
+    let broker = kit.broker();
+    let token = Some(broker.token().as_str());
     assert!(
-        http_get(port, &format!("/a2a/{GRANDCHILD}/.well-known/agent.json"))
+        broker
+            .http_get(&format!("/a2a/{GRANDCHILD}/.well-known/agent.json"), token)
             .await
             .contains("403 Forbidden")
     );
     assert!(
-        http_get(port, "/.well-known/agent.json")
+        broker
+            .http_get("/.well-known/agent.json", token)
             .await
             .contains("403 Forbidden")
     );
@@ -1881,6 +1960,7 @@ async fn spawn_context_is_clamped() {
 
     let (_task, _updates) = registry
         .submit_task(&name, DelegatedTask::new("widen your context"))
+        .await
         .expect("the rogue node is connected");
     let refusals = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen = refusals.clone();
@@ -2079,11 +2159,12 @@ async fn one_broker_per_root() {
             }
         }
     }
-    assert_eq!(
-        sockets,
-        [kit.socket()],
-        "only the root binds a participant socket"
-    );
+    // The root's broker binds two: the shared participant socket and its
+    // gateway's own (EN-0d). No worker binds any.
+    sockets.sort();
+    let mut roots = kit.broker().bound_sockets();
+    roots.sort();
+    assert_eq!(sockets, roots, "only the root binds sockets");
 }
 
 // ---------------------------------------------------------------------------
@@ -2099,17 +2180,13 @@ pub(crate) struct StartedBroker(pub(crate) std::sync::Arc<dyn chatty_fabric::Tra
 
 #[async_trait::async_trait]
 impl chatty_core::services::lazy_broker::LazyBroker for StartedBroker {
-    async fn ensure_started(&self) -> anyhow::Result<String> {
-        anyhow::bail!("the kit's root reaches its broker only through its direct handle")
-    }
-
     async fn transport(
         &self,
     ) -> anyhow::Result<Option<std::sync::Arc<dyn chatty_fabric::Transport>>> {
         Ok(Some(self.0.clone()))
     }
 
-    fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+    fn bound_sockets(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
 
@@ -2381,6 +2458,7 @@ async fn no_mid_run_delivery() {
     }
     let (_task, _updates) = registry
         .submit_task(&courier, DelegatedTask::new("tell the root"))
+        .await
         .expect("the courier is connected");
     let status = std::sync::Arc::new(parking_lot::Mutex::new(None));
     let seen = status.clone();

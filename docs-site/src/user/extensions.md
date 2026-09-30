@@ -47,6 +47,14 @@ The server appears under **Installed** with an **↗ External** badge. The agent
 > [!TIP]
 > Servers to try, with their start commands, are collected on the [curated MCP catalog](../dev/architecture/curated-mcp-catalog.md) page. Write your own against the [MCP specification](https://modelcontextprotocol.io/).
 
+## Remote A2A agents and private networks
+
+A remote **A2A** agent (installed from the marketplace or added as a custom extension) is called over HTTP, the same as an MCP server. By default it can only be reached at a public address or `localhost`: a name that resolves to your LAN, your Tailscale tailnet, or any other private range is refused, so a malicious or compromised marketplace agent can't be pointed at your own network.
+
+If you run an agent yourself on your LAN or tailnet, turn on its **Private network** toggle (next to **Enable**/**Disable** under **Installed**) to let that one agent reach a private address. It admits the same ranges as the browser's **Allow Browser Access to Private Network** toggle: RFC-1918 LAN addresses, Tailscale's CGNAT range, and IPv6 unique-local addresses. Cloud-metadata addresses (`169.254.x.x`) and IPv6 link-local addresses stay refused either way. A private-network agent still needs `https://`: plain `http://` only ever works for `localhost`.
+
+Turn this on only for an agent whose address you control. The check runs against whatever address the agent's name resolves to at the moment of each call, not once when you add it — so if the name is ever pointed somewhere else (DNS rebinding), the opt-in lets that new address through too, private range or not.
+
 ## Build your own module
 
 Modules are small programs that run inside Chatty, locally or on the Hive runner. The developer guide [Build a WASM module](../dev/guides/build-wasm-module.md) walks through it, with two worked examples: [write a plugin (echo)](../dev/start/tutorial-echo-agent.md) and [give an agent the plugin (benford)](../dev/start/tutorial-benford-agent.md).
@@ -54,6 +62,27 @@ Modules are small programs that run inside Chatty, locally or on the Hive runner
 A module is a **plugin**: tools an agent runs, never an agent of its own. Installing one adds it to the module directory and nothing more; an agent uses it once its spec lists the plugin under `[[plugins]]` and grants a subset of what the plugin asks for — an LLM call, a file read, billing, and so on. Anything not granted is refused to the plugin, not silently allowed. **Settings → Plugins** lists every plugin with its tools, what it requests, trust level and the agent specs that use it, each with what it actually grants; **Settings → Agents** shows the same requests-vs-grants breakdown for each spec's plugins. A module you copy into the module directory yourself shows **Trust: local**: Chatty loads it because you put it there, but nothing vouches for it.
 
 If a module fails to load — an invalid `module.toml`, a missing `.wasm` file, a name that clashes with another installed module, or an installed `.wasm` that changed on disk since it was installed (`hash mismatch`) — its row shows **Failed to load:** with the reason, instead of failing silently. Reinstall a module that fails with a hash mismatch.
+
+## Use a plugin from another MCP client
+
+A plugin whose `module.toml` sets `[protocols] mcp = true` is also served to MCP clients outside Chatty, by the desktop's module gateway (**Enable module runtime** in **Settings → Plugins**). The gateway starts the first time an agent delegates, and **Settings → Plugins** then shows where it runs.
+
+The gateway has no network port. It listens on a Unix socket in a folder only you can open, and answers only a caller that sends the token Chatty writes there each time it starts the gateway:
+
+- **Socket:** `gateway.sock` in `$XDG_RUNTIME_DIR/chatty-run`. Without `XDG_RUNTIME_DIR` (macOS, some Linux setups) the folder is `chatty-run` in your cache folder: `~/Library/Caches` or `~/.cache`.
+- **Token:** `gateway.token`, next to the socket, readable only by you. Send it as `Authorization: Bearer <token>`; it changes every launch, so read it from the file each time.
+
+```sh
+dir="$XDG_RUNTIME_DIR/chatty-run"
+curl -s --unix-socket "$dir/gateway.sock" http://localhost/mcp/echo \
+  -H "Authorization: Bearer $(cat "$dir/gateway.token")" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+A client that can only reach an HTTP URL needs a local bridge from a port to the socket. The bridge answers anyone who can reach that port, so bind it to `127.0.0.1` and still send the token.
+
+Chatty refuses to start the gateway when the `chatty-run` folder is someone else's or can be opened by other users (anything but mode `700`); remove the folder and it is recreated correctly. On Windows the gateway does not start yet: it needs an owner-only folder there, which Chatty does not create yet, so external MCP access (reaching a plugin's tools from another MCP client) is macOS/Linux-only for now.
 
 ## Next
 

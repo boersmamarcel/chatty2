@@ -75,12 +75,12 @@ pub async fn start_gateway(fixtures: &[&str]) -> (String, Arc<FakeLlm>) {
             .load(module_dir(fixture))
             .unwrap_or_else(|e| panic!("{fixture} loads: {e:#}"));
     }
-    let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)), 0);
+    let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)));
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("an ephemeral port");
     let base = format!("http://{}", tcp.local_addr().unwrap());
-    let router = gateway.build_router();
+    let router = with_launch_token(&gateway);
     tokio::spawn(async move {
         axum::serve(tcp, router).await.ok();
     });
@@ -94,4 +94,22 @@ pub fn rt() -> tokio::runtime::Runtime {
         .enable_all()
         .build()
         .expect("a tokio runtime")
+}
+
+/// The gateway's router with its launch token added to every request: this
+/// test's own listener stands in for a caller that holds the token (EN-0d).
+pub fn with_launch_token(gateway: &ProtocolGateway) -> axum::Router {
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    gateway
+        .build_router()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::extract::Request| {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer.clone());
+                request
+            },
+        ))
 }

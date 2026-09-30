@@ -46,7 +46,7 @@ struct Harness {
 impl Harness {
     async fn start() -> Self {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let socket = dir.path().join("participants.sock");
+        let socket = dir.path().join("run").join("participants.sock");
 
         let provider: Arc<dyn LlmProvider> = Arc::new(NoopProvider);
         let modules = Arc::new(RwLock::new(
@@ -54,26 +54,27 @@ impl Harness {
         ));
         let edge_log = EdgeLog::open(dir.path()).expect("the edge log opens");
         let edges_path = edge_log.path();
-        let gateway = ProtocolGateway::new(modules, 0)
+        let gateway = ProtocolGateway::new(modules)
             .with_participant_socket(&socket)
             .with_edge_log(edge_log);
         let participants = gateway.participants();
 
         // A role the loopback route must refuse: a connection the broker
         // made for it, exactly as a real worker gets (ADR-0020), welcomed
-        // over the v2 protocol so it is actually live in the registry.
+        // over the v3 protocol so it is actually live in the registry.
         let connection = open_connection(&participants, "stub-worker", None).expect("a connection");
         connection.worker_end.set_nonblocking(true).unwrap();
         let mut worker = UnixStream::from_std(connection.worker_end).unwrap();
         let hello = json!({
-            "v": 2,
-            "type": "hello",
-            "card": {
+            "v": 3,
+            "id": 1,
+            "method": "session.hello",
+            "params": {"card": {
                 "name": "stub-worker",
                 "description": "a stub worker",
                 "version": "0.1.0",
                 "skills": [],
-            }
+            }}
         });
         worker
             .write_all(format!("{hello}\n").as_bytes())
@@ -86,14 +87,15 @@ impl Harness {
                 .expect("the broker answers hello")
                 .unwrap()
                 .expect("the socket is readable");
-            assert!(welcome.contains("\"welcome\""), "{welcome}");
+            let welcome: serde_json::Value = serde_json::from_str(&welcome).unwrap();
+            assert_eq!(welcome["result"]["name"], "stub-worker-0", "{welcome}");
         }
 
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("an ephemeral port");
         let base_url = format!("http://{}", tcp.local_addr().unwrap());
-        let router = gateway.build_router();
+        let router = with_launch_token(&gateway);
         tokio::spawn(async move {
             axum::serve(tcp, router).await.ok();
         });
@@ -220,4 +222,22 @@ async fn loopback_ignores_caller_header() {
         refusal_body(),
         "the header claims a caller identity; the response is the plain refusal regardless"
     );
+}
+
+/// The gateway's router with its launch token added to every request: this
+/// test's own listener stands in for a caller that holds the token (EN-0d).
+fn with_launch_token(gateway: &ProtocolGateway) -> axum::Router {
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    gateway
+        .build_router()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::extract::Request| {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer.clone());
+                request
+            },
+        ))
 }

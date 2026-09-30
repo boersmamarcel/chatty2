@@ -88,7 +88,9 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/adr-0011-broker-ab-2026-09-08.md`](research/adr-0011-broker-ab-2026-09-08.md) | ADR-0011 kill criteria | `sub_agent` vs the broker, measured (AGE-302) |
 | [`research/fabric-hop-latency-baseline.md`](research/fabric-hop-latency-baseline.md) | ADR-0020 latency criterion | Hop latency before BI-3, the baseline BI-8 compares against (AGE-632) |
 | [`research/fabric-hop-latency-2026-09-29.md`](research/fabric-hop-latency-2026-09-29.md) | ADR-0020 latency criterion | The new path against the baseline, both on one box; why the hop shrank (AGE-640) |
+| [`research/fabric-codec-baseline.md`](research/fabric-codec-baseline.md) | ADR-0021 kill criterion 3 | The v3 envelope's `FrameCodec` against the v2 frames, one session on one box (AGE-769) |
 | [`research/showcase-runs-2026-09-29.md`](research/showcase-runs-2026-09-29.md) | Shipping or changing a preset team | Real-model reliability runs of `data-analysis` and `research-brief`, the tuning history, and why `coder-reviewer` and the Benford team did not ship (AGE-752) |
+| [`research/dabstep-team-2026-09-30.md`](research/dabstep-team-2026-09-30.md) | Claiming a team beats one agent | E8: `analyst-panel` against a single agent on DABstep subset-80; no gain, and invalid handoffs are the main loss (AGE-754) |
 | [`research/plugin-perf-2026-09-27.md`](research/plugin-perf-2026-09-27.md) | PL-H4, PL-U2, or re-checking PL-H1 | S7 baseline: cold load, per-protocol overhead, concurrency, 1-hour soak (AGE-603) |
 | [`research/resume-spike-template.md`](research/resume-spike-template.md) | Running or analysing the resume spike | The frozen re-brief and resume prompts both arms get; runner in `scripts/resume-spike/` (AGE-650) |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |

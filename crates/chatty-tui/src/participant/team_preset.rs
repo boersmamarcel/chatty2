@@ -59,9 +59,10 @@ async fn start_team_broker(
         module_settings,
         agents,
         &["--auto-approve".to_string()],
+        Some(dir),
     );
     Broker::start_at(
-        dir.join("participants.sock"),
+        dir.join("run").join("participants.sock"),
         scripted_worker_binary(dir, &completed_turn().await),
         module_settings.default_endpoint_budget,
         specs,
@@ -189,7 +190,14 @@ async fn a_team_file_in_the_workspace_overrides_the_preset() {
     );
     assert_eq!(execution_settings.max_agent_turns, 12);
 
-    let specs = resolve_virtual_agents(&[], &[], &module_settings, &agents, &[]);
+    let specs = resolve_virtual_agents(
+        &[],
+        &[],
+        &module_settings,
+        &agents,
+        &[],
+        Some(workspace.path()),
+    );
     assert_eq!(specs.len(), 1);
     assert_eq!(specs[0].name, "ws-coder");
     assert_eq!(

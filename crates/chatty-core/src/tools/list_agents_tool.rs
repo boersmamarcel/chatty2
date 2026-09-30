@@ -15,7 +15,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
@@ -134,21 +133,17 @@ pub struct ListAgentsTool {
     /// The broker's local workers (ADR-0011 C2, named under C10), if the
     /// gateway is running.
     local_workers: Vec<LocalWorkerAgentSummary>,
-    /// Where to read the broker's live participant table, when the gateway is
-    /// running (ADR-0011 C5).
-    gateway_base_url: Option<String>,
-    /// A broker that has not necessarily started yet (BI-2, AGE-634).
-    /// Consulted only when `gateway_base_url` is `None`.
+    /// A broker that has not necessarily started yet (BI-2, AGE-634):
+    /// its live participant table is read through its direct handle
+    /// (ADR-0011 C5, ADR-0020).
     lazy_broker: Option<Arc<dyn LazyBroker>>,
     /// The fabric the broker's directory is read through (ADR-0020, BI-4):
-    /// a worker's broker-made connection. When present, the live half is
-    /// never read over loopback HTTP.
+    /// a worker's broker-made connection.
     transport: Option<Arc<dyn Transport>>,
     /// Where a local agent's spec is looked up for its card's plugins:
     /// the workspace and the data directory (then the presets).
     spec_workspace: Option<PathBuf>,
     spec_data_dir: Option<PathBuf>,
-    http: reqwest::Client,
 }
 
 impl ListAgentsTool {
@@ -156,33 +151,22 @@ impl ListAgentsTool {
         Self {
             remote_agents,
             local_workers: Vec::new(),
-            gateway_base_url: None,
             lazy_broker: None,
             transport: None,
             spec_workspace: None,
             spec_data_dir: dirs::data_dir(),
-            http: reqwest::Client::new(),
         }
     }
 
-    /// Read the broker's live participant table as well as settings
-    /// (ADR-0011 C5). Without it, this lists only what was configured.
-    pub fn with_gateway_port(mut self, port: u16) -> Self {
-        self.gateway_base_url = Some(format!("http://localhost:{port}"));
-        self
-    }
-
     /// Start the broker itself on first use instead of expecting it already
-    /// running (BI-2, AGE-634). Ignored when a `gateway_port` was already
-    /// given: that path is for tests and hosts that already know a live
-    /// port.
+    /// running (BI-2, AGE-634), and read its live participant table as well
+    /// as settings (ADR-0011 C5).
     pub fn with_lazy_broker(mut self, broker: Arc<dyn LazyBroker>) -> Self {
         self.lazy_broker = Some(broker);
         self
     }
 
-    /// Read the broker's directory over `transport` instead of its
-    /// aggregated card over loopback HTTP (ADR-0020, BI-4).
+    /// Read the broker's directory over `transport` (ADR-0020, BI-4).
     pub fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
         self.transport = Some(transport);
         self
@@ -201,8 +185,8 @@ impl ListAgentsTool {
     /// given, else the lazy broker's direct handle (starting it).
     ///
     /// `Ok(None)` means no broker is configured at all — nothing to report.
-    /// `Err` means one is configured but failed to start (AGE-746, e.g. a
-    /// port collision): the caller surfaces this to the user rather than
+    /// `Err` means one is configured but failed to start (AGE-746, e.g. its
+    /// gateway socket in use): the caller surfaces this to the user rather than
     /// treating it the same as "no broker".
     async fn fabric_transport(&self) -> Result<Option<Arc<dyn Transport>>, String> {
         if let Some(transport) = &self.transport {
@@ -212,22 +196,6 @@ impl ListAgentsTool {
             return Ok(None);
         };
         broker.transport().await.map_err(|error| {
-            tracing::warn!(%error, "Failed to start the broker for list_agents");
-            error.to_string()
-        })
-    }
-
-    /// The gateway's base URL, resolving a [`LazyBroker`] on first use if
-    /// that is all this tool has. See [`Self::fabric_transport`] for what
-    /// `Ok(None)` vs `Err` means.
-    async fn gateway_base_url(&self) -> Result<Option<String>, String> {
-        if let Some(url) = &self.gateway_base_url {
-            return Ok(Some(url.clone()));
-        }
-        let Some(broker) = self.lazy_broker.as_ref() else {
-            return Ok(None);
-        };
-        broker.ensure_started().await.map(Some).map_err(|error| {
             tracing::warn!(%error, "Failed to start the broker for list_agents");
             error.to_string()
         })
@@ -359,9 +327,7 @@ impl Tool for ListAgentsTool {
         let agents: Vec<AgentListing> = listings.into_values().collect();
         tracing::info!(
             agent_count = agents.len(),
-            live_read = self.gateway_base_url.is_some()
-                || self.lazy_broker.is_some()
-                || self.transport.is_some(),
+            live_read = self.lazy_broker.is_some() || self.transport.is_some(),
             "list_agents called"
         );
 
@@ -378,8 +344,8 @@ impl Tool for ListAgentsTool {
              called."
                 .to_string()
         };
-        // AGE-746: a broker that is configured but failed to start (a port
-        // collision, most often) used to be indistinguishable from one that
+        // AGE-746: a broker that is configured but failed to start (its
+        // gateway socket in use, most often) used to be indistinguishable from one that
         // was simply never turned on — this tool would list local workers'
         // static fallback descriptions either way. Say so, so the model can
         // tell the user rather than reporting local agents as reachable.
@@ -387,8 +353,8 @@ impl Tool for ListAgentsTool {
             note = format!(
                 "The local broker failed to start ({error}), so live agent data (and any agent \
                  only the broker knows about) is unavailable; entries below may be stale or \
-                 unreachable. This is often another chatty process already holding the gateway \
-                 port — check Settings → Agents, or close the other process. {note}"
+                 unreachable. This is often another chatty process already serving the gateway \
+                 socket — check Settings → Agents, or close the other process. {note}"
             );
         }
 
@@ -401,70 +367,25 @@ impl Tool for ListAgentsTool {
 }
 
 impl ListAgentsTool {
-    /// How long the broker gets to answer. It is a local HTTP call to a
-    /// process on the same machine; if it is not answering, the agents it
-    /// would have listed are not reachable either, so listing without them is
-    /// the honest answer rather than a stalled turn.
-    const LIVE_READ_TIMEOUT: Duration = Duration::from_millis(750);
-
-    /// The broker's live participant table, from its aggregated agent card,
+    /// The broker's live participant table, read over its direct handle,
     /// plus the reason the broker itself could not be reached — not raised
     /// as an error, since a `list_agents` call must still answer with what
     /// settings alone can say, but not swallowed either: a broker that is
     /// merely off is unremarkable, but one that is configured and failed to
-    /// bind its port (AGE-746) is worth telling the user about, so the note
-    /// carries it back to `call`.
+    /// start (AGE-746) is worth telling the user about, so the note carries
+    /// it back to `call`.
     async fn live_agents(&self) -> (Vec<AgentListing>, Option<String>) {
         match self.fabric_transport().await {
-            Ok(Some(transport)) => return (directory_over(transport.as_ref()).await, None),
-            Ok(None) => {}
-            Err(error) => return (Vec::new(), Some(error)),
+            Ok(Some(transport)) => (directory_over(transport.as_ref()).await, None),
+            Ok(None) => (Vec::new(), None),
+            Err(error) => (Vec::new(), Some(error)),
         }
-        let base = match self.gateway_base_url().await {
-            Ok(Some(base)) => base,
-            Ok(None) => return (Vec::new(), None),
-            Err(error) => return (Vec::new(), Some(error)),
-        };
-        let url = format!("{base}/.well-known/agent.json");
-
-        let card = match self
-            .http
-            .get(&url)
-            .timeout(Self::LIVE_READ_TIMEOUT)
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
-                match response.json::<serde_json::Value>().await {
-                    Ok(card) => card,
-                    Err(error) => {
-                        tracing::debug!(%url, ?error, "the broker's card did not parse");
-                        return (Vec::new(), None);
-                    }
-                }
-            }
-            Ok(response) => {
-                tracing::debug!(%url, status = %response.status(), "the broker refused its card");
-                return (Vec::new(), None);
-            }
-            Err(error) => {
-                tracing::debug!(%url, ?error, "no broker to list live agents from");
-                return (Vec::new(), None);
-            }
-        };
-
-        let agents = card
-            .get("agents")
-            .and_then(|agents| agents.as_array())
-            .map(|agents| agents.iter().filter_map(listing_from_card).collect())
-            .unwrap_or_default();
-        (agents, None)
     }
 }
 
 /// The broker's directory, read over the fabric: the same card entries its
 /// aggregated card lists, as a `list_agents` call's result. A failed call is
-/// an empty live half, as a broker that does not answer over HTTP is.
+/// an empty live half.
 async fn directory_over(transport: &dyn Transport) -> Vec<AgentListing> {
     use futures::StreamExt;
 
@@ -546,19 +467,19 @@ mod tests {
     use crate::services::lazy_broker::LazyBroker;
     use crate::settings::models::a2a_store::A2aAgentConfig;
 
-    /// A broker that is configured but never manages to bind its port —
-    /// standing in for the AGE-746 port-collision case.
+    /// A broker that is configured but never manages to bind its socket —
+    /// standing in for the AGE-746 collision case.
     struct FailingBroker;
 
     #[async_trait::async_trait]
     impl LazyBroker for FailingBroker {
-        async fn ensure_started(&self) -> anyhow::Result<String> {
+        async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
             Err(anyhow::anyhow!(
-                "failed to bind to 127.0.0.1:8420: Address already in use (os error 98)"
+                "failed to serve the gateway: Address already in use (os error 98)"
             ))
         }
 
-        fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+        fn bound_sockets(&self) -> Vec<PathBuf> {
             Vec::new()
         }
     }
@@ -570,6 +491,7 @@ mod tests {
             api_key: None,
             enabled,
             skills: vec![],
+            allow_private_network: false,
         }
     }
 
@@ -598,10 +520,7 @@ mod tests {
     /// AGE-746: a bind failure (e.g. two chatty processes on the same port)
     /// used to be silent — `list_agents` fell back to local workers' static
     /// descriptions with no sign the broker was actually down. Now the
-    /// failure reaches the note the model reads, wherever the port fallback
-    /// happened to come from — an `ensure_started` broker with no
-    /// pre-resolved URL and no direct transport, the shape a lazily-started
-    /// gateway is in until its first call.
+    /// failure reaches the note the model reads.
     #[tokio::test]
     async fn gateway_bind_failure_is_reported() {
         let tool = ListAgentsTool::new(vec![])
@@ -786,8 +705,8 @@ mod tests {
     /// anything.
     #[tokio::test]
     async fn the_broker_s_live_participants_are_listed_with_their_origin() {
-        let (port, _server) = serve_card(broker_card()).await;
-        let tool = ListAgentsTool::new(vec![]).with_gateway_port(port);
+        let directory = directory(broker_card());
+        let tool = ListAgentsTool::new(vec![]).with_transport(directory);
 
         let output = list(&tool).await;
         assert_eq!(output.total, 3);
@@ -816,10 +735,10 @@ mod tests {
                  "description": "Model: gemma. Tool groups disabled: fs-write, shell, git."},
             ],
         });
-        let (port, _server) = serve_card(card).await;
+        let directory = directory(card);
         let tool = ListAgentsTool::new(vec![])
             .with_local_workers(["local-coder", "local-reviewer"])
-            .with_gateway_port(port);
+            .with_transport(directory);
 
         let output = list(&tool).await;
         assert_eq!(output.total, 2);
@@ -853,13 +772,13 @@ mod tests {
         let card = serde_json::json!({
             "agents": [{"name": "voucher-agent", "origin": "local"}],
         });
-        let (port, _server) = serve_card(card).await;
+        let directory = directory(card);
         let tool = ListAgentsTool::new(vec![make_agent(
             "voucher-agent",
             "https://hive.dev/a2a/voucher",
             true,
         )])
-        .with_gateway_port(port);
+        .with_transport(directory);
 
         let output = list(&tool).await;
         assert_eq!(output.total, 1);
@@ -869,15 +788,12 @@ mod tests {
         );
     }
 
-    /// No gateway is not an error: the tool answers with what settings know.
+    /// A broker that does not answer is not an error: the tool answers with
+    /// what settings know.
     #[tokio::test]
-    async fn a_gateway_that_is_not_there_leaves_the_settings_listing_alone() {
-        let port = {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            listener.local_addr().unwrap().port()
-        };
+    async fn a_broker_that_does_not_answer_leaves_the_settings_listing_alone() {
         let tool = ListAgentsTool::new(vec![make_agent("remote", "https://example.com/a2a", true)])
-            .with_gateway_port(port);
+            .with_transport(Arc::new(Silent));
 
         let output = list(&tool).await;
         assert_eq!(output.total, 1);
@@ -887,30 +803,35 @@ mod tests {
         );
     }
 
-    /// Serve one fixed card on a loopback port, as the gateway would.
-    async fn serve_card(card: serde_json::Value) -> (u16, tokio::task::JoinHandle<()>) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    /// A broker whose directory is `card`'s agents, as the gateway's
+    /// aggregated card lists them.
+    fn directory(card: serde_json::Value) -> Arc<dyn Transport> {
+        Arc::new(Directory(card["agents"].clone()))
+    }
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("a loopback port");
-        let port = listener.local_addr().expect("the bound address").port();
-        let body = card.to_string();
+    struct Directory(serde_json::Value);
 
-        let server = tokio::spawn(async move {
-            while let Ok((mut socket, _)) = listener.accept().await {
-                let mut buffer = [0u8; 1024];
-                let _ = socket.read(&mut buffer).await;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.flush().await;
-            }
-        });
+    #[async_trait::async_trait]
+    impl Transport for Directory {
+        async fn call(
+            &self,
+            _req: CallRequest,
+        ) -> Result<chatty_fabric::CallStream, chatty_fabric::CallError> {
+            use futures::StreamExt;
+            Ok(futures::stream::iter([Ok(CallEvent::Result(self.0.clone()))]).boxed())
+        }
+    }
 
-        (port, server)
+    /// A broker that refuses every call.
+    struct Silent;
+
+    #[async_trait::async_trait]
+    impl Transport for Silent {
+        async fn call(
+            &self,
+            _req: CallRequest,
+        ) -> Result<chatty_fabric::CallStream, chatty_fabric::CallError> {
+            Err(chatty_fabric::CallError::Disconnected("gone".into()))
+        }
     }
 }

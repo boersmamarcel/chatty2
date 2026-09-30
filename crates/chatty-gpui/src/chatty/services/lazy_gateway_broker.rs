@@ -5,7 +5,7 @@
 //! Building and starting the gateway needs `gpui::AsyncApp`, which is
 //! `!Send` (GPUI is single-threaded), while this handle must be
 //! `Send + Sync` to live behind `Arc<dyn LazyBroker>` and be called from a
-//! tool running on tokio's own threads. So `ensure_started` does not do the
+//! tool running on tokio's own threads. So `transport` does not do the
 //! work itself: it asks the task `module_settings_controller::refresh_runtime`
 //! spawned on GPUI's own executor to do it — that task is still on
 //! `AsyncApp`, and answers over a one-shot reply channel — and waits for the
@@ -14,48 +14,52 @@
 //!
 //! The desktop's root conversation is its broker's root (ADR-0020: one
 //! broker per root process), so what the start task answers with is the
-//! gateway's direct [`Transport`] as well as its port: `invoke_agent` reaches
-//! the local roles through that handle, never over loopback HTTP (AGE-744).
-//! So the HTTP side is bound only when the module runtime is on: it serves
-//! the WASM modules and external clients, which the broker's root does not
-//! need (AGE-759).
+//! gateway's direct [`Transport`] as well as its socket: `invoke_agent`
+//! reaches the local roles through that handle, never over the gateway's
+//! socket (AGE-744). So the socket is bound only when the module runtime is
+//! on: it serves the WASM modules and external clients, which the broker's
+//! root does not need (AGE-759).
 
-use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chatty_fabric::Transport;
 
-/// What a started gateway hands back: the port it bound, if it serves HTTP,
-/// and this process's direct handle into it (`ProtocolGateway::transport`).
+/// What a started gateway hands back: the socket it serves on, if the
+/// module runtime is on, and this process's direct handle into it
+/// (`ProtocolGateway::transport`).
 #[derive(Clone)]
 pub struct StartedGateway {
-    pub port: Option<u16>,
+    pub socket: Option<PathBuf>,
     pub transport: Arc<dyn Transport>,
 }
 
-/// A reply to one [`LazyGatewayBroker::ensure_started`] request: the started
+/// A reply to one start request: the started
 /// gateway, or the reason it failed to start.
 pub type StartReply = tokio::sync::oneshot::Sender<Result<StartedGateway, String>>;
 
-/// Start `gateway` as the desktop's broker, binding its HTTP side on
-/// `port` only with `serve_http` (the module runtime on, AGE-759). Its
-/// direct handle is taken here, after every virtual agent is on it, so the
-/// call path reaches all of them.
+/// Start `gateway` as the desktop's broker, binding its socket only with
+/// `serve` (the module runtime on, AGE-759). Its direct handle is taken
+/// here, after every virtual agent is on it, so the call path reaches all
+/// of them.
 pub async fn start(
     gateway: &mut chatty_protocol_gateway::ProtocolGateway,
-    port: u16,
-    serve_http: bool,
+    serve: bool,
 ) -> anyhow::Result<StartedGateway> {
     let transport = gateway.transport();
-    if !serve_http {
+    if !serve {
         return Ok(StartedGateway {
-            port: None,
+            socket: None,
             transport,
         });
     }
     gateway.start().await?;
+    let socket = gateway
+        .socket_path()
+        .ok_or_else(|| anyhow::anyhow!("the gateway started with no socket"))?
+        .to_path_buf();
     Ok(StartedGateway {
-        port: Some(port),
+        socket: Some(socket),
         transport,
     })
 }
@@ -94,25 +98,16 @@ impl LazyGatewayBroker {
 
 #[async_trait::async_trait]
 impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
-    async fn ensure_started(&self) -> anyhow::Result<String> {
-        match self.started().await?.port {
-            Some(port) => Ok(format!("http://localhost:{port}")),
-            None => Err(anyhow::anyhow!(
-                "the module runtime is off, so the broker serves no HTTP"
-            )),
-        }
-    }
-
     /// The root reaches its broker directly (ADR-0020, BI-4).
     async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
         Ok(Some(self.started().await?.transport.clone()))
     }
 
-    fn bound_addrs(&self) -> Vec<SocketAddr> {
+    fn bound_sockets(&self) -> Vec<PathBuf> {
         self.once
             .get()
-            .and_then(|started| started.port)
-            .map(|port| vec![SocketAddr::from(([127, 0, 0, 1], port))])
+            .and_then(|started| started.socket.clone())
+            .map(|socket| vec![socket])
             .unwrap_or_default()
     }
 

@@ -740,12 +740,6 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     #[cfg(not(unix))]
     let broker: Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> = None;
 
-    // The broker's own gateway port is not known until it actually starts
-    // (BI-2, AGE-634), so this stays `None` in production; kept out of
-    // `module_settings` either way (AGE-382), so `/modules` sees and saves
-    // only what was on disk.
-    let broker_port: Option<u16> = None;
-
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
@@ -764,7 +758,6 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             provider_config,
             execution_settings,
             module_settings,
-            broker_port,
             broker: broker.clone(),
             models,
             providers,
@@ -797,7 +790,6 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 provider_config,
                 execution_settings,
                 module_settings,
-                broker_port,
                 broker: broker.clone(),
                 models,
                 providers,
@@ -877,7 +869,6 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 provider_config,
                 execution_settings: execution_settings.clone(),
                 module_settings,
-                broker_port,
                 broker: broker.clone(),
                 models,
                 providers: providers.clone(),

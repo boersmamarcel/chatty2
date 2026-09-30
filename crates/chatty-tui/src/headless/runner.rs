@@ -435,11 +435,6 @@ impl HeadlessRunner {
                 skill_service: Some(self.skill_service.clone()),
                 search_settings: self.config.search_settings.clone(),
                 embedding_service: self.config.embedding_service.clone(),
-                gateway_port: self.config.broker_port.or(self
-                    .config
-                    .module_settings
-                    .enabled
-                    .then_some(self.config.module_settings.gateway_port)),
                 lazy_broker: self.config.broker.clone(),
                 local_agents: match self.config.team.as_ref() {
                     Some(team) => team.agent_names(),

@@ -1,0 +1,24 @@
+[package]
+name = "chatty-protocol-gateway-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+chatty-protocol-gateway = { path = ".." }
+
+# Its own workspace: nightly-only, and never built by `cargo test` at the
+# repository root.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "frame-codec"
+path = "fuzz_targets/frame_codec.rs"
+test = false
+doc = false
+bench = false

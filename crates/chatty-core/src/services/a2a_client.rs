@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{debug, info, warn};
 
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::models::clarification_store::{
@@ -20,6 +21,10 @@ use crate::models::clarification_store::{
 };
 use crate::models::execution_approval_store::ApprovalDetail;
 use crate::models::token_usage::{ModelRef, TokenUsage};
+use crate::services::ssrf_guard::{
+    AddressPolicy, GuardedResolver, HostLookup, SystemLookup, a2a_peer, a2a_peer_with_bypass,
+    check_a2a_url_without_lookup,
+};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 
 /// The key under a status's `metadata` that carries what an
@@ -287,15 +292,166 @@ const _: () = assert!(
      question nobody answers fails as a dead socket instead"
 );
 
-/// A lightweight HTTP client for remote A2A agents.
+/// The largest single SSE event, or whole JSON response body, an A2A peer
+/// may send. A terminal status can carry the worker's conversation (up to
+/// the gateway's 32 MiB capture cap) plus its envelope; this matches the
+/// interim 33 MiB frame cap of ADR-0021 step 0.
+pub const A2A_MAX_EVENT_BYTES: usize = 33 * 1024 * 1024;
+
+/// The most an A2A peer may send over one `message/stream` in total.
+pub const A2A_MAX_STREAM_BYTES: usize = 256 * 1024 * 1024;
+
+/// How much of an error response's body is kept for the error message.
+const ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// What an A2A peer may send back (ADR-0021 step 0, AGE-767). Exceeding any
+/// bound fails the call with an error that names the bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct A2aLimits {
+    /// One SSE event, or a whole non-streaming JSON body.
+    pub max_event_bytes: usize,
+    /// Everything one SSE stream delivers.
+    pub max_stream_bytes: usize,
+    /// How long an SSE stream may deliver nothing at all.
+    pub idle_timeout: Duration,
+}
+
+impl Default for A2aLimits {
+    fn default() -> Self {
+        Self {
+            max_event_bytes: A2A_MAX_EVENT_BYTES,
+            max_stream_bytes: A2A_MAX_STREAM_BYTES,
+            idle_timeout: DELEGATION_READ_TIMEOUT,
+        }
+    }
+}
+
+/// An HTTP client for remote A2A agents: the A2A edge.
+///
+/// Every connection it makes — agent card, `message/send`, `message/stream`
+/// — goes through the SSRF guard's [`GuardedResolver`] with the
+/// [`a2a_peer`] policy: a name is resolved once, the answer is checked, and
+/// the connection goes to exactly the checked addresses; a lookup that
+/// fails is a refusal. It never follows a redirect, never uses a proxy,
+/// bounds what a peer may send ([`A2aLimits`]), and sends no credential but
+/// the one configured for the agent it calls (ADR-0021 step 0, AGE-767).
+///
+/// Two `reqwest::Client`s share everything but their `GuardedResolver`
+/// policy: `http` is [`a2a_peer`] (the default, no private ranges), and
+/// `http_private_network` is [`a2a_peer_with_bypass`]`(true)`, used only for
+/// a call whose [`A2aAgentConfig::allow_private_network`] is set (AGE-806).
+/// Reqwest's DNS resolver is fixed per `Client`, so the per-agent opt-in
+/// picks between the two rather than reconfiguring one.
 #[derive(Clone)]
 pub struct A2aClient {
     http: reqwest::Client,
+    http_private_network: reqwest::Client,
+    limits: A2aLimits,
 }
 
-async fn detailed_http_error(operation: &str, resp: reqwest::Response) -> String {
+/// The one way the edge's HTTP client is built.
+fn edge_http(
+    lookup: Arc<dyn HostLookup>,
+    policy: AddressPolicy,
+    timeouts: impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder,
+) -> reqwest::Client {
+    timeouts(reqwest::Client::builder())
+        .user_agent(crate::services::http_client::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none())
+        // A proxy would resolve the target itself, out of the guard's sight.
+        .no_proxy()
+        .dns_resolver(Arc::new(GuardedResolver::new(lookup, policy)))
+        .build()
+        .expect("Failed to initialize HTTP client (TLS backend error)")
+}
+
+fn delegation_timeouts(
+    read: Duration,
+) -> impl FnOnce(reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    move |builder| {
+        builder
+            .connect_timeout(DELEGATION_CONNECT_TIMEOUT)
+            .read_timeout(read)
+    }
+}
+
+/// Refuse a URL the edge must not call before anything is sent: plain HTTP
+/// off the local network (AGE-756, unchanged) and an IP literal the
+/// [`a2a_peer`] policy refuses (a literal never reaches the resolver).
+fn ensure_callable(url: &str) -> Result<()> {
+    hive_client::ensure_secure_url(url).map_err(|e| anyhow::anyhow!(e))?;
+    check_a2a_url_without_lookup(url).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Attach the agent's own credential, and nothing else.
+fn authorized(req: reqwest::RequestBuilder, config: &A2aAgentConfig) -> reqwest::RequestBuilder {
+    match config.api_key.as_deref().filter(|k| !k.is_empty()) {
+        Some(key) => req.bearer_auth(key),
+        None => req,
+    }
+}
+
+/// Send `req` and accept only a direct success: a redirect is an error,
+/// never followed, so neither the request nor the credential goes anywhere
+/// but the configured agent.
+async fn send_checked(
+    req: reqwest::RequestBuilder,
+    url: &str,
+    operation: &str,
+) -> Result<reqwest::Response> {
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("Failed to reach A2A agent at {}", url))?;
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    if status.is_redirection() {
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("nowhere");
+        bail!(
+            "A2A {operation} to {url} was redirected ({status}) to {location}; \
+             A2A requests do not follow redirects"
+        );
+    }
+    if !status.is_success() {
+        bail!("{}", detailed_http_error(operation, resp).await);
+    }
+    Ok(resp)
+}
+
+/// Read a whole response body, refusing one larger than `max` bytes.
+async fn read_capped(mut resp: reqwest::Response, max: usize, what: &str) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .with_context(|| format!("Failed to read the A2A {what}"))?
+    {
+        if body.len() + chunk.len() > max {
+            bail!("the A2A {what} exceeds the {max}-byte cap; refusing it");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+async fn read_json_capped(resp: reqwest::Response, max: usize, what: &str) -> Result<Value> {
+    let body = read_capped(resp, max, what).await?;
+    serde_json::from_slice(&body).with_context(|| format!("Failed to parse the A2A {what} as JSON"))
+}
+
+async fn detailed_http_error(operation: &str, mut resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let mut prefix = Vec::new();
+    while prefix.len() < ERROR_BODY_BYTES
+        && let Ok(Some(chunk)) = resp.chunk().await
+    {
+        prefix.extend_from_slice(&chunk);
+    }
+    prefix.truncate(ERROR_BODY_BYTES);
+    let body = String::from_utf8_lossy(&prefix);
     let body = body.trim();
 
     let mismatch_hint = if status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
@@ -358,8 +514,15 @@ fn task_outcome(value: &Value) -> Result<String> {
 
 impl A2aClient {
     pub fn new() -> Self {
+        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
         Self {
-            http: crate::services::http_client::default_client(30),
+            http: edge_http(Arc::clone(&lookup), Arc::new(a2a_peer), |builder| {
+                builder.timeout(Duration::from_secs(30))
+            }),
+            http_private_network: edge_http(lookup, a2a_peer_with_bypass(true), |builder| {
+                builder.timeout(Duration::from_secs(30))
+            }),
+            limits: A2aLimits::default(),
         }
     }
 
@@ -367,11 +530,19 @@ impl A2aClient {
     ///
     /// Bounds silence rather than duration — see [`DELEGATION_READ_TIMEOUT`].
     pub fn for_delegation() -> Self {
+        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
         Self {
-            http: crate::services::http_client::streaming_client(
-                DELEGATION_CONNECT_TIMEOUT,
-                DELEGATION_READ_TIMEOUT,
+            http: edge_http(
+                Arc::clone(&lookup),
+                Arc::new(a2a_peer),
+                delegation_timeouts(DELEGATION_READ_TIMEOUT),
             ),
+            http_private_network: edge_http(
+                lookup,
+                a2a_peer_with_bypass(true),
+                delegation_timeouts(DELEGATION_READ_TIMEOUT),
+            ),
+            limits: A2aLimits::default(),
         }
     }
 
@@ -379,8 +550,61 @@ impl A2aClient {
     /// can wait for. The production one is minutes; nothing in CI should be.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_delegation_with_read_timeout(read: Duration) -> Self {
+        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
         Self {
-            http: crate::services::http_client::streaming_client(DELEGATION_CONNECT_TIMEOUT, read),
+            http: edge_http(
+                Arc::clone(&lookup),
+                Arc::new(a2a_peer),
+                delegation_timeouts(read),
+            ),
+            http_private_network: edge_http(
+                lookup,
+                a2a_peer_with_bypass(true),
+                delegation_timeouts(read),
+            ),
+            limits: A2aLimits {
+                idle_timeout: read,
+                ..A2aLimits::default()
+            },
+        }
+    }
+
+    /// A delegation client resolving names through `lookup`, a stub in
+    /// tests, under the production [`a2a_peer`] policy — and, for an agent
+    /// with the opt-in, [`a2a_peer_with_bypass`]`(true)` over the same
+    /// stubbed `lookup`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_lookup(lookup: Arc<dyn HostLookup>) -> Self {
+        Self {
+            http: edge_http(
+                Arc::clone(&lookup),
+                Arc::new(a2a_peer),
+                delegation_timeouts(DELEGATION_READ_TIMEOUT),
+            ),
+            http_private_network: edge_http(
+                lookup,
+                a2a_peer_with_bypass(true),
+                delegation_timeouts(DELEGATION_READ_TIMEOUT),
+            ),
+            limits: A2aLimits::default(),
+        }
+    }
+
+    /// This client with other bounds on what a peer may send.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_limits(mut self, limits: A2aLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Which of the two clients to use for `config`: the default, or —
+    /// only when its AGE-806 opt-in is set — the one whose resolver admits
+    /// private ranges for the addresses this agent's name resolves to.
+    fn http_for(&self, config: &A2aAgentConfig) -> &reqwest::Client {
+        if config.allow_private_network {
+            &self.http_private_network
+        } else {
+            &self.http
         }
     }
 
@@ -388,34 +612,16 @@ impl A2aClient {
     ///
     /// Returns `None` when the endpoint is unreachable or returns unexpected JSON.
     pub async fn fetch_agent_card(&self, config: &A2aAgentConfig) -> Result<AgentCard> {
-        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
+        ensure_callable(&config.url)?;
         // Strip trailing slash and append the well-known path.
         let base = config.url.trim_end_matches('/');
         let card_url = format!("{}/.well-known/agent.json", base);
 
         debug!(url = %card_url, "Fetching A2A agent card");
 
-        let mut req = self.http.get(&card_url);
-        if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("Failed to reach A2A agent at {}", card_url))?;
-
-        if !resp.status().is_success() {
-            bail!(
-                "A2A agent card request failed with status {}",
-                resp.status()
-            );
-        }
-
-        let body: Value = resp
-            .json()
-            .await
-            .context("Failed to parse A2A agent card as JSON")?;
+        let req = authorized(self.http_for(config).get(&card_url), config);
+        let resp = send_checked(req, &card_url, "agent card request").await?;
+        let body = read_json_capped(resp, self.limits.max_event_bytes, "agent card").await?;
 
         let name = body
             .get("name")
@@ -470,7 +676,7 @@ impl A2aClient {
     ///
     /// Returns the plain-text response extracted from the task artifacts.
     pub async fn send_message(&self, config: &A2aAgentConfig, prompt: &str) -> Result<String> {
-        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
+        ensure_callable(&config.url)?;
         let url = config.url.trim_end_matches('/').to_string();
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -488,24 +694,10 @@ impl A2aClient {
 
         debug!(url = %url, agent = %config.name, "Sending A2A message/send");
 
-        let mut req = self.http.post(&url).json(&body);
-        if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("Failed to reach A2A agent at {}", url))?;
-
-        if !resp.status().is_success() {
-            bail!("{}", detailed_http_error("message/send", resp).await);
-        }
-
-        let value: Value = resp
-            .json()
-            .await
-            .context("Failed to parse A2A message/send response as JSON")?;
+        let req = authorized(self.http_for(config).post(&url).json(&body), config);
+        let resp = send_checked(req, &url, "message/send").await?;
+        let value =
+            read_json_capped(resp, self.limits.max_event_bytes, "message/send response").await?;
 
         // Check for JSON-RPC error
         if let Some(err) = value.get("error") {
@@ -536,7 +728,7 @@ impl A2aClient {
     ) -> Result<BoxStream<'static, Result<A2aStreamEvent>>> {
         use reqwest::header;
 
-        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
+        ensure_callable(&config.url)?;
         let url = config.url.trim_end_matches('/').to_string();
 
         let task_id = uuid::Uuid::new_v4().to_string();
@@ -554,19 +746,8 @@ impl A2aClient {
 
         debug!(url = %url, agent = %config.name, "Sending A2A message/stream");
 
-        let mut req = self.http.post(&url).json(&body);
-        if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
-            req = req.bearer_auth(key);
-        }
-
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("Failed to reach A2A agent at {}", url))?;
-
-        if !resp.status().is_success() {
-            bail!("{}", detailed_http_error("message/stream", resp).await);
-        }
+        let req = authorized(self.http_for(config).post(&url).json(&body), config);
+        let resp = send_checked(req, &url, "message/stream").await?;
 
         // Check Content-Type — if not SSE, the server likely doesn't support
         // streaming and returned a normal JSON-RPC response.
@@ -579,10 +760,12 @@ impl A2aClient {
 
         if !content_type.contains("text/event-stream") {
             // Treat as a regular JSON response (same as message/send).
-            let value: Value = resp
-                .json()
-                .await
-                .context("Failed to parse non-streaming A2A response")?;
+            let value = read_json_capped(
+                resp,
+                self.limits.max_event_bytes,
+                "non-streaming message/stream response",
+            )
+            .await?;
 
             let text = value
                 .pointer("/result/artifacts/0/parts/0/text")
@@ -614,15 +797,29 @@ impl A2aClient {
             return Ok(Box::pin(stream));
         }
 
-        // Parse the SSE byte stream into A2aStreamEvent items.
+        // Parse the SSE byte stream into A2aStreamEvent items, within the
+        // limits: an event, the whole stream and any silence are bounded.
         let byte_stream = resp.bytes_stream();
+        let limits = self.limits;
         let event_stream = async_stream::stream! {
             use futures::StreamExt;
 
             let mut buffer = String::new();
             let mut stream = byte_stream;
+            let mut total = 0usize;
 
-            while let Some(result) = stream.next().await {
+            loop {
+                let result = match tokio::time::timeout(limits.idle_timeout, stream.next()).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => break,
+                    Err(_) => {
+                        yield Err(anyhow::anyhow!(
+                            "A2A stream from {url} sent nothing for {:?}; giving up on it",
+                            limits.idle_timeout
+                        ));
+                        return;
+                    }
+                };
                 let bytes = match result {
                     Ok(b) => b,
                     Err(e) => {
@@ -630,10 +827,22 @@ impl A2aClient {
                         return;
                     }
                 };
+                total += bytes.len();
+                if total > limits.max_stream_bytes {
+                    yield Err(anyhow::anyhow!(
+                        "A2A stream from {url} exceeds the {}-byte stream cap; refusing it",
+                        limits.max_stream_bytes
+                    ));
+                    return;
+                }
                 buffer.push_str(&String::from_utf8_lossy(&bytes).replace("\r\n", "\n"));
 
                 // SSE events are separated by double newlines.
                 while let Some(pos) = buffer.find("\n\n") {
+                    if pos > limits.max_event_bytes {
+                        yield Err(event_over_cap(&url, limits.max_event_bytes));
+                        return;
+                    }
                     let event_block = buffer[..pos].to_string();
                     buffer = buffer[pos + 2..].to_string();
 
@@ -644,6 +853,12 @@ impl A2aClient {
                             return;
                         }
                     }
+                }
+
+                // An unfinished event already over the cap will not shrink.
+                if buffer.len() > limits.max_event_bytes {
+                    yield Err(event_over_cap(&url, limits.max_event_bytes));
+                    return;
                 }
             }
 
@@ -672,7 +887,7 @@ impl A2aClient {
         request_id: &str,
         answers: &[ClarificationAnswer],
     ) -> Result<()> {
-        hive_client::ensure_secure_url(&config.url).map_err(|e| anyhow::anyhow!(e))?;
+        ensure_callable(&config.url)?;
         let url = config.url.trim_end_matches('/').to_string();
         let text = answers
             .iter()
@@ -699,21 +914,10 @@ impl A2aClient {
 
         debug!(url = %url, agent = %config.name, task = %task_id, "Answering a parked A2A task");
 
-        let mut req = self.http.post(&url).json(&body);
-        if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
-            req = req.bearer_auth(key);
-        }
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("Failed to reach A2A agent at {}", url))?;
-        if !resp.status().is_success() {
-            bail!("{}", detailed_http_error("message/send", resp).await);
-        }
-        let value: Value = resp
-            .json()
-            .await
-            .context("Failed to parse A2A message/send response as JSON")?;
+        let req = authorized(self.http_for(config).post(&url).json(&body), config);
+        let resp = send_checked(req, &url, "message/send").await?;
+        let value =
+            read_json_capped(resp, self.limits.max_event_bytes, "message/send response").await?;
         if let Some(err) = value.get("error") {
             let msg = err
                 .get("message")
@@ -723,6 +927,10 @@ impl A2aClient {
         }
         Ok(())
     }
+}
+
+fn event_over_cap(url: &str, max: usize) -> anyhow::Error {
+    anyhow::anyhow!("an A2A stream event from {url} exceeds the {max}-byte event cap; refusing it")
 }
 
 impl Default for A2aClient {
@@ -1121,6 +1329,7 @@ mod tests {
             api_key: None,
             enabled: true,
             skills: vec![],
+            allow_private_network: false,
         }
     }
 
@@ -1299,5 +1508,483 @@ mod tests {
             !format!("{err:#}").contains("plain http"),
             "a loopback agent must not be rejected as insecure: {err:#}"
         );
+    }
+
+    // ── AGE-767: the A2A edge (ADR-0021 step 0) ────────────────────────────
+
+    use crate::services::ssrf_guard::HostLookup;
+    use std::collections::VecDeque;
+    use std::future::Future;
+    use std::net::IpAddr;
+    use std::pin::Pin;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A resolver stub: answers from a script, in order, and counts lookups.
+    struct Scripted {
+        answers: Mutex<VecDeque<std::io::Result<Vec<IpAddr>>>>,
+        calls: AtomicUsize,
+    }
+
+    impl Scripted {
+        fn new(answers: Vec<std::io::Result<Vec<IpAddr>>>) -> Arc<Self> {
+            Arc::new(Self {
+                answers: Mutex::new(answers.into()),
+                calls: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl HostLookup for Scripted {
+        fn lookup(
+            &self,
+            _host: &str,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let answer = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(std::io::Error::other("stub: no scripted answer left")));
+            Box::pin(async move { answer })
+        }
+    }
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    /// Read one HTTP request off `socket`: the headers, then as much body
+    /// as `content-length` says.
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut raw = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            if let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&raw[..end]).to_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if raw.len() >= end + 4 + length {
+                    return String::from_utf8_lossy(&raw).into_owned();
+                }
+            }
+            match socket.read(&mut chunk).await {
+                Ok(0) | Err(_) => return String::from_utf8_lossy(&raw).into_owned(),
+                Ok(n) => raw.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+
+    /// A loopback HTTP server that answers each connection with the next
+    /// canned response, closing it after, and hands back what it was sent.
+    async fn http_server(responses: Vec<String>) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for response in responses {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                seen.push(read_request(&mut socket).await);
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+            seen
+        });
+        (port, server)
+    }
+
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    const COMPLETED: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"status":{"state":"completed"},"artifacts":[{"parts":[{"text":"done"}]}]}}"#;
+
+    /// Nothing may have connected to `listener`: a connection, had one been
+    /// made, would be waiting in its backlog.
+    async fn assert_never_connected(listener: &tokio::net::TcpListener, why: &str) {
+        let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+        assert!(accepted.is_err(), "{why}");
+    }
+
+    /// The stub first answers the checked address, then — a rebinding name —
+    /// a private one. Each connection resolves exactly once and goes to what
+    /// that lookup returned; the rebound answer is refused, never dialed.
+    ///
+    /// The TLS rule (AGE-756) only lets a plain-http test server sit behind
+    /// `localhost`, whose admitted class is loopback, so loopback plays the
+    /// checked address and `10.0.0.5` the private one it is rebound to. A
+    /// public name rebound to loopback is refused the same way, before any
+    /// connection (the second half), under the production policy.
+    #[tokio::test]
+    async fn a2a_refuses_private_address_after_rebind() {
+        let (port, server) = http_server(vec![json_response(COMPLETED)]).await;
+        let lookup = Scripted::new(vec![Ok(vec![ip("127.0.0.1")]), Ok(vec![ip("10.0.0.5")])]);
+        let client = A2aClient::with_lookup(lookup.clone());
+        let local = agent(&format!("http://localhost:{port}/a2a"));
+
+        let text = client
+            .send_message(&local, "hi")
+            .await
+            .expect("the checked address is the one connected to");
+        assert_eq!(text, "done");
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1, "resolved once");
+
+        let err = client
+            .send_message(&local, "hi")
+            .await
+            .expect_err("a name rebound to a private address must be refused");
+        assert!(format!("{err:#}").contains("SSRF"), "{err:#}");
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            server.await.unwrap().len(),
+            1,
+            "only the checked address was reached"
+        );
+
+        // A public name answering loopback: refused at resolution, so the
+        // loopback server listening there is never connected to.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let lookup = Scripted::new(vec![Ok(vec![ip("127.0.0.1")])]);
+        let client = A2aClient::with_lookup(lookup);
+        let err = client
+            .send_message(
+                &agent(&format!("https://agent.example.com:{port}/a2a")),
+                "hi",
+            )
+            .await
+            .expect_err("a public name resolving to loopback must be refused");
+        assert!(format!("{err:#}").contains("SSRF"), "{err:#}");
+        assert_never_connected(&listener, "a refused address must never be dialed").await;
+    }
+
+    // ── AGE-806: per-agent opt-in for private-network agents ───────────────
+
+    /// Without the opt-in (the default, `allow_private_network: false`), a
+    /// hostname that resolves to a private address is refused — unchanged
+    /// from before the flag existed.
+    #[tokio::test]
+    async fn a2a_private_address_refused_without_opt_in() {
+        let lookup = Scripted::new(vec![Ok(vec![ip("10.0.0.5")])]);
+        let client = A2aClient::with_lookup(lookup);
+        let remote = agent("https://agent.lan.example/a2a");
+        assert!(!remote.allow_private_network);
+
+        let err = client
+            .send_message(&remote, "hi")
+            .await
+            .expect_err("a name resolving to a private address must be refused without the opt-in");
+        assert!(format!("{err:#}").contains("SSRF"), "{err:#}");
+    }
+
+    /// With the opt-in on, a hostname resolving to a LAN or Tailscale (CGN)
+    /// address is admitted by the resolver: the attempt then fails for an
+    /// ordinary reason — nothing listens on this port — never as SSRF. Same
+    /// technique as `loopback_http_is_allowed`: the gate itself must not be
+    /// what refuses this. The exact ranges (RFC-1918, `100.64.0.0/10`, ULA)
+    /// are covered address-by-address in `ssrf_guard`'s
+    /// `a2a_peer_with_bypass_on_admits_lan_and_tailscale_names`; this proves
+    /// the A2A client actually wires the per-agent flag through to the
+    /// resolver it dials with.
+    #[tokio::test]
+    async fn a2a_lan_and_tailscale_admitted_with_opt_in() {
+        let lookup = Scripted::new(vec![Ok(vec![ip("127.0.0.1")])]);
+        let client = A2aClient::with_lookup(lookup);
+        let mut remote = agent("https://agent.lan.example:1/a2a");
+        remote.allow_private_network = true;
+
+        let err = client
+            .send_message(&remote, "hi")
+            .await
+            .expect_err("nothing listens on this port");
+        assert!(
+            !format!("{err:#}").contains("SSRF"),
+            "the opt-in must admit a resolved private address: {err:#}"
+        );
+    }
+
+    /// Cloud metadata (`169.254.0.0/16`) stays refused even with the opt-in
+    /// on — that carve-out is applied before the flag is ever consulted.
+    #[tokio::test]
+    async fn a2a_opt_in_still_refuses_link_local_metadata() {
+        let lookup = Scripted::new(vec![Ok(vec![ip("169.254.169.254")])]);
+        let client = A2aClient::with_lookup(lookup);
+        let mut remote = agent("https://agent.lan.example/a2a");
+        remote.allow_private_network = true;
+
+        let err = client
+            .send_message(&remote, "hi")
+            .await
+            .expect_err("cloud metadata must stay refused even with the opt-in");
+        assert!(format!("{err:#}").contains("SSRF"), "{err:#}");
+    }
+
+    /// The opt-in lives on the agent config, not the client or a global
+    /// setting: one client, one resolved address, and only one of the two
+    /// agents has the flag set.
+    #[tokio::test]
+    async fn a2a_opt_in_is_per_agent() {
+        let lookup = Scripted::new(vec![
+            Ok(vec![ip("127.0.0.1")]), // agent-a, opted in
+            Ok(vec![ip("127.0.0.1")]), // agent-b, not opted in
+        ]);
+        let client = A2aClient::with_lookup(lookup);
+
+        let mut agent_a = agent("https://agent-a.lan.example:1/a2a");
+        agent_a.allow_private_network = true;
+        let err_a = client
+            .send_message(&agent_a, "hi")
+            .await
+            .expect_err("nothing listens on this port");
+        assert!(
+            !format!("{err_a:#}").contains("SSRF"),
+            "agent-a's own opt-in must admit it: {err_a:#}"
+        );
+
+        let mut agent_b = agent("https://agent-b.lan.example:1/a2a");
+        agent_b.allow_private_network = false;
+        let err_b = client
+            .send_message(&agent_b, "hi")
+            .await
+            .expect_err("agent-b has no opt-in, so the same address must be refused");
+        assert!(
+            format!("{err_b:#}").contains("SSRF"),
+            "agent-a's opt-in must not leak to agent-b: {err_b:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a2a_resolution_error_refuses() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let local = agent(&format!("http://localhost:{port}/a2a"));
+        let lookup = Scripted::new(vec![
+            Err(std::io::Error::other("stub: resolver down")),
+            Err(std::io::Error::other("stub: resolver down")),
+            Ok(vec![]),
+        ]);
+        let client = A2aClient::with_lookup(lookup);
+
+        let err = client
+            .fetch_agent_card(&local)
+            .await
+            .expect_err("card must be refused");
+        assert!(
+            format!("{err:#}").contains("could not be resolved"),
+            "{err:#}"
+        );
+        let err = match client.send_message_stream(&local, "hi").await {
+            Ok(_) => panic!("a stream must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            format!("{err:#}").contains("could not be resolved"),
+            "{err:#}"
+        );
+        let err = client
+            .send_message(&local, "hi")
+            .await
+            .expect_err("an empty answer too");
+        assert!(format!("{err:#}").contains("no address"), "{err:#}");
+
+        assert_never_connected(&listener, "an unresolved name must never be dialed").await;
+    }
+
+    #[tokio::test]
+    async fn a2a_does_not_follow_redirect() {
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let elsewhere = format!(
+            "http://127.0.0.1:{}/steal",
+            target.local_addr().unwrap().port()
+        );
+        let redirect = format!(
+            "HTTP/1.1 307 Temporary Redirect\r\nlocation: {elsewhere}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let (port, server) = http_server(vec![redirect.clone(), redirect.clone(), redirect]).await;
+        let mut keyed = agent(&format!("http://127.0.0.1:{port}/a2a"));
+        keyed.api_key = Some("agent-key".to_string());
+        let client = A2aClient::new();
+
+        let err = client
+            .send_message(&keyed, "hi")
+            .await
+            .expect_err("a redirect is an error");
+        assert!(
+            format!("{err:#}").contains("do not follow redirects"),
+            "{err:#}"
+        );
+        let err = match client.send_message_stream(&keyed, "hi").await {
+            Ok(_) => panic!("a redirected stream must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            format!("{err:#}").contains("do not follow redirects"),
+            "{err:#}"
+        );
+        let err = client
+            .fetch_agent_card(&keyed)
+            .await
+            .expect_err("a redirected card too");
+        assert!(
+            format!("{err:#}").contains("do not follow redirects"),
+            "{err:#}"
+        );
+
+        assert_eq!(server.await.unwrap().len(), 3);
+        assert_never_connected(&target, "the redirect target must never be requested").await;
+    }
+
+    /// An SSE server that writes `chunks` as they are, then holds the
+    /// connection open for `hold`.
+    async fn raw_sse_server(chunks: Vec<String>, hold: Duration) -> String {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            read_request(&mut socket).await;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n")
+                .await;
+            for chunk in chunks {
+                let framed = format!("{:x}\r\n{chunk}\r\n", chunk.len());
+                if socket.write_all(framed.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+            let _ = socket.flush().await;
+            tokio::time::sleep(hold).await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    const WORKING: &str = "data:{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":\"t\",\"status\":{\"state\":\"working\"},\"final\":false}}\n\n";
+
+    #[tokio::test]
+    async fn a2a_sse_over_cap_fails_call() {
+        let limits = A2aLimits {
+            max_event_bytes: 1024,
+            max_stream_bytes: 4096,
+            idle_timeout: Duration::from_millis(300),
+        };
+        let client = A2aClient::new().with_limits(limits);
+
+        // One event larger than the event cap, never terminated.
+        let huge = format!("data:{}", "x".repeat(2048));
+        let url = raw_sse_server(vec![huge], Duration::from_secs(5)).await;
+        let (seen, outcome) = drive(&client, &url).await;
+        let err = outcome.expect_err("an oversized event must fail the call");
+        assert_eq!(seen, 0);
+        assert!(format!("{err:#}").contains("event cap"), "{err:#}");
+
+        // Small events that add up past the stream cap.
+        let url = raw_sse_server(vec![WORKING.to_string(); 64], Duration::from_secs(5)).await;
+        let (_, outcome) = drive(&client, &url).await;
+        let err = outcome.expect_err("a stream past its total cap must fail the call");
+        assert!(format!("{err:#}").contains("stream cap"), "{err:#}");
+
+        // One event, then silence past the idle timeout.
+        let url = raw_sse_server(vec![WORKING.to_string()], Duration::from_secs(5)).await;
+        let (seen, outcome) = drive(&client, &url).await;
+        let err = outcome.expect_err("a stream idle past its timeout must fail the call");
+        assert_eq!(seen, 1, "the stream was alive before it went quiet");
+        assert!(format!("{err:#}").contains("sent nothing"), "{err:#}");
+    }
+
+    /// Every A2A request carries the called agent's own bearer and nothing
+    /// else that could be a credential: not another agent's key, not a
+    /// provider key, no cookie; and an agent without a key gets none.
+    #[tokio::test]
+    async fn a2a_sends_only_its_own_credential() {
+        let card = r#"{"name":"a","skills":[],"capabilities":{"streaming":false}}"#;
+        let (port, server) = http_server(vec![
+            json_response(card),
+            json_response(COMPLETED),
+            json_response(COMPLETED),
+            json_response(COMPLETED),
+            json_response(COMPLETED),
+        ])
+        .await;
+        let url = format!("http://127.0.0.1:{port}/a2a");
+        let with_key = |key: Option<&str>| A2aAgentConfig {
+            api_key: key.map(str::to_string),
+            ..agent(&url)
+        };
+        let (a, b, none) = (
+            with_key(Some("key-a")),
+            with_key(Some("key-b")),
+            with_key(None),
+        );
+        let client = A2aClient::new();
+
+        client.fetch_agent_card(&a).await.expect("card");
+        client.send_message(&a, "hi").await.expect("send");
+        let _ = drive(&client, &url).await; // no key: `drive` uses `agent(url)`
+        client.send_message(&b, "hi").await.expect("send b");
+        client.send_message(&none, "hi").await.expect("send none");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 5);
+
+        let allowed = [
+            "host",
+            "user-agent",
+            "accept",
+            "accept-encoding",
+            "content-type",
+            "content-length",
+            "authorization",
+        ];
+        for (request, expected) in
+            requests
+                .iter()
+                .zip([Some("key-a"), Some("key-a"), None, Some("key-b"), None])
+        {
+            let headers: Vec<(String, String)> = request
+                .split("\r\n\r\n")
+                .next()
+                .unwrap()
+                .lines()
+                .skip(1)
+                .filter_map(|l| l.split_once(':'))
+                .map(|(k, v)| (k.trim().to_lowercase(), v.trim().to_string()))
+                .collect();
+            for (name, _) in &headers {
+                assert!(
+                    allowed.contains(&name.as_str()),
+                    "unexpected header {name}: {request}"
+                );
+            }
+            let auth: Vec<&str> = headers
+                .iter()
+                .filter(|(k, _)| k == "authorization")
+                .map(|(_, v)| v.as_str())
+                .collect();
+            match expected {
+                Some(key) => assert_eq!(auth, vec![format!("Bearer {key}").as_str()]),
+                None => assert!(auth.is_empty(), "no key configured, none sent: {request}"),
+            }
+            let other = if expected == Some("key-a") {
+                "key-b"
+            } else {
+                "key-a"
+            };
+            assert!(
+                !request.contains(other),
+                "another agent's key leaked: {request}"
+            );
+        }
     }
 }

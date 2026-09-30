@@ -85,9 +85,14 @@ pub(crate) fn format_agents_summary(
     }
     for agent in remote_agents {
         out.push_str(&format!(
-            "  {} — remote A2A agent at {}{}\n",
+            "  {} — remote A2A agent at {}{}{}\n",
             agent.name,
             agent.url,
+            if agent.allow_private_network {
+                " (private network allowed)"
+            } else {
+                ""
+            },
             if agent.enabled { "" } else { " (disabled)" }
         ));
     }
@@ -997,21 +1002,9 @@ impl ChatEngine {
                 self.module_settings.module_dir = resolved.to_string_lossy().to_string();
                 changed = true;
             }
-            "port" => {
-                if rest.is_empty() {
-                    bail!("Usage: /modules port <1-65535>");
-                }
-                let port = rest
-                    .parse()
-                    .context("Port must be a number between 1 and 65535")?;
-                let port =
-                    std::num::NonZeroU16::new(port).context("Port must be between 1 and 65535")?;
-                self.module_settings.gateway_port = port.get();
-                changed = true;
-            }
             _ => {
                 bail!(
-                    "Unknown /modules command '{}'. Valid: show, enable, disable, dir, port",
+                    "Unknown /modules command '{}'. Valid: show, enable, disable, dir",
                     cmd
                 );
             }
@@ -1031,10 +1024,8 @@ impl ChatEngine {
             self.session.set_conversation(None);
             self.is_ready = false;
             self.add_system_message(format!(
-                "Modules settings updated: enabled={}, dir={}, port={}. Conversation context was reset.",
-                self.module_settings.enabled,
-                self.module_settings.module_dir,
-                self.module_settings.gateway_port
+                "Modules settings updated: enabled={}, dir={}. Conversation context was reset.",
+                self.module_settings.enabled, self.module_settings.module_dir
             ));
         }
 
@@ -1042,16 +1033,9 @@ impl ChatEngine {
     }
 
     pub fn module_settings_summary(&self) -> String {
-        let broker_line = match self.broker_port {
-            Some(port) => format!("\n- Broker: active on port {port} (not persisted)"),
-            None => String::new(),
-        };
         format!(
-            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n- Gateway port: {}{}\n\nPlugins are tools inside an agent spec's [[plugins]], never agents; /agents lists the agents.\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>\n/modules port <1-65535>",
-            self.module_settings.enabled,
-            self.module_settings.module_dir,
-            self.module_settings.gateway_port,
-            broker_line
+            "Modules settings:\n- Runtime enabled: {}\n- Module directory: {}\n\nPlugins are tools inside an agent spec's [[plugins]], never agents; /agents lists the agents.\n\nCommands:\n/modules show\n/modules enable|disable|on|off\n/modules dir <directory>",
+            self.module_settings.enabled, self.module_settings.module_dir
         )
     }
 }
@@ -1170,6 +1154,7 @@ mod tests {
             api_key: None,
             enabled: false,
             skills: Vec::new(),
+            allow_private_network: false,
         };
 
         let text = format_agents_summary(&[remote], &roster, &listings);
@@ -1206,6 +1191,40 @@ mod tests {
         );
     }
 
+    /// AGE-806: `/agents` shows the per-agent private-network opt-in, so a
+    /// user can see which remote agents can reach a LAN/Tailscale address.
+    #[test]
+    fn agents_shows_the_private_network_opt_in() {
+        let opted_in = A2aAgentConfig {
+            name: "lan-worker".to_string(),
+            url: "https://192.168.1.9/a2a".to_string(),
+            api_key: None,
+            enabled: true,
+            skills: Vec::new(),
+            allow_private_network: true,
+        };
+        let default = A2aAgentConfig {
+            name: "public-worker".to_string(),
+            url: "https://example.com/a2a".to_string(),
+            api_key: None,
+            enabled: true,
+            skills: Vec::new(),
+            allow_private_network: false,
+        };
+
+        let text = format_agents_summary(&[opted_in, default], &[], &[]);
+        assert!(
+            text.contains(
+                "lan-worker — remote A2A agent at https://192.168.1.9/a2a (private network allowed)"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("public-worker — remote A2A agent at https://example.com/a2a\n"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn parse_modules_command_variants() {
         assert_eq!(
@@ -1225,74 +1244,6 @@ mod tests {
     #[test]
     fn parse_update_command() {
         assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
-    }
-
-    /// AGE-382: `--broker` threads its ephemeral port into `broker_port`,
-    /// never into `module_settings`. A `/modules` mutation that only touches
-    /// `module_dir` must leave `enabled`/`gateway_port` exactly as they were
-    /// before the broker started, so the struct `handle_modules_command`
-    /// hands to the repository never carries the broker's port to disk.
-    /// Revert the fix (route `broker_port` back through `module_settings`)
-    /// and this fails.
-    #[tokio::test]
-    async fn broker_port_does_not_leak_into_module_settings_on_a_modules_save() {
-        use crate::engine::ChatEngineConfig;
-        use chatty_core::services::StreamSurface;
-        use chatty_core::settings::models::models_store::ModelConfig;
-        use chatty_core::settings::models::module_settings::ModuleSettingsModel;
-        use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
-        use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
-
-        let on_disk = ModuleSettingsModel::default();
-        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut engine = ChatEngine::new(
-            ChatEngineConfig {
-                model_config: ModelConfig::new(
-                    "m1".to_string(),
-                    "Test Model".to_string(),
-                    ProviderType::Ollama,
-                    "llama3.2".to_string(),
-                ),
-                provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
-                execution_settings: ExecutionSettingsModel::default(),
-                module_settings: on_disk.clone(),
-                broker_port: Some(54321),
-                broker: None,
-                models: ModelsModel::default(),
-                providers: Vec::new(),
-                mcp_service: None,
-                memory_service: None,
-                search_settings: None,
-                embedding_service: None,
-                user_secrets: Vec::new(),
-                remote_agents: Vec::new(),
-                spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
-                team: None,
-                is_sub_agent: false,
-                services_loaded: true,
-                surface: StreamSurface::InteractiveTui,
-            },
-            event_tx,
-        );
-
-        let dir = tempfile::tempdir().expect("a temp dir for module_dir");
-        let changed = engine
-            .handle_modules_command(Some(&format!("dir {}", dir.path().display())))
-            .expect("dir is a valid /modules subcommand");
-
-        assert!(changed, "module_dir changed, so the command reports true");
-        assert_eq!(
-            engine.module_settings.enabled, on_disk.enabled,
-            "the broker must not flip `enabled` on"
-        );
-        assert_eq!(
-            engine.module_settings.gateway_port, on_disk.gateway_port,
-            "the broker's ephemeral port must not overwrite the persisted gateway_port"
-        );
-        assert_eq!(
-            engine.module_settings.module_dir,
-            dir.path().to_string_lossy()
-        );
     }
 
     /// AGE-407, the same rule for a team: `--team` declares its roster and
@@ -1326,7 +1277,6 @@ mod tests {
                 provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
                 execution_settings: ExecutionSettingsModel::default(),
                 module_settings: on_disk.clone(),
-                broker_port: Some(54321),
                 broker: None,
                 models: ModelsModel::default(),
                 providers: Vec::new(),
@@ -1345,11 +1295,15 @@ mod tests {
             event_tx,
         );
 
+        let dir = tempfile::tempdir().expect("a temp dir for module_dir");
         let changed = engine
-            .handle_modules_command(Some("port 9000"))
-            .expect("port is a valid /modules subcommand");
+            .handle_modules_command(Some(&format!("dir {}", dir.path().display())))
+            .expect("dir is a valid /modules subcommand");
         assert!(changed);
-        assert_eq!(engine.module_settings.gateway_port, 9000);
+        assert_eq!(
+            engine.module_settings.module_dir,
+            dir.path().to_string_lossy()
+        );
         assert_eq!(
             engine.module_settings.virtual_agents, on_disk.virtual_agents,
             "the team's roster must not reach the persisted module settings"

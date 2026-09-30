@@ -75,6 +75,13 @@ pub enum InvokeAgentProgress {
     /// [`SessionEvent::SwarmEvent`](crate::session::SessionEvent::SwarmEvent),
     /// not as delegation progress.
     Swarm(chatty_fabric::SwarmEvent),
+    /// The name the broker admitted this callee's connection under
+    /// (`<spec>-<n>`), as soon as it is known — before any of its own
+    /// steps, and well before [`Finished`](Self::Finished) (AGE-762). Two
+    /// parallel calls to the same spec are indistinguishable until each
+    /// carries this: without it, a swarm tree can only name both callees
+    /// by the shared spec, so a stop by that name would hit both.
+    Admitted(String),
 }
 
 /// Shared slot for sending progress events from the tool to the stream loop.
@@ -1157,6 +1164,7 @@ mod tests {
             api_key: None,
             enabled,
             skills: vec![],
+            allow_private_network: false,
         }
     }
 
@@ -1439,17 +1447,13 @@ mod tests {
 
         #[async_trait::async_trait]
         impl LazyBroker for FailingBroker {
-            async fn ensure_started(&self) -> anyhow::Result<String> {
-                unreachable!("the root reaches its broker over the transport")
-            }
-
             async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
                 Err(anyhow::anyhow!(
                     "failed to create module registry: out of wasm memory"
                 ))
             }
 
-            fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+            fn bound_sockets(&self) -> Vec<std::path::PathBuf> {
                 Vec::new()
             }
         }

@@ -32,6 +32,8 @@ use tracing::{debug, info, warn};
 use serde_json::Value;
 
 use super::calls::{BrokerCalls, Caller};
+use super::codec::BrokerCodec;
+use super::limits::MAX_FRAME_BYTES;
 use super::protocol::{
     BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
     TaskState,
@@ -85,6 +87,8 @@ pub enum AnswerError {
     UnknownTask(String),
     #[error("the participant owning task '{0}' is disconnecting")]
     ParticipantGone(String),
+    #[error("the answer to task '{0}' is over the {max}-byte frame cap", max = MAX_FRAME_BYTES)]
+    TooLarge(String),
 }
 
 /// A node the broker admitted for a connection it is making.
@@ -108,7 +112,8 @@ impl AdmittedNode {
         self.name.as_str()
     }
 
-    /// The `welcome` frame that tells the worker who it is.
+    /// The welcome — `session.hello`'s result — that tells the worker who
+    /// it is.
     pub fn welcome(&self) -> BrokerFrame {
         BrokerFrame::Welcome {
             name: self.name.clone(),
@@ -133,8 +138,9 @@ struct Participant {
     /// Where this registration arrived from. The participant does not get a
     /// say — see [`AgentOrigin`].
     origin: AgentOrigin,
-    /// Frames queued for this participant's socket writer.
-    outbound: mpsc::UnboundedSender<BrokerFrame>,
+    /// Frames queued for this participant's socket writer; bounded, so a
+    /// producer waits while the worker is slow to read (EN-0b).
+    outbound: mpsc::Sender<BrokerFrame>,
     /// Open tasks: id → where this task's updates go.
     tasks: HashMap<String, mpsc::UnboundedSender<TaskUpdate>>,
 }
@@ -383,7 +389,7 @@ impl ParticipantRegistry {
         &self,
         node: AdmittedNode,
         card: ParticipantCard,
-        outbound: mpsc::UnboundedSender<BrokerFrame>,
+        outbound: mpsc::Sender<BrokerFrame>,
     ) -> String {
         let name = node.name.as_str().to_string();
         if card.name != name && !card.name.is_empty() {
@@ -513,12 +519,21 @@ impl ParticipantRegistry {
     /// Hand `task` to `name` as a new task.
     ///
     /// Returns the task's id and its update stream, or `None` if the
-    /// participant is not registered or its socket writer has already gone.
+    /// participant is not registered, its socket writer has already gone,
+    /// or the task's frame would be over the worker's frame cap
+    /// ([`MAX_FRAME_BYTES`]) — which fails this task and nothing else.
+    ///
+    /// Waits while the participant's outbound queue is full: a worker slow
+    /// to read slows whoever hands it work, and keeps its connection.
     ///
     /// A new task is the participant's next run: the messages waiting for
     /// it open the task's text, and each sender's allowance starts over
     /// (tree messages, TM-2).
-    pub fn submit_task(&self, name: &str, mut task: DelegatedTask) -> Option<(String, TaskStream)> {
+    pub async fn submit_task(
+        &self,
+        name: &str,
+        mut task: DelegatedTask,
+    ) -> Option<(String, TaskStream)> {
         if !self.is_registered(name) {
             return None;
         }
@@ -534,30 +549,36 @@ impl ParticipantRegistry {
             crate::gateway::new_id(),
             self.next_task.fetch_add(1, Ordering::Relaxed)
         );
-        let (tx, rx) = mpsc::unbounded_channel();
+        let frame = BrokerFrame::Task {
+            task_id: task_id.clone(),
+            budget: Box::new(task.frame_budget()),
+            text: task.text,
+            bearer: task.bearer,
+            capture_conversation: task.capture_conversation,
+            spawn_context: task.spawn_context,
+            handoff: task.handoff,
+            swarm_events: task.swarm_events,
+        };
+        if BrokerCodec::line_len_bound(&frame) > MAX_FRAME_BYTES {
+            warn!(participant = %name, task = %task_id, "Refusing a task over the worker's frame cap");
+            return None;
+        }
 
-        let mut inner = self.lock();
-        let participant = inner.participants.get_mut(name)?;
-        if participant
-            .outbound
-            .send(BrokerFrame::Task {
-                task_id: task_id.clone(),
-                budget: Box::new(task.frame_budget()),
-                text: task.text,
-                bearer: task.bearer,
-                capture_conversation: task.capture_conversation,
-                spawn_context: task.spawn_context,
-                handoff: task.handoff,
-                swarm_events: task.swarm_events,
-            })
-            .is_err()
-        {
+        // Room in the queue first, without the lock held; then the task is
+        // opened and its frame queued in one step, so no update can arrive
+        // for a task the registry does not know yet.
+        let outbound = self.lock().participants.get(name)?.outbound.clone();
+        let Ok(permit) = outbound.reserve().await else {
             // The writer task is gone; the read loop's deregister is on its
             // way. Don't hand the caller a stream nothing will ever feed.
             warn!(participant = %name, "Dropping a task: the participant's socket is closing");
             return None;
-        }
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut inner = self.lock();
+        let participant = inner.participants.get_mut(name)?;
         participant.tasks.insert(task_id.clone(), tx);
+        permit.send(frame);
         drop(inner);
 
         debug!(participant = %name, task = %task_id, "Task submitted to a local participant");
@@ -575,9 +596,27 @@ impl ParticipantRegistry {
             return;
         };
         if participant.tasks.remove(task_id).is_some() {
-            let _ = participant.outbound.send(BrokerFrame::Cancel {
+            let cancel = BrokerFrame::Cancel {
                 task_id: task_id.to_string(),
-            });
+            };
+            // Called from `Drop`, so it cannot wait here for room in a full
+            // queue: a task of its own waits instead. The cancel is never
+            // dropped for a slow reader, and the connection stays open.
+            if let Err(mpsc::error::TrySendError::Full(cancel)) =
+                participant.outbound.try_send(cancel)
+            {
+                let outbound = participant.outbound.clone();
+                match tokio::runtime::Handle::try_current() {
+                    Ok(runtime) => {
+                        runtime.spawn(async move {
+                            let _ = outbound.send(cancel).await;
+                        });
+                    }
+                    Err(_) => {
+                        warn!(participant = %name, task = %task_id, "Could not queue a cancel outside a runtime")
+                    }
+                }
+            }
             debug!(participant = %name, task = %task_id, "Task cancelled");
         }
     }
@@ -600,26 +639,42 @@ impl ParticipantRegistry {
     /// was streaming, and a runner's task is served by a worker whose
     /// participant name the caller never learned. The task stays open — the
     /// participant's next status un-parks it.
-    pub fn answer_task(&self, task_id: &str, input: TaskInput) -> Result<(), AnswerError> {
-        let mut inner = self.lock();
-        let Some((name, participant)) = inner
-            .participants
-            .iter_mut()
-            .find(|(_, p)| p.tasks.contains_key(task_id))
-        else {
-            return Err(AnswerError::UnknownTask(task_id.to_string()));
+    ///
+    /// An answer whose frame would be over the worker's frame cap fails
+    /// with [`AnswerError::TooLarge`]; the task and its connection stay
+    /// open. Waits while the participant's outbound queue is full.
+    pub async fn answer_task(&self, task_id: &str, input: TaskInput) -> Result<(), AnswerError> {
+        let frame = BrokerFrame::Input {
+            task_id: task_id.to_string(),
+            input,
         };
-        let name = name.clone();
-        if participant
-            .outbound
-            .send(BrokerFrame::Input {
-                task_id: task_id.to_string(),
-                input,
-            })
-            .is_err()
-        {
-            return Err(AnswerError::ParticipantGone(task_id.to_string()));
+        if BrokerCodec::line_len_bound(&frame) > MAX_FRAME_BYTES {
+            return Err(AnswerError::TooLarge(task_id.to_string()));
         }
+        let (name, outbound) = {
+            let inner = self.lock();
+            let Some((name, participant)) = inner
+                .participants
+                .iter()
+                .find(|(_, p)| p.tasks.contains_key(task_id))
+            else {
+                return Err(AnswerError::UnknownTask(task_id.to_string()));
+            };
+            (name.clone(), participant.outbound.clone())
+        };
+        let Ok(permit) = outbound.reserve().await else {
+            return Err(AnswerError::ParticipantGone(task_id.to_string()));
+        };
+        // The task may have ended while this waited for room.
+        let inner = self.lock();
+        if !inner
+            .participants
+            .get(&name)
+            .is_some_and(|p| p.tasks.contains_key(task_id))
+        {
+            return Err(AnswerError::UnknownTask(task_id.to_string()));
+        }
+        permit.send(frame);
         drop(inner);
         debug!(participant = %name, task = %task_id, "Answer delivered to a parked task");
         Ok(())
@@ -666,7 +721,9 @@ impl ParticipantRegistry {
             }
             // Calls are run by the connection loop, which owns their
             // lifetime; one reaching here was not routed and is dropped.
-            ParticipantFrame::Call { id, .. } | ParticipantFrame::CallInput { id, .. } => {
+            ParticipantFrame::Call { id, .. }
+            | ParticipantFrame::CallInput { id, .. }
+            | ParticipantFrame::CancelCall { id } => {
                 warn!(participant = %name, call = id, "A call frame outside a connection loop");
                 return true;
             }
@@ -743,6 +800,7 @@ impl ParticipantRegistry {
 mod tests {
     use super::super::protocol::TaskBearer;
     use super::*;
+    use crate::participant::limits::OUTBOUND_QUEUE_FRAMES;
 
     fn card(name: &str) -> ParticipantCard {
         ParticipantCard {
@@ -754,10 +812,7 @@ mod tests {
 
     /// Admit a node as `spec`, register it, and return its name with the
     /// outbound receiver kept alive for the caller.
-    fn register(
-        reg: &ParticipantRegistry,
-        spec: &str,
-    ) -> (String, mpsc::UnboundedReceiver<BrokerFrame>) {
+    fn register(reg: &ParticipantRegistry, spec: &str) -> (String, mpsc::Receiver<BrokerFrame>) {
         register_from(reg, spec, AgentOrigin::Local)
     }
 
@@ -765,11 +820,11 @@ mod tests {
         reg: &ParticipantRegistry,
         spec: &str,
         origin: AgentOrigin,
-    ) -> (String, mpsc::UnboundedReceiver<BrokerFrame>) {
+    ) -> (String, mpsc::Receiver<BrokerFrame>) {
         let node = reg
             .admit(spec, origin, None)
             .expect("a root node is admitted");
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(OUTBOUND_QUEUE_FRAMES);
         (reg.register(node, card(spec), tx), rx)
     }
 
@@ -789,7 +844,7 @@ mod tests {
     fn the_cards_name_is_replaced_by_the_admitted_one() {
         let reg = ParticipantRegistry::new();
         let node = reg.admit("local-coder", AgentOrigin::Local, None).unwrap();
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = mpsc::channel(OUTBOUND_QUEUE_FRAMES);
         let name = reg.register(node, card("evil"), tx);
 
         assert_eq!(name, "local-coder-0");
@@ -844,6 +899,7 @@ mod tests {
                 &w,
                 DelegatedTask::new("summarise foo.rs").with_bearer(Some(TaskBearer::new("tok"))),
             )
+            .await
             .expect("the participant is registered");
 
         let BrokerFrame::Task {
@@ -923,8 +979,8 @@ mod tests {
         let reg = ParticipantRegistry::new();
         let (w, _outbound) = register(&reg, "worker");
 
-        let (_a, mut first) = reg.submit_task(&w, DelegatedTask::new("a")).unwrap();
-        let (_b, mut second) = reg.submit_task(&w, DelegatedTask::new("b")).unwrap();
+        let (_a, mut first) = reg.submit_task(&w, DelegatedTask::new("a")).await.unwrap();
+        let (_b, mut second) = reg.submit_task(&w, DelegatedTask::new("b")).await.unwrap();
 
         reg.deregister(&w);
 
@@ -944,11 +1000,12 @@ mod tests {
         assert!(reg.names().is_empty());
     }
 
-    #[test]
-    fn a_task_for_an_unregistered_participant_is_not_accepted() {
+    #[tokio::test]
+    async fn a_task_for_an_unregistered_participant_is_not_accepted() {
         let reg = ParticipantRegistry::new();
         assert!(
             reg.submit_task("nobody", DelegatedTask::new("hello"))
+                .await
                 .is_none()
         );
     }
@@ -957,7 +1014,7 @@ mod tests {
     async fn cancelling_forgets_the_task_and_tells_the_participant() {
         let reg = ParticipantRegistry::new();
         let (w, mut outbound) = register(&reg, "worker");
-        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).unwrap();
+        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).await.unwrap();
         let _ = outbound.recv().await;
 
         reg.cancel_task(&w, &task_id);
@@ -988,7 +1045,7 @@ mod tests {
 
         let reg = ParticipantRegistry::new();
         let (w, mut outbound) = register(&reg, "worker");
-        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).unwrap();
+        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).await.unwrap();
         let _ = outbound.recv().await;
 
         // The worker parks the task and says what it is waiting for.
@@ -1029,7 +1086,7 @@ mod tests {
                 custom: false,
             }],
         };
-        reg.answer_task(&task_id, input.clone()).unwrap();
+        reg.answer_task(&task_id, input.clone()).await.unwrap();
         assert!(matches!(
             outbound.recv().await,
             Some(BrokerFrame::Input { task_id: t, input: i }) if t == task_id && i == input
@@ -1041,7 +1098,7 @@ mod tests {
         );
 
         assert_eq!(
-            reg.answer_task("task-nobody", input).unwrap_err(),
+            reg.answer_task("task-nobody", input).await.unwrap_err(),
             AnswerError::UnknownTask("task-nobody".into())
         );
         assert!(!reg.owns_task("task-nobody"));

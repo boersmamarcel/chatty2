@@ -53,7 +53,7 @@ mod slash_commands;
 
 pub(crate) use conversation_ops_modify::move_ui_enabled;
 
-/// The broker's gateway port and the local roster's names (PL-U5) for a
+/// The local roster's names (PL-U5) for a
 /// conversation whose own effective workspace is `workspace` (its own
 /// working directory when it has one, else the shared default — the same
 /// value the caller already resolved for its `exec_settings`, AGE-719).
@@ -71,10 +71,10 @@ pub(crate) use conversation_ops_modify::move_ui_enabled;
 /// They also come back empty when no broker is published at all, or none
 /// could serve them on this platform: a name listed without one fails
 /// every delegation (AGE-759).
-pub(crate) fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(u16, Vec<String>)> {
+pub(crate) fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<Vec<String>> {
     let m = cx.try_global::<crate::settings::models::ModuleSettingsModel>()?;
     if !crate::settings::models::agent_specs::broker_reachable(cx) {
-        return Some((m.gateway_port, Vec::new()));
+        return Some(Vec::new());
     }
     let discovered = cx.try_global::<crate::settings::models::DiscoveredModulesModel>();
     let broker_is_live = discovered.is_some_and(|d| d.gateway.is_some());
@@ -90,9 +90,9 @@ pub(crate) fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<(
             "conversation workspace and the running broker's roster workspace disagree; \
              listing no local agents rather than one the broker cannot reach"
         );
-        return Some((m.gateway_port, Vec::new()));
+        return Some(Vec::new());
     }
-    Some((m.gateway_port, m.roster_names(workspace)))
+    Some(m.roster_names(workspace))
 }
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
@@ -328,11 +328,10 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let memory_service = await_memory_service(cx).await;
     let embedding_service = get_embedding_service(cx);
     let skill_service = get_skill_service(cx);
-    let (gateway_port, local_agents) = cx
+    let local_agents = cx
         .update(|cx| gateway_and_roster(cx, built_workspace_dir.as_deref()))
         .ok()
-        .flatten()
-        .unzip();
+        .flatten();
     // The broker starts itself on this call if it has not already (BI-2,
     // AGE-634).
     let lazy_broker = cx
@@ -365,7 +364,6 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
             skill_service: Some(skill_service),
             search_settings,
             embedding_service,
-            gateway_port,
             lazy_broker,
             local_agents: local_agents.unwrap_or_default(),
             remote_agents,
@@ -1015,11 +1013,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
-        async fn ensure_started(&self) -> anyhow::Result<String> {
-            unreachable!("listing the roster starts no broker")
-        }
-
-        fn bound_addrs(&self) -> Vec<std::net::SocketAddr> {
+        fn bound_sockets(&self) -> Vec<std::path::PathBuf> {
             Vec::new()
         }
     }
@@ -1037,12 +1031,12 @@ mod tests {
                 ..Default::default()
             });
             cx.set_global(crate::settings::models::DiscoveredModulesModel::default());
-            let (_, names) = gateway_and_roster(cx, None).expect("module settings exist");
+            let names = gateway_and_roster(cx, None).expect("module settings exist");
             assert!(names.is_empty(), "no broker published: {names:?}");
 
             cx.global_mut::<crate::settings::models::DiscoveredModulesModel>()
                 .lazy_broker = Some(std::sync::Arc::new(PendingBroker));
-            let (_, names) = gateway_and_roster(cx, None).expect("module settings exist");
+            let names = gateway_and_roster(cx, None).expect("module settings exist");
             if cfg!(unix) {
                 assert_eq!(names, vec!["data-analyst".to_string()]);
             } else {

@@ -11,8 +11,10 @@
 //!
 //! The pieces:
 //!
-//! * [`protocol`] — the frames on the socket. Newline-delimited JSON, not
-//!   A2A: A2A is the broker's public format, a child process is not public.
+//! * [`protocol`] — what the two ends say to each other, as frames.
+//! * [`codec`] — the v3 envelope those frames travel in (ADR-0021 § 1), one
+//!   [`FrameCodec`] per connection. Newline-delimited JSON, not A2A: A2A is
+//!   the broker's public format, a child process is not public.
 //! * [`registry`] — who is registered and where each open task's updates go,
 //!   and the way back down to a task parked on a question (AGE-306).
 //! * [`calls`] — the calls a worker makes over its connection, and the
@@ -32,16 +34,22 @@
 //!   (ADR-0011 C2).
 
 mod calls;
+mod codec;
+pub mod limits;
 mod protocol;
 mod registry;
 pub mod spawn_context;
 mod virtual_agent;
 
-pub use calls::{BrokerCalls, Caller, DirectTransport};
+pub use calls::{BrokerCalls, Caller, DirectTransport, LocalPermissive};
+pub use codec::{
+    BrokerCodec, BrokerNotification, BrokerRequest, BrokerSide, FrameCodec, FrameError,
+    PROTOCOL_VERSION, WorkerCodec, WorkerNotification, WorkerRequest, WorkerSide,
+};
 pub use protocol::{
-    ApprovalAsker, ApprovalKind, BrokerFrame, CallStamp, DelegatedTask, FrameError, InputAnswer,
-    InputQuestion, InputRequest, PROTOCOL_VERSION, ParticipantCard, ParticipantFrame,
-    ParticipantSkill, TaskBearer, TaskInput, TaskState, decode_frame, encode_frame,
+    ApprovalAsker, ApprovalKind, BrokerFrame, CallStamp, DelegatedTask, InputAnswer, InputQuestion,
+    InputRequest, ParticipantCard, ParticipantFrame, ParticipantSkill, TaskBearer, TaskInput,
+    TaskState,
 };
 pub use registry::{
     AdmittedNode, AnswerError, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, RunGuard,

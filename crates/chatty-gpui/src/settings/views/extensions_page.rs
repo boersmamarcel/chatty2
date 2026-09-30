@@ -264,6 +264,39 @@ fn installed_extensions_group() -> SettingGroup {
                             .child(
                                 h_flex()
                                     .gap_1()
+                                    // AGE-806: per-agent opt-in to reach this A2A agent on
+                                    // a private network (LAN, Tailscale). Off by default;
+                                    // cloud metadata and IPv6 link-local stay refused
+                                    // either way.
+                                    .when_some(
+                                        match &ext.kind {
+                                            ExtensionKind::A2aAgent(cfg) => {
+                                                Some(cfg.allow_private_network)
+                                            }
+                                            _ => None,
+                                        },
+                                        |el, allow_private_network| {
+                                            let toggle_id = id.clone();
+                                            el.child(
+                                                Button::new(SharedString::from(format!(
+                                                    "a2a-private-network-{toggle_id}"
+                                                )))
+                                                .small()
+                                                .ghost()
+                                                .label(if allow_private_network {
+                                                    "Private network: on"
+                                                } else {
+                                                    "Private network: off"
+                                                })
+                                                .on_click(move |_, _window, cx| {
+                                                    extensions_controller::toggle_a2a_private_network(
+                                                        toggle_id.clone(),
+                                                        cx,
+                                                    );
+                                                }),
+                                            )
+                                        },
+                                    )
                                     // Execution mode toggle: only for WASM modules that are
                                     // not remote_only.
                                     .when(

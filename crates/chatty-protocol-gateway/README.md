@@ -26,14 +26,20 @@ there is no gRPC, no WebSocket (except MCP SSE), and no binary framing:
 | Agent card (aggregated) | `GET /.well-known/agent.json` | `application/json` |
 | Participant connection | broker-made `socketpair` per worker (`open_connection`) | newline-delimited JSON, v2 |
 
+All of it is served on a Unix socket in an owner-only directory, never on a
+TCP port (see [Running](#running)).
+
 ### What every route enforces
 
+- **The launch token.** Every route, and the fallback, answers **401**
+  without `Authorization: Bearer <token>`, where the token is the gateway's
+  per-launch one (`ProtocolGateway::token()`, written to `gateway.token`
+  beside the socket, `0600`; ADR-0021 § 4).
 - **Loopback callers only.** A request whose `Host` is not a loopback name
   (`localhost`, `127.0.0.0/8`, `[::1]`), or whose `Origin` is present and not
-  loopback (`null` included), gets **403**. Binding to 127.0.0.1 does not stop
-  DNS rebinding: a browser page that re-resolves its own name to 127.0.0.1
-  reaches the socket, and from there every module's `llm::complete`. A
-  request without `Host` (not a browser's) is served.
+  loopback (`null` included), gets **403**, a guard against DNS rebinding
+  for any listener an embedder puts in front of the socket. A request
+  without `Host` (not a browser's) is served.
 - **The `/a2a/{name}` surface is modules and the remote-runner forward only
   (BI-7, ADR-0020).** Once a worker calls over its own connection (BI-4), a
   `{name}` that is a role — a registered participant or a virtual agent —
@@ -149,34 +155,56 @@ role with 403.
 `Directory::admit` names it `<spec>-<n>`, never reusing a name — creates a
 `socketpair`, keeps one end and hands the other to the child it spawns at
 descriptor 3 (`chatty-tui --participant-fd 3`; `open_connection`,
-`LocalRunner`). The worker's `hello` names nothing: a card's `name` is
-ignored, and the broker's `welcome` says who the worker is. There is no way
+`LocalRunner`). The worker's `session.hello` names nothing: a card's `name`
+is ignored, and the hello's result says who the worker is. There is no way
 to register otherwise. The shared socket (`with_participant_socket`, `bind`,
-`serve`) stays bound and refuses every connection with an `error` frame, so
-no local process can take a name the broker is about to route a task to.
+`serve`) stays bound and refuses every connection — a hello with an `error`
+for its id, anything else by closing it — so no local process can take a
+name the broker is about to route a task to.
 
 The connection carries newline-delimited JSON, not A2A: A2A is the gateway's
 public wire format, and a child process is not a public endpoint. This is
-**version 2**: every frame in both directions carries `"v":2`, and a frame
-without it is answered with an `error` frame naming v2 and the connection is
-closed. There is no v1 fallback. (hive's worker speaks v1 at its current
-chatty2 pin and moves to v2 with HS-4, AGE-678.)
+**version 3**, ADR-0021's one envelope (`participant::FrameCodec`, one per
+connection): every line is a request `{"v":3,"id":…,"method":…,"params":…}`,
+a result `{"v":3,"id":…,"result":…}`, an error
+`{"v":3,"id":…,"error":{"kind":…,"message":…}}` or a notification
+`{"v":3,"method":…,"params":…}`. There is no fallback to an older version.
+(hive's worker moves to v3 with HS-4a, after ADR-0021 step 3.)
 
 ```
-participant → {"v":2,"type":"hello","card":{"name":"",…}}
-broker      → {"v":2,"type":"welcome","name":"local-coder-0","scope":"root","owner":null}
-broker      → {"v":2,"type":"task","taskId":"task-…","text":"summarise foo.rs"}
-participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"read_file"}
-participant → {"v":2,"type":"artifact","taskId":"task-…","text":"foo.rs defines…","lastChunk":false}
-participant → {"v":2,"type":"status","taskId":"task-…","state":"completed"}
+participant → {"v":3,"id":1,"method":"session.hello","params":{"card":{"name":"",…}}}
+broker      → {"v":3,"id":1,"result":{"name":"local-coder-0","scope":"root","owner":null}}
+broker      → {"v":3,"id":1,"method":"task.run","params":{"taskId":"task-…","text":"summarise foo.rs"}}
+participant → {"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working","message":"read_file"}}
+participant → {"v":3,"method":"task.event","params":{"kind":"artifact","id":1,"text":"foo.rs defines…","lastChunk":false}}
+participant → {"v":3,"id":1,"result":{"state":"completed"}}
 ```
+
+Each side numbers its own requests and never reuses an id; reusing one still
+in flight closes the connection. Results, errors, `req.progress` and
+`task.event` name the receiver's request (a task's events name its
+`task.run`); `req.cancel` names the sender's — the broker stops a task with
+`req.cancel` of its `task.run`. A response or cancel naming nothing in
+flight is dropped and logged. Each direction decodes into its own set of
+methods, so a method the peer may not send — a worker's `task.run`, say —
+closes the connection, as does a line that does not decode at all; an
+`error` is only ever sent back for a refused hello.
+
+| Sender | Requests | Notifications |
+|---|---|---|
+| worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post` | `task.event`, `req.cancel`; interim `task.input_required`, `call.input` |
+| broker | `task.run` | `req.progress`, `req.cancel`; interim `task.input`, `call.input_required`, `call.input_withdrawn` |
+
+The interim notifications carry the question and approval traffic until
+ADR-0021 step 2 turns it into `human.ask` / `human.approve` requests.
 
 `scope` is the conversation the node works for and `owner` the node that
-asked for it; for now every node is the root's, in scope `root`. The task
-frame also carries the node's `spawnContext` (BI-5, below).
+asked for it; for now every node is the root's, in scope `root`. `task.run`
+also carries the node's `spawnContext` (BI-5, below).
 
-`status` states are A2A's (`submitted`, `working`, `input-required`,
-`completed`, `failed`, `canceled`); the terminal three end the task.
+Task states are A2A's (`submitted`, `working`, `input-required`,
+`completed`, `failed`, `canceled`); a terminal one is the `task.run`'s
+result and ends the task.
 
 **A question goes up the chain, the answer comes back down** (ADR-0011 C7,
 AGE-306). A worker whose `ask_user` is waiting parks its task in
@@ -184,45 +212,47 @@ AGE-306). A worker whose `ask_user` is waiting parks its task in
 question with its options — under `input`. The broker serves that to the A2A
 caller under the status's `metadata.clarification`; the caller answers with
 A2A `message/send` carrying the task's id on the message and the answers under
-the message's `metadata.clarification`, which the broker turns into an `input`
-frame on the same task. The worker's next status un-parks it.
+the message's `metadata.clarification`, which the broker turns into
+`task.input` on the same `task.run`. The worker's next status un-parks it.
 
 ```
-participant → {"v":2,"type":"status","taskId":"task-…","state":"input-required","message":"Which database?",
-               "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
-broker      → {"v":2,"type":"input","taskId":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}
-participant → {"v":2,"type":"status","taskId":"task-…","state":"working","message":"✓ ask_user"}
+participant → {"v":3,"method":"task.input_required","params":{"id":1,"message":"Which database?",
+               "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}}
+broker      → {"v":3,"method":"task.input","params":{"id":1,"input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}}
+participant → {"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working","message":"✓ ask_user"}}
 ```
 
-**Calls over the connection (ADR-0020, BI-4).** A worker's `invoke_agent` and
-`list_agents` reach local roles and the directory over the same connection,
-not over loopback HTTP. Each is a `call` with the worker's own `id`; the
-broker runs it as the node the connection names and answers under that `id`,
-so several calls can be in flight and finish in any order. Closing the
-connection cancels every call still in flight on it, which reaps the workers
-those calls started.
+**Calls over the connection (ADR-0020, BI-4).** A worker's `invoke_agent`,
+`list_agents` and `send_message` reach local roles and the directory over the
+same connection, not over loopback HTTP, as `agent.invoke`, `agent.list` and
+`mailbox.post` requests. The broker runs each as the node the connection
+names and answers under its id, so several can be in flight and finish in
+any order. Closing the connection cancels every call still in flight on it,
+which reaps the workers those calls started; a worker may also withdraw one
+with `req.cancel`.
 
 ```
-participant → {"v":2,"type":"call","id":1,"method":"invoke_agent","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
-participant → {"v":2,"type":"call","id":2,"method":"list_agents"}
-broker      → {"v":2,"type":"call_result","id":2,"result":[{"name":"local-reviewer","origin":"local",…}]}
-broker      → {"v":2,"type":"call_progress","id":1,"event":{"Step":"read_file"}}
-broker      → {"v":2,"type":"call_result","id":1,"result":{"success":true,"response":"Looks good.","metadata":{…}}}
+participant → {"v":3,"id":2,"method":"agent.invoke","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
+participant → {"v":3,"id":3,"method":"agent.list"}
+broker      → {"v":3,"id":3,"result":[{"name":"local-reviewer","origin":"local",…}]}
+broker      → {"v":3,"method":"req.progress","params":{"id":2,"event":{"Step":"read_file"}}}
+broker      → {"v":3,"id":2,"result":{"success":true,"response":"Looks good.","metadata":{…}}}
 ```
 
-A call that cannot run ends with `call_error` (`{"kind":"unknown_agent","message":…}`);
-a callee whose task failed ends with a `call_result` whose `success` is false.
+A call that cannot run ends with an `error` (`{"kind":"unknown_agent","message":…}`);
+a callee whose task failed ends with a result whose `success` is false.
 The in-process root uses `ProtocolGateway::transport()`, the same calls with no
 socket.
 
 **A callee's question comes back down the call** (BI-5). When a callee parks
-its task, the broker tells the calling worker with `call_input_required`, and
-the worker's answer goes up as `call_input`, in the `input` frame's shape. The
-broker delivers it only to the task that call parked.
+its task, the broker tells the calling worker with `call.input_required`, and
+the worker's answer goes up as `call.input`, in `task.input`'s shape. The
+broker delivers it only to the task that call parked. A question withdrawn
+below (TB-7) reaches the caller as `call.input_withdrawn`.
 
 ```
-broker      → {"v":2,"type":"call_input_required","id":1,"task":"task-…","request":{"id":"req-…","questions":[…]}}
-participant → {"v":2,"type":"call_input","id":1,"task":"task-…","input":{"requestId":"req-…","answers":[…]}}
+broker      → {"v":3,"method":"call.input_required","params":{"id":2,"task":"task-…","request":{"id":"req-…","questions":[…]}}}
+participant → {"v":3,"method":"call.input","params":{"id":2,"task":"task-…","input":{"requestId":"req-…","answers":[…]}}}
 ```
 
 **The spawn context rides the request** (ADR-0020 invariants 5–6, BI-5). Only
@@ -232,7 +262,7 @@ base_branch, roster, verification, endpoint}` the broker derives from the
 calling node's own (its tree, its branch, its roster; the root's verification
 command and endpoint for the agent), so a sub-leader's worker branches from the
 sub-leader's branch. A call may bring one as `params.spawn_context`; it is
-clamped to the caller's own and refused otherwise with `call_error`
+clamped to the caller's own and refused otherwise with an `error`
 `{"kind":"spawn_context_refused","message":{"field":…,"reason":…}}`
 (`participant::spawn_context`).
 
@@ -273,6 +303,16 @@ task it still owed is failed with a `failed` status naming the disconnect. A
 process that has died cannot fail to send a heartbeat, so the connection is
 the only signal that cannot lie.
 
+**Every connection is bounded** (EN-0b, `participant/limits.rs`), and only a
+peer's own frame closes its connection. Each end reads lines of at most
+`MAX_FRAME_BYTES` (33 MiB, interim until ADR-0021 Q4); a longer line, or one
+that does not decode, closes the connection it arrived on. A reply that would
+put a frame over the receiver's cap — a callee's result too large for its
+caller — fails only that call with an `error`. The outbound queue holds
+`OUTBOUND_QUEUE_FRAMES` and makes the producer wait when full, never closing
+the slow reader. Calls past `MAX_IN_FLIGHT_CALLS` or `CALLS_PER_SECOND` per
+connection are refused. `fuzz/` fuzzes the `FrameCodec` (see its README).
+
 The hosted transport is Firecracker vsock, which reaches this crate as a
 plain stream — `serve_connection(stream, registry, admitted_node)` takes any
 of them, and `ParticipantConnection::hello_over` is the worker's side of the
@@ -282,7 +322,7 @@ same generalization (AGE-307; the hosted broker adopts it with HS-4).
 
 `ProtocolGateway::with_virtual_agent` publishes one agent that is not a
 connected process but a factory. A task addressed to it starts a worker on a
-connection the broker made for it, waits for that worker's `hello`, routes the
+connection the broker made for it, waits for that worker's `session.hello`, routes the
 task to it, and reaps it. To its caller — over the caller's own connection,
 or the root's direct handle — it is reached exactly like a registered
 participant, which is the point: `invoke_agent` replaces `sub_agent` without
@@ -312,14 +352,22 @@ silently running the worker unisolated.
 
 This crate is a library, not a binary — it has no `[[bin]]` target and no
 `--modules-dir` CLI. An embedder constructs a `ModuleRegistry`, calls
-`scan_directory`, and passes it to `ProtocolGateway::new(registry, port)`.
+`scan_directory`, and passes it to `ProtocolGateway::new(registry)`.
 The desktop (`chatty-gpui`) and `chatty-tui --broker` both do this; see their
 module-settings / broker wiring for a worked example, or
 `crates/chatty-protocol-gateway/tests/` for a minimal one.
 
-The gateway binds to `127.0.0.1:<port>` — never `0.0.0.0` — on whatever port
-the embedder passes to `ProtocolGateway::new`; the desktop defaults that port
-to `8420`.
+`start()` serves on `gateway.sock` in an owner-only directory
+(`access::default_runtime_dir()`: `$XDG_RUNTIME_DIR/chatty-run`, else
+`<cache dir>/chatty-run`; `with_runtime_dir` overrides it), and writes the
+per-launch token to `gateway.token` (`0600`) beside it. Every route of every
+listener serving `build_router()` answers 401 without
+`Authorization: Bearer <token>`. It refuses to start when the directory is a
+symlink, someone else's, or open to group or others, and it never unlinks a
+socket this user does not own. There is no TCP listener. On Windows `start()`
+fails with `access::WINDOWS_UNSUPPORTED` (an owner-only DACL is not
+implemented yet, tracked by AGE-778): external MCP access is macOS/Linux-only
+for now.
 
 ## Being a worker (`worker` feature)
 

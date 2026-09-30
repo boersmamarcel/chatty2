@@ -426,6 +426,10 @@ impl DesktopSink {
             // Arrives as `SessionEvent::SwarmEvent`, never as delegation
             // progress (TB-1).
             InvokeAgentProgress::Swarm(_) => {}
+            // The swarm tree (`SwarmTrace`) renames the node on this;
+            // nothing else here has a per-call identity to update
+            // (AGE-762).
+            InvokeAgentProgress::Admitted(_) => {}
         }
     }
 }

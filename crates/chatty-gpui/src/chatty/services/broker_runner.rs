@@ -32,15 +32,11 @@ use tracing::{info, warn};
 /// Where the shared participant socket is bound. Nothing registers on it
 /// (ADR-0020); it refuses every connection.
 ///
-/// The runtime directory when there is one (`/run/user/<uid>`, cleaned up on
-/// logout), otherwise the temp directory. Unix socket paths are limited to
-/// about 100 bytes, so this stays short deliberately — a path under the
-/// user's data directory would overflow it on some systems.
-pub fn socket_path() -> PathBuf {
-    dirs::runtime_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("chatty")
-        .join("participants.sock")
+/// The owner-only runtime directory the gateway's own socket lives in
+/// (`$XDG_RUNTIME_DIR/chatty-run`, else under the cache dir; never the
+/// shared temp dir, ADR-0021 § 4).
+pub fn socket_path() -> std::io::Result<PathBuf> {
+    Ok(chatty_protocol_gateway::access::default_runtime_dir()?.join("participants.sock"))
 }
 
 /// The runners the gateway publishes, one per resolved virtual agent.
@@ -135,7 +131,15 @@ fn worktree_factory() -> WorkspaceFactory {
 ///
 /// A failure is logged and swallowed: nothing needs the socket to work —
 /// workers reach the broker over the connection it makes for each of them.
-pub fn serve_socket(socket: &PathBuf) {
+pub fn serve_socket(socket: std::io::Result<PathBuf>) {
+    let socket = match socket {
+        Ok(socket) => socket,
+        Err(e) => {
+            warn!(error = %e, "No directory for the shared participant socket");
+            return;
+        }
+    };
+    let socket = &socket;
     match chatty_protocol_gateway::participant::bind(socket) {
         Ok(listener) => {
             tokio::spawn(chatty_protocol_gateway::participant::serve(listener));

@@ -69,10 +69,13 @@ version = "^0.2"
 ### Over MCP, for an external client
 
 The protocol gateway serves the plugin's tools at `POST /mcp/benford`
-(`[protocols] mcp = true` in `module.toml`):
+(`[protocols] mcp = true` in `module.toml`), on its Unix socket, to a caller
+that sends its launch token:
 
 ```sh
-curl -X POST http://localhost:8420/mcp/benford \
+dir="$XDG_RUNTIME_DIR/chatty-run"
+curl -X POST --unix-socket "$dir/gateway.sock" http://localhost/mcp/benford \
+  -H "Authorization: Bearer $(cat "$dir/gateway.token")" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
        "params":{"name":"compute_benford_distribution",

@@ -516,6 +516,7 @@ fn composer_with_a_remote_agent(
                 api_key: None,
                 enabled: true,
                 skills: Vec::new(),
+                allow_private_network: false,
             }),
             source: ExtensionSource::Custom,
             pricing_model: None,

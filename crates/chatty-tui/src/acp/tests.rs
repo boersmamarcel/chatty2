@@ -33,7 +33,6 @@ fn test_server() -> Arc<Server> {
             provider_config: ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
             execution_settings: ExecutionSettingsModel::default(),
             module_settings: ModuleSettingsModel::default(),
-            broker_port: None,
             broker: None,
             models: ModelsModel::default(),
             providers: Vec::new(),

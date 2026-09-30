@@ -25,6 +25,20 @@ pub struct A2aAgentConfig {
     /// Skills discovered from the remote agent card (cached, not always present).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,
+
+    /// Opt-in (default `false`, AGE-806) to reach this agent on a private
+    /// network: RFC-1918 LAN ranges, CGN/Tailscale's `100.64.0.0/10`, and
+    /// IPv6 ULA (`fd7a:115c:a1e0::/48` included). Applies only to this
+    /// agent — the same bypass semantics as the browser tool's
+    /// per-workspace toggle (`check_public_host_with_bypass`, AGE-459).
+    ///
+    /// Cloud metadata (`169.254.0.0/16`) and IPv6 link-local stay refused
+    /// even with this on. Turning it on only makes sense for an agent whose
+    /// address you control: a name that resolves privately can be rebound
+    /// to a different private address between requests, and with this flag
+    /// the rebind is admitted rather than refused.
+    #[serde(default)]
+    pub allow_private_network: bool,
 }
 
 fn default_enabled() -> bool {
@@ -126,6 +140,7 @@ mod tests {
             api_key: None,
             enabled,
             skills: vec![],
+            allow_private_network: false,
         }
     }
 

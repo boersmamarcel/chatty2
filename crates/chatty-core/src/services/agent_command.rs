@@ -83,6 +83,7 @@ mod tests {
             api_key: None,
             enabled,
             skills: Vec::new(),
+            allow_private_network: false,
         }
     }
 

@@ -101,6 +101,7 @@ fn tool_step(step_id: u32, agent: &str, call: &ToolCall) -> AtifStep {
         ToolOutcome::Running => None,
         ToolOutcome::Done { result } => Some((result.clone(), false)),
         ToolOutcome::Failed { error } => Some((error.clone(), true)),
+        ToolOutcome::Cancelled => Some(("cancelled_by_user".to_string(), true)),
     };
     AtifStep {
         step_id,

@@ -122,12 +122,12 @@ async fn in_process_plugin_call_vs_the_mcp_path() {
     registry
         .load(&echo_dir)
         .expect("echo loads into the registry");
-    let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)), 0);
+    let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)));
     let tcp = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("an ephemeral port");
     let base = format!("http://{}", tcp.local_addr().unwrap());
-    let router = gateway.build_router();
+    let router = with_launch_token(&gateway);
     tokio::spawn(async move {
         axum::serve(tcp, router).await.ok();
     });
@@ -162,4 +162,22 @@ async fn in_process_plugin_call_vs_the_mcp_path() {
          in-process plugin tool {in_process:?}, MCP path {over_mcp:?} ({:.1}x the plugin tool)",
         over_mcp.as_secs_f64() / in_process.as_secs_f64()
     );
+}
+
+/// The gateway's router with its launch token added to every request: this
+/// test's own listener stands in for a caller that holds the token (EN-0d).
+fn with_launch_token(gateway: &ProtocolGateway) -> axum::Router {
+    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
+        .parse()
+        .expect("a token is a valid header value");
+    gateway
+        .build_router()
+        .layer(tower::util::MapRequestLayer::new(
+            move |mut request: axum::extract::Request| {
+                request
+                    .headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, bearer.clone());
+                request
+            },
+        ))
 }

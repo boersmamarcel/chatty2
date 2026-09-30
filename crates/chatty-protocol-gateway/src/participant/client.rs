@@ -17,12 +17,12 @@
 use anyhow::{Context, Result, bail};
 use chatty_fabric::{ConversationScope, NodeName};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tracing::debug;
 
-use super::protocol::{
-    BrokerFrame, ParticipantCard, ParticipantFrame, TaskState, decode_frame, encode_frame,
-};
+use super::codec::WorkerCodec;
+use super::limits::{BoundedLines, MAX_FRAME_BYTES};
+use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
 
 type BoxedRead = Box<dyn AsyncRead + Unpin + Send>;
 type BoxedWrite = Box<dyn AsyncWrite + Unpin + Send>;
@@ -42,12 +42,14 @@ pub struct ParticipantConnection {
 /// task reports on the other half while it waits here for the answer to a
 /// question it asked (AGE-306), and neither side may hold the other up.
 pub struct ParticipantReader {
-    lines: Lines<BufReader<BoxedRead>>,
+    lines: BoundedLines<BufReader<BoxedRead>>,
+    codec: WorkerCodec,
 }
 
 /// The participant's frames, written one per line.
 pub struct ParticipantWriter {
     write: BoxedWrite,
+    codec: WorkerCodec,
 }
 
 impl ParticipantConnection {
@@ -63,11 +65,15 @@ impl ParticipantConnection {
         S: AsyncRead + AsyncWrite + Send + 'static,
     {
         let (read, write) = tokio::io::split(stream);
+        // One codec for the connection, shared by its two halves.
+        let codec = WorkerCodec::new();
         let mut reader = ParticipantReader {
-            lines: BufReader::new(Box::new(read) as BoxedRead).lines(),
+            lines: BoundedLines::new(BufReader::new(Box::new(read) as BoxedRead), MAX_FRAME_BYTES),
+            codec: codec.clone(),
         };
         let mut writer = ParticipantWriter {
             write: Box::new(write) as BoxedWrite,
+            codec,
         };
         writer.send(ParticipantFrame::Hello { card }).await?;
 
@@ -167,6 +173,8 @@ impl ParticipantConnection {
 
 impl ParticipantReader {
     /// The next frame from the broker, or `None` when it closes the socket.
+    /// A message naming nothing in flight is dropped by the codec and
+    /// skipped here.
     pub async fn next_frame(&mut self) -> Result<Option<BrokerFrame>> {
         loop {
             let Some(line) = self
@@ -180,16 +188,27 @@ impl ParticipantReader {
             if line.trim().is_empty() {
                 continue;
             }
-            return Ok(Some(decode_frame(&line).with_context(|| {
+            let frame = self.codec.decode(&line).with_context(|| {
                 format!("the broker sent a frame this build cannot accept: {line}")
-            })?));
+            })?;
+            if let Some(frame) = frame {
+                return Ok(Some(frame));
+            }
         }
     }
 }
 
 impl ParticipantWriter {
+    /// Send `frame`. One that names nothing in flight — a status for a task
+    /// the broker never ran — is dropped by the codec, not sent.
     pub async fn send(&mut self, frame: ParticipantFrame) -> Result<()> {
-        let mut line = encode_frame(&frame).context("failed to encode a frame")?;
+        let Some(mut line) = self
+            .codec
+            .encode(&frame)
+            .context("failed to encode a frame")?
+        else {
+            return Ok(());
+        };
         line.push('\n');
         self.write
             .write_all(line.as_bytes())

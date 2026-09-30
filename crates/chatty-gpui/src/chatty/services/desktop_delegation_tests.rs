@@ -26,7 +26,7 @@ use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_protocol_gateway::participant::{
-    LocalRunner, PARTICIPANT_FD, ParticipantFrame, encode_frame,
+    LocalRunner, PARTICIPANT_FD, ParticipantFrame, WorkerCodec,
 };
 use chatty_protocol_gateway::worker::TaskMapper;
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
@@ -57,7 +57,16 @@ impl LlmProvider for NoopProvider {
 /// A worker that answers its one task with `ANSWER`, as a real one
 /// replaying that turn through `TaskMapper` would.
 fn answering_worker(dir: &Path) -> PathBuf {
-    const TASK_ID: &str = "@TASK_ID@";
+    // The `task.run` id as the canned lines carry it; `sed` fills in the
+    // real one.
+    const RUN_ID: u64 = 4_294_967_291;
+    const TASK_ID: &str = "stand-in-task";
+    let codec = WorkerCodec::new();
+    codec
+        .decode(&format!(
+            r#"{{"v":3,"id":{RUN_ID},"method":"task.run","params":{{"taskId":"{TASK_ID}","text":""}}}}"#
+        ))
+        .expect("a task.run decodes");
     let mut mapper = TaskMapper::new(TASK_ID);
     let mut frames: Vec<ParticipantFrame> = [
         SessionEvent::TurnStarted,
@@ -70,7 +79,13 @@ fn answering_worker(dir: &Path) -> PathBuf {
     frames.push(mapper.terminal());
     let frames: String = frames
         .iter()
-        .map(|frame| encode_frame(frame).expect("a frame encodes") + "\n")
+        .map(|frame| {
+            codec
+                .encode(frame)
+                .expect("a frame encodes")
+                .expect("every frame names the task.run")
+                + "\n"
+        })
         .collect();
     std::fs::write(dir.join("frames.jsonl"), frames).expect("frames written");
     let fd = PARTICIPANT_FD;
@@ -78,11 +93,11 @@ fn answering_worker(dir: &Path) -> PathBuf {
         dir,
         &format!(
             r#"here="$(dirname "$0")"
-printf '{{"v":2,"type":"hello","card":{{"name":"stand-in"}}}}\n' >&{fd}
+printf '{{"v":3,"id":1,"method":"session.hello","params":{{"card":{{"name":"stand-in"}}}}}}\n' >&{fd}
 read -r welcome <&{fd}
 read -r task <&{fd}
-id=$(printf '%s' "$task" | sed 's/.*"taskId":"\([^"]*\)".*/\1/')
-sed "s/{TASK_ID}/$id/g" "$here/frames.jsonl" >&{fd}
+id=$(printf '%s' "$task" | sed 's/^{{"v":3,"id":\([0-9]*\),.*/\1/')
+sed "s/{RUN_ID}/$id/g" "$here/frames.jsonl" >&{fd}
 exec sleep 30"#
         ),
     )
@@ -132,16 +147,20 @@ fn desktop_broker_with(
             Some(module_dir) => build_registry(module_dir, Arc::new(NoopProvider), false),
         }
         .expect("the module registry builds");
-        let mut gateway = ProtocolGateway::new(Arc::new(tokio::sync::RwLock::new(registry)), 0);
+        // Its socket goes in a directory of the test's own, never the
+        // user's runtime directory.
+        let dir = tempfile::tempdir().expect("a socket directory");
+        let mut gateway = ProtocolGateway::new(Arc::new(tokio::sync::RwLock::new(registry)))
+            .with_runtime_dir(dir.path().join("run"));
         let runner = LocalRunner::new(worker, gateway.participants()).with_agent_name(ANALYST);
         gateway = gateway.with_virtual_agent(Arc::new(runner));
-        let started = lazy_gateway_broker::start(&mut gateway, 0, runtime_off_module_dir.is_none())
+        let started = lazy_gateway_broker::start(&mut gateway, runtime_off_module_dir.is_none())
             .await
             .map_err(|e| e.to_string());
         let _ = reply.send(started);
         // The gateway serves for as long as the test runs.
         std::future::pending::<()>().await;
-        drop(gateway);
+        drop((gateway, dir));
     });
     Arc::new(LazyGatewayBroker::new(request_tx))
 }
@@ -349,7 +368,7 @@ async fn runtime_off_agent_command_reaches_local_spec() {
     );
     assert_eq!(finished(&events), vec![(true, Some(ANSWER.to_string()))]);
     assert!(
-        broker.bound_addrs().is_empty(),
-        "the module runtime is off: no HTTP port is bound"
+        broker.bound_sockets().is_empty(),
+        "the module runtime is off: no gateway socket is bound"
     );
 }

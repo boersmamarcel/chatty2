@@ -303,7 +303,6 @@ impl AgentClient {
             skill_service,
             search_settings,
             embedding_service,
-            gateway_port,
             lazy_broker,
             local_agents,
             remote_agents,
@@ -1329,18 +1328,16 @@ impl AgentClient {
         .flatten()
         .map(AskUserTool::new);
 
-        // The broker's local workers exist exactly when the gateway that
-        // serves them does (ADR-0011 C2); a live port or a broker that will
-        // start one lazily on first use (BI-2, AGE-634) is the whole
-        // condition. Which names there are is the roster's: the specs
+        // The broker's local workers exist exactly when a broker does
+        // (ADR-0011 C2): one that starts lazily on first use (BI-2,
+        // AGE-634), or the connection a worker's broker made for it. Which names there are is the roster's: the specs
         // module settings or a team declare, else every exposed spec
         // (C10, PL-U5).
-        let local_agents: Vec<String> =
-            if gateway_port.is_some() || lazy_broker.is_some() || fabric_transport.is_some() {
-                local_agents
-            } else {
-                Vec::new()
-            };
+        let local_agents: Vec<String> = if lazy_broker.is_some() || fabric_transport.is_some() {
+            local_agents
+        } else {
+            Vec::new()
+        };
 
         // Create list_agents tool (registered when the role delegates)
         let mut list_agents_tool = ListAgentsTool::new(remote_agents.clone())
@@ -1352,16 +1349,11 @@ impl AgentClient {
                     .map(std::path::PathBuf::from),
                 dirs::data_dir(),
             );
-        // With a gateway there is a live participant table to read, not just
-        // the settings snapshot (ADR-0011 C5). A lazy broker takes priority
-        // over an already-resolved port: a host that hands in both knows the
-        // port only because it started the broker itself (a test), so the
-        // eager path is used; otherwise the tool starts the broker itself on
-        // first use.
+        // With a broker there is a live participant table to read, not just
+        // the settings snapshot (ADR-0011 C5); the tool starts the broker
+        // itself on first use.
         if let Some(broker) = lazy_broker.clone() {
             list_agents_tool = list_agents_tool.with_lazy_broker(broker);
-        } else if let Some(port) = gateway_port {
-            list_agents_tool = list_agents_tool.with_gateway_port(port);
         }
         // A delegated worker reads its broker's directory over the
         // connection the broker made, never over loopback (ADR-0020, BI-4).

@@ -412,6 +412,7 @@ impl LocalRunner {
         let (task_id, updates) = self
             .registry
             .submit_task(&name, task)
+            .await
             .ok_or_else(|| anyhow!("worker '{name}' disconnected before it could be given work"))?;
         worker.task_id = Some(task_id.clone());
 
@@ -734,7 +735,9 @@ mod tests {
     /// A stand-in worker's script: say hello on the connection the runner
     /// handed it, then `then`.
     fn hello(then: &str) -> String {
-        format!("printf '{{\"v\":2,\"type\":\"hello\"}}\\n' >&{PARTICIPANT_FD}; {then}")
+        format!(
+            "printf '{{\"v\":3,\"id\":1,\"method\":\"session.hello\",\"params\":{{}}}}\\n' >&{PARTICIPANT_FD}; {then}"
+        )
     }
 
     /// A stand-in that says hello and then waits, like a worker mid-task.
@@ -781,12 +784,12 @@ mod tests {
         assert_eq!(worker.name(), "local-agent-0", "the broker names it");
         assert!(registry.is_registered("local-agent-0"));
         let frames = frames_containing(&frames, "summarise foo.rs").await;
-        assert_eq!(frames[0]["v"], 2);
-        assert_eq!(frames[0]["type"], "welcome");
-        assert_eq!(frames[0]["name"], "local-agent-0");
-        assert_eq!(frames[1]["type"], "task", "the welcome comes first");
-        assert_eq!(frames[1]["text"], "summarise foo.rs");
-        assert_eq!(frames[1]["taskId"].as_str(), worker.task_id());
+        assert_eq!(frames[0]["v"], 3);
+        assert_eq!(frames[0]["id"], 1, "the hello's result");
+        assert_eq!(frames[0]["result"]["name"], "local-agent-0");
+        assert_eq!(frames[1]["method"], "task.run", "the welcome comes first");
+        assert_eq!(frames[1]["params"]["text"], "summarise foo.rs");
+        assert_eq!(frames[1]["params"]["taskId"].as_str(), worker.task_id());
     }
 
     /// The child gets its end of the connection at `PARTICIPANT_FD`, open

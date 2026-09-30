@@ -252,6 +252,45 @@ impl Team {
     }
 }
 
+/// The verification command declared by whichever team — a preset compiled
+/// into the binary, or a `<workspace>/.chatty/teams/<id>/team.json` — has
+/// `name` as its leader or on its roster (AGE-763): `/agent <name>` runs
+/// with that team's own tests, exactly as `--team <id>` does, rather than
+/// module settings' own `team.verification`. A workspace team beats a
+/// preset of the same id, as [`load_team`] shadows it; reads only the team
+/// file, never the specs it names, so a spec that does not load never
+/// blocks this lookup. `None` when no team claims `name`, or the team that
+/// does declares no verification command.
+pub fn verification_for_member(name: &str, workspace: Option<&Path>) -> Option<String> {
+    if let Some(root) = workspace {
+        let dir = root.join(WORKSPACE_TEAMS_DIR);
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(path.join("team.json")) else {
+                    continue;
+                };
+                let Ok(file) = TeamFile::parse(&text) else {
+                    continue;
+                };
+                if file.leader == name || file.agents.iter().any(|agent| agent == name) {
+                    return file.verification;
+                }
+            }
+        }
+    }
+    for preset in PRESETS {
+        let file = TeamFile::parse(preset.team_json).expect("a preset team.json parses");
+        if file.leader == name || file.agents.iter().any(|agent| agent == name) {
+            return file.verification;
+        }
+    }
+    None
+}
+
 /// Load the team `id` from the workspace, the data directory, or the
 /// presets, in that order, and the specs it names from the same places.
 ///
@@ -791,7 +830,7 @@ mod tests {
     #[test]
     fn the_run_settings_carry_the_roster_verification_and_turn_budget() {
         let mut on_disk = ModuleSettingsModel {
-            gateway_port: 9999,
+            default_endpoint_budget: 7,
             virtual_agents: vec!["stale".to_string()],
             ..Default::default()
         };
@@ -806,7 +845,7 @@ mod tests {
         assert_eq!(team.agent_names(), ["data-analyst", "reviewer"]);
         assert!(run.team.verification.is_none());
         assert_eq!(
-            run.gateway_port, 9999,
+            run.default_endpoint_budget, 7,
             "everything else is the on-disk value"
         );
         assert_eq!(on_disk.virtual_agents, ["stale"]);

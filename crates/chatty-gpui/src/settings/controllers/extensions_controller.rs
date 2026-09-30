@@ -488,6 +488,26 @@ pub fn toggle_extension(id: String, cx: &mut App) {
     }
 }
 
+/// AGE-806: flip an A2A agent's per-agent `allow_private_network` opt-in.
+/// Only this agent is affected — the A2A edge's `GuardedResolver` reads the
+/// flag off the agent config it is given for every call, not a global
+/// setting.
+pub fn toggle_a2a_private_network(id: String, cx: &mut App) {
+    let extensions = cx.global_mut::<ExtensionsModel>();
+    let Some(ext) = extensions.find_mut(&id) else {
+        return;
+    };
+    let ExtensionKind::A2aAgent(ref mut config) = ext.kind else {
+        return;
+    };
+    config.allow_private_network = !config.allow_private_network;
+    let allow_private_network = config.allow_private_network;
+    info!(id = %id, allow_private_network, "Toggled A2A agent private-network opt-in");
+
+    save_extensions_async(extensions.clone(), cx);
+    cx.refresh_windows();
+}
+
 /// Handle MCP server connect/disconnect after toggling.
 fn handle_mcp_toggle(config: McpServerConfig, is_enabled: bool, cx: &mut App) {
     let service = cx.global::<McpService>().clone();

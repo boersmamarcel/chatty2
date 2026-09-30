@@ -87,11 +87,32 @@ pub struct A2aAgentConfig {
     pub api_key: Option<String>,// Optional Bearer token
     pub enabled: bool,          // Toggle on/off
     pub skills: Vec<String>,    // Cached from agent card discovery
+    pub allow_private_network: bool, // AGE-806: opt this agent into RFC-1918/CGN/ULA
 }
 ```
 
 Runtime connection status is tracked in `A2aAgentsModel` (a GPUI global) but **not
 persisted** — it is refreshed at startup by fetching agent cards.
+
+### Reaching a private network (AGE-806)
+
+Every call goes through the SSRF guard's `GuardedResolver`
+(`crates/chatty-core/src/services/ssrf_guard.rs`) with an `AddressPolicy` chosen per
+call from `config.allow_private_network` (`A2aClient::http_for`), not once at client
+construction: `a2a_peer` (default) or `a2a_peer_with_bypass(true)` (opted in). Both
+resolve a name once and check the addresses actually dialed — never a separate
+pre-check — so the rebinding protection from AGE-537/AGE-767 holds either way; the
+opt-in only widens which addresses the check admits.
+
+With the opt-in, a *name* that resolves into RFC-1918, `100.64.0.0/10` (CGN/Tailscale)
+or ULA is admitted, using the same bypass semantics as the browser tool's
+per-workspace toggle (`check_public_host_with_bypass`, AGE-459). A configured IP
+literal was already admitted unconditionally before this flag existed (the address is
+the user's explicit choice, not resolved). Link-local (`169.254.0.0/16`, cloud
+metadata, and `fe80::/10`) is refused regardless of the flag, and `localhost` still
+means loopback and nothing else. The AGE-756 TLS rule is unchanged: plain `http://`
+only ever works for a loopback host string, so a private-network agent reached by name
+needs `https://`.
 
 ### Protocol
 
@@ -146,10 +167,13 @@ If the server answers with a `Content-Type` other than `text/event-stream`, the 
 
 ## Protocol gateway
 
-The gateway (`chatty-protocol-gateway`) is a local HTTP server, bound to
-`127.0.0.1` (not `0.0.0.0`) on a port the embedding app chooses — the desktop
-defaults to `8420` (`module_settings.json`'s `gateway_port`; there is no UI
-field for it yet). It serves every loaded plugin's tools over MCP
+The gateway (`chatty-protocol-gateway`) is a local HTTP server on a Unix
+socket, never a TCP port (ADR-0021 § 4): `gateway.sock` (the desktop) or
+`gateway-<pid>.sock` (a `--broker` leader) in `$XDG_RUNTIME_DIR/chatty-run`,
+else `<cache dir>/chatty-run`. That directory is created `0700` and checked
+before use (owned by this user, no group or other bits), or the gateway does
+not start. Every route requires the per-launch token, which is written to
+`gateway.token` (`0600`) beside the socket and never passed in argv. It serves every loaded plugin's tools over MCP
 ([plugins.md](plugins.md#serving-a-plugin-over-mcp)), and the broker's agents (local
 participants and virtual agents) over A2A:
 
@@ -197,36 +221,49 @@ worker are the same thing to an A2A caller. Participants are looked up
 node, which names it `<spec>-<n>` (`local-coder-0`), creates a `socketpair`
 and hands one end to the child at descriptor 3 (`--participant-fd 3`); the
 child marks it close-on-exec as `main`'s first statement, so no shell or tool
-it starts inherits it. The child's `hello` names nothing — its card's `name`
-is ignored — and the broker's `welcome` tells it its name, scope and owner.
-Nothing registers any other way: the shared participant socket stays bound
-and answers every connection with an `error` frame, so no local process can
-take a name the broker is about to route a task to.
+it starts inherits it. The child's `session.hello` names nothing — its
+card's `name` is ignored — and the hello's result tells it its name, scope
+and owner. Nothing registers any other way: the shared participant socket
+stays bound and refuses every connection (a hello with an `error` for its
+id, anything else by closing it), so no local process can take a name the
+broker is about to route a task to.
 
-The connection carries newline-delimited JSON frames, protocol **v2**: every
-frame carries `"v":2` (`hello`, `welcome`, `error`, `task`, `status`,
-`artifact`, `cancel`, `input`, and the call frames below), and a frame without
-it is answered with an `error` frame naming v2 and the connection is closed —
-there is no v1. The gateway maps the task frames onto A2A status and artifact
-updates.
+The connection carries newline-delimited JSON, protocol **v3** (ADR-0021 § 1,
+one `FrameCodec` per connection): every line is a request
+`{"v":3,"id":…,"method":…,"params":…}`, a result `{"v":3,"id":…,"result":…}`,
+an error `{"v":3,"id":…,"error":{"kind":…,"message":…}}` or a notification
+`{"v":3,"method":…,"params":…}`. Each side numbers its own requests; results,
+errors, `req.progress` and `task.event` name the receiver's request, and
+`req.cancel` the sender's. The broker sends work as `task.run`; the worker
+reports on it with `task.event` (`kind` `status`, `artifact` or `swarm`) and
+ends it with the `task.run`'s result, and the broker stops it with
+`req.cancel`. A method the peer may not send, a reused in-flight id or a line
+that does not decode closes the connection without a reply; a response
+naming nothing in flight is dropped. There is no older version to fall back
+to. The gateway maps a task's messages onto A2A status and artifact updates.
 
 **Workers call over the same connection (ADR-0020, BI-4, AGE-636).** A
-worker's `invoke_agent` and `list_agents` reach local roles and the broker's
-directory as `call` frames on its own connection, never over loopback HTTP:
+worker's `invoke_agent`, `list_agents` and `send_message` reach local roles
+and the broker's directory as requests on its own connection, never over
+loopback HTTP:
 
-| Direction | Frame | Fields |
+| Direction | Message | Fields |
 |---|---|---|
-| worker → broker | `call` | `id` (the worker's, unique on the connection), `method` (`invoke_agent`, `list_agents`, `send_message`), `params` |
-| broker → worker | `call_progress` | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
-| broker → worker | `call_result` | `id`, `result` — for `invoke_agent` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `list_agents` the aggregated card's `agents` array; for `send_message` `{"status":"pending","id":"msg-1"}` or `{"status":"refused","reason":"not_on_tree"}` (see [`send_message`](#send_message)) |
-| broker → worker | `call_error` | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
-| broker → worker | `call_input_required` | `id`, `task` (the callee's parked task), `request` — the question, `{id, questions}` as a parked task's `input` carries it (BI-5) |
-| worker → broker | `call_input` | `id`, `task`, `input` — the answer, `{requestId, answers}`, the same shape as an `input` frame (BI-5) |
+| worker → broker | `agent.invoke`, `agent.list`, `mailbox.post` requests | `id` (the worker's, never reused on the connection), `params` (none for `agent.list`) |
+| broker → worker | `req.progress` notification | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
+| broker → worker | result | `id`, `result` — for `agent.invoke` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `agent.list` the aggregated card's `agents` array; for `mailbox.post` `{"status":"pending","id":"msg-1"}` or `{"status":"refused","reason":"not_on_tree"}` (see [`send_message`](#send_message)) |
+| broker → worker | error | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
+| broker → worker | `call.input_required` notification (interim) | `id`, `task` (the callee's parked task), `request` — the question, `{id, questions}` as a parked task's `input` carries it (BI-5) |
+| worker → broker | `call.input` notification (interim) | `id`, `task`, `input` — the answer, `{requestId, answers}`, the same shape `task.input` carries (BI-5) |
+| worker → broker | `req.cancel` notification | `id` — the worker withdraws its call |
+
+The interim notifications carry the question traffic until ADR-0021 step 2
+replaces them with `human.ask` / `human.approve`.
 
 ```text
-worker → {"v":2,"type":"call","id":1,"method":"invoke_agent","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
-broker → {"v":2,"type":"call_progress","id":1,"event":{"Step":"read_file"}}
-broker → {"v":2,"type":"call_result","id":1,"result":{"success":true,"response":"Looks good.","metadata":{…}}}
+worker → {"v":3,"id":2,"method":"agent.invoke","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
+broker → {"v":3,"method":"req.progress","params":{"id":2,"event":{"Step":"read_file"}}}
+broker → {"v":3,"id":2,"result":{"success":true,"response":"Looks good.","metadata":{…}}}
 ```
 
 The call says nothing about its caller: the broker runs it as the node the
@@ -235,36 +272,36 @@ writes one edge-log row per `invoke_agent` call when it ends and one `message`
 row per `send_message` call (`<data_dir>/chatty/fabric/edges-<pid>.jsonl`;
 `list_agents` is a directory read, not an edge, and writes none). Several calls can be in flight in one
 task; replies match by `id`, in whatever order the calls finish. A callee
-whose task failed is a `call_result` with `success: false`, not a
-`call_error`, so the caller renders it exactly as a failed A2A task. When a
+whose task failed is a result with `success: false`, not an `error`, so the
+caller renders it exactly as a failed A2A task. When a
 worker's connection closes, the broker cancels every call still in flight on
 it, which reaps the workers those calls started — so cancelling a leader's
 task reaps its whole subtree (invariant 11).
 
 **A question comes back down the call (BI-5, AGE-637).** When a callee parks
 its task on `ask_user`, the broker sends the calling worker
-`call_input_required` with the call's `id` and the parked task; the worker's
+`call.input_required` with the call's `id` and the parked task; the worker's
 `invoke_agent` re-asks it on the worker's own clarification store — which
 parks the worker's own task toward *its* caller — and sends the answer up as
-`call_input`. The broker delivers it only to the task that call parked, so a
+`call.input`. The broker delivers it only to the task that call parked, so a
 worker answers its own callees and nobody else's. A grandchild's question
 therefore reaches the root's human however many workers sit between them, and
 the answer descends the same hops
 (`clarification_relays_across_two_hops`):
 
 ```text
-broker → {"v":2,"type":"call_input_required","id":1,"task":"task-…","request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}
-worker → {"v":2,"type":"call_input","id":1,"task":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}
+broker → {"v":3,"method":"call.input_required","params":{"id":2,"task":"task-…","request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}}
+worker → {"v":3,"method":"call.input","params":{"id":2,"task":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}}
 ```
 
 **The root sees every nested run (TB-1, AGE-663).** A run a worker's call
 starts is nested under the root's delegation. When the root's call is
 listening — every root `invoke_agent` over its broker is — the broker sends
-that run's `task` frame with `"swarmEvents":true`, and the worker reports its
-own turns and tool events as `event` frames beside its usual ones
-(`{"v":2,"type":"event","taskId":"task-…","event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}`).
+that run's `task.run` with `"swarmEvents":true`, and the worker reports its
+own turns and tool events as `task.event`s of kind `swarm` beside its usual ones
+(`{"v":3,"method":"task.event","params":{"kind":"swarm","id":1,"event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}}`).
 The broker forwards them to the root's call, tagged with
-`(root_task_id, node, chain)` from its own task table — never from the frame,
+`(root_task_id, node, chain)` from its own task table — never from the event,
 whose extra fields are dropped when it is parsed — together with what it reads
 off the run's own frames: its text as a byte count (`{"kind":"text","bytes":15}`;
 the text itself stays with the run's caller), its usage whole, and its end.
@@ -272,7 +309,7 @@ It batches per node and flushes at most once every 250 ms, one batch per node,
 the last before the root's result; nothing is forwarded per token. The root's
 session emits each batch as `SessionEvent::SwarmEvent` — a view of the tree,
 not a bill: the delegation's own progress and usage still arrive as
-`SessionEvent::Delegation`. A task nobody forwards gets no `event` frames, so
+`SessionEvent::Delegation`. A task nobody forwards gets no `swarm` events, so
 its wire is unchanged (`nested_events_reach_the_root_tagged`,
 `forwarding_is_bounded`, `worker_cannot_forge_tags`).
 
@@ -309,7 +346,7 @@ whose spec delegates in turn — is spawned with no `--broker`, and
 over its connection like any worker's. What its own broker used to decide
 travels on the spawn request as a `SpawnContext {workspace_root, base_branch,
 roster, verification, endpoint}` (on the `invoke_agent` call's `params` as
-`spawn_context`, and on the child's `task` frame). The broker sets it from the
+`spawn_context`, and on the child's `task.run`). The broker sets it from the
 calling node's own context: the node's own worktree and branch and the roster
 it was given, with the verification command and endpoint the root's settings
 give the agent being spawned. So a sub-leader's worker gets its tree under the
@@ -319,14 +356,14 @@ A call that brings a context of its own is clamped: accepted only if
 `workspace_root` lies inside the caller's own tree, `base_branch` is the
 caller's, `roster` is a subset of the caller's, `verification` is the root's
 (or none) and `endpoint` is the root's for that agent. Anything else ends the
-call with `call_error` `spawn_context_refused`, whose `message` is
+call with an `error` of kind `spawn_context_refused`, whose `message` is
 `{field, reason}` naming the field (`spawn_context_is_clamped`), so a
 `team.json` a model wrote into its worktree cannot loosen anything. A call to
 a virtual agent outside the caller's roster is `refused`. Usage folds up both
 hops through the root (`usage_folds_across_two_hops`).
 
 A worker **connects before it builds its agent**: `chatty-tui
---participant-fd` says `hello`, gets `welcome`, and only then builds the agent
+--participant-fd` says `session.hello`, gets its result, and only then builds the agent
 with the connection's transport (`WorkerConnection::transport`,
 `AgentBuildContext::fabric_transport`), so its tools hold the connection from
 the first turn. The in-process chatty-tui root reaches its own broker the
@@ -338,16 +375,16 @@ the directory (`RouteCounter`); in a swarm of workers both stay at zero
 signal: closing it deregisters the participant and fails every task it still
 owed. A worker's `ask_user` parks its task in `input-required` with the
 question attached; the caller answers with `message/send` on the same task id
-and the broker hands the answer down as an `input` frame (AGE-306). The frames
+and the broker hands the answer down as `task.input` (AGE-306). The messages
 and the mapping are documented in
 [`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
 
 The participant path is Unix-only. The hosted transport is Firecracker vsock,
 which arrives here as an ordinary stream: both `serve_connection` and
 `ParticipantConnection` take any `AsyncRead + AsyncWrite`, so the frames, the
-hello/welcome and the liveness rule are shared rather than reimplemented
-(AGE-307, in `boersmamarcel/hive`; hive speaks v1 at its current chatty2 pin and
-adopts v2 with HS-4, AGE-678).
+hello and the liveness rule are shared rather than reimplemented
+(AGE-307, in `boersmamarcel/hive`; hive moves to v3 with HS-4a, after ADR-0021
+step 3).
 
 ## LLM-facing tools
 
@@ -444,7 +481,7 @@ once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
   from the directory; `to` must be that owner's name. The owner is whoever
   spawned the worker: the node whose `invoke_agent` started it, recorded when
   the broker admits it, or `root` (`ROOT_NAME`) when the root asked. The
-  `welcome` says which, and the `to` parameter's description repeats it; a
+  hello's result says which, and the `to` parameter's description repeats it; a
   sub-leader's workers message the sub-leader, never the root past it. A sibling, the sender itself, a name nobody
   has or a node of another conversation is `not_on_tree`; an owner that has
   ended is `recipient_ended`. Messages to a worker's live handles come with
