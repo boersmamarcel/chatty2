@@ -7,15 +7,14 @@ use tracing::{debug, info, warn};
 
 use crate::models::clarification_store::{PendingClarifications, request_clarification};
 use crate::models::execution_approval_store::{
-    ApprovalKind, PendingApprovals, request_relayed_execution_approval,
+    ApprovalDetail, ApprovalKind, PendingApprovals, request_relayed_execution_approval,
 };
 use crate::models::message_types::ToolSource;
 use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::a2a_client::{
-    A2aApprovalRequest, A2aClarificationRequest, A2aClient, A2aStreamEvent, APPROVAL_DENIED,
-    APPROVAL_GRANTED, conversation_from_status_metadata, trace_from_status_metadata,
-    usage_from_status_metadata,
+    A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
+    trace_from_status_metadata, usage_from_status_metadata,
 };
 use crate::services::fabric_transport::progress_from_value;
 use crate::services::handoff::{HandoffLedger, HandoffReport};
@@ -25,8 +24,8 @@ use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::filesystem_write_tool::request_relayed_write_approval;
 use chatty_fabric::{
-    AgentOrigin, CallError, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Refusal,
-    Remaining, Transport,
+    AgentOrigin, ApprovalRequest, ApprovalVerdict, CallError, CallEvent, CallRequest,
+    InvokeAgentOutcome, InvokeAgentParams, Refusal, Remaining, Transport,
 };
 
 /// The agent name the broker publishes for "a chatty agent in its own
@@ -232,9 +231,10 @@ pub struct InvokeAgentTool {
     /// leader may instead answer for its worker is an open question on the
     /// ADR; nothing selects such a policy today.
     clarifications: Option<PendingClarifications>,
-    /// This agent's own execution and write approval stores: where a
-    /// delegated agent's approval is re-raised (AGE-646). `None` means
-    /// nobody here can approve, and the request is denied.
+    /// This agent's own execution and write approval stores: where an
+    /// approval the broker forwards to the root is raised (EN-2a). Only a
+    /// root call is ever forwarded one. `None` means nobody here can
+    /// approve, and the request is denied.
     approvals: Option<RelayedApprovals>,
     /// The hosted per-user spend cap (AGE-416 / ADR-0010), asked before any
     /// delegation starts. `None` — the desktop, chatty-tui, any leader
@@ -337,9 +337,10 @@ impl InvokeAgentTool {
         self
     }
 
-    /// Re-raise a delegated agent's execution and write approvals on this
-    /// agent's own approval stores (AGE-646) — the ones its own tools hold,
-    /// so at the root they reach the human's approval card like any other.
+    /// Raise the approvals the broker forwards to the root (EN-2a) on this
+    /// agent's own approval stores — the ones its own tools hold, so they
+    /// reach the human's approval card like any other. A worker is never
+    /// forwarded one, so on a worker these stores are never asked.
     pub fn with_approvals(
         mut self,
         execution: PendingApprovals,
@@ -753,11 +754,12 @@ impl InvokeAgentTool {
 
         let mut outcome = None;
         let mut failure = None;
-        // The questions the callee's subtree parked, each being answered
-        // here while the call goes on — so a call that ends, or a question
-        // withdrawn below (TB-7), drops the copy re-raised on this agent's
-        // store, which withdraws it. At most one per task: a task parks on
-        // one question at a time.
+        // The questions the callee's subtree parked, and at the root the
+        // approvals the broker forwarded (EN-2a), each being answered here
+        // while the call goes on — so a call that ends, or a request
+        // withdrawn below (TB-7), drops the copy raised on this agent's
+        // store, which withdraws it. Keyed by the parked task, or by the
+        // broker's approval id.
         let mut parked = futures::stream::FuturesUnordered::new();
         let mut withdraw: std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>> =
             std::collections::HashMap::new();
@@ -786,10 +788,13 @@ impl InvokeAgentTool {
                 Ok(CallEvent::Swarm(event)) => {
                     self.send_progress(InvokeAgentProgress::Swarm(event));
                 }
-                Ok(CallEvent::InputRequired { task, request }) => {
+                Ok(event @ (CallEvent::InputRequired { .. } | CallEvent::Approve { .. })) => {
+                    let Some((key, waiting)) = Parked::from_event(event) else {
+                        continue;
+                    };
                     let (withdrawn_tx, withdrawn) = tokio::sync::oneshot::channel::<()>();
-                    let answer = self.answer_parked(transport, agent, task.clone(), request);
-                    withdraw.insert(task, withdrawn_tx);
+                    let answer = self.answer_parked(transport, agent, waiting);
+                    withdraw.insert(key, withdrawn_tx);
                     parked.push(Box::pin(async move {
                         tokio::select! {
                             answered = answer => answered,
@@ -1024,27 +1029,30 @@ impl InvokeAgentTool {
             .map_err(|e| undeliverable(agent, e))
     }
 
-    /// Answer the question a callee over the fabric parked `task` on: an
-    /// approval is relayed, a clarification re-asked; a request that is
-    /// neither has nothing to answer. `Err` is why the delegation cannot
-    /// go on. Dropping this withdraws the copy raised here (TB-7).
+    /// Answer what a call over the fabric is waiting on: a callee's
+    /// question is re-asked, a forwarded approval asked of the human. `Err`
+    /// is why the delegation cannot go on. Dropping this withdraws the copy
+    /// raised here (TB-7).
     async fn answer_parked(
         &self,
         transport: &dyn Transport,
         agent: &str,
-        task: String,
-        request: serde_json::Value,
+        parked: Parked,
     ) -> Result<(), String> {
-        if let Ok(approval) = serde_json::from_value::<A2aApprovalRequest>(request.clone()) {
-            self.relay_approval(transport, agent, &task, approval).await;
-            return Ok(());
-        }
-        match serde_json::from_value::<A2aClarificationRequest>(request) {
-            Ok(request) => {
-                self.answer_over_fabric(transport, agent, &task, request)
-                    .await
+        match parked {
+            Parked::Question { task, request } => {
+                match serde_json::from_value::<A2aClarificationRequest>(request) {
+                    Ok(request) => {
+                        self.answer_over_fabric(transport, agent, &task, request)
+                            .await
+                    }
+                    Err(_) => Ok(()),
+                }
             }
-            Err(_) => Ok(()),
+            Parked::Approval { id, request } => {
+                self.answer_approval(transport, agent, &id, request).await;
+                Ok(())
+            }
         }
     }
 
@@ -1081,8 +1089,38 @@ impl InvokeAgentTool {
     }
 }
 
-/// The approval stores a delegated agent's approvals are re-raised on
-/// (AGE-646).
+/// What a call over the fabric is waiting on.
+enum Parked {
+    /// A callee's question, `request` as the participant protocol carries it.
+    Question {
+        task: String,
+        request: serde_json::Value,
+    },
+    /// An approval the broker forwarded to the root under `id` (EN-2a).
+    Approval {
+        id: String,
+        request: ApprovalRequest,
+    },
+}
+
+impl Parked {
+    /// What `event` waits on, keyed the way its withdrawal names it: by the
+    /// parked task, or by the broker's approval id.
+    fn from_event(event: CallEvent) -> Option<(String, Self)> {
+        match event {
+            CallEvent::InputRequired { task, request } => {
+                Some((task.clone(), Self::Question { task, request }))
+            }
+            CallEvent::Approve { id, request } => {
+                Some((id.clone(), Self::Approval { id, request }))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The approval stores the approvals forwarded to the root are raised on
+/// (EN-2a).
 #[derive(Clone)]
 struct RelayedApprovals {
     execution: PendingApprovals,
@@ -1090,59 +1128,57 @@ struct RelayedApprovals {
 }
 
 impl InvokeAgentTool {
-    /// A delegated agent — at any depth below — is waiting on an execution
-    /// or write approval (AGE-646): re-raise it on this agent's own store and
-    /// send the decision back down. Deny and timeout both go down as a
-    /// denial, which the worker's tool turns into an error; dropping this
-    /// future (a cancelled turn) withdraws the re-raised request.
-    async fn relay_approval(
+    /// A node under this root call is waiting on an execution or write
+    /// approval, which the broker forwarded here under `id` (EN-2a): ask the
+    /// human, always — this root's approval mode and a callee's sandbox
+    /// never decide it — with the request shown literally, and send the
+    /// verdict back to the broker. Deny and timeout both go back as a
+    /// denial; dropping this future (a cancelled turn, a withdrawn request)
+    /// withdraws the card.
+    async fn answer_approval(
         &self,
         transport: &dyn Transport,
         agent: &str,
-        task_id: &str,
-        request: A2aApprovalRequest,
+        id: &str,
+        request: ApprovalRequest,
     ) {
-        let mut answers = Vec::new();
-        for question in request.questions {
-            let granted = match self.approvals.as_ref() {
-                None => {
-                    warn!(agent = %agent, task = %task_id, "A delegated agent asked for an approval nobody here can give; denying");
+        let detail = ApprovalDetail::forwarded(request);
+        let approved = match self.approvals.as_ref() {
+            None => {
+                warn!(agent = %agent, approval = %id, "A forwarded approval nobody here can give; denying");
+                false
+            }
+            Some(stores) => {
+                info!(
+                    agent = %agent,
+                    approval = %id,
+                    kind = ?detail.kind,
+                    "The broker forwarded an approval to the root; asking the human"
+                );
+                let decided = match detail.kind {
+                    ApprovalKind::Exec => {
+                        request_relayed_execution_approval(&stores.execution, detail).await
+                    }
+                    ApprovalKind::Write => {
+                        request_relayed_write_approval(&stores.write, detail).await
+                    }
+                };
+                decided.unwrap_or_else(|e| {
+                    warn!(agent = %agent, error = %e, "A forwarded approval went unanswered; denying");
                     false
-                }
-                Some(stores) => {
-                    info!(
-                        agent = %agent,
-                        task = %task_id,
-                        request = %request.id,
-                        kind = ?question.detail.kind,
-                        "Delegated agent asked for an approval; escalating"
-                    );
-                    let decided = match question.detail.kind {
-                        ApprovalKind::Exec => {
-                            request_relayed_execution_approval(&stores.execution, question.detail)
-                                .await
-                        }
-                        ApprovalKind::Write => {
-                            request_relayed_write_approval(&stores.write, question.detail).await
-                        }
-                    };
-                    decided.unwrap_or_else(|e| {
-                        warn!(agent = %agent, error = %e, "A relayed approval went unanswered; denying");
-                        false
-                    })
-                }
-            };
-            answers.push(serde_json::json!({
-                "id": question.id,
-                "answer": if granted { APPROVAL_GRANTED } else { APPROVAL_DENIED },
-            }));
-        }
-        let input = serde_json::json!({ "requestId": request.id, "answers": answers });
-        // Unlike a lost answer to a question, a lost decision ends nothing
-        // here: the worker's own tool settles it (its timeout is a denial),
-        // and a worker that went away ends the call on its own.
-        if let Err(e) = transport.answer(task_id, input).await {
-            warn!(agent = %agent, task = %task_id, error = %e, "A relayed approval's decision could not be delivered");
+                })
+            }
+        };
+        let verdict = if approved {
+            ApprovalVerdict::Approved
+        } else {
+            ApprovalVerdict::Denied
+        };
+        // A lost verdict ends nothing here: the worker's own store settles
+        // it (its timeout is a denial), and a worker that went away ends
+        // the call on its own.
+        if let Err(e) = transport.approve(id, verdict).await {
+            warn!(agent = %agent, approval = %id, error = %e, "A forwarded approval's verdict could not be delivered");
         }
     }
 }
@@ -1630,5 +1666,128 @@ mod tests {
                 "the transcript's card ends failed: {events:?}"
             );
         }
+    }
+
+    /// A broker that forwards one approval to the root's call, waits for
+    /// the root's verdict, and only then answers the call.
+    struct Forwarding {
+        request: chatty_fabric::ApprovalRequest,
+        verdicts: Arc<Mutex<Vec<(String, ApprovalVerdict)>>>,
+        answered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for Forwarding {
+        async fn call(&self, _req: CallRequest) -> Result<chatty_fabric::CallStream, CallError> {
+            use futures::StreamExt;
+            let approve = CallEvent::Approve {
+                id: "approval-7".into(),
+                request: self.request.clone(),
+            };
+            let answered = self.answered.clone();
+            Ok(async_stream::stream! {
+                yield Ok(approve);
+                // The call stays open until the root has answered.
+                answered.notified().await;
+                yield Ok(CallEvent::Result(serde_json::json!(InvokeAgentOutcome {
+                    success: true,
+                    response: "done".into(),
+                    error: None,
+                    metadata: None,
+                    messages: Vec::new(),
+                    cancelled_by_user: false,
+                })));
+            }
+            .boxed())
+        }
+
+        async fn approve(&self, id: &str, verdict: ApprovalVerdict) -> Result<(), CallError> {
+            self.verdicts.lock().push((id.to_string(), verdict));
+            self.answered.notify_one();
+            Ok(())
+        }
+    }
+
+    /// EN-2a: the card for a forwarded approval shows what the worker sent
+    /// literally — bidi overrides, escape sequences and other control
+    /// characters escaped, line breaks visible, a cut marked — and the
+    /// human's verdict goes back to the broker under the broker's id.
+    #[tokio::test]
+    async fn approval_card_escapes_bidi_and_control_chars() {
+        use crate::models::execution_approval_store::{
+            ApprovalDecision, ExecutionApprovalStore, LITERAL_CAP,
+        };
+        use crate::models::write_approval_store::WriteApprovalStore;
+
+        let long = "x".repeat(LITERAL_CAP + 10);
+        let request = chatty_fabric::ApprovalRequest {
+            kind: chatty_fabric::ApprovalKind::Exec,
+            command_or_path: format!(
+                "[shell] rm -rf ~/\u{202e}gpj.exe\nrm -rf /\u{1b}[2K\u{1b}[1A echo safe\u{200b}\t{long}"
+            ),
+            diff_stat: None,
+            asker: Some(chatty_fabric::ApprovalAsker {
+                agent: "coder-0\u{2067}".into(),
+                chain: vec!["root".into(), "lead\r\nroot".into(), "coder".into()],
+            }),
+        };
+        let mut execution = ExecutionApprovalStore::new();
+        let (raised_tx, mut raised) = tokio::sync::mpsc::unbounded_channel();
+        let (resolved_tx, _resolved) = tokio::sync::mpsc::unbounded_channel();
+        execution.set_notifiers(raised_tx, resolved_tx);
+        let broker = Arc::new(Forwarding {
+            request,
+            verdicts: Arc::default(),
+            answered: Arc::default(),
+        });
+        let tool = InvokeAgentTool::new(vec![])
+            .with_local_agents(["coder"])
+            .with_transport(broker.clone())
+            .with_approvals(
+                execution.get_pending_approvals(),
+                WriteApprovalStore::new().get_pending_approvals(),
+            );
+        let run = tokio::spawn(async move {
+            tool.call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "coder".into(),
+                    prompt: "go".into(),
+                    include_trace: false,
+                },
+            )
+            .await
+        });
+
+        let card = raised.recv().await.expect("the root's human is asked");
+        let shown = format!(
+            "[shell] rm -rf ~/\\u{{202e}}gpj.exe\\nrm -rf /\\u{{001b}}[2K\\u{{001b}}[1A echo safe\\u{{200b}}\\t{}",
+            "x".repeat(LITERAL_CAP - 54)
+        );
+        assert_eq!(
+            card.command,
+            format!("{shown}… [64 more characters not shown]"),
+            "the card's line is the request, literally, with the cut marked"
+        );
+        assert_eq!(card.detail.command_or_path, card.command);
+        assert!(
+            !card.is_sandboxed,
+            "a forwarded approval is never sandboxed"
+        );
+        let asker = card.detail.asker.clone().expect("the broker's stamp");
+        assert_eq!(asker.agent, "coder-0\\u{2067}");
+        assert_eq!(asker.chain, ["root", "lead\\r\\nroot", "coder"]);
+        assert!(
+            !card.command.chars().any(|c| c.is_control()
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')),
+            "nothing on the card is invisible or reorders it"
+        );
+
+        assert!(execution.resolve(&card.id, ApprovalDecision::Approved));
+        run.await.unwrap().expect("the call completes");
+        assert_eq!(
+            broker.verdicts.lock().as_slice(),
+            [("approval-7".to_string(), ApprovalVerdict::Approved)]
+        );
     }
 }

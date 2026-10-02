@@ -26,12 +26,14 @@
 //!
 //! | Sender | Requests | Notifications |
 //! |---|---|---|
-//! | worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post` | `task.event`, `req.cancel`, interim `task.input_required`, `call.input` |
+//! | worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `human.approve` | `task.event`, `req.cancel`, interim `task.input_required`, `call.input` |
 //! | broker | `task.run` | `req.progress`, `req.cancel`, interim `task.input`, `call.input_required`, `call.input_withdrawn` |
 //!
-//! The interim notifications carry ADR-0021's *step 2* rows unchanged in
-//! meaning until EN-2a/EN-2b replace them with `human.ask` and
-//! `human.approve`, which is also when those two requests join the tables.
+//! `human.approve` (EN-2a) is a worker's request only: the broker answers
+//! it with the root's verdict and never sends one, so a worker that is sent
+//! one closes the connection. The interim notifications carry ADR-0021's
+//! *step 2* question rows unchanged in meaning until EN-2b replaces them
+//! with `human.ask`, which is also when that request joins the table.
 //!
 //! # Ids
 //!
@@ -59,8 +61,8 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
-    CallError, CallRequest, ConversationScope, HandoffContract, InvokeAgentParams, NodeName,
-    Remaining, SendMessageParams, SpawnContext, SwarmItem,
+    ApprovalRequest, ApprovalVerdict, CallError, CallRequest, ConversationScope, HandoffContract,
+    InvokeAgentParams, NodeName, Remaining, SendMessageParams, SpawnContext, SwarmItem,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -314,6 +316,8 @@ pub enum WorkerRequest {
     AgentList,
     /// `mailbox.post`
     MailboxPost(SendMessageParams),
+    /// `human.approve` (EN-2a): an approval only the root answers.
+    HumanApprove(ApprovalRequest),
 }
 
 /// A notification a worker may send.
@@ -364,6 +368,7 @@ impl WorkerRequest {
                 Self::AgentList
             }
             "mailbox.post" => Self::MailboxPost(params(method, raw)?),
+            "human.approve" => Self::HumanApprove(params(method, raw)?),
             other => return Err(FrameError::WrongDirection(other.to_string())),
         })
     }
@@ -602,6 +607,15 @@ struct State {
     calls: HashMap<u64, u64>,
     /// The reverse of `calls`.
     call_ids: HashMap<u64, u64>,
+    /// A worker's `human.approve` requests: request id → the approval
+    /// number the worker gave it.
+    approvals: HashMap<u64, u64>,
+    /// The reverse of `approvals`.
+    approval_ids: HashMap<u64, u64>,
+    /// The broker's end: which of the peer's requests in flight are
+    /// `human.approve`s, so a `req.cancel` withdraws an approval and only an
+    /// approval is answered with a verdict.
+    their_approvals: HashSet<u64>,
     /// How many messages this end has dropped, for rate-limited logging.
     dropped: u64,
 }
@@ -770,6 +784,14 @@ impl FrameCodec<BrokerSide> {
                 };
                 notification(m, "call.input_withdrawn", params)?
             }
+            BrokerFrame::Approval { id, verdict } => {
+                if !state.their_approvals.remove(id) {
+                    state.drop_message("result", *id);
+                    return Ok(None);
+                }
+                state.theirs.remove(id);
+                result(m, *id, verdict)?
+            }
         };
         Ok(Some(line))
     }
@@ -802,6 +824,10 @@ impl FrameCodec<BrokerSide> {
                         id,
                         request: CallRequest::SendMessage(params),
                     },
+                    WorkerRequest::HumanApprove(request) => {
+                        state.their_approvals.insert(id);
+                        ParticipantFrame::Approve { id, request }
+                    }
                 }
             }
             Message::Notification { method, params } => {
@@ -869,7 +895,11 @@ impl FrameCodec<BrokerSide> {
                             state.drop_message("req.cancel", id);
                             return Ok(None);
                         }
-                        ParticipantFrame::CancelCall { id }
+                        if state.their_approvals.remove(&id) {
+                            ParticipantFrame::CancelApproval { id }
+                        } else {
+                            ParticipantFrame::CancelCall { id }
+                        }
                     }
                     WorkerNotification::CallInput(params) => {
                         if !state.theirs.contains(&params.id) {
@@ -943,6 +973,10 @@ impl FrameCodec<BrokerSide> {
                 | BrokerFrame::CallInputRequired { id, .. }
                 | BrokerFrame::CallInputWithdrawn { id, .. } => {
                     state.theirs.insert(*id);
+                }
+                BrokerFrame::Approval { id, .. } => {
+                    state.theirs.insert(*id);
+                    state.their_approvals.insert(*id);
                 }
                 BrokerFrame::Welcome { .. }
                 | BrokerFrame::Error { .. }
@@ -1081,6 +1115,24 @@ impl FrameCodec<WorkerSide> {
                 state.calls.remove(&id);
                 notification(m, "req.cancel", IdParams { id })?
             }
+            ParticipantFrame::Approve {
+                id: approval,
+                request: approve,
+            } => {
+                let id = state.next_id();
+                state.approvals.insert(id, *approval);
+                state.approval_ids.insert(*approval, id);
+                request(m, id, "human.approve", Some(approve))?
+            }
+            ParticipantFrame::CancelApproval { id: approval } => {
+                // Answered already, or never sent: nothing to withdraw.
+                let Some(id) = state.approval_ids.remove(approval) else {
+                    state.drop_message("req.cancel", *approval);
+                    return Ok(None);
+                };
+                state.approvals.remove(&id);
+                notification(m, "req.cancel", IdParams { id })?
+            }
         };
         Ok(line.text())
     }
@@ -1186,6 +1238,14 @@ impl FrameCodec<WorkerSide> {
                     state.call_ids.remove(&call);
                     let result: Value = serde_json::from_str(result.get()).map_err(malformed)?;
                     BrokerFrame::CallResult { id: call, result }
+                } else if let Some(approval) = state.approvals.remove(&id) {
+                    state.approval_ids.remove(&approval);
+                    let verdict: ApprovalVerdict =
+                        serde_json::from_str(result.get()).map_err(malformed)?;
+                    BrokerFrame::Approval {
+                        id: approval,
+                        verdict,
+                    }
                 } else {
                     state.drop_message("result", id);
                     return Ok(None);
@@ -1203,6 +1263,14 @@ impl FrameCodec<WorkerSide> {
                 } else if let Some(call) = state.calls.remove(&id) {
                     state.call_ids.remove(&call);
                     BrokerFrame::CallError { id: call, error }
+                } else if let Some(approval) = state.approvals.remove(&id) {
+                    // An approval nobody granted is denied.
+                    state.approval_ids.remove(&approval);
+                    warn!(approval, %error, "The broker failed an approval; denying it");
+                    BrokerFrame::Approval {
+                        id: approval,
+                        verdict: ApprovalVerdict::Denied,
+                    }
                 } else {
                     state.drop_message("error", id);
                     return Ok(None);

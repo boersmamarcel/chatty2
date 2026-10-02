@@ -35,11 +35,11 @@ use super::calls::Caller;
 use super::codec::BrokerCodec;
 use super::limits::{
     BoundedLines, CALL_BURST, CALLS_PER_SECOND, MAX_FRAME_BYTES, MAX_IN_FLIGHT_CALLS,
-    OUTBOUND_QUEUE_FRAMES, RateLimit,
+    MAX_PENDING_APPROVALS, OUTBOUND_QUEUE_FRAMES, RateLimit,
 };
 use super::protocol::{BrokerFrame, ParticipantFrame, TaskInput};
 use super::registry::{AdmittedNode, ParticipantRegistry};
-use chatty_fabric::{AgentOrigin, CallError, CallEvent, CallStream};
+use chatty_fabric::{AgentOrigin, ApprovalVerdict, CallError, CallEvent, CallStream};
 use futures::StreamExt;
 use tokio::task::JoinSet;
 
@@ -238,10 +238,17 @@ where
     // question (BI-5): an answer is delivered only to the task its call
     // names, so a worker answers its own callees and nobody else's.
     let parked: Parked = Arc::default();
+    // The worker's `human.approve`s waiting on the root (EN-2a), by request
+    // id, so the worker can withdraw one; the set owns them, so closing the
+    // connection withdraws every one.
+    let mut approvals = JoinSet::new();
+    let mut waiting: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
     let mut rate = RateLimit::new(CALLS_PER_SECOND, CALL_BURST, tokio::time::Instant::now());
     loop {
         while calls.try_join_next().is_some() {}
         running.retain(|_, handle| !handle.is_finished());
+        while approvals.try_join_next().is_some() {}
+        waiting.retain(|_, handle| !handle.is_finished());
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => match decode(&line) {
@@ -286,6 +293,41 @@ where
                 Ok(Some(ParticipantFrame::CallInput { id, task, input })) => {
                     answer_callee(&registry, &parked, &name, id, &task, input).await;
                 }
+                Ok(Some(ParticipantFrame::Approve { id, request })) => {
+                    let raised = match registry.calls() {
+                        Some(_) if waiting.len() >= MAX_PENDING_APPROVALS => {
+                            warn!(participant = %name, approval = id, "Denying an approval: too many pending on this connection");
+                            None
+                        }
+                        Some(broker) => Some(broker.raise_approval(&name, request)),
+                        None => None,
+                    };
+                    match raised {
+                        Some(mut raised) => {
+                            let outbound = outbound_tx.clone();
+                            let handle = approvals.spawn(async move {
+                                let verdict = raised.verdict().await;
+                                let _ = outbound.send(BrokerFrame::Approval { id, verdict }).await;
+                            });
+                            waiting.insert(id, handle);
+                        }
+                        None => {
+                            let _ = outbound_tx
+                                .send(BrokerFrame::Approval {
+                                    id,
+                                    verdict: ApprovalVerdict::Denied,
+                                })
+                                .await;
+                        }
+                    }
+                }
+                Ok(Some(ParticipantFrame::CancelApproval { id })) => {
+                    // Dropping the wait withdraws the root's card.
+                    if let Some(handle) = waiting.remove(&id) {
+                        debug!(participant = %name, approval = id, "The worker withdrew an approval");
+                        handle.abort();
+                    }
+                }
                 Ok(Some(ParticipantFrame::CancelCall { id })) => {
                     // Aborting the call's task drops its stream, which
                     // cancels the callee; the worker expects no reply.
@@ -324,8 +366,11 @@ where
 
     // 3. However we got here, the participant is gone, and so is everything
     // it had asked for: its calls are cancelled, which reaps the workers
-    // they started.
+    // they started, and its approvals leave the root's screen.
     calls.abort_all();
+    // Waited for, not just aborted: each withdrawal is on its way to the
+    // root before the task's end is, so the root's card goes first.
+    approvals.shutdown().await;
     registry.deregister(&name);
     drop(outbound_tx);
     let _ = writer.await;
@@ -371,9 +416,9 @@ async fn reply(
                 (BrokerFrame::CallInputWithdrawn { id, task }, false)
             }
             Ok(CallEvent::Result(result)) => (BrokerFrame::CallResult { id, result }, true),
-            // Only a root call hears its nested runs (TB-1); a worker's
-            // call is one of them.
-            Ok(CallEvent::Swarm(_)) => continue,
+            // Only a root call hears its nested runs (TB-1) and their
+            // approvals (EN-2a); a worker's call is one of them.
+            Ok(CallEvent::Swarm(_) | CallEvent::Approve { .. }) => continue,
             Err(error) => (BrokerFrame::CallError { id, error }, true),
         };
         let size = BrokerCodec::line_len_bound(&frame);
