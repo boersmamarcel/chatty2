@@ -247,9 +247,9 @@ pub enum CallError {
 /// Progress, then one result. An `Err` item ends the stream.
 pub type CallStream = BoxStream<'static, Result<CallEvent, CallError>>;
 
-// async_trait's expansion of each method's `-> Pin<Box<dyn Future>>` return
-// trips clippy's double_must_use on the trait definition itself (clippy
-// 0.1.99); the generated code isn't actually double-must-use.
+// async_trait expands each async fn into one returning a `#[must_use]`
+// boxed future; `call`/`answer` already return `Result`, which clippy sees
+// as a double must-use with no way to attach a reason to the generated fn.
 #[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
