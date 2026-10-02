@@ -30,12 +30,17 @@ agent, and `module.toml` refuses the keys that used to say it was one.
 
 The broker serves the **roster**: the specs `module_settings.json`'s `virtual_agents`
 names (a `--team` names its own), or — when nothing is declared — `local-agent` and
-**every exposed spec** the workspace reaches, first definition of each name
-(`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). So the
-`data-analyst` preset is an agent like any other: `list_agents` lists it,
-`invoke_agent` reaches it at `/a2a/data-analyst`, and `/agent data-analyst …` runs
-it. A spec file that does not load is left out of the roster with a warning;
-Settings → Agents and `/agents` show it with its error.
+**every exposed spec of your own** (workspace and data directory), first definition of
+each name (`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). The
+presets are experimental teams' roles and join the default roster only when one of
+your specs names them in `delegates_to`, directly or through another preset (a glob
+pulls in none; AGE-760). Otherwise a preset runs with its team (`--team <id>`) or when
+`virtual_agents` names it: then the `data-analyst` preset is an agent like any other,
+`list_agents` lists it, `invoke_agent` reaches it at `/a2a/data-analyst`, and
+`/agent data-analyst …` runs it. A spec that names its `callers` (a team-internal worker
+such as `panel-writer`) is served for its lead but never offered to the root's
+`list_agents`/`invoke_agent`. A spec file that does not load is left out of the roster
+with a warning; Settings → Agents and `/agents` show it with its error.
 
 On the desktop, "the workspace" a conversation's own `list_agents`/`invoke_agent`/`/agent`
 resolve the roster from is its own working directory when it has one, else the shared
@@ -56,7 +61,8 @@ turn of the conversation handed to that agent through the conversation's own bro
 (`TurnInput::delegation`, `chatty_core::session::Delegation`, AGE-744/AGE-747): the model
 is not asked, the turn is the one `invoke_agent` call, so the delegation row and its swarm
 tree show exactly as for a model-issued call, and a worker that fails or exits ends the
-row with its error. It needs the module runtime on, like `invoke_agent`. There is no
+row with its error. It needs the conversation's broker, like `invoke_agent`; the desktop
+publishes one whether or not the module runtime is on (AGE-759). There is no
 subprocess path: `chatty-tui --agent <name>` is still how you start the terminal app
 itself running as that spec, but `/agent` inside a running conversation never shells out
 to it. The desktop's lazy broker hands the root its gateway's direct transport
@@ -621,10 +627,14 @@ agent-build context, so `/modules` in the same session still saves exactly what 
 disk (AGE-382).
 
 **The broker starts lazily, on first use (BI-2, AGE-634).** Neither host starts the
-broker at boot: `--broker`/`--team` (chatty-tui) and the module gateway setting (the
-desktop) only prepare it — a `chatty_core::services::lazy_broker::LazyBroker` — and the
+broker at boot: `--broker`/`--team` (chatty-tui) and the desktop's module settings only
+prepare it — a `chatty_core::services::lazy_broker::LazyBroker` — and the
 first `list_agents` or `invoke_agent` call is what actually binds its socket and TCP
-port, through `LazyBroker::ensure_started`. Later calls reuse the same broker
+port, through `LazyBroker::ensure_started`. The desktop prepares one whether or not the
+module runtime is on: that switch gates WASM modules only. With it off, the broker's
+gateway loads no module and binds no TCP port — the root reaches it over
+`LazyBroker::transport` alone — and a broker that fails to start puts its reason in the
+`invoke_agent` error (AGE-759). Later calls reuse the same broker
 (memoized). A test can read `LazyBroker::bound_addrs()` to see whether anything is
 bound yet without triggering a start.
 
@@ -888,7 +898,9 @@ earlier one.
 | `fix-and-verify` | `fix-lead` | `fix-coder`, `code-reviewer` | A coding team whose tests Chatty runs (AGE-757): the coder fixes a bug in its own worktree, the team's `verification` runs the project's test command in that tree and the result goes into the `evidence` block, `code-reviewer` (no shell) judges the real diff (`git_diff <base>..<branch>`) and that evidence, never the coder's word, and the leader merges on `APPROVE` with exit code 0. At most one fix round. `teams/fix-and-verify/fixture/` is a four-test Python project with one known bug (an order of exactly the free-shipping threshold is charged shipping; the fix is `>=` in `invoice.py`). Its `verification` is that fixture's command; for your own project, put a `team.json` naming the same specs and your test command in `.chatty/teams/fix-and-verify/`. |
 
 `data-analysis`, `research-brief` and `fix-and-verify` have no `SKILL.md`: the leader's preamble is the
-playbook, so `/agent data-lead …` on the desktop runs it the same as `--team data-analysis`.
+playbook, so `/agent data-lead …` on the desktop runs it the same as `--team data-analysis`
+once `virtual_agents` names the team (`["local-agent", "data-lead", "data-analyst",
+"reviewer"]`); the desktop has no team selection of its own.
 `reviewer` is shared by both.
 The user walkthrough is the docs-site tutorial *From one agent to a team*; the
 reliability runs behind both presets, and why `coder-reviewer` and the Benford team did

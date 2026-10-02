@@ -31,7 +31,7 @@ use super::super::attachment_validation::{PDF_EXTENSION, is_image_extension};
 use super::super::terminal::context::render_context_chip;
 use super::ThumbnailCache;
 use super::at_mention::{at_menu_items_for, render_at_menu};
-use super::slash::{render_slash_menu, slash_menu_items_with_skills};
+use super::slash::render_slash_menu;
 use super::{ChatInput, ChatInputEvent, ChatInputState};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 
@@ -186,8 +186,7 @@ impl RenderOnce for ChatInput {
 
         // --- Slash menu ---
         let input_text = input_entity.read(cx).text().to_string();
-        let available_skills = self.state.read(cx).available_skills.clone();
-        let menu_items = slash_menu_items_with_skills(&input_text, &available_skills);
+        let menu_items = self.state.read(cx).slash_menu_items(&input_text);
         let slash_menu_selected = self.state.read(cx).slash_menu_selected();
 
         // --- @ mention menu ---

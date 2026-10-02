@@ -16,18 +16,21 @@
 //! broker per root process), so what the start task answers with is the
 //! gateway's direct [`Transport`] as well as its socket: `invoke_agent`
 //! reaches the local roles through that handle, never over the gateway's
-//! socket (AGE-744).
+//! socket (AGE-744). So the socket is bound only when the module runtime is
+//! on: it serves the WASM modules and external clients, which the broker's
+//! root does not need (AGE-759).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use chatty_fabric::Transport;
 
-/// What a started gateway hands back: the socket it serves on, and this
-/// process's direct handle into it (`ProtocolGateway::transport`).
+/// What a started gateway hands back: the socket it serves on, if the
+/// module runtime is on, and this process's direct handle into it
+/// (`ProtocolGateway::transport`).
 #[derive(Clone)]
 pub struct StartedGateway {
-    pub socket: PathBuf,
+    pub socket: Option<PathBuf>,
     pub transport: Arc<dyn Transport>,
 }
 
@@ -35,19 +38,30 @@ pub struct StartedGateway {
 /// gateway, or the reason it failed to start.
 pub type StartReply = tokio::sync::oneshot::Sender<Result<StartedGateway, String>>;
 
-/// Start `gateway` as the desktop's broker. Its direct handle is taken
+/// Start `gateway` as the desktop's broker, binding its socket only with
+/// `serve` (the module runtime on, AGE-759). Its direct handle is taken
 /// here, after every virtual agent is on it, so the call path reaches all
 /// of them.
 pub async fn start(
     gateway: &mut chatty_protocol_gateway::ProtocolGateway,
+    serve: bool,
 ) -> anyhow::Result<StartedGateway> {
     let transport = gateway.transport();
+    if !serve {
+        return Ok(StartedGateway {
+            socket: None,
+            transport,
+        });
+    }
     gateway.start().await?;
     let socket = gateway
         .socket_path()
         .ok_or_else(|| anyhow::anyhow!("the gateway started with no socket"))?
         .to_path_buf();
-    Ok(StartedGateway { socket, transport })
+    Ok(StartedGateway {
+        socket: Some(socket),
+        transport,
+    })
 }
 
 /// See the module docs.
@@ -92,7 +106,8 @@ impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
     fn bound_sockets(&self) -> Vec<PathBuf> {
         self.once
             .get()
-            .map(|started| vec![started.socket.clone()])
+            .and_then(|started| started.socket.clone())
+            .map(|socket| vec![socket])
             .unwrap_or_default()
     }
 

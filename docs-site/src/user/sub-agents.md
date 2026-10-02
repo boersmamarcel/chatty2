@@ -20,7 +20,7 @@ When the workspace is a git repository, each spawned sub-agent works in its own 
 
 ## From the chat
 
-Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; the built-in `data-analyst` is one), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt.
+Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress in the transcript. `/agent <name> <prompt>` sends the prompt to a named agent instead: one of your agent specs (see [Named workers and roles](#named-workers-and-roles) below; a built-in one such as `data-analyst` once your roster names it), or a remote agent you have installed as an [extension](./extensions.md). A name that is neither is just the first word of the prompt. In the desktop app, typing `/agent ` (with the space) opens a list of the agents this conversation can reach; type to filter it, and Enter or Tab puts the chosen name in for you.
 
 `/agent` hands the task to the same local agents the assistant itself delegates to, so the delegation row — and the swarm tree below, when that agent delegates in turn — looks exactly as if the assistant had made the call. If the agent fails or stops before answering, the row ends with the error.
 
@@ -36,11 +36,11 @@ When a sub-agent delegates in turn, its row in the desktop transcript opens into
 - **Stop** on a running agent's line, or **Stop this agent** in its sheet, stops that one agent and every agent it started. The rest of the swarm keeps running. The agent that called it is told `cancelled_by_user` and carries on without it. Any approval or question the stopped agents were waiting on is withdrawn, and the line shows as canceled.
 - If you stop a turn, runs still drawn as running show as canceled.
 
-A single delegation with no further delegation keeps its plain row. In the terminal, `/swarm` prints the same tree as text, and `/stop <agent>` stops one agent by the name `/swarm` shows.
+A single delegation with no further delegation keeps its plain row. Its ↗ button (on the "Sub-agented" row, once its activity is unfolded) opens that agent's transcript in the same side sheet; it is greyed out until the agent has started. In the terminal, `/swarm` prints the same tree as text, and `/stop <agent>` stops one agent by the name `/swarm` shows.
 
 ## Let the agent decide
 
-With tools on ([Agents & tools](./agents-and-tools.md)) and the module runtime enabled ([Extensions](./extensions.md)), the parent can ask for children itself when a task splits cleanly:
+With tools on ([Agents & tools](./agents-and-tools.md)), the parent can ask for children itself when a task splits cleanly:
 
 ```
 Task: "Refactor all modules and write tests for each"
@@ -82,7 +82,7 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 
 ## Named workers and roles
 
-Out of the box the parent can reach `local-agent` — your default model with the parent's tools — and every built-in or project spec that doesn't opt out with `exposed = false` under `[swarm]`. You can declare your own **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
+Out of the box the parent can reach `local-agent` — your default model with the parent's tools — and every spec of your own that doesn't opt out with `exposed = false` under `[swarm]`. The built-in specs are the example teams' roles: they join only with their team (`--team <id>`), when `virtual_agents` below names them, or when a spec of yours lists them in `delegates_to`. A spec that names its `callers` works only for those agents and is never offered to the parent. You can declare your own **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
 
 Declare each worker as an **agent spec**: a small TOML file named after the worker, in your project's `.chatty/agents/` folder (or in Chatty's data folder under `chatty/agents/` to share it across projects — [where that is](./advanced.md)):
 
@@ -115,13 +115,12 @@ A spec file is picked up as soon as it exists (on the desktop, **Settings → Ag
 
 ```json
 {
-  "enabled": true,
   "virtual_agents": ["local-coder", "local-reviewer"],
   "team": { "verification": "python3 -m pytest -q" }
 }
 ```
 
-On the desktop, the `enabled` field is the **Enable module runtime** switch in **Settings → Plugins**; it starts or stops the local agent broker right away, with no restart.
+On the desktop, the `enabled` field is the **Enable module runtime** switch in **Settings → Plugins**. It loads WASM modules; agents do not need it, because the local agent broker runs either way.
 
 A `module_settings.json` that still describes workers inline (the format before agent specs) no longer loads; move each entry into its own spec file.
 
@@ -162,7 +161,7 @@ Four teams ship built in. Agent teams are supported and **experimental**: they s
 | `fix-and-verify` | `chatty-tui --team fix-and-verify -m "The tests fail. Find the bug and fix it without changing the tests."` | A coder fixes a bug in its own git worktree, Chatty runs the project's tests on that branch (the coder's claim that they pass counts for nothing), a reviewer reads the real diff and Chatty's test output, and the lead merges only on approval with passing tests. One fix round at most. Walkthrough: [A coding team whose tests Chatty runs](./tutorial-team.md#a-built-in-coding-team-fix-and-verify). |
 | `research-brief` | `/agent editor Using the documents in docs/, write brief.md: <your question>` | A researcher finds sourced facts in a folder of documents, a writer turns them into a brief (the file write comes to you for approval), and the reviewer checks the brief against the sources. |
 
-The leader of each team is an agent like any other, so `/agent <leader> …` runs the team from the desktop, and `chatty-tui --team <id>` runs it from the terminal:
+`chatty-tui --team <id>` runs a team from the terminal. The desktop has no team switch: name the team's agents in `virtual_agents` (for `data-analysis`, `["local-agent", "data-lead", "data-analyst", "reviewer"]`), restart, and `/agent <leader> …` runs it, since the leader is an agent like any other:
 
 ```bash
 chatty-tui --team research-brief --headless --ollama --model qwen3:14b \

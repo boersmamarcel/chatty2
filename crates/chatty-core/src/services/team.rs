@@ -644,6 +644,29 @@ mod tests {
         assert_eq!(brief.file.agents, ["researcher", "writer", "reviewer"]);
     }
 
+    /// AGE-760: a preset team's specs are on no default roster; selecting
+    /// the team (`--team <id>`) is what puts them on the run's roster, and
+    /// its leader, the root, reaches every one of them.
+    #[test]
+    fn selecting_a_team_adds_its_presets() {
+        let default_roster = crate::agent_spec::roster_names_from(&[], None, None);
+        for preset in PRESETS {
+            let id = preset.id;
+            let team = load_team(id, None, None).expect("the preset loads");
+            for name in team.file.agents.iter().chain([&team.file.leader]) {
+                assert!(
+                    !default_roster.contains(name),
+                    "{id}: {name} is not on the default roster"
+                );
+            }
+            assert_eq!(team.agent_names(), team.file.agents, "{id}");
+            let settings = team.run_module_settings(&ModuleSettingsModel::default());
+            let roster = crate::agent_spec::load_roster_from(&settings.virtual_agents, None, None)
+                .expect("the team's roster loads");
+            assert_eq!(roster, team.agents, "{id}: the run serves the team");
+        }
+    }
+
     /// AGE-757: `fix-and-verify` is a coding team whose tests Chatty runs:
     /// the verification command is the fixture's own test suite, the coder
     /// has a shell (so its tree is checked) and the reviewer has none (it

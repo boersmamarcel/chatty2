@@ -1,6 +1,6 @@
-use crate::settings::models::agent_specs::served_names;
+use crate::settings::models::AgentSpecsModel;
+use crate::settings::models::agent_specs::{broker_reachable, served_names};
 use crate::settings::models::extensions_store::ExtensionsModel;
-use crate::settings::models::{AgentSpecsModel, ModuleSettingsModel};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
@@ -54,18 +54,11 @@ impl RenderOnce for AgentIndicatorView {
         }
 
         // 2. The local roster: the agent specs the broker serves (PL-U5),
-        // when the module runtime — and so the broker — is on. A plugin is
-        // a tool inside a spec, never an agent of its own.
-        let broker_on = cx
-            .try_global::<ModuleSettingsModel>()
-            .is_some_and(|settings| settings.enabled);
-        let listings = if broker_on {
-            AgentSpecsModel::listings(cx)
-        } else {
-            Vec::new()
-        };
-        let served = if broker_on {
-            served_names(&listings, cx)
+        // whenever a broker can reach them — the module runtime's switch
+        // gates WASM modules only (AGE-759). A plugin is a tool inside a
+        // spec, never an agent of its own.
+        let served = if broker_reachable(cx) {
+            served_names(&AgentSpecsModel::listings(cx), cx)
         } else {
             Vec::new()
         };

@@ -66,10 +66,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace, warn};
 
-use super::chat_input::{
-    ChatInput, ChatInputEvent, ChatInputState, ModelOption, PrStatusBarView,
-    slash_menu_items_with_skills,
-};
+use super::chat_input::{ChatInput, ChatInputEvent, ChatInputState, ModelOption, PrStatusBarView};
 use super::message_component::{DisplayMessage, MessageRenderCaches, MessageRole, render_message};
 use super::message_types::{ApprovalState, ClarificationState, SystemTrace, TraceItem};
 use super::parsed_cache::{ParsedContentCache, StreamingParseState};
@@ -178,6 +175,11 @@ pub struct ChatView {
     /// row's message index and the spec it delegated to. The swarm tree
     /// (TB-4) hangs each row's callee subtree under it; see `swarm.rs`.
     swarm_rows: Vec<(usize, String)>,
+    /// A delegation row's run when its callee delegated to no one: a
+    /// one-node tree, so ↗ on the row can still open the worker's transcript
+    /// (AGE-813). A callee with sub-agents keeps its tree on the row's
+    /// `DisplayMessage` instead; see `run_tree`.
+    delegation_runs: HashMap<usize, std::sync::Arc<super::transcript::SwarmTree>>,
     /// Animated "Thinking…" indicator entity. Owns its own rotation
     /// timer so the spinner + label keep updating even when no stream
     /// events are arriving (typical while a tool runs silently).
@@ -514,6 +516,7 @@ impl ChatView {
                         if new_text.trim() == "/" {
                             cx.emit(ChatInputEvent::SlashMenuOpened);
                         }
+                        state.refresh_agents_if_picker_opened(&new_text, cx);
                         state.reset_slash_menu_selection_if_query_changed(&new_text);
                         state.reset_at_menu_selection_if_query_changed(&new_text);
 
@@ -547,8 +550,33 @@ impl ChatView {
         // here prevents the InputState's MoveUp/MoveDown cursor-movement
         // actions from running.
         let input_for_interceptor = chat_input_state.clone();
-        let slash_menu_interceptor = cx.intercept_keystrokes(move |event, _window, cx| {
+        let slash_menu_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             let key = event.keystroke.key.as_str();
+            // Tab inserts the `/agent ` picker's highlighted agent; Escape
+            // closes the picker but keeps the text, where the input's own
+            // clean-on-escape would clear it (AGE-761). Only while the
+            // composer has focus: the terminal dock wants both keys.
+            if (key == "tab" || key == "escape") && !event.keystroke.modifiers.modified() {
+                let handled = input_for_interceptor.update(cx, |state, cx| {
+                    let text = state.input.read(cx).text().to_string();
+                    if !state.input.read(cx).focus_handle(cx).is_focused(window)
+                        || !state.is_agent_picker_open(&text)
+                    {
+                        return false;
+                    }
+                    if key == "tab" {
+                        state.apply_slash_command(cx);
+                    } else {
+                        state.dismiss_agent_picker(&text);
+                    }
+                    cx.notify();
+                    true
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+                return;
+            }
             // Only intercept plain ↑ / ↓ (no modifier keys).
             if (key != "up" && key != "down")
                 || event.keystroke.modifiers.control
@@ -558,14 +586,12 @@ impl ChatView {
                 return;
             }
             // Check whether the slash-command picker is currently showing.
-            let (input_text, skills) = {
+            let (input_text, items) = {
                 let state = input_for_interceptor.read(cx);
-                (
-                    state.input.read(cx).text().to_string(),
-                    state.available_skills().to_vec(),
-                )
+                let input_text = state.input.read(cx).text().to_string();
+                let items = state.slash_menu_items(&input_text);
+                (input_text, items)
             };
-            let items = slash_menu_items_with_skills(&input_text, &skills);
             if !items.is_empty() {
                 let num = items.len();
                 input_for_interceptor.update(cx, |state, cx| {
@@ -627,6 +653,7 @@ impl ChatView {
             delegation_progress_msg_idx: None,
             delegation_started_at: None,
             swarm_rows: Vec::new(),
+            delegation_runs: HashMap::new(),
             thinking_indicator: new_thinking_indicator(cx),
             agent_task_snapshot: None,
             plan_overlay_open: false,
@@ -2636,6 +2663,7 @@ impl ChatView {
                 })
             },
             stop_node: Rc::new(move |name, cx| swarm::stop_swarm_node(&name, cx)),
+            run: self.delegation_run_name(turn.message_index),
         };
 
         // Folded turns keep receipts + the assistant message; only the
@@ -4529,5 +4557,171 @@ mod terminal_dock_tests {
             context.block
         );
         drop(rt);
+    }
+}
+
+/// AGE-813: ↗ on a delegation row opens the worker's own run, even when the
+/// worker delegated to no one (so no swarm tree hangs under the row).
+#[cfg(test)]
+mod delegation_run_tests {
+    // Named imports, not a glob (see `show_artifact_integration_tests`).
+    use super::{ChatView, ExecutionSettingsModel};
+    use crate::chatty::views::transcript::SwarmTree;
+    use chatty_core::models::message_types::ToolSource;
+    use chatty_core::models::token_usage::PriceBook;
+    use chatty_core::services::swarm_trace::SwarmTrace;
+    use chatty_core::session::SessionEvent;
+    use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
+    use gpui::{AnyWindowHandle, AppContext as _, Entity};
+    use gpui_component::WindowExt as _;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn harness(cx: &mut gpui::TestAppContext) -> (Entity<ChatView>, AnyWindowHandle) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::models::general_model::GeneralSettingsModel::default());
+            cx.set_global(ExecutionSettingsModel::default());
+            cx.set_global(crate::settings::models::ExtensionsModel::default());
+            cx.set_global(chatty_core::models::ErrorStore::new(100));
+            cx.set_global(crate::auto_updater::AutoUpdater::new("0.0.0"));
+            cx.set_global(chatty_core::models::ConversationsStore::new());
+        });
+        let slot: Rc<RefCell<Option<Entity<ChatView>>>> = Rc::default();
+        let slot_for_window = slot.clone();
+        let window = cx.add_window(move |window, cx| {
+            let view = cx.new(|cx| ChatView::new(window, cx));
+            *slot_for_window.borrow_mut() = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = slot.borrow_mut().take().expect("ChatView captured");
+        (view, window.into())
+    }
+
+    fn started(spec: &str) -> SessionEvent {
+        SessionEvent::Delegation(InvokeAgentProgress::Started {
+            agent_name: spec.into(),
+            prompt: "test".into(),
+            source: ToolSource::Local,
+        })
+    }
+
+    /// Clicking ↗ on the rendered delegation row runs the real wiring
+    /// (ToolRow -> ActivityGroup -> render_typed_block -> open_node).
+    #[gpui::test]
+    fn clicking_open_on_a_delegation_row_opens_the_drill_in(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        let mut vcx = gpui::VisualTestContext::from_window(window, cx);
+        vcx.update(|_, cx| {
+            view.update(cx, |v, cx| {
+                v.start_delegation_progress("[Agent: local-agent] test", ToolSource::Local, cx);
+                v.note_swarm_row("local-agent");
+                // Unfold the turn's work trace, as the reader would.
+                let idx = v.delegation_progress_msg_idx.expect("row");
+                v.collapsed_turns.insert(idx, false);
+            });
+        });
+        vcx.run_until_parked();
+        // The activity group starts folded: open it, as the reader would.
+        let header = vcx
+            .debug_bounds("activity-header")
+            .expect("the delegation row's activity header is drawn");
+        vcx.simulate_click(header.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        // No worker yet: ↗ is drawn, clicking it opens nothing.
+        let bounds = vcx
+            .debug_bounds("tool-open-invoke_agent")
+            .expect("the delegation row's open button is drawn");
+        vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| assert!(!window.has_active_sheet(cx)));
+
+        let mut trace = SwarmTrace::new();
+        trace.apply(&SessionEvent::TurnStarted);
+        trace.apply(&started("local-agent"));
+        vcx.update(|_, cx| {
+            view.update(cx, |v, cx| {
+                v.set_swarm_trace(&trace, &PriceBook::default(), cx)
+            });
+        });
+        vcx.run_until_parked();
+        let bounds = vcx
+            .debug_bounds("tool-open-invoke_agent")
+            .expect("the delegation row's open button is drawn");
+        vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| assert!(window.has_active_sheet(cx), "the drill-in opened"));
+    }
+
+    #[gpui::test]
+    fn open_on_a_delegation_row_opens_that_workers_run(cx: &mut gpui::TestAppContext) {
+        let (view, window) = harness(cx);
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.start_delegation_progress("[Agent: local-agent] test", ToolSource::Local, cx);
+                v.note_swarm_row("local-agent");
+            });
+        });
+        let idx = cx.update(|cx| view.read(cx).delegation_progress_msg_idx.expect("row"));
+
+        // Before the broker reports a worker there is no run: ↗ is disabled
+        // (`ToolRow::open_state`), and nothing is offered to open.
+        cx.update(|cx| assert_eq!(view.read(cx).delegation_run_name(idx), None));
+
+        // The worker starts and delegates to no one: the row stays plain,
+        // but its run is there to open.
+        let mut trace = SwarmTrace::new();
+        trace.apply(&SessionEvent::TurnStarted);
+        trace.apply(&started("local-agent"));
+        let name = cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_swarm_trace(&trace, &PriceBook::default(), cx)
+            });
+            let v = view.read(cx);
+            assert!(v.messages[idx].swarm_tree.is_none(), "row stays plain");
+            v.delegation_run_name(idx)
+                .expect("a worker exists, so ↗ has a run to open")
+        });
+        assert_eq!(name, "local-agent");
+
+        // Activating ↗ runs `open_node(idx, name)`, which is this call.
+        cx.update_window(window, |_, window, cx| {
+            assert!(!window.has_active_sheet(cx));
+            view.update(cx, |v, cx| v.open_swarm_node(idx, name.clone(), window, cx));
+            assert!(window.has_active_sheet(cx), "the drill-in opened");
+        })
+        .unwrap();
+
+        // It shows that worker's node.
+        cx.update(|cx| {
+            let tree: std::sync::Arc<SwarmTree> = view.read(cx).run_tree(idx).unwrap();
+            assert_eq!(tree.nodes.len(), 1);
+            assert_eq!(tree.nodes[0].name, "local-agent");
+        });
+    }
+
+    /// A new chat must not offer the previous chat's worker run.
+    #[gpui::test]
+    fn a_cleared_chat_does_not_keep_the_old_workers_run(cx: &mut gpui::TestAppContext) {
+        let (view, _window) = harness(cx);
+        let mut trace = SwarmTrace::new();
+        trace.apply(&SessionEvent::TurnStarted);
+        trace.apply(&started("local-agent"));
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.start_delegation_progress("[Agent: local-agent] t", ToolSource::Local, cx);
+                v.note_swarm_row("local-agent");
+                v.set_swarm_trace(&trace, &PriceBook::default(), cx);
+            });
+            let idx = view.read(cx).delegation_progress_msg_idx.unwrap();
+            assert!(view.read(cx).delegation_run_name(idx).is_some());
+            view.update(cx, |v, cx| {
+                v.clear_messages(cx);
+                v.start_delegation_progress("[Agent: other] t", ToolSource::Local, cx);
+                v.note_swarm_row("other");
+            });
+            let idx = view.read(cx).delegation_progress_msg_idx.unwrap();
+            assert_eq!(view.read(cx).delegation_run_name(idx), None);
+        });
     }
 }

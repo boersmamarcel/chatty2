@@ -56,6 +56,7 @@ impl ChatView {
         self.delegation_progress_msg_idx = None;
         self.delegation_started_at = None;
         self.swarm_rows.clear();
+        self.delegation_runs.clear();
 
         self.messages.clear();
         self.reset_transcript_list();

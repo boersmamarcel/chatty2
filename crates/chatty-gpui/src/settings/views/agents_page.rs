@@ -1,13 +1,13 @@
 //! Settings → Agents (PL-U5): every agent spec the workspace reaches, read
 //! only. One kind of local agent — a spec, run by the harness — whatever
-//! file or preset defined it; the broker serves the exposed ones at
+//! file or preset defined it; the broker serves the roster (AGE-760) at
 //! `/a2a/{name}`, and `list_agents`, `invoke_agent` and `/agent` reach them
 //! by name. Remote A2A agents are listed below them.
 
-use crate::settings::models::agent_specs::served_names;
+use crate::settings::models::agent_specs::{broker_reachable, served_names};
 use crate::settings::models::extensions_store::ExtensionsModel;
-use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel, ModuleSettingsModel};
-use chatty_core::agent_spec::{AgentSpec, SpecListing};
+use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel};
+use chatty_core::agent_spec::{AgentSpec, SpecListing, SpecSource};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
@@ -18,8 +18,9 @@ pub fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
         .description(
             "Every local agent is a spec: <workspace>/.chatty/agents/<name>.toml, \
-             <data dir>/chatty/agents/<name>.toml, or a preset. With the module runtime on, \
-             the broker serves the exposed ones, and list_agents, invoke_agent and \
+             <data dir>/chatty/agents/<name>.toml, or a preset. The broker serves \
+             local-agent and your own exposed specs; a preset joins when one of them \
+             delegates to it or module settings name it. list_agents, invoke_agent and \
              /agent <name> reach them by name. Edit a spec in its file, then Reload.",
         )
         .resettable(false)
@@ -32,9 +33,15 @@ fn specs_group() -> SettingGroup {
         .items(vec![SettingItem::render(|_options, _window, cx| {
             let listings = AgentSpecsModel::listings(cx);
             let served = served_names(&listings, cx);
-            let broker_on = cx
-                .try_global::<ModuleSettingsModel>()
-                .is_some_and(|settings| settings.enabled);
+            // What the conversations' roster actually reaches, whatever the
+            // module runtime's switch says (AGE-759).
+            let status = if !broker_reachable(cx) {
+                "No broker is available here, so none of these are served.".to_string()
+            } else if served.is_empty() {
+                "The broker serves none of these.".to_string()
+            } else {
+                format!("Served by the broker: {}", served.join(", "))
+            };
 
             v_flex()
                 .w_full()
@@ -48,13 +55,7 @@ fn specs_group() -> SettingGroup {
                             div()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(if broker_on {
-                                    format!("Served by the broker: {}", served.join(", "))
-                                } else {
-                                    "The module runtime is off, so the broker serves none of \
-                                     these; /agent <name> still runs them."
-                                        .to_string()
-                                }),
+                                .child(status),
                         )
                         .child(
                             Button::new("agents-reload")
@@ -100,11 +101,18 @@ fn default_worker_row(name: &str, cx: &App) -> AnyElement {
 }
 
 fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
+    // An experimental team's role joins the roster only when asked for
+    // (AGE-760): say so, and how.
+    let preset_off = !served
+        && !listing.shadowed
+        && listing.source == SpecSource::Preset
+        && listing.spec.as_ref().is_ok_and(|spec| spec.swarm.exposed);
     let (status, color): (&str, Hsla) = match (&listing.spec, listing.shadowed) {
         (_, true) => ("Shadowed", cx.theme().muted_foreground),
         (Err(_), false) => ("Does not load", cx.theme().danger),
         (Ok(_), false) if served => ("Served", gpui::rgb(0x16A34A).into()),
         (Ok(spec), false) if !spec.swarm.exposed => ("Not exposed", cx.theme().muted_foreground),
+        (Ok(_), false) if preset_off => ("Preset · not in the roster", cx.theme().muted_foreground),
         (Ok(_), false) => ("Not in the roster", cx.theme().muted_foreground),
     };
 
@@ -124,6 +132,13 @@ fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
                         .child(listing.source.label()),
                 ),
         )
+        .when(preset_off, |el| {
+            el.child(detail(
+                "Runs with its team (chatty-tui --team <id>); to add it here, name it in \
+                 virtual_agents in module_settings.json.",
+                cx,
+            ))
+        })
         .map(|el| match &listing.spec {
             Ok(spec) => el.children(spec_details(spec, cx)),
             Err(error) => el.child(

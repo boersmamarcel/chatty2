@@ -639,7 +639,7 @@ mod tests {
             assert_eq!(find(&output, name).origin, AgentOrigin::Local);
             assert_eq!(find(&output, name).kind, "worker");
         }
-        assert_eq!(find(&output, "data-analyst").kind, "worker");
+        assert_eq!(find(&output, "local-agent").kind, "worker");
         assert!(
             output
                 .agents

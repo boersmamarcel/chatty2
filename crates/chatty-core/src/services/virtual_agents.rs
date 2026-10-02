@@ -564,19 +564,24 @@ mod tests {
     }
 
     /// AGE-763: the desktop's `/agent fix-lead <task>` reaches the broker
-    /// through the default, undeclared roster — every exposed spec,
-    /// `fix-lead` among them — with no `module_settings.team.verification`
-    /// set (the desktop never writes one for a built-in preset). `fix-lead`
+    /// through a declared roster — presets are opt-in since AGE-760, so the
+    /// user lists `fix-lead` and its workers — with no
+    /// `module_settings.team.verification` set (the desktop never writes one
+    /// for a built-in preset). `fix-lead`
     /// is `fix-and-verify`'s leader, so the roster's own shell-having
     /// member, `fix-coder`, still gets that team's own test command, exactly
     /// as `--team fix-and-verify` gives it — and nobody else's evidence
     /// picks it up.
     #[test]
     fn slash_agent_team_leader_uses_team_verification() {
-        let roster = crate::agent_spec::load_roster(&[], None).expect("the default roster loads");
+        let declared: Vec<String> = ["fix-lead", "fix-coder", "code-reviewer", "data-analyst"]
+            .map(String::from)
+            .to_vec();
+        let roster =
+            crate::agent_spec::load_roster(&declared, None).expect("the declared roster loads");
         assert!(
             roster.iter().any(|spec| spec.agent.name == "fix-lead"),
-            "fix-lead is on the default roster /agent resolves against"
+            "fix-lead is on the declared roster /agent resolves against"
         );
 
         let specs = resolve_virtual_agents(
@@ -591,7 +596,7 @@ mod tests {
         let fix_coder = specs
             .iter()
             .find(|spec| spec.name == "fix-coder")
-            .expect("fix-coder is on the default roster");
+            .expect("fix-coder is on the declared roster");
         assert_eq!(
             fix_coder.verification.as_deref(),
             Some("python3 -m unittest discover -s tests -t . -v"),
@@ -601,7 +606,7 @@ mod tests {
         let code_reviewer = specs
             .iter()
             .find(|spec| spec.name == "code-reviewer")
-            .expect("code-reviewer is on the default roster");
+            .expect("code-reviewer is on the declared roster");
         assert_eq!(
             code_reviewer.verification, None,
             "code-reviewer disables the shell group, so it never produced a build to check"
@@ -610,7 +615,7 @@ mod tests {
         let data_analyst = specs
             .iter()
             .find(|spec| spec.name == "data-analyst")
-            .expect("data-analyst is on the default roster");
+            .expect("data-analyst is on the declared roster");
         assert_eq!(
             data_analyst.verification, None,
             "data-analysis's own team declares no verification command"

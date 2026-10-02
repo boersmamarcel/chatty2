@@ -70,9 +70,18 @@ struct ScanSnapshot {
     scan_error: Option<String>,
 }
 
-fn build_registry(module_dir: &str, llm_provider: Arc<dyn LlmProvider>) -> Result<ModuleRegistry> {
+/// With the module runtime off (`load_modules` false) the registry stays
+/// empty: the broker still serves the roster, just no WASM module (AGE-759).
+pub(crate) fn build_registry(
+    module_dir: &str,
+    llm_provider: Arc<dyn LlmProvider>,
+    load_modules: bool,
+) -> Result<ModuleRegistry> {
     let mut registry = ModuleRegistry::new(llm_provider, ResourceLimits::default())
         .context("failed to create module registry")?;
+    if !load_modules {
+        return Ok(registry);
+    }
     registry
         .scan_directory(module_dir)
         .with_context(|| format!("failed to scan module directory {module_dir}"))?;
@@ -275,6 +284,7 @@ fn gateway_running_status(gateway: &ProtocolGateway) -> String {
 }
 
 fn apply_gateway_result(
+    settings: &ModuleSettingsModel,
     generation: u64,
     result: Result<ProtocolGateway>,
     gateway_workspace: Option<std::path::PathBuf>,
@@ -291,7 +301,9 @@ fn apply_gateway_result(
 
         match result {
             Ok(gateway) => {
-                state.gateway_status = gateway_running_status(&gateway);
+                if settings.enabled {
+                    state.gateway_status = gateway_running_status(&gateway);
+                }
                 state.gateway = Some(gateway);
                 state.gateway_workspace = gateway_workspace;
                 true
@@ -394,15 +406,6 @@ pub fn refresh_runtime(cx: &mut App) {
                 scan_error: Some(format!("Module scan task failed: {err}")),
             });
 
-            let should_start_gateway = cx
-                .update(|cx| apply_scan_snapshot(snapshot, &settings, generation, cx))
-                .unwrap_or(false)
-                && settings.enabled;
-
-            if !should_start_gateway {
-                return;
-            }
-
             // The gateway — and the broker riding on it (ADR-0011 C2) —
             // starts on the first `list_agents`/`invoke_agent` call, not
             // here (BI-2, AGE-634). Publish a `LazyGatewayBroker` that asks
@@ -412,16 +415,23 @@ pub fn refresh_runtime(cx: &mut App) {
             // the tool call runs on. This task stays parked on
             // `request_rx.recv()` until then, or exits with nothing bound if
             // settings change again first (dropping the sender).
+            //
+            // Published whether or not the module runtime is on: that
+            // switch gates WASM modules, not the roster (AGE-759). And in
+            // the same update as the scan, so the rebuild the scan asks for
+            // already sees it.
             let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
             let broker = Arc::new(LazyGatewayBroker::new(request_tx));
             let published = cx
                 .update(|cx| {
-                    let state = cx.global_mut::<DiscoveredModulesModel>();
-                    if state.refresh_generation != generation {
+                    if !apply_scan_snapshot(snapshot, &settings, generation, cx) {
                         return false;
                     }
-                    state.gateway_status =
-                        "Gateway will start on the first delegation".to_string();
+                    let state = cx.global_mut::<DiscoveredModulesModel>();
+                    if settings.enabled {
+                        state.gateway_status =
+                            "Gateway will start on the first delegation".to_string();
+                    }
                     state.lazy_broker = Some(broker);
                     true
                 })
@@ -439,7 +449,8 @@ pub fn refresh_runtime(cx: &mut App) {
             let registry_result = tokio::task::spawn_blocking({
                 let module_dir = settings.module_dir.clone();
                 let provider = llm_provider.clone();
-                move || build_registry(&module_dir, provider)
+                let load_modules = settings.enabled;
+                move || build_registry(&module_dir, provider, load_modules)
             })
             .await
             .unwrap_or_else(|err| Err(anyhow::anyhow!("Module registry task failed: {err}")));
@@ -480,7 +491,9 @@ pub fn refresh_runtime(cx: &mut App) {
                         (hive.clone(), session, paid_modules)
                     });
 
-                    if let Ok((hive_settings, session, paid_modules)) = hive_settings_result {
+                    if settings.enabled
+                        && let Ok((hive_settings, session, paid_modules)) = hive_settings_result
+                    {
                         // Authenticate as the signed-in user, if any
                         let mut hive_client = HiveRegistryClient::new(&hive_settings.registry_url);
                         if let Some(ref session) = session {
@@ -622,7 +635,7 @@ pub fn refresh_runtime(cx: &mut App) {
                         }
                     }
 
-                    lazy_gateway_broker::start(&mut gateway)
+                    lazy_gateway_broker::start(&mut gateway, settings.enabled)
                         .await
                         .map(|gateway_started| {
                             started = Some(gateway_started);
@@ -634,7 +647,7 @@ pub fn refresh_runtime(cx: &mut App) {
 
             let error_text = gateway_result.as_ref().err().map(|e| e.to_string());
             let _ = cx.update(|cx| {
-                apply_gateway_result(generation, gateway_result, gateway_workspace, cx);
+                apply_gateway_result(&settings, generation, gateway_result, gateway_workspace, cx);
             });
             let _ = reply.send(started.ok_or_else(|| {
                 error_text.unwrap_or_else(|| "the gateway did not start".to_string())
