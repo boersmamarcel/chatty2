@@ -51,5 +51,5 @@ pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
     CANCELLED_BY_USER, CallError, CallEvent, CallRequest, CallResult, CallStream,
     InvokeAgentOutcome, InvokeAgentParams, MessageStatus, RefusalReason, SendMessageParams,
-    SpawnContext, Transport,
+    SpawnContext, Transport, WORKER_START_FAILED, find_worker_start_failure, worker_start_failed,
 };

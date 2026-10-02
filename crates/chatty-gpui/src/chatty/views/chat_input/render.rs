@@ -489,14 +489,28 @@ impl RenderOnce for ChatInput {
                                         // Attach reserves its space like Send.
                                         d.child(div().flex_shrink_0().child(popover))
                                     })
-                                    .when_some(effective_working_dir, |d, dir| {
-                                        // Compute display name: last path component or full path
-                                        let dir_name = dir
-                                            .file_name()
-                                            .map(|n| n.to_string_lossy().to_string())
-                                            .unwrap_or_else(|| dir.to_string_lossy().to_string());
-                                        let full_path = dir.to_string_lossy().to_string();
-                                        let full_path_for_tooltip = full_path.clone();
+                                    .map(|d| {
+                                        // Display name: last path component or full path.
+                                        // Without a folder the chip still shows, as the
+                                        // place to pick one: `/agent` refuses to start a
+                                        // team without it and points here (AGE-822).
+                                        let (dir_name, full_path_for_tooltip) =
+                                            match effective_working_dir {
+                                                Some(dir) => (
+                                                    dir.file_name()
+                                                        .map(|n| n.to_string_lossy().to_string())
+                                                        .unwrap_or_else(|| {
+                                                            dir.to_string_lossy().to_string()
+                                                        }),
+                                                    dir.to_string_lossy().to_string(),
+                                                ),
+                                                None => (
+                                                    "Choose folder".to_string(),
+                                                    "No folder: choose the one this chat and \
+                                                     its agents work in"
+                                                        .to_string(),
+                                                ),
+                                            };
                                         d.child(
                                             div()
                                                 .flex()

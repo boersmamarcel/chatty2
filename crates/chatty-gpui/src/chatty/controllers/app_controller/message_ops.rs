@@ -91,10 +91,21 @@ impl ChattyApp {
     /// (ADR-0020), so the delegation row and its swarm tree show exactly as
     /// for a model-issued `invoke_agent` (AGE-744). Queued like any message
     /// while a turn streams.
-    pub(super) fn send_delegation(&mut self, delegation: Delegation, cx: &mut Context<Self>) {
+    pub(super) fn send_delegation(
+        &mut self,
+        delegation: Delegation,
+        workspace_line: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        // The workspace rides under the command, in the transcript and in
+        // history alike, so a reload shows the same turn (AGE-822).
+        let message = match workspace_line {
+            Some(line) => format!("{}\n\n{line}", delegation.user_text()),
+            None => delegation.user_text(),
+        };
         self.send(
             QueuedSend {
-                message: delegation.user_text(),
+                message,
                 attachments: Vec::new(),
                 terminal_context: None,
                 delegation: Some(delegation),

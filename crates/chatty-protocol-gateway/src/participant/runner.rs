@@ -22,8 +22,11 @@
 //! desktop is a `git worktree`. Making one is a git operation and git lives
 //! in `chatty-core`, so this crate does not decide: the embedder supplies a
 //! [`WorkspaceFactory`], and the broker only spawns in whatever directory it
-//! is handed. Without a factory the child inherits the broker's own
-//! directory.
+//! is handed. The embedder supplies one only for a team that asks for
+//! isolation (`"isolate": true`, AGE-822). Without one — or when it has no
+//! tree to give — the child works in its caller's tree, the spawn
+//! context's `workspace_root`, and only with no tree at all does it
+//! inherit the broker's own directory.
 
 use std::future::Future;
 use std::os::fd::{AsRawFd, RawFd};
@@ -357,6 +360,11 @@ impl LocalRunner {
                 .with_context(|| format!("failed to prepare a workspace for worker '{name}'"))?,
             None => None,
         };
+        // A tree of its own, or its caller's shared one (AGE-822).
+        let cwd = match workspace.as_ref() {
+            Some(w) => Some(w.cwd.clone()),
+            None => request.workspace_root.as_ref().map(PathBuf::from),
+        };
         // The node's own context, which its calls spawn from: its tree and
         // branch, or its caller's when it got none of its own, and the
         // roster it was given.
@@ -377,7 +385,7 @@ impl LocalRunner {
             );
         }
 
-        let mut child = self.spawn(&name, &worker_end, workspace.as_ref())?;
+        let mut child = self.spawn(&name, &worker_end, cwd.as_deref())?;
         // The child holds its copy. The broker must not keep one: a dead
         // child has to read as a closed connection.
         drop(worker_end);
@@ -414,7 +422,7 @@ impl LocalRunner {
         &self,
         name: &str,
         worker_end: &std::os::unix::net::UnixStream,
-        workspace: Option<&WorkerWorkspace>,
+        cwd: Option<&std::path::Path>,
     ) -> Result<Child> {
         let fd = worker_end.as_raw_fd();
         if fd <= 2 {
@@ -435,14 +443,12 @@ impl LocalRunner {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        if let Some(workspace) = workspace {
+        if let Some(cwd) = cwd {
             // Both: `current_dir` for anything that reads the process CWD, and
             // `--workspace` because chatty-tui's tool root comes from the
             // settings file it shares with its parent unless overridden
-            // (AGE-314).
-            cmd.current_dir(&workspace.cwd)
-                .arg("--workspace")
-                .arg(&workspace.cwd);
+            // (AGE-314) — the conversation's own folder is not in that file.
+            cmd.current_dir(cwd).arg("--workspace").arg(cwd);
         }
 
         // SAFETY: the closure runs in the child between fork and exec, where

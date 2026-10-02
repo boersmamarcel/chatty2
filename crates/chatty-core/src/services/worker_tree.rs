@@ -1,8 +1,11 @@
 //! ADR-0012's worker isolation on the desktop: a `git worktree` per worker.
 //!
 //! The broker's local runner spawns each worker behind an A2A endpoint
-//! (AGE-301) and gives it a tree of its own, so two workers on one
-//! conversation cannot overwrite each other's edits (AGE-314).
+//! (AGE-301) and, for a team that sets `"isolate": true` in its
+//! `team.json` (AGE-822), gives it a tree of its own, so two workers on one
+//! conversation cannot overwrite each other's edits (AGE-314). Every other
+//! worker works in its caller's tree — the conversation's workspace — and
+//! never reaches this module.
 //!
 //! # What a worker gets
 //!
@@ -103,8 +106,12 @@ const MAX_NAME_ATTEMPTS: u32 = 1000;
 ///
 /// In a git repository the tree is either created or the delegation fails:
 /// a worker that silently ran in the shared tree would report a branch that
-/// does not exist (AGE-402). The tree's name is `name` unless the repository
-/// already has that branch or directory — another broker's worker, or a
+/// does not exist (AGE-402). A repository with no commits yet — a fresh
+/// `git init` — fails at once, saying so: its branch is unborn, so there is
+/// nothing to branch a tree from, and each nested worker would otherwise
+/// fail on its sub-leader's empty branch instead (AGE-822). The tree's
+/// name is `name` unless the repository already has that branch or
+/// directory — another broker's worker, or a
 /// tree left from an earlier run — in which case it is the first free
 /// `name-N`. Its branch starts at `base` — the sub-leader's branch, for a
 /// sub-leader's worker (BI-5) — or at the workspace's `HEAD`.
@@ -125,6 +132,12 @@ pub async fn create(
             return Ok(None);
         }
     };
+    if !git.has_commits().await {
+        bail!(
+            "the workspace {workspace_root} is a git repository with no commits yet, so \
+             there is no branch to give '{name}' a worktree on"
+        );
+    }
 
     let tree = add_worktree(&git, name, base)
         .await
@@ -615,6 +628,29 @@ mod tests {
         git(&["add", "."], dir.path()).await;
         git(&["commit", "-q", "-m", "init"], dir.path()).await;
         dir
+    }
+
+    /// AGE-822: a fresh `git init` with nothing committed has an unborn
+    /// branch. Isolating a worker there fails before anything is spawned,
+    /// saying why, instead of handing a nested worker a base that is no
+    /// commit (`fatal: invalid reference: sub-agent/data-lead-4`).
+    #[tokio::test]
+    async fn a_repository_without_commits_refuses_isolation_up_front() {
+        let dir = tempfile::tempdir().unwrap();
+        git(&["init", "-q", "-b", "main"], dir.path()).await;
+        let root = dir.path().to_string_lossy().to_string();
+
+        let error = create(&root, "data-lead-0", None)
+            .await
+            .expect_err("no commit, no worktree");
+        assert!(
+            format!("{error:#}").contains("git repository with no commits yet"),
+            "{error:#}"
+        );
+        assert!(
+            !dir.path().join(".chatty/worktrees").exists(),
+            "nothing was created"
+        );
     }
 
     /// AGE-402: two root processes on one repository both name their first

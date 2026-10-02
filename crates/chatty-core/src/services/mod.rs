@@ -106,6 +106,9 @@ pub mod virtual_agents;
 /// Which model endpoint a broker worker talks to, and its budget on it
 /// (ADR-0011 C6 / AGE-376).
 pub mod worker_endpoint;
+/// A worker that never started: a terminal error and a card for the user
+/// (AGE-822).
+pub mod worker_start;
 /// ADR-0012 worker isolation: a `git worktree` per worker (AGE-314 / AGE-301).
 pub mod worker_tree;
 

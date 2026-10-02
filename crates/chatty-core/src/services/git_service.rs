@@ -330,6 +330,15 @@ impl GitService {
         Ok(listed.lines().any(|line| line.trim() == name))
     }
 
+    /// Whether `HEAD` names a commit: `false` in a fresh `git init` with
+    /// nothing committed yet, whose branch is unborn — nothing a worktree
+    /// can be branched from (AGE-822).
+    pub async fn has_commits(&self) -> bool {
+        self.run_git(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+            .await
+            .is_ok()
+    }
+
     /// The repository's default branch: `main` or `master`, whichever
     /// exists locally. `None` when neither does.
     ///

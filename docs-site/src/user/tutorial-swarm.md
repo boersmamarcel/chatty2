@@ -23,7 +23,7 @@ You give a sales export to a three-agent team and ask it a real question: *reven
 - The Chatty desktop app, on Linux or macOS ([Getting started](./getting-started.md)). Teams need the local agent broker, which is not available on Windows yet.
 - One model that is good at tool calls. The screenshots use `Qwen3.8-27B-INT4` served by a local vLLM, added as an OpenAI-compatible provider ([Providers & models](./providers-and-models.md)). A hosted model works just as well.
 - For step 7, a second model, for example `qwen3:4b` in [Ollama](https://ollama.com).
-- A workspace folder. This page uses `~/sales`.
+- A folder for the data. This page uses `~/sales`. It does not need to be a git repository, and if it is one, nothing about it matters: the team works in the folder itself.
 
 ## 1. Set up
 
@@ -48,7 +48,17 @@ mkdir -p ~/sales && cd ~/sales
 curl -LO https://boersmamarcel.github.io/chatty2/assets/samples/orders.csv
 ```
 
-**Point Chatty at the folder.** In **Settings → Code Execution**, turn on **Enable Code Execution**, set the workspace to `~/sales` and set the approval mode to **Always ask**. Reading files and querying data never ask. Running a command or writing a file does, including when an agent deep inside the team wants to do it. The default mode, **Auto-approve sandboxed**, lets sandboxed commands and writes inside the workspace through without asking. With it, this run asks you nothing.
+**Turn on code execution.** In **Settings → Code Execution**, turn on **Enable Code Execution** and set the approval mode to **Always ask**. Reading files and querying data never ask. Running a command or writing a file does, including when an agent deep inside the team wants to do it. The default mode, **Auto-approve sandboxed**, lets sandboxed commands and writes inside the workspace through without asking. With it, this run asks you nothing.
+
+**Point the chat at the folder.** Start a new chat. Under the message box, next to **+**, is the folder chip: it shows the folder this conversation works in. Click it and pick `~/sales`. Every agent the team starts reads and writes in this folder, so `orders.csv` has to be in it.
+
+**Check your setup.** Three things, before you ask anything:
+
+1. The folder chip reads **sales**.
+2. `orders.csv` is in that folder: `ls ~/sales` lists it.
+3. Type `/agent ` (with the space) in the message box. The list that opens shows `data-lead`, `data-analyst` and `reviewer`. If it does not, the roster from the first step was not read; see [Common issues](#common-issues).
+
+![The folder chip reads sales, and /agent lists the team](../assets/screenshots/swarm-00-setup-check.png)
 
 ## 2. Meet the agents
 
@@ -74,7 +84,9 @@ Start a new chat and type:
 /agent data-lead Revenue in orders.csv fell in August. Find out why.
 ```
 
-`/agent <name>` gives the turn straight to that agent: your own model is not asked anything. The lead gets the question and starts delegating.
+`/agent <name>` gives the turn straight to that agent: your own model is not asked anything. Your message shows the workspace the team works in under it, so you can see at once that it is `~/sales`. The lead gets the question and starts delegating.
+
+If something in the setup is missing, Chatty says so before any agent starts, with a red **Could not start** card: what failed and what to do. No workspace, or code execution turned off, is caught this way. So is an agent that cannot be started at all; the agent that asked for it then stops, rather than trying to work around it.
 
 ## 4. Watch the team work
 
@@ -219,12 +231,17 @@ When `memo-writer` wants to create `memo.md`, you get the same kind of card as i
 - Step 6's report puts the drop at 17.6%, names EU `Pro` as the biggest driver (about 70%) and the `SUMMER30` discount on online `Starter` as the second (about 27%).
 - The swarm tree shows `data-lead` with `data-analyst` and `reviewer` below it. After step 7, `reviewer` has a different model from the rest.
 - `~/sales/report.md` exists after step 5, and `~/sales/memo.md` after step 8; you approved both writes.
+- `~/sales` has no `.chatty/worktrees` folder: this team works in your folder directly.
 
 ## Common issues
 
 | You see | Why | Fix |
 |---|---|---|
 | `data-lead` shows **Preset · not in the roster**, and `/agent data-lead …` goes to the default agent | The team's agents are not in `virtual_agents` | Step 1: name all three in `module_settings.json`, then restart |
+| A red **Could not start 'data-lead'** card: *this conversation has no workspace folder* | The chat has no folder | Pick `~/sales` with the folder chip under the message box and send the message again |
+| A red **Could not start** card: *code execution is off* | Code execution is turned off | Turn on **Enable Code Execution** in Settings → Code Execution and send the message again |
+| The lead says it cannot find `orders.csv` | The chat's folder is not the one with the file | Check the folder chip and the workspace line under your message, then pick `~/sales` |
+| A red **Could not start** card that mentions a git worktree | A team with `"isolate": true` (a coding team such as `fix-and-verify`) gives each agent its own git worktree, and the folder is a git repository without a first commit | Commit something first, or pick a folder that is not a git repository. The data-analysis team does not isolate and never needs this |
 | No approval card at all | The approval mode is **Auto-approve sandboxed** (the default), which lets writes inside the workspace through | Switch to **Always ask** in Settings → Code Execution to see each write and command first |
 | The reviewer appears twice in the tree | It asked for changes, and the lead fixed the report and sent it back | This is the review loop working. The lead sends the report back only once. |
 | A run takes a long time on a local model | Every agent's turns share one model server, one request at a time | Expect five to ten minutes on a single local GPU. A hosted lead (step 7) makes it faster. |
