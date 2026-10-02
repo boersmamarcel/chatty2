@@ -27,13 +27,19 @@ You give a sales export to a three-agent team and ask it a real question: *reven
 
 ## 1. Set up
 
-**Add the team.** Its agents ship with Chatty but are experimental, so they are not on your roster until you name them. Quit Chatty, then write `~/.config/chatty/module_settings.json` (create the file if it is not there) and start Chatty again:
+**Add the team.** Its agents ship with Chatty but are experimental, so they are not on your roster until you name them. Quit Chatty, then write `module_settings.json` (create the file if it is not there) and start Chatty again:
+
+- macOS: `~/Library/Application Support/chatty/module_settings.json`
+- Linux: `~/.config/chatty/module_settings.json` (or `$XDG_CONFIG_HOME/chatty/module_settings.json`)
+- Windows: `%APPDATA%\chatty\module_settings.json` — teams need the local agent broker, which is not available on Windows yet (see Prerequisites)
 
 ```json
 {
   "virtual_agents": ["local-agent", "data-lead", "data-analyst", "reviewer"]
 }
 ```
+
+A file at the wrong path is simply never read: Chatty starts with the default roster (`local-agent` and your own exposed specs) instead, silently. If `/agent data-lead …` below ends up answering as `local-agent` instead, re-check this path first — see [Where Chatty stores data](./advanced.md#where-chatty-stores-data) for every platform's config and data directories.
 
 **Get the sample data.** `orders.csv` has 793 orders from July and August: date, region, channel, product, units, price, discount, promo code and revenue. Something happened in August.
 

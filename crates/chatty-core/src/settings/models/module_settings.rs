@@ -134,7 +134,18 @@ impl ModuleSettingsModel {
     /// when nothing was, less team-internal specs
     /// ([`agent_spec::roster_names`](crate::agent_spec::roster_names)).
     pub fn roster_names(&self, workspace: Option<&std::path::Path>) -> Vec<String> {
-        crate::agent_spec::roster_names(&self.virtual_agents, workspace)
+        self.roster_names_from(workspace, dirs::data_dir().as_deref())
+    }
+
+    /// [`Self::roster_names`] with the data directory given rather than the
+    /// platform's, so a test can see a "global" spec without touching the
+    /// real `dirs::data_dir()` (AGE-814).
+    pub fn roster_names_from(
+        &self,
+        workspace: Option<&std::path::Path>,
+        data_dir: Option<&std::path::Path>,
+    ) -> Vec<String> {
+        crate::agent_spec::roster_names_from(&self.virtual_agents, workspace, data_dir)
     }
 }
 
