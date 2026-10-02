@@ -140,7 +140,7 @@
 
 use chatty_fabric::{
     ApprovalRequest, ApprovalVerdict, CallChain, CallError, CallRequest, ConversationScope,
-    HandoffContract, NodeName, Remaining, SpawnContext, SwarmItem,
+    HandoffContract, NodeName, Remaining, RunId, SpawnContext, SwarmItem,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -279,11 +279,13 @@ pub struct DelegatedTask {
     /// AGE-693). Set by the runner of a role the team names a schema for;
     /// `None` otherwise, and then absent from the task frame.
     pub handoff: Option<HandoffContract>,
-    /// The run a broker call starts: who called and the chain the broker
-    /// built for it (DP-2). Stays with the broker, like `caller`: a runner
-    /// records it in the broker's task table before the worker can call,
-    /// and it is not part of the task frame. `None` for a task no broker
-    /// call started (an A2A request over HTTP).
+    /// The run a broker call starts: who called, from which of its runs,
+    /// and the chain the gate granted (DP-2, ADR-0023 § 1). Stays with the
+    /// broker, like `caller`, and is not part of the task frame: the
+    /// registry opens the task's run under it in the critical section that
+    /// queues the `task.run`, so the worker's first call already finds it.
+    /// A task without one is refused there: every task a node is handed
+    /// opens a run.
     pub call: Option<CallStamp>,
     /// What the worker may spend on this task (DP-3), as the task frame
     /// carries it: the broker fills the frame from `call`'s chain when it
@@ -295,14 +297,35 @@ pub struct DelegatedTask {
     pub swarm_events: bool,
 }
 
-/// What a broker call stamps on the task it starts (DP-2).
+/// What a broker call stamps on the task it starts (DP-2): the gate's
+/// grant (ADR-0023 § 1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallStamp {
     /// The calling node's name; `None` for the in-process root.
     pub caller: Option<String>,
+    /// The caller's run the call was made from, which the call named
+    /// (GT-0b); `None` for the root. The task's run opens under it only
+    /// while it is still the caller's open run.
+    pub from_run: Option<RunId>,
     /// The caller's chain plus the callee, built from the broker's own
     /// task table.
     pub chain: CallChain,
+}
+
+#[cfg(test)]
+impl DelegatedTask {
+    /// A task the root hands a node directly, stamped as a granted root
+    /// call would stamp it (ADR-0023 § 1): what a fixture with no gate in
+    /// front of it submits, so the task opens its run.
+    pub(crate) fn from_root(text: impl Into<String>) -> Self {
+        Self::new(text).with_call(Some(CallStamp {
+            caller: None,
+            from_run: None,
+            chain: CallChain::root("t-fixture")
+                .extend("fixture")
+                .expect("a chain of one"),
+        }))
+    }
 }
 
 impl DelegatedTask {

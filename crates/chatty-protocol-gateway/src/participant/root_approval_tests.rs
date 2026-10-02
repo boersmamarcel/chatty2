@@ -77,8 +77,10 @@ async fn serve(stream: UnixStream, behaviour: Behaviour, seen: Seen) {
         match &behaviour {
             Behaviour::Delegate { calls, forge } => {
                 for i in 0..*calls as u64 {
+                    // A call names the run it is made from (GT-0b).
                     let call = json!({"id": 2 + i, "method": "agent.invoke",
-                                      "params": {"agent": "leaf", "prompt": "go"}});
+                                      "params": {"agent": "leaf", "prompt": "go",
+                                                 "run": frame["params"]["taskId"]}});
                     write.write_all(line(call).as_bytes()).await.unwrap();
                     waiting.push(2 + i);
                 }
@@ -156,7 +158,6 @@ struct Scripted {
 struct Handle {
     name: String,
     task_id: String,
-    _run: Option<super::super::registry::RunGuard>,
 }
 
 impl WorkerHandle for Handle {
@@ -192,10 +193,6 @@ impl VirtualAgent for Scripted {
             let spawner = task.call.as_ref().and_then(|call| call.caller.as_deref());
             let LocalConnection { name, worker_end } =
                 open_connection(&self.registry, &self.name, spawner)?;
-            let run = task.call.as_ref().and_then(|call| {
-                self.registry
-                    .open_run(&name, call.caller.as_deref(), call.chain.clone())
-            });
             worker_end.set_nonblocking(true)?;
             let stream = UnixStream::from_std(worker_end)?;
             tokio::spawn(serve(stream, self.behaviour.clone(), self.seen.clone()));
@@ -209,11 +206,7 @@ impl VirtualAgent for Scripted {
                 .submit_task(&name, task)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("gone before its task"))?;
-            let handle: Box<dyn WorkerHandle> = Box::new(Handle {
-                name,
-                task_id,
-                _run: run,
-            });
+            let handle: Box<dyn WorkerHandle> = Box::new(Handle { name, task_id });
             Ok((handle, updates))
         })
     }
@@ -244,7 +237,7 @@ fn broker(mid: Behaviour, leaf: Behaviour) -> (Arc<BrokerCalls>, Seen) {
 /// The root's call to `agent`.
 fn root_call(calls: &BrokerCalls, agent: &str) -> CallStream {
     calls.call(
-        Caller::Root,
+        Peer::Root,
         CallRequest::InvokeAgent(InvokeAgentParams {
             agent: agent.into(),
             prompt: "go".into(),
@@ -252,6 +245,7 @@ fn root_call(calls: &BrokerCalls, agent: &str) -> CallStream {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         }),
     )
 }
@@ -526,4 +520,40 @@ async fn callee_hang_up_withdraws_root_approval() {
             .is_err()
     );
     finish(&mut root).await;
+}
+
+/// A root call that ends sends no verdict to an approval still waiting
+/// under it: the asker goes with the call's subtree, and a `denied` sent
+/// now races its reaping and lets it act on a call that is over (the
+/// `approval_relays_up_the_chain` flake). Its request just stays pending.
+#[tokio::test]
+async fn ended_root_call_answers_no_pending_approval() {
+    let (calls, seen) = broker(
+        Behaviour::Delegate {
+            calls: 0,
+            forge: false,
+        },
+        Behaviour::Approve(exec("ls")),
+    );
+    let mut root = root_call(&calls, "leaf");
+    let (id, _) = next_approval(&mut root).await;
+    drop(root);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let answered = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, frame)| frame["id"] == 2 && frame.get("method").is_none());
+    assert!(
+        !answered,
+        "the waiting approval got a verdict: {:?}",
+        seen.lock().unwrap()
+    );
+    assert!(
+        calls
+            .answer_approval(&id, ApprovalVerdict::Approved)
+            .is_err(),
+        "nothing is left to answer under the ended call"
+    );
 }

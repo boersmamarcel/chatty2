@@ -60,6 +60,8 @@ tempfile = { workspace = true }
 rmcp = { workspace = true }
 # S7 performance baseline benches (AGE-603).
 criterion = "0.5"
+# Reading the broker gate's decision log in its tests (ADR-0023 § 1).
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "load_time"

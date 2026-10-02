@@ -18,6 +18,11 @@
 //!
 //! The root's own context ([`root`]) is the root's workspace, its `HEAD`,
 //! and every agent the broker publishes.
+//!
+//! [`derive`] and [`clamp`] are rules of the broker gate (ADR-0023 § 1,
+//! GT-0), which is pure: they read a [`Target`] — the runner's settings as
+//! plain data — and do no I/O. Whether a requested tree lies inside the
+//! caller's is resolved on disk ([`lies_inside`]) before the gate runs.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -27,14 +32,33 @@ use chatty_fabric::{CallError, SpawnContext};
 
 use super::virtual_agent::VirtualAgent;
 
+/// The agent a call would spawn, as the spawn rules read it: its name and
+/// the settings the root gives it, copied off its runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub name: String,
+    pub workspace_root: Option<String>,
+    pub verification: Option<String>,
+    pub endpoint: Option<String>,
+}
+
+impl Target {
+    /// `runner`'s name and settings.
+    pub fn of(runner: &dyn VirtualAgent) -> Self {
+        Self {
+            name: runner.agent_name().to_string(),
+            workspace_root: runner.workspace_root().map(str::to_string),
+            verification: runner.verification().map(str::to_string),
+            endpoint: runner.endpoint().map(str::to_string),
+        }
+    }
+}
+
 /// The root's own context: its workspace (as the runner being spawned was
 /// configured with it), its `HEAD`, and every agent the broker publishes.
-pub fn root(
-    runners: &BTreeMap<String, Arc<dyn VirtualAgent>>,
-    target: &dyn VirtualAgent,
-) -> SpawnContext {
+pub fn root(runners: &BTreeMap<String, Arc<dyn VirtualAgent>>, target: &Target) -> SpawnContext {
     SpawnContext {
-        workspace_root: target.workspace_root().map(str::to_string),
+        workspace_root: target.workspace_root.clone(),
         base_branch: None,
         roster: runners.keys().cloned().collect(),
         verification: None,
@@ -45,27 +69,30 @@ pub fn root(
 /// The context `target` is spawned with for a caller whose own context is
 /// `caller`: the caller's tree, branch and roster, and the root's
 /// verification command and endpoint for `target`.
-pub fn derive(caller: &SpawnContext, target: &dyn VirtualAgent) -> SpawnContext {
+pub fn derive(caller: &SpawnContext, target: &Target) -> SpawnContext {
     SpawnContext {
         workspace_root: caller.workspace_root.clone(),
         base_branch: caller.base_branch.clone(),
         roster: caller.roster.clone(),
-        verification: target.verification().map(str::to_string),
-        endpoint: target.endpoint().map(str::to_string),
+        verification: target.verification.clone(),
+        endpoint: target.endpoint.clone(),
     }
 }
 
 /// Accept `requested` for spawning `target` on behalf of a caller whose own
 /// context is `caller`, or refuse it naming the field that reaches outside
-/// (invariant 6).
+/// (invariant 6). `inside` is whether `requested`'s tree lies inside
+/// `caller`'s, resolved on disk by [`lies_inside`]; it is read only when
+/// both name one.
 pub fn clamp(
     requested: SpawnContext,
     caller: &SpawnContext,
-    target: &dyn VirtualAgent,
+    target: &Target,
+    inside: bool,
 ) -> Result<SpawnContext, CallError> {
     match (&requested.workspace_root, &caller.workspace_root) {
         (None, None) => {}
-        (Some(root), Some(tree)) if lies_inside(root, tree) => {}
+        (Some(_), Some(_)) if inside => {}
         (Some(root), Some(tree)) => {
             return Err(refused(
                 "workspace_root",
@@ -107,21 +134,19 @@ pub fn clamp(
             format!("not on the caller's roster: {}", wider.join(", ")),
         ));
     }
-    if requested.verification.is_some()
-        && requested.verification.as_deref() != target.verification()
-    {
+    if requested.verification.is_some() && requested.verification != target.verification {
         return Err(refused(
             "verification",
             "the verification command comes from the root's settings".to_string(),
         ));
     }
-    if requested.endpoint.as_deref() != target.endpoint() {
+    if requested.endpoint != target.endpoint {
         return Err(refused(
             "endpoint",
             format!(
                 "'{}' runs on {}, from the root's settings",
-                target.agent_name(),
-                target.endpoint().unwrap_or("no metered endpoint"),
+                target.name,
+                target.endpoint.as_deref().unwrap_or("no metered endpoint"),
             ),
         ));
     }
@@ -131,7 +156,7 @@ pub fn clamp(
 /// Whether `path` is `tree` or lies under it, both resolved on disk so a
 /// `..` or a symlink cannot step outside. A path that does not exist lies
 /// nowhere.
-fn lies_inside(path: &str, tree: &str) -> bool {
+pub fn lies_inside(path: &str, tree: &str) -> bool {
     match (
         std::fs::canonicalize(Path::new(path)),
         std::fs::canonicalize(Path::new(tree)),
@@ -151,42 +176,29 @@ fn refused(field: &str, reason: String) -> CallError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::participant::{DelegatedTask, ParticipantCard, ParticipantRegistry, WorkerFuture};
 
-    /// A runner that is only ever asked about its settings.
-    struct Settings {
-        registry: ParticipantRegistry,
-        endpoint: Option<String>,
-        verification: Option<String>,
-    }
-
-    impl VirtualAgent for Settings {
-        fn agent_name(&self) -> &str {
-            "local-coder"
-        }
-        fn agent_card(&self) -> ParticipantCard {
-            ParticipantCard::default()
-        }
-        fn registry(&self) -> &ParticipantRegistry {
-            &self.registry
-        }
-        fn run_task(&self, _task: DelegatedTask) -> WorkerFuture<'_> {
-            unreachable!("nothing here spawns")
-        }
-        fn endpoint(&self) -> Option<&str> {
-            self.endpoint.as_deref()
-        }
-        fn verification(&self) -> Option<&str> {
-            self.verification.as_deref()
-        }
-    }
-
-    fn target() -> Settings {
-        Settings {
-            registry: ParticipantRegistry::new(),
+    /// A runner's settings, as the spawn rules read them.
+    fn target() -> Target {
+        Target {
+            name: "local-coder".to_string(),
+            workspace_root: None,
             endpoint: Some("http://localhost:11434".to_string()),
             verification: Some("cargo test".to_string()),
         }
+    }
+
+    /// [`clamp`] with its tree check resolved on disk, as the broker does
+    /// before its gate runs.
+    fn clamp_on_disk(
+        requested: SpawnContext,
+        caller: &SpawnContext,
+        target: &Target,
+    ) -> Result<SpawnContext, CallError> {
+        let inside = match (&requested.workspace_root, &caller.workspace_root) {
+            (Some(root), Some(tree)) => lies_inside(root, tree),
+            _ => false,
+        };
+        clamp(requested, caller, target, inside)
     }
 
     fn caller(tree: &Path) -> SpawnContext {
@@ -220,7 +232,7 @@ mod tests {
         requested.roster = vec!["local-coder".to_string()];
         requested.verification = None;
         assert_eq!(
-            clamp(requested.clone(), &caller(dir.path()), &target()),
+            clamp_on_disk(requested.clone(), &caller(dir.path()), &target()),
             Ok(requested)
         );
     }
@@ -230,10 +242,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tree = dir.path().join("tree");
         std::fs::create_dir(&tree).unwrap();
-        let field = |requested: SpawnContext| match clamp(requested, &caller(&tree), &target()) {
-            Err(CallError::SpawnContextRefused { field, .. }) => field,
-            other => panic!("expected a refusal, got {other:?}"),
-        };
+        let field =
+            |requested: SpawnContext| match clamp_on_disk(requested, &caller(&tree), &target()) {
+                Err(CallError::SpawnContextRefused { field, .. }) => field,
+                other => panic!("expected a refusal, got {other:?}"),
+            };
         let base = derive(&caller(&tree), &target());
 
         let mut escape = base.clone();
