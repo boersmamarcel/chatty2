@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Which region drove the September revenue drop",
+  "prompt": "Total revenue fell from August to September. Which region accounts for most of the drop? Use the data in sales.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: EU, US, APAC, LATAM."
+}

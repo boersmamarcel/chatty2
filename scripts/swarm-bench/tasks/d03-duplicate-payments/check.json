@@ -1,0 +1,12 @@
+{
+  "type": "verdict",
+  "choices": [
+    "Acme Supplies",
+    "Brightline",
+    "Corvus Freight",
+    "Delta Office",
+    "Evergreen IT",
+    "Fulton Print"
+  ],
+  "label": "Corvus Freight"
+}

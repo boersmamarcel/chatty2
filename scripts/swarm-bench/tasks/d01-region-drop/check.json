@@ -1,0 +1,10 @@
+{
+  "type": "verdict",
+  "choices": [
+    "EU",
+    "US",
+    "APAC",
+    "LATAM"
+  ],
+  "label": "APAC"
+}

@@ -1,0 +1,401 @@
+po_id,date,requester,vendor,amount
+1,2026-03-01,Emeka,Corvus Freight,1479.11
+2,2026-03-01,Chen,Corvus Freight,2906.71
+3,2026-03-02,Dolores,Fulton Print,1353.18
+4,2026-03-03,Ahmed,Acme Supplies,1595.59
+5,2026-03-03,Dolores,Evergreen IT,3813.67
+6,2026-03-03,Dolores,Corvus Freight,4413.64
+7,2026-03-03,Dolores,Evergreen IT,4948.08
+8,2026-03-03,Dolores,Evergreen IT,4741.32
+9,2026-03-03,Dolores,Evergreen IT,4884.69
+10,2026-03-04,Dolores,Acme Supplies,2191.16
+11,2026-03-04,Dolores,Corvus Freight,2223.37
+12,2026-03-04,Ahmed,Corvus Freight,4553.49
+13,2026-03-05,Emeka,Fulton Print,876.86
+14,2026-03-05,Emeka,Corvus Freight,1064.58
+15,2026-03-06,Emeka,Delta Office,3320.53
+16,2026-03-07,Dolores,Corvus Freight,2156.78
+17,2026-03-07,Ahmed,Acme Supplies,3438.56
+18,2026-03-07,Chen,Evergreen IT,3578.64
+19,2026-03-08,Emeka,Fulton Print,2370.79
+20,2026-03-08,Bianca,Acme Supplies,2342.47
+21,2026-03-09,Bianca,Delta Office,3667.15
+22,2026-03-09,Dolores,Corvus Freight,716.31
+23,2026-03-09,Dolores,Evergreen IT,2899.44
+24,2026-03-10,Dolores,Delta Office,3669.72
+25,2026-03-11,Dolores,Corvus Freight,4258.5
+26,2026-03-12,Emeka,Evergreen IT,3393.65
+27,2026-03-13,Bianca,Evergreen IT,3928.84
+28,2026-03-13,Chen,Evergreen IT,2280.63
+29,2026-03-14,Dolores,Corvus Freight,1298.99
+30,2026-03-14,Emeka,Delta Office,3946.87
+31,2026-03-15,Emeka,Delta Office,3134.64
+32,2026-03-16,Ahmed,Corvus Freight,4035.41
+33,2026-03-16,Bianca,Delta Office,1232.15
+34,2026-03-16,Bianca,Acme Supplies,1575.43
+35,2026-03-17,Ahmed,Evergreen IT,3878.26
+36,2026-03-17,Ahmed,Evergreen IT,1429.83
+37,2026-03-17,Dolores,Evergreen IT,4743.84
+38,2026-03-17,Dolores,Evergreen IT,4948.31
+39,2026-03-17,Dolores,Evergreen IT,4947.45
+40,2026-03-18,Chen,Evergreen IT,214.18
+41,2026-03-19,Bianca,Evergreen IT,3318.84
+42,2026-03-19,Bianca,Acme Supplies,1911.3
+43,2026-03-19,Chen,Acme Supplies,4064.75
+44,2026-03-20,Emeka,Delta Office,2935.53
+45,2026-03-20,Ahmed,Acme Supplies,2020.85
+46,2026-03-21,Bianca,Evergreen IT,721.99
+47,2026-03-22,Bianca,Corvus Freight,1299.38
+48,2026-03-22,Dolores,Brightline,1398.46
+49,2026-03-23,Dolores,Delta Office,3885.06
+50,2026-03-24,Dolores,Fulton Print,1092.4
+51,2026-03-24,Emeka,Evergreen IT,3243.27
+52,2026-03-24,Bianca,Corvus Freight,4011.82
+53,2026-03-25,Chen,Brightline,1290.86
+54,2026-03-25,Chen,Corvus Freight,3605.8
+55,2026-03-25,Dolores,Corvus Freight,2845.52
+56,2026-03-26,Ahmed,Delta Office,4453.21
+57,2026-03-27,Dolores,Corvus Freight,1868.76
+58,2026-03-27,Dolores,Evergreen IT,2651.06
+59,2026-03-28,Emeka,Fulton Print,1461.65
+60,2026-03-28,Bianca,Evergreen IT,2043.25
+61,2026-03-29,Dolores,Evergreen IT,2700.54
+62,2026-03-29,Bianca,Acme Supplies,981.58
+63,2026-03-29,Ahmed,Corvus Freight,1007.65
+64,2026-03-30,Bianca,Acme Supplies,843.36
+65,2026-03-30,Bianca,Evergreen IT,327.37
+66,2026-03-31,Emeka,Corvus Freight,964.56
+67,2026-04-01,Dolores,Acme Supplies,4255.65
+68,2026-04-01,Bianca,Evergreen IT,3864.03
+69,2026-04-01,Ahmed,Fulton Print,1541.1
+70,2026-04-02,Chen,Brightline,392.62
+71,2026-04-02,Chen,Evergreen IT,3087.87
+72,2026-04-02,Emeka,Delta Office,2261.27
+73,2026-04-03,Chen,Brightline,2637.97
+74,2026-04-03,Chen,Brightline,947.44
+75,2026-04-03,Dolores,Evergreen IT,4765.36
+76,2026-04-03,Dolores,Evergreen IT,4724.59
+77,2026-04-03,Dolores,Evergreen IT,4912.28
+78,2026-04-04,Chen,Acme Supplies,4082.38
+79,2026-04-04,Ahmed,Evergreen IT,3884.87
+80,2026-04-05,Dolores,Evergreen IT,2274.95
+81,2026-04-05,Ahmed,Brightline,1558.37
+82,2026-04-06,Chen,Corvus Freight,1735.63
+83,2026-04-06,Chen,Corvus Freight,1666.6
+84,2026-04-06,Emeka,Corvus Freight,4424.07
+85,2026-04-07,Ahmed,Fulton Print,601.7
+86,2026-04-08,Bianca,Brightline,383.06
+87,2026-04-08,Bianca,Evergreen IT,1992.45
+88,2026-04-09,Emeka,Brightline,803.14
+89,2026-04-10,Dolores,Delta Office,4444.38
+90,2026-04-10,Dolores,Evergreen IT,971.26
+91,2026-04-11,Dolores,Delta Office,2729.58
+92,2026-04-11,Emeka,Brightline,284.09
+93,2026-04-12,Emeka,Delta Office,1967.77
+94,2026-04-12,Bianca,Corvus Freight,1513.07
+95,2026-04-13,Bianca,Evergreen IT,793.53
+96,2026-04-14,Chen,Fulton Print,1620.07
+97,2026-04-14,Bianca,Corvus Freight,3377.49
+98,2026-04-15,Ahmed,Brightline,3250.76
+99,2026-04-15,Dolores,Corvus Freight,1398.48
+100,2026-04-15,Dolores,Acme Supplies,3102.17
+101,2026-04-16,Bianca,Acme Supplies,569.79
+102,2026-04-16,Dolores,Fulton Print,2466.37
+103,2026-04-16,Bianca,Brightline,4420.2
+104,2026-04-17,Bianca,Brightline,3187.5
+105,2026-04-17,Chen,Evergreen IT,3699.62
+106,2026-04-17,Dolores,Brightline,2520.46
+107,2026-04-17,Dolores,Evergreen IT,4777.07
+108,2026-04-17,Dolores,Evergreen IT,4775.83
+109,2026-04-17,Dolores,Evergreen IT,4863.54
+110,2026-04-18,Chen,Corvus Freight,2231.02
+111,2026-04-18,Chen,Delta Office,2790.13
+112,2026-04-18,Dolores,Evergreen IT,2933.71
+113,2026-04-19,Bianca,Delta Office,3410.9
+114,2026-04-19,Chen,Brightline,1560.86
+115,2026-04-20,Emeka,Delta Office,2001.37
+116,2026-04-20,Ahmed,Delta Office,1879.65
+117,2026-04-21,Ahmed,Corvus Freight,242.93
+118,2026-04-22,Dolores,Corvus Freight,3379.64
+119,2026-04-23,Chen,Evergreen IT,3921.73
+120,2026-04-23,Chen,Brightline,1408.77
+121,2026-04-24,Emeka,Brightline,1465.85
+122,2026-04-25,Ahmed,Brightline,2432.16
+123,2026-04-26,Bianca,Fulton Print,4441.97
+124,2026-04-26,Bianca,Brightline,2981.33
+125,2026-04-27,Emeka,Delta Office,3923.71
+126,2026-04-28,Dolores,Fulton Print,356.87
+127,2026-04-28,Dolores,Corvus Freight,566.35
+128,2026-04-28,Emeka,Evergreen IT,1383.36
+129,2026-04-29,Bianca,Corvus Freight,1160.81
+130,2026-04-30,Chen,Acme Supplies,3766.36
+131,2026-05-01,Dolores,Fulton Print,3096.22
+132,2026-05-01,Emeka,Corvus Freight,2624.19
+133,2026-05-01,Ahmed,Delta Office,1311.49
+134,2026-05-02,Chen,Acme Supplies,3359.71
+135,2026-05-02,Emeka,Delta Office,2578.16
+136,2026-05-02,Chen,Evergreen IT,2298.74
+137,2026-05-03,Bianca,Delta Office,965.99
+138,2026-05-03,Bianca,Delta Office,3989.94
+139,2026-05-03,Dolores,Brightline,2821.92
+140,2026-05-03,Dolores,Evergreen IT,4952.46
+141,2026-05-03,Dolores,Evergreen IT,4950.88
+142,2026-05-03,Dolores,Evergreen IT,4709.55
+143,2026-05-04,Bianca,Delta Office,972.18
+144,2026-05-05,Ahmed,Brightline,1189.89
+145,2026-05-05,Bianca,Brightline,2113.23
+146,2026-05-06,Ahmed,Fulton Print,962.93
+147,2026-05-06,Bianca,Delta Office,2947.32
+148,2026-05-07,Dolores,Acme Supplies,4091.76
+149,2026-05-07,Emeka,Fulton Print,1029.1
+150,2026-05-08,Chen,Corvus Freight,616.94
+151,2026-05-08,Emeka,Acme Supplies,2243.06
+152,2026-05-09,Chen,Corvus Freight,3250.61
+153,2026-05-09,Emeka,Acme Supplies,4137.35
+154,2026-05-10,Ahmed,Delta Office,1046.38
+155,2026-05-10,Ahmed,Acme Supplies,4589.99
+156,2026-05-10,Emeka,Fulton Print,407.41
+157,2026-05-11,Chen,Corvus Freight,2396.98
+158,2026-05-11,Ahmed,Fulton Print,4230.26
+159,2026-05-12,Emeka,Brightline,298.0
+160,2026-05-12,Emeka,Evergreen IT,1589.32
+161,2026-05-13,Emeka,Corvus Freight,807.35
+162,2026-05-13,Ahmed,Acme Supplies,2127.9
+163,2026-05-14,Chen,Fulton Print,3133.45
+164,2026-05-15,Chen,Corvus Freight,2740.01
+165,2026-05-16,Dolores,Brightline,2975.82
+166,2026-05-16,Dolores,Delta Office,3911.55
+167,2026-05-17,Chen,Brightline,479.78
+168,2026-05-17,Emeka,Evergreen IT,4549.53
+169,2026-05-17,Dolores,Evergreen IT,4804.02
+170,2026-05-17,Dolores,Evergreen IT,4848.66
+171,2026-05-17,Dolores,Evergreen IT,4734.35
+172,2026-05-18,Emeka,Fulton Print,1949.65
+173,2026-05-18,Ahmed,Corvus Freight,814.39
+174,2026-05-19,Emeka,Delta Office,2812.52
+175,2026-05-19,Chen,Fulton Print,2708.88
+176,2026-05-19,Emeka,Corvus Freight,4530.45
+177,2026-05-20,Dolores,Acme Supplies,4102.81
+178,2026-05-21,Bianca,Acme Supplies,501.59
+179,2026-05-21,Dolores,Corvus Freight,94.02
+180,2026-05-21,Bianca,Brightline,946.99
+181,2026-05-22,Dolores,Brightline,2498.74
+182,2026-05-23,Bianca,Corvus Freight,221.31
+183,2026-05-24,Ahmed,Corvus Freight,3230.5
+184,2026-05-24,Emeka,Delta Office,3034.58
+185,2026-05-25,Emeka,Evergreen IT,345.25
+186,2026-05-25,Ahmed,Brightline,4131.78
+187,2026-05-25,Ahmed,Delta Office,2258.98
+188,2026-05-26,Emeka,Delta Office,1912.09
+189,2026-05-26,Ahmed,Brightline,3921.51
+190,2026-05-27,Dolores,Evergreen IT,2058.57
+191,2026-05-28,Dolores,Fulton Print,1766.45
+192,2026-05-29,Bianca,Evergreen IT,2169.9
+193,2026-05-29,Dolores,Evergreen IT,2621.94
+194,2026-05-30,Dolores,Acme Supplies,2576.21
+195,2026-05-30,Chen,Delta Office,2533.73
+196,2026-05-30,Dolores,Evergreen IT,494.29
+197,2026-05-31,Chen,Fulton Print,2846.75
+198,2026-05-31,Ahmed,Brightline,1450.5
+199,2026-05-31,Ahmed,Brightline,2823.81
+200,2026-06-01,Chen,Acme Supplies,3023.69
+201,2026-06-02,Chen,Acme Supplies,2692.1
+202,2026-06-02,Ahmed,Delta Office,418.18
+203,2026-06-03,Dolores,Acme Supplies,1123.33
+204,2026-06-03,Ahmed,Brightline,1317.63
+205,2026-06-03,Dolores,Evergreen IT,4701.13
+206,2026-06-03,Dolores,Evergreen IT,4804.05
+207,2026-06-03,Dolores,Evergreen IT,4848.13
+208,2026-06-04,Bianca,Brightline,1301.32
+209,2026-06-04,Dolores,Acme Supplies,3638.4
+210,2026-06-04,Dolores,Brightline,2903.2
+211,2026-06-05,Emeka,Acme Supplies,1175.49
+212,2026-06-05,Emeka,Corvus Freight,2689.18
+213,2026-06-05,Ahmed,Fulton Print,2890.82
+214,2026-06-06,Emeka,Corvus Freight,1741.33
+215,2026-06-06,Bianca,Brightline,3693.87
+216,2026-06-07,Ahmed,Evergreen IT,915.0
+217,2026-06-07,Chen,Fulton Print,576.7
+218,2026-06-07,Emeka,Evergreen IT,3019.61
+219,2026-06-08,Chen,Brightline,3923.35
+220,2026-06-09,Chen,Brightline,3509.51
+221,2026-06-10,Bianca,Delta Office,1186.47
+222,2026-06-11,Chen,Delta Office,3793.89
+223,2026-06-11,Ahmed,Corvus Freight,3784.45
+224,2026-06-11,Ahmed,Delta Office,2126.72
+225,2026-06-12,Bianca,Evergreen IT,1849.69
+226,2026-06-13,Chen,Acme Supplies,3768.25
+227,2026-06-13,Ahmed,Evergreen IT,1612.95
+228,2026-06-14,Chen,Delta Office,1496.03
+229,2026-06-14,Ahmed,Fulton Print,2976.26
+230,2026-06-15,Chen,Delta Office,3886.06
+231,2026-06-15,Emeka,Acme Supplies,3192.14
+232,2026-06-16,Dolores,Evergreen IT,1193.56
+233,2026-06-16,Ahmed,Brightline,2850.93
+234,2026-06-17,Emeka,Brightline,732.35
+235,2026-06-17,Dolores,Acme Supplies,169.41
+236,2026-06-17,Bianca,Delta Office,3423.73
+237,2026-06-17,Dolores,Evergreen IT,4722.21
+238,2026-06-17,Dolores,Evergreen IT,4793.38
+239,2026-06-17,Dolores,Evergreen IT,4752.06
+240,2026-06-18,Bianca,Delta Office,636.04
+241,2026-06-18,Emeka,Corvus Freight,1049.96
+242,2026-06-19,Bianca,Corvus Freight,1544.07
+243,2026-06-20,Chen,Evergreen IT,3123.02
+244,2026-06-20,Ahmed,Evergreen IT,358.68
+245,2026-06-21,Chen,Delta Office,3292.58
+246,2026-06-22,Ahmed,Brightline,2510.86
+247,2026-06-22,Emeka,Corvus Freight,2272.24
+248,2026-06-22,Bianca,Acme Supplies,760.09
+249,2026-06-23,Dolores,Evergreen IT,1592.78
+250,2026-06-24,Bianca,Acme Supplies,3065.59
+251,2026-06-24,Dolores,Brightline,810.52
+252,2026-06-24,Bianca,Acme Supplies,173.18
+253,2026-06-25,Ahmed,Evergreen IT,1266.34
+254,2026-06-25,Bianca,Brightline,310.24
+255,2026-06-26,Dolores,Evergreen IT,1957.9
+256,2026-06-26,Dolores,Corvus Freight,2707.54
+257,2026-06-27,Bianca,Brightline,388.03
+258,2026-06-28,Dolores,Corvus Freight,1034.97
+259,2026-06-29,Bianca,Delta Office,2694.25
+260,2026-06-29,Ahmed,Corvus Freight,295.55
+261,2026-06-30,Bianca,Evergreen IT,2804.04
+262,2026-06-30,Bianca,Evergreen IT,4214.54
+263,2026-07-01,Ahmed,Fulton Print,3008.33
+264,2026-07-01,Emeka,Brightline,1353.16
+265,2026-07-01,Ahmed,Acme Supplies,4017.06
+266,2026-07-02,Emeka,Brightline,3607.21
+267,2026-07-02,Chen,Evergreen IT,3270.38
+268,2026-07-03,Chen,Corvus Freight,2043.93
+269,2026-07-03,Ahmed,Fulton Print,4540.91
+270,2026-07-03,Emeka,Evergreen IT,3872.52
+271,2026-07-03,Dolores,Evergreen IT,4971.53
+272,2026-07-03,Dolores,Evergreen IT,4909.05
+273,2026-07-03,Dolores,Evergreen IT,4921.13
+274,2026-07-04,Chen,Evergreen IT,130.04
+275,2026-07-04,Bianca,Delta Office,990.98
+276,2026-07-05,Dolores,Corvus Freight,4336.32
+277,2026-07-05,Dolores,Acme Supplies,4481.37
+278,2026-07-06,Ahmed,Brightline,4102.69
+279,2026-07-06,Chen,Fulton Print,189.28
+280,2026-07-07,Ahmed,Brightline,4398.49
+281,2026-07-07,Dolores,Corvus Freight,1739.43
+282,2026-07-08,Ahmed,Fulton Print,424.68
+283,2026-07-08,Emeka,Acme Supplies,1533.18
+284,2026-07-08,Bianca,Brightline,638.68
+285,2026-07-09,Emeka,Acme Supplies,2656.16
+286,2026-07-09,Emeka,Brightline,438.54
+287,2026-07-09,Emeka,Brightline,3527.25
+288,2026-07-10,Dolores,Acme Supplies,616.45
+289,2026-07-11,Chen,Brightline,4256.89
+290,2026-07-12,Bianca,Fulton Print,4420.23
+291,2026-07-13,Ahmed,Delta Office,2617.2
+292,2026-07-13,Emeka,Fulton Print,1673.15
+293,2026-07-13,Bianca,Brightline,2611.57
+294,2026-07-14,Dolores,Fulton Print,928.43
+295,2026-07-15,Chen,Delta Office,1264.3
+296,2026-07-16,Dolores,Acme Supplies,1047.57
+297,2026-07-17,Dolores,Fulton Print,4085.75
+298,2026-07-17,Dolores,Evergreen IT,4810.67
+299,2026-07-17,Dolores,Evergreen IT,4924.82
+300,2026-07-17,Dolores,Evergreen IT,4973.87
+301,2026-07-18,Chen,Brightline,3989.52
+302,2026-07-19,Ahmed,Acme Supplies,1415.78
+303,2026-07-19,Chen,Corvus Freight,2455.58
+304,2026-07-19,Ahmed,Brightline,481.7
+305,2026-07-20,Chen,Fulton Print,4029.22
+306,2026-07-20,Chen,Evergreen IT,1039.85
+307,2026-07-21,Ahmed,Evergreen IT,1756.65
+308,2026-07-22,Bianca,Fulton Print,620.34
+309,2026-07-22,Emeka,Corvus Freight,4430.48
+310,2026-07-22,Chen,Evergreen IT,2707.4
+311,2026-07-23,Emeka,Evergreen IT,2469.76
+312,2026-07-23,Chen,Brightline,788.67
+313,2026-07-24,Dolores,Evergreen IT,677.5
+314,2026-07-24,Emeka,Delta Office,2350.13
+315,2026-07-25,Bianca,Acme Supplies,3326.85
+316,2026-07-25,Emeka,Evergreen IT,2672.49
+317,2026-07-25,Chen,Evergreen IT,497.46
+318,2026-07-26,Emeka,Corvus Freight,1109.73
+319,2026-07-26,Chen,Brightline,3257.34
+320,2026-07-27,Bianca,Evergreen IT,4532.84
+321,2026-07-27,Dolores,Corvus Freight,293.97
+322,2026-07-27,Bianca,Fulton Print,3083.97
+323,2026-07-28,Dolores,Corvus Freight,3353.27
+324,2026-07-28,Dolores,Acme Supplies,4250.39
+325,2026-07-29,Dolores,Corvus Freight,1289.37
+326,2026-07-29,Ahmed,Brightline,3465.32
+327,2026-07-30,Emeka,Delta Office,3867.73
+328,2026-07-30,Ahmed,Delta Office,3085.83
+329,2026-07-30,Chen,Evergreen IT,277.64
+330,2026-07-31,Dolores,Brightline,3736.09
+331,2026-07-31,Emeka,Acme Supplies,4001.94
+332,2026-08-01,Emeka,Fulton Print,406.0
+333,2026-08-01,Bianca,Evergreen IT,3251.53
+334,2026-08-02,Dolores,Delta Office,2657.31
+335,2026-08-03,Dolores,Brightline,2935.36
+336,2026-08-03,Dolores,Corvus Freight,3157.63
+337,2026-08-03,Chen,Fulton Print,3216.15
+338,2026-08-03,Dolores,Evergreen IT,4967.0
+339,2026-08-03,Dolores,Evergreen IT,4768.26
+340,2026-08-03,Dolores,Evergreen IT,4858.12
+341,2026-08-04,Bianca,Brightline,1680.37
+342,2026-08-05,Bianca,Acme Supplies,3301.01
+343,2026-08-06,Emeka,Corvus Freight,1195.35
+344,2026-08-06,Bianca,Delta Office,2513.46
+345,2026-08-07,Emeka,Delta Office,3801.84
+346,2026-08-07,Dolores,Corvus Freight,257.55
+347,2026-08-07,Emeka,Brightline,4526.71
+348,2026-08-08,Emeka,Acme Supplies,1036.76
+349,2026-08-08,Emeka,Fulton Print,2046.5
+350,2026-08-09,Dolores,Evergreen IT,1419.76
+351,2026-08-09,Bianca,Fulton Print,1358.27
+352,2026-08-10,Ahmed,Evergreen IT,1486.22
+353,2026-08-10,Ahmed,Fulton Print,641.2
+354,2026-08-11,Chen,Evergreen IT,2129.86
+355,2026-08-11,Emeka,Delta Office,2226.4
+356,2026-08-12,Chen,Delta Office,3947.35
+357,2026-08-13,Chen,Brightline,2515.92
+358,2026-08-13,Emeka,Fulton Print,2733.91
+359,2026-08-13,Bianca,Acme Supplies,1783.54
+360,2026-08-14,Bianca,Delta Office,1932.88
+361,2026-08-14,Dolores,Brightline,4200.94
+362,2026-08-15,Dolores,Corvus Freight,4512.66
+363,2026-08-16,Bianca,Corvus Freight,81.74
+364,2026-08-17,Dolores,Acme Supplies,1570.29
+365,2026-08-17,Ahmed,Acme Supplies,4000.58
+366,2026-08-17,Ahmed,Delta Office,4071.13
+367,2026-08-17,Dolores,Evergreen IT,4736.63
+368,2026-08-17,Dolores,Evergreen IT,4865.53
+369,2026-08-17,Dolores,Evergreen IT,4885.01
+370,2026-08-18,Bianca,Delta Office,3119.96
+371,2026-08-18,Ahmed,Delta Office,1167.43
+372,2026-08-19,Ahmed,Evergreen IT,314.78
+373,2026-08-19,Bianca,Acme Supplies,1682.92
+374,2026-08-19,Emeka,Corvus Freight,1782.01
+375,2026-08-20,Chen,Delta Office,372.08
+376,2026-08-20,Chen,Fulton Print,3027.21
+377,2026-08-20,Chen,Delta Office,4296.83
+378,2026-08-21,Emeka,Fulton Print,990.69
+379,2026-08-21,Chen,Delta Office,4226.44
+380,2026-08-22,Bianca,Delta Office,1015.39
+381,2026-08-23,Bianca,Corvus Freight,2371.23
+382,2026-08-23,Bianca,Fulton Print,245.77
+383,2026-08-24,Dolores,Acme Supplies,777.57
+384,2026-08-24,Ahmed,Corvus Freight,503.32
+385,2026-08-24,Ahmed,Brightline,4180.18
+386,2026-08-25,Dolores,Brightline,3165.41
+387,2026-08-25,Emeka,Acme Supplies,4436.26
+388,2026-08-26,Chen,Fulton Print,1011.81
+389,2026-08-26,Bianca,Delta Office,4072.83
+390,2026-08-27,Chen,Fulton Print,1993.39
+391,2026-08-27,Ahmed,Fulton Print,3787.35
+392,2026-08-27,Dolores,Fulton Print,4301.23
+393,2026-08-28,Chen,Corvus Freight,2699.66
+394,2026-08-29,Dolores,Evergreen IT,3452.38
+395,2026-08-29,Dolores,Acme Supplies,760.21
+396,2026-08-29,Dolores,Evergreen IT,2279.8
+397,2026-08-30,Emeka,Evergreen IT,1187.01
+398,2026-08-30,Ahmed,Acme Supplies,2171.0
+399,2026-08-31,Dolores,Brightline,2826.33
+400,2026-08-31,Ahmed,Brightline,430.48

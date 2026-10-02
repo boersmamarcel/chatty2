@@ -91,6 +91,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/fabric-codec-baseline.md`](research/fabric-codec-baseline.md) | ADR-0021 kill criterion 3 | The v3 envelope's `FrameCodec` against the v2 frames, one session on one box (AGE-769) |
 | [`research/showcase-runs-2026-09-29.md`](research/showcase-runs-2026-09-29.md) | Shipping or changing a preset team | Real-model reliability runs of `data-analysis` and `research-brief`, the tuning history, and why `coder-reviewer` and the Benford team did not ship (AGE-752) |
 | [`research/dabstep-team-2026-09-30.md`](research/dabstep-team-2026-09-30.md) | Claiming a team beats one agent | E8: `analyst-panel` against a single agent on DABstep subset-80; no gain, and invalid handoffs are the main loss (AGE-754) |
+| [`research/swarm-vs-single-prereg.md`](research/swarm-vs-single-prereg.md) | Running or reading the swarm-vs-single benchmark | The frozen pre-registration: arms, the 30-task set, n = 30, MDE, analysis and decision rule; runner in `scripts/swarm-bench/` (AGE-670) |
 | [`research/plugin-perf-2026-09-27.md`](research/plugin-perf-2026-09-27.md) | PL-H4, PL-U2, or re-checking PL-H1 | S7 baseline: cold load, per-protocol overhead, concurrency, 1-hour soak (AGE-603) |
 | [`research/resume-spike-template.md`](research/resume-spike-template.md) | Running or analysing the resume spike | The frozen re-brief and resume prompts both arms get; runner in `scripts/resume-spike/` (AGE-650) |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |

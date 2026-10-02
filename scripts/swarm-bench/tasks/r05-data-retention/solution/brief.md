@@ -1,0 +1,1 @@
+Logs are kept 90 days, backups 35 days, and a terminated customer's data is deleted within 30 days [retention-policy.md]. Data under a legal hold is kept until Legal lifts it [retention-exceptions.md].

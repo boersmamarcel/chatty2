@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Due diligence on Initech Ltd",
+  "prompt": "Using only the documents in docs/, write brief.md: a due-diligence summary on the vendor Initech Ltd for the finance director: its current contract term, its annual spending cap, whether a data processing agreement is in place, and any open audit findings. Keep it short. Cite the source file of every fact in square brackets, e.g. [contracts-index.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}

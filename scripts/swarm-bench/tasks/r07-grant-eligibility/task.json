@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Innovation grant eligibility",
+  "prompt": "Using only the documents in docs/, write brief.md: a summary of the regional innovation grant for the board: the application deadline, the maximum grant, the share the company must co-fund, and whether a company with 310 employees is eligible. Keep it short. Cite the source file of every fact in square brackets, e.g. [grant-call-2025.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}

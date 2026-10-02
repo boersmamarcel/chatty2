@@ -1,0 +1,18 @@
+{
+  "type": "tests",
+  "command": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests",
+    "-t",
+    ".",
+    "-v"
+  ],
+  "protected": [
+    "tests/__init__.py",
+    "tests/test_semver.py"
+  ]
+}

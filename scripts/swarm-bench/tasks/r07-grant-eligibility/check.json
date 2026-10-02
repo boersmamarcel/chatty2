@@ -1,0 +1,27 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "grant-call-2025.md",
+    "grant-call-2026.md",
+    "grant-eligibility.md"
+  ],
+  "facts": [
+    {
+      "fact": "deadline 2026-12-15",
+      "pattern": "2026-12-15|15 December 2026|December 15"
+    },
+    {
+      "fact": "max 400,000",
+      "pattern": "400[,.\\s]?000|400k|400 ?K"
+    },
+    {
+      "fact": "co-funding 20%",
+      "pattern": "20 ?%|20 per ?cent"
+    },
+    {
+      "fact": "not eligible (250 limit)",
+      "pattern": "\\b250\\b"
+    }
+  ]
+}

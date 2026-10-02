@@ -1,0 +1,27 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "retention-exceptions.md",
+    "retention-policy-v2.md",
+    "retention-policy.md"
+  ],
+  "facts": [
+    {
+      "fact": "logs 90 days",
+      "pattern": "\\b90\\b"
+    },
+    {
+      "fact": "backups 35 days",
+      "pattern": "\\b35\\b"
+    },
+    {
+      "fact": "customer data 30 days",
+      "pattern": "\\b30\\b"
+    },
+    {
+      "fact": "legal hold",
+      "pattern": "legal hold"
+    }
+  ]
+}

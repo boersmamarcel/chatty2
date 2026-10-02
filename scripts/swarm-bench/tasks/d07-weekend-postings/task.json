@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Which user posts journal entries at weekends",
+  "prompt": "Journal entries are normally posted on working days (Monday to Friday). Which user posts journal entries at weekends far more often than the others? Use the data in journal.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: jkoval, mpatel, srossi, tnguyen, wbaker."
+}

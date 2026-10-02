@@ -1,0 +1,27 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "office-move-announcement.md",
+    "office-move-faq.md",
+    "old-office-lease.md"
+  ],
+  "facts": [
+    {
+      "fact": "Catharijnesingel 52",
+      "pattern": "Catharijnesingel 52"
+    },
+    {
+      "fact": "move date 2026-11-02",
+      "pattern": "2026-11-02|2 November 2026|November 2"
+    },
+    {
+      "fact": "18 parking spaces",
+      "pattern": "\\b18\\b"
+    },
+    {
+      "fact": "contact Sanne de Vries / facilities",
+      "pattern": "Sanne de Vries|facilities@example\\.com"
+    }
+  ]
+}

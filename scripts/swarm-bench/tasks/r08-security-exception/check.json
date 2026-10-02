@@ -1,0 +1,27 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "ex-44-detail.md",
+    "ex-44-request-2025.md",
+    "security-exceptions.md"
+  ],
+  "facts": [
+    {
+      "fact": "id EX-44",
+      "pattern": "EX-44"
+    },
+    {
+      "fact": "expires 2026-12-31",
+      "pattern": "2026-12-31|31 December 2026|December 31"
+    },
+    {
+      "fact": "IP allowlist",
+      "pattern": "allow ?-?list|whitelist"
+    },
+    {
+      "fact": "owner Aisha Bello",
+      "pattern": "Aisha Bello"
+    }
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Launch readiness of Ledgerly Pro",
+  "prompt": "Using only the documents in docs/, write brief.md: a launch-readiness note on Ledgerly Pro: the current launch date, the price, the open launch blocker, and who owns the support runbook. Keep it short. Cite the source file of every fact in square brackets, e.g. [launch-blockers.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}
