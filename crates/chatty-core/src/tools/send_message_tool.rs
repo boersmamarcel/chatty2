@@ -134,6 +134,7 @@ impl Tool for SendMessageTool {
                 CallEvent::Progress(_)
                 | CallEvent::InputRequired { .. }
                 | CallEvent::InputWithdrawn { .. }
+                | CallEvent::Approve { .. }
                 | CallEvent::Swarm(_) => {}
             }
         }

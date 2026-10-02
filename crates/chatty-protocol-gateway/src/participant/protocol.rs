@@ -87,8 +87,24 @@
 //! which un-parks its own task toward its caller in turn.
 //!
 //! These three, and `task.input_required` / `task.input` below, are interim
-//! notifications: ADR-0021's step 2 (EN-2a, EN-2b) replaces them with the
-//! `human.ask` and `human.approve` requests.
+//! notifications for questions: ADR-0021's step 2 (EN-2b) replaces them with
+//! the `human.ask` request.
+//!
+//! # An approval (EN-2a, AGE-770)
+//!
+//! A worker whose command or write needs a human asks the root, and only the
+//! root: it sends a `human.approve` request and waits for its result. The
+//! broker stamps the asker from the connection (whatever the worker put
+//! there is overwritten), delivers it to the root's call under an id of its
+//! own ([`chatty_fabric::CallEvent::Approve`]), and sends the root's answer
+//! back as the request's result. No caller in between sees it, and the
+//! broker never sends `human.approve` to a worker. A worker that stops
+//! waiting withdraws it with `req.cancel`.
+//!
+//! ```text
+//! participant → {"v":3,"id":4,"method":"human.approve","params":{"kind":"exec","command_or_path":"[shell] echo hi"}}
+//! broker      → {"v":3,"id":4,"result":"approved"}
+//! ```
 //!
 //! # A parked task
 //!
@@ -123,8 +139,8 @@
 //! ```
 
 use chatty_fabric::{
-    CallChain, CallError, CallRequest, ConversationScope, HandoffContract, NodeName, Remaining,
-    SpawnContext, SwarmItem,
+    ApprovalRequest, ApprovalVerdict, CallChain, CallError, CallRequest, ConversationScope,
+    HandoffContract, NodeName, Remaining, SpawnContext, SwarmItem,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -169,31 +185,14 @@ impl std::fmt::Display for TaskState {
     }
 }
 
-/// One thing a parked task is waiting on.
-///
-/// Untagged, so an `ask_user` question is field for field chatty-core's
-/// `ClarifyingQuestion` and an approval field for field its
-/// `A2aApprovalQuestion` (an `id` plus a flattened `ApprovalDetail`); they
-/// are spelled out here because the wire's schema belongs with the wire, and
-/// this crate does not depend on chatty-core without the `worker` feature.
-/// `Approval` comes first: a question has none of its fields.
+/// One thing a parked task is waiting on: an `ask_user` question, field for
+/// field chatty-core's `ClarifyingQuestion`. Spelled out here because the
+/// wire's schema belongs with the wire, and this crate does not depend on
+/// chatty-core without the `worker` feature. Approvals are not questions:
+/// they go to the root as `human.approve` (EN-2a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InputQuestion {
-    /// An execution or write approval a worker at depth ≥ 1 is waiting on
-    /// (AGE-646). Its caller re-raises it on its own approval store; the
-    /// answer is `approve` or `deny`.
-    Approval {
-        id: String,
-        kind: ApprovalKind,
-        command_or_path: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        diff_stat: Option<String>,
-        /// Who asked: stamped by the broker on the first hop up, kept by
-        /// every hop above it.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        asker: Option<ApprovalAsker>,
-    },
     /// One `ask_user` question.
     Question {
         id: String,
@@ -203,28 +202,11 @@ pub enum InputQuestion {
     },
 }
 
-/// Which approval store an [`InputQuestion::Approval`] belongs on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalKind {
-    Exec,
-    Write,
-}
-
-/// The agent an approval came from: its broker-assigned name and the chain
-/// of spec names it runs under, root first (AGE-646).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApprovalAsker {
-    pub agent: String,
-    pub chain: Vec<String>,
-}
-
-/// What a task in `input-required` is waiting for: one `ask_user` call, or
-/// one approval (AGE-646).
+/// What a task in `input-required` is waiting for: one `ask_user` call.
 ///
-/// `id` is the worker's own request id — the key its clarification or
-/// approval store resolves on — and it rides up and back down unchanged so
-/// the answer lands on the call that asked.
+/// `id` is the worker's own request id — the key its clarification store
+/// resolves on — and it rides up and back down unchanged so the answer
+/// lands on the call that asked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputRequest {
     pub id: String,
@@ -265,27 +247,6 @@ impl TaskBearer {
     /// The token itself. Named so the read is visible at the call site.
     pub fn expose(&self) -> &str {
         &self.0
-    }
-}
-
-impl InputRequest {
-    /// Name the agent every approval in this request came from, unless a
-    /// hop below already did (AGE-646): the broker calls this as the
-    /// request leaves `agent`'s task, so the first hop names the worker that
-    /// actually asked and every relay above keeps it.
-    pub fn stamp_asker(&mut self, agent: &str, chain: &[String]) {
-        for question in &mut self.questions {
-            if let InputQuestion::Approval {
-                asker: asker @ None,
-                ..
-            } = question
-            {
-                *asker = Some(ApprovalAsker {
-                    agent: agent.to_string(),
-                    chain: chain.to_vec(),
-                });
-            }
-        }
     }
 }
 
@@ -507,6 +468,14 @@ pub enum ParticipantFrame {
     /// The worker withdraws call `id` (`req.cancel`): the broker stops it,
     /// and sends nothing more for it.
     CancelCall { id: u64 },
+    /// A `human.approve` request (EN-2a): the worker waits on the root's
+    /// answer, [`BrokerFrame::Approval`]. `id` is the worker's own approval
+    /// number on its side and the request id on the broker's; the codec
+    /// maps between them.
+    Approve { id: u64, request: ApprovalRequest },
+    /// The worker withdraws approval `id` (`req.cancel`): nobody is waiting
+    /// on it any more.
+    CancelApproval { id: u64 },
 }
 
 /// A frame from the broker to a participant.
@@ -576,54 +545,14 @@ pub enum BrokerFrame {
     /// The question call `id`'s callee parked `task` on is over without
     /// this worker's answer (TB-7): withdraw the copy re-raised for it.
     CallInputWithdrawn { id: u64, task: String },
+    /// The root's answer to the worker's approval `id`: the `human.approve`
+    /// request's result (EN-2a).
+    Approval { id: u64, verdict: ApprovalVerdict },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// AGE-646: an approval rides the same `input` as a question, with its
-    /// own fields, and the asker is stamped once — the first hop up — so a
-    /// relay above cannot rename it.
-    #[test]
-    fn an_approval_is_an_input_question_stamped_once() {
-        let mut request: InputRequest = serde_json::from_value(serde_json::json!({
-            "id": "a1",
-            "questions": [{
-                "id": "a1",
-                "kind": "write",
-                "command_or_path": "src/lib.rs",
-                "diff_stat": "+3 \u{2212}1",
-            }],
-        }))
-        .unwrap();
-        request.stamp_asker("coder-0", &["root".into(), "lead".into(), "coder".into()]);
-        request.stamp_asker("lead-0", &["root".into(), "lead".into()]);
-        let InputQuestion::Approval { kind, asker, .. } = &request.questions[0] else {
-            panic!("an approval: {:?}", request.questions[0]);
-        };
-        assert_eq!(*kind, ApprovalKind::Write);
-        assert_eq!(asker.as_ref().unwrap().agent, "coder-0");
-        assert_eq!(
-            serde_json::to_value(&request).unwrap()["questions"][0]["asker"]["chain"],
-            serde_json::json!(["root", "lead", "coder"])
-        );
-
-        // A question is still a question, and nothing stamps it.
-        let mut question: InputRequest = serde_json::from_value(serde_json::json!({
-            "id": "r1",
-            "questions": [{ "id": "q1", "question": "Which?", "options": ["a"] }],
-        }))
-        .unwrap();
-        question.stamp_asker("coder-0", &[]);
-        assert_eq!(
-            serde_json::to_value(&question).unwrap(),
-            serde_json::json!({
-                "id": "r1",
-                "questions": [{ "id": "q1", "question": "Which?", "options": ["a"] }],
-            })
-        );
-    }
 
     #[test]
     fn the_bearer_does_not_debug_print() {

@@ -43,6 +43,19 @@
 //! root's direct handle or a worker's connection alike, so a question climbs
 //! every hop to the root's human (AGE-306, BI-5).
 //!
+//! An approval does not climb: only the root answers one (ADR-0021 § 2,
+//! EN-2a). A node's `human.approve` reaches [`BrokerCalls::raise_approval`],
+//! which stamps the asker from the node's admitted name and the chain of
+//! the run it serves (overwriting whatever the worker said), gives it an id
+//! unique within this broker, and delivers it to the root call that run is
+//! nested under as [`CallEvent::Approve`] — beside the swarm events, on the
+//! same line. The root's answer ([`Transport::approve`]) goes back to the
+//! request that asked, and nowhere else. A worker that withdraws its
+//! request, or whose connection closes because its callee ended or was
+//! stopped, withdraws the root's card ([`CallEvent::InputWithdrawn`] under
+//! the broker's id); a root call that ends denies whatever is still pending
+//! under it. An approval with no root call to go to is denied.
+//!
 //! A caller metered on a model endpoint does not hold its permit while it
 //! waits (BI-6): an `invoke_agent` call releases the caller's
 //! [`RunPermit`](chatty_fabric::RunPermit), and the call that brings the
@@ -92,7 +105,8 @@
 //! connection and so drops every call it made: the subtree goes the way a
 //! hung-up caller's does, permits and pending messages with it. The
 //! caller's own run carries on, and a question the stopped subtree had
-//! parked above it is withdrawn hop by hop ([`CallEvent::InputWithdrawn`]).
+//! parked above it is withdrawn hop by hop ([`CallEvent::InputWithdrawn`]),
+//! and an approval it was waiting on leaves the root's screen.
 //!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, every `send_message` call one message row, and every refused call
@@ -106,11 +120,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
-    AgentOrigin, CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest,
-    CallStream, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL,
-    InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList,
-    ROOT_NAME, Refusal, RefusalReason, Remaining, SendMessageParams, SpawnContext, SwarmBatcher,
-    SwarmItem, Transport, UsagePricer, deadline_grace,
+    AgentOrigin, ApprovalAsker, ApprovalRequest, ApprovalVerdict, CANCELLED_BY_USER, CallChain,
+    CallError, CallEvent, CallPolicy, CallRequest, CallStream, ChildCall, ConversationScope,
+    EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL, InvokeAgentOutcome, InvokeAgentParams, Message,
+    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, Remaining,
+    SendMessageParams, SpawnContext, SwarmBatcher, SwarmItem, Transport, UsagePricer,
+    deadline_grace,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -174,6 +189,72 @@ pub struct BrokerCalls {
     /// Every running call, by the node it runs: what
     /// [`cancel`](BrokerCalls::cancel) stops (TB-7).
     stops: Stops,
+    /// Every approval waiting on the root, by the id this broker gave it
+    /// (EN-2a).
+    approvals: Approvals,
+    /// The last approval id handed out.
+    next_approval: AtomicU64,
+}
+
+/// Approvals waiting on the root, by broker id.
+type Approvals = Arc<Mutex<HashMap<String, PendingApproval>>>;
+
+/// One approval the root has been asked for and has not answered.
+struct PendingApproval {
+    /// The root call it was delivered to: when that call ends, it is denied.
+    root_task_id: String,
+    /// Where the root's answer goes: the request that asked.
+    answer: oneshot::Sender<ApprovalVerdict>,
+    /// The root call's line, for a withdrawal.
+    root: mpsc::UnboundedSender<ToRoot>,
+}
+
+fn lock_approvals(
+    approvals: &Approvals,
+) -> std::sync::MutexGuard<'_, HashMap<String, PendingApproval>> {
+    approvals.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A node's approval, as [`BrokerCalls::raise_approval`] raised it: wait on
+/// [`verdict`](Self::verdict). Dropping it before the root answered — the
+/// worker withdrew the request, or its connection closed — withdraws the
+/// root's card.
+pub(crate) struct RaisedApproval {
+    /// `None` for an approval denied without asking.
+    pending: Option<(String, oneshot::Receiver<ApprovalVerdict>)>,
+    approvals: Approvals,
+}
+
+impl RaisedApproval {
+    fn denied(approvals: &Approvals) -> Self {
+        Self {
+            pending: None,
+            approvals: approvals.clone(),
+        }
+    }
+
+    /// The root's answer; `Denied` when there is nobody to ask or the root
+    /// call it went to has ended.
+    pub(crate) async fn verdict(&mut self) -> ApprovalVerdict {
+        match self.pending.as_mut() {
+            Some((_, answer)) => answer.await.unwrap_or(ApprovalVerdict::Denied),
+            None => ApprovalVerdict::Denied,
+        }
+    }
+}
+
+impl Drop for RaisedApproval {
+    fn drop(&mut self) {
+        let Some((id, _)) = self.pending.take() else {
+            return;
+        };
+        // Answered approvals are already out of the table.
+        let pending = lock_approvals(&self.approvals).remove(&id);
+        if let Some(pending) = pending {
+            debug!(approval = %id, "An approval was withdrawn before the root answered");
+            let _ = pending.root.send(ToRoot::Withdrawn { id });
+        }
+    }
 }
 
 /// The running calls [`BrokerCalls::cancel`] can stop.
@@ -236,7 +317,20 @@ fn stoppable(
 }
 
 /// Root calls listening for their nested runs, by root task id.
-type Swarm = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Nested>>>>;
+type Swarm = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ToRoot>>>>;
+
+/// What reaches a root call from the runs nested under it.
+enum ToRoot {
+    /// A nested run's event (TB-1).
+    Nested(Nested),
+    /// A node's approval, for the root to answer (EN-2a).
+    Approve {
+        id: String,
+        request: ApprovalRequest,
+    },
+    /// That approval is over without the root's answer.
+    Withdrawn { id: String },
+}
 
 /// One item a nested run reported, with the broker's tag.
 struct Nested {
@@ -245,19 +339,22 @@ struct Nested {
     item: SwarmItem,
 }
 
-/// A root call's end of [`Swarm`]; stops listening when dropped.
+/// A root call's end of [`Swarm`]; stops listening when dropped, which
+/// denies every approval still waiting on it.
 struct Listening {
     swarm: Swarm,
+    approvals: Approvals,
     root_task_id: String,
-    nested: mpsc::UnboundedReceiver<Nested>,
+    nested: mpsc::UnboundedReceiver<ToRoot>,
 }
 
 impl Listening {
-    fn open(swarm: &Swarm, root_task_id: &str) -> Self {
+    fn open(swarm: &Swarm, approvals: &Approvals, root_task_id: &str) -> Self {
         let (tx, nested) = mpsc::unbounded_channel();
         lock_swarm(swarm).insert(root_task_id.to_string(), tx);
         Self {
             swarm: swarm.clone(),
+            approvals: approvals.clone(),
             root_task_id: root_task_id.to_string(),
             nested,
         }
@@ -267,13 +364,24 @@ impl Listening {
 impl Drop for Listening {
     fn drop(&mut self) {
         lock_swarm(&self.swarm).remove(&self.root_task_id);
+        let mut approvals = lock_approvals(&self.approvals);
+        let orphaned: Vec<String> = approvals
+            .iter()
+            .filter(|(_, pending)| pending.root_task_id == self.root_task_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in orphaned {
+            if let Some(pending) = approvals.remove(&id) {
+                let _ = pending.answer.send(ApprovalVerdict::Denied);
+            }
+        }
     }
 }
 
 /// A nested run's line to its root call: where it reports, and the tag the
 /// broker puts on what it reports.
 struct Reporting {
-    to: mpsc::UnboundedSender<Nested>,
+    to: mpsc::UnboundedSender<ToRoot>,
     chain: CallChain,
     node: String,
     /// Whether the run's end has been reported.
@@ -298,11 +406,11 @@ impl Reporting {
         if matches!(item, SwarmItem::Ended { .. }) {
             self.ended.store(true, Ordering::Relaxed);
         }
-        let _ = self.to.send(Nested {
+        let _ = self.to.send(ToRoot::Nested(Nested {
             node: self.node.clone(),
             chain: self.chain.clone(),
             item,
-        });
+        }));
     }
 }
 
@@ -317,7 +425,7 @@ async fn sleep_until_cut(cut: Option<tokio::time::Instant>) {
 
 /// The next item a root call hears, or never for a call that does not
 /// listen.
-async fn next_nested(listening: &mut Option<Listening>) -> Option<Nested> {
+async fn next_nested(listening: &mut Option<Listening>) -> Option<ToRoot> {
     match listening {
         Some(listening) => listening.nested.recv().await,
         None => std::future::pending().await,
@@ -374,7 +482,7 @@ impl Policy {
 
 fn lock_swarm(
     swarm: &Swarm,
-) -> std::sync::MutexGuard<'_, HashMap<String, mpsc::UnboundedSender<Nested>>> {
+) -> std::sync::MutexGuard<'_, HashMap<String, mpsc::UnboundedSender<ToRoot>>> {
     swarm.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -394,7 +502,75 @@ impl BrokerCalls {
             pricer: None,
             swarm: Arc::default(),
             stops: Arc::default(),
+            approvals: Arc::default(),
+            next_approval: AtomicU64::new(0),
         }
+    }
+
+    /// Raise `node`'s `human.approve` with the root (EN-2a): stamp it with
+    /// the name `node` was admitted under and the chain of the run it
+    /// serves — whatever asker the worker put there is overwritten — and
+    /// deliver it, under a new id, to the root call that run is nested
+    /// under. A node with no run, or whose root call has ended, is denied
+    /// without asking.
+    pub(crate) fn raise_approval(
+        &self,
+        node: &str,
+        mut request: ApprovalRequest,
+    ) -> RaisedApproval {
+        let Some(chain) = self.registry.run_chain(node) else {
+            warn!(participant = %node, "Denying an approval from a node serving no run");
+            return RaisedApproval::denied(&self.approvals);
+        };
+        let Some(root) = lock_swarm(&self.swarm).get(&chain.root_task_id).cloned() else {
+            warn!(participant = %node, "Denying an approval with no root call to ask");
+            return RaisedApproval::denied(&self.approvals);
+        };
+        request.asker = Some(ApprovalAsker {
+            agent: node.to_string(),
+            chain: chain.chain.clone(),
+        });
+        let id = format!(
+            "approval-{}",
+            self.next_approval.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        let (answer, verdict) = oneshot::channel();
+        // In the table before it is sent, so a root call that ends in
+        // between denies it.
+        lock_approvals(&self.approvals).insert(
+            id.clone(),
+            PendingApproval {
+                root_task_id: chain.root_task_id.clone(),
+                answer,
+                root: root.clone(),
+            },
+        );
+        info!(participant = %node, approval = %id, kind = ?request.kind, "A node asked the root for an approval");
+        if root
+            .send(ToRoot::Approve {
+                id: id.clone(),
+                request,
+            })
+            .is_err()
+        {
+            lock_approvals(&self.approvals).remove(&id);
+            return RaisedApproval::denied(&self.approvals);
+        }
+        RaisedApproval {
+            pending: Some((id, verdict)),
+            approvals: self.approvals.clone(),
+        }
+    }
+
+    /// The root's answer to approval `id` (EN-2a), delivered to the request
+    /// that asked. `Err` when nothing is waiting under `id`: it was
+    /// answered, withdrawn, or never raised.
+    pub fn answer_approval(&self, id: &str, verdict: ApprovalVerdict) -> Result<(), CallError> {
+        let pending = lock_approvals(&self.approvals)
+            .remove(id)
+            .ok_or_else(|| CallError::Failed(format!("no approval '{id}' is pending")))?;
+        let _ = pending.answer.send(verdict);
+        Ok(())
     }
 
     /// Stop `node` and everything under it (TB-7, AGE-749): the call that
@@ -708,13 +884,12 @@ impl BrokerCalls {
         // call starts reports to its root call, if that is listening
         // (TB-1). Both are keyed by the chain the broker stamped.
         let chain = stamp.as_ref().map(|stamp| stamp.chain.clone());
-        // The chain an approval from this callee names (AGE-646).
-        let asker_chain = chain
-            .as_ref()
-            .map(|chain| chain.chain.clone())
-            .unwrap_or_default();
         let mut listening = match (&caller, &chain) {
-            (Caller::Root, Some(chain)) => Some(Listening::open(&self.swarm, &chain.root_task_id)),
+            (Caller::Root, Some(chain)) => Some(Listening::open(
+                &self.swarm,
+                &self.approvals,
+                &chain.root_task_id,
+            )),
             _ => None,
         };
         let reports_to = match (&caller, chain) {
@@ -822,8 +997,18 @@ impl BrokerCalls {
                         stopped_by_user = true;
                         break;
                     }
-                    Some(nested) = next_nested(&mut listening) => {
-                        batcher.push(&nested.node, &nested.chain, nested.item);
+                    Some(to_root) = next_nested(&mut listening) => {
+                        match to_root {
+                            ToRoot::Nested(nested) => {
+                                batcher.push(&nested.node, &nested.chain, nested.item);
+                            }
+                            ToRoot::Approve { id, request } => {
+                                yield Ok(CallEvent::Approve { id, request });
+                            }
+                            ToRoot::Withdrawn { id } => {
+                                yield Ok(CallEvent::InputWithdrawn { task: id });
+                            }
+                        }
                         continue;
                     }
                     _ = flush.tick(), if !batcher.is_empty() => {
@@ -870,13 +1055,11 @@ impl BrokerCalls {
                             break;
                         }
                         match (state, input) {
-                            // Back to whoever called, root or worker: a
-                            // worker re-asks it on its own store, which
-                            // parks its own task toward its caller.
-                            (TaskState::InputRequired, Some(mut input)) => {
-                                // An approval names the agent that asked,
-                                // once: the first hop up (AGE-646).
-                                input.stamp_asker(running.participant(), &asker_chain);
+                            // A question goes back to whoever called, root
+                            // or worker: a worker re-asks it on its own
+                            // store, which parks its own task toward its
+                            // caller.
+                            (TaskState::InputRequired, Some(input)) => {
                                 parked = Some(running.task_id.clone());
                                 yield Ok(CallEvent::InputRequired {
                                     task: running.task_id.clone(),
@@ -935,9 +1118,19 @@ impl BrokerCalls {
             // Every nested run ended before the callee did, so what they
             // reported is all here: it goes out, on the next flush, before
             // the result.
+            // A withdrawal still queued goes out before the result; an
+            // approval still pending is denied as the call ends.
             if let Some(listening) = listening.as_mut() {
-                while let Ok(nested) = listening.nested.try_recv() {
-                    batcher.push(&nested.node, &nested.chain, nested.item);
+                while let Ok(to_root) = listening.nested.try_recv() {
+                    match to_root {
+                        ToRoot::Nested(nested) => {
+                            batcher.push(&nested.node, &nested.chain, nested.item);
+                        }
+                        ToRoot::Withdrawn { id } => {
+                            yield Ok(CallEvent::InputWithdrawn { task: id });
+                        }
+                        ToRoot::Approve { .. } => {}
+                    }
                 }
             }
             if !batcher.is_empty() {
@@ -1200,6 +1393,11 @@ impl Transport for DirectTransport {
             .answer_task(task, input)
             .await
             .map_err(|e| CallError::Failed(e.to_string()))
+    }
+
+    /// The root's answer to an approval the broker delivered (EN-2a).
+    async fn approve(&self, id: &str, verdict: ApprovalVerdict) -> Result<(), CallError> {
+        self.calls.answer_approval(id, verdict)
     }
 
     /// The root's next user turn is starting: its messages, for the turn
@@ -1869,3 +2067,7 @@ mod tests {
 #[cfg(all(test, unix))]
 #[path = "swarm_forwarding_tests.rs"]
 mod swarm_forwarding_tests;
+
+#[cfg(all(test, unix))]
+#[path = "root_approval_tests.rs"]
+mod root_approval_tests;

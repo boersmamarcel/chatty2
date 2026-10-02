@@ -13,8 +13,8 @@ pub enum ApprovalDecision {
 }
 
 /// Which store an approval belongs to: a command (shell, git, browser,
-/// plugin) or a filesystem write. Rides the A2A wire when an approval is
-/// relayed up the call chain (AGE-646), so its spelling is the wire's.
+/// plugin) or a filesystem write. Spelled as `human.approve`'s `kind`
+/// (EN-2a).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
@@ -24,18 +24,18 @@ pub enum ApprovalKind {
 
 /// The delegated agent an approval was raised by (AGE-646): its
 /// broker-assigned name and the chain of spec names it runs under, root
-/// first. The broker stamps it on the first hop up; every hop above keeps
-/// it, so the human's card names the agent that actually asked.
+/// first. The broker stamps it from the asking worker's connection
+/// (EN-2a), so the human's card names the agent that actually asked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalAsker {
     pub agent: String,
     pub chain: Vec<String>,
 }
 
-/// What an approval is for, in the shape it travels up the call chain in
-/// (AGE-646): the kind, the command or the path, a write's diff stat, and —
-/// once it has been relayed — who asked. The notification's `command` is the
-/// line a card shows; this is what a worker sends its parent.
+/// What an approval is for, in `human.approve`'s shape (EN-2a): the kind,
+/// the command or the path, a write's diff stat, and — once the broker has
+/// forwarded it to the root — who asked. The notification's `command` is the
+/// line a card shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalDetail {
     pub kind: ApprovalKind,
@@ -57,6 +57,24 @@ impl ApprovalDetail {
         }
     }
 
+    /// An approval the broker forwarded to the root (EN-2a), as its card
+    /// shows it: every field [`literal`], so what the human reads is
+    /// exactly what the worker sent.
+    pub fn forwarded(request: chatty_fabric::ApprovalRequest) -> Self {
+        Self {
+            kind: match request.kind {
+                chatty_fabric::ApprovalKind::Exec => ApprovalKind::Exec,
+                chatty_fabric::ApprovalKind::Write => ApprovalKind::Write,
+            },
+            command_or_path: literal(&request.command_or_path),
+            diff_stat: request.diff_stat.as_deref().map(literal),
+            asker: request.asker.map(|asker| ApprovalAsker {
+                agent: literal(&asker.agent),
+                chain: asker.chain.iter().map(|spec| literal(spec)).collect(),
+            }),
+        }
+    }
+
     /// The command or path this approval is for, with no asker folded in
     /// (AGE-751): `[shell] echo hi`, or `[write] path (+3 -1)`. This is what
     /// `ApprovalNotification::command` carries; a card that wants to name
@@ -70,6 +88,57 @@ impl ApprovalDetail {
             },
         }
     }
+}
+
+/// How many characters of one forwarded field a card shows (EN-2a); the
+/// rest is cut, and the cut is marked.
+pub const LITERAL_CAP: usize = 4096;
+
+/// `text` as an approval card shows it literally (EN-2a): a line break,
+/// tab or carriage return as `\n`, `\t`, `\r`; any other control
+/// character (an escape sequence's ESC included), a bidi override or
+/// isolate, or an invisible format character as `\u{…}`; and at most
+/// [`LITERAL_CAP`] characters, the rest replaced by a marker saying how
+/// many were cut. So nothing a worker sends can reorder, hide or restyle
+/// what the human reads.
+pub fn literal(text: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(text.len().min(LITERAL_CAP));
+    for (shown, c) in text.chars().enumerate() {
+        if shown == LITERAL_CAP {
+            let cut = text.chars().count() - LITERAL_CAP;
+            let _ = write!(out, "… [{cut} more characters not shown]");
+            break;
+        }
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() || hidden(c) => {
+                let _ = write!(out, "\\u{{{:04x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A character that changes how the text around it is shown without being
+/// seen itself: the bidi marks, embeddings, overrides and isolates, and the
+/// zero-width and other invisible format characters.
+fn hidden(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00ad}'
+            | '\u{061c}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+    )
 }
 
 /// Notification that an approval request was created
@@ -156,11 +225,14 @@ pub async fn request_execution_approval(
     .await
 }
 
-/// Re-raise an approval a delegated agent asked for on this agent's own
-/// store (AGE-646), always asking: the worker below would not have asked if
-/// its mode — the root's, mirrored down — let it through. The notification's
-/// `command` is [`ApprovalDetail::description`]; the asker travels in
-/// `detail.asker` for the card to show separately (AGE-751).
+/// Raise an approval the broker forwarded to the root (EN-2a) on the root's
+/// own store, always asking a human: the root's [`ApprovalMode`], any
+/// classifier and the asking callee's sandbox never decide a forwarded
+/// approval, so the notification is never marked sandboxed. The
+/// notification's `command` is [`ApprovalDetail::description`]; the asker
+/// travels in `detail.asker` for the card to show separately (AGE-751).
+///
+/// [`ApprovalMode`]: crate::settings::models::execution_settings::ApprovalMode
 ///
 /// Dropping the future — the turn it runs in was cancelled — withdraws the
 /// request and announces it resolved (denied), so no card outlives it.
