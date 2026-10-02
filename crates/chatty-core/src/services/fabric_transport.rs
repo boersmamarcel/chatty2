@@ -244,6 +244,7 @@ mod tests {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         })
     }
 

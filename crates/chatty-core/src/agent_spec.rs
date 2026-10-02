@@ -410,6 +410,9 @@ impl BudgetSection {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SpecError {
     BadName(String),
+    /// The name is [`chatty_fabric::ROOT_NAME`], which only the broker's
+    /// root goes by (ADR-0023 § 2): no spec may take it.
+    ReservedName(String),
     UnknownProfile(String),
     UnknownToolGroup(String),
     BadModel(String),
@@ -429,6 +432,10 @@ impl std::fmt::Display for SpecError {
                 f,
                 "agent.name '{name}' is not a name: use lowercase letters, digits, '-' and '_', \
                  starting with a letter or digit, at most 64 characters"
+            ),
+            Self::ReservedName(name) => write!(
+                f,
+                "agent.name '{name}' is reserved: only the broker's root goes by it"
             ),
             Self::UnknownProfile(profile) => write!(
                 f,
@@ -463,6 +470,11 @@ impl std::fmt::Display for SpecErrors {
 }
 
 impl std::error::Error for SpecErrors {}
+
+/// Whether `name` is the root's, which no spec may take (ADR-0023 § 2).
+fn is_reserved_name(name: &str) -> bool {
+    name == chatty_fabric::ROOT_NAME
+}
 
 fn is_valid_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -514,6 +526,8 @@ impl AgentSpec {
         let mut errors = Vec::new();
         if !is_valid_name(&self.agent.name) {
             errors.push(SpecError::BadName(self.agent.name.clone()));
+        } else if is_reserved_name(&self.agent.name) {
+            errors.push(SpecError::ReservedName(self.agent.name.clone()));
         }
         if let Some(model) = self.agent.model.as_deref() {
             let resolves = match models {
@@ -632,6 +646,9 @@ pub fn load_agent_spec_from(
 ) -> Result<LoadedSpec> {
     if !is_valid_name(name) {
         bail!("{}", SpecError::BadName(name.to_string()));
+    }
+    if is_reserved_name(name) {
+        bail!("{}", SpecError::ReservedName(name.to_string()));
     }
     let dirs = spec_dirs(workspace, data_dir);
     for (dir, in_workspace) in &dirs {
@@ -1672,5 +1689,43 @@ cap_usd = 2.0
             Some(workspace_b.path()),
             true,
         ));
+    }
+
+    /// ADR-0023 § 2: `root` is the broker's root's name. No spec may take
+    /// it — not by its `agent.name`, not by its file name — and a spec that
+    /// tries fails alone: the others beside it still load.
+    #[test]
+    fn root_name_cannot_be_taken() {
+        let errors = AgentSpec::named("root").validate(None).unwrap_err().0;
+        assert_eq!(errors, [SpecError::ReservedName("root".to_string())]);
+
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("root.toml"), "[agent]\nname = \"root\"\n").unwrap();
+        std::fs::write(dir.join("helper.toml"), "[agent]\nname = \"helper\"\n").unwrap();
+
+        let error = load_agent_spec_from("root", Some(workspace.path()), None).unwrap_err();
+        assert!(format!("{error:#}").contains("reserved"), "{error:#}");
+        assert_eq!(
+            load_agent_spec_from("helper", Some(workspace.path()), None)
+                .unwrap()
+                .spec
+                .agent
+                .name,
+            "helper"
+        );
+
+        let listings = inspect_agent_specs_from(Some(workspace.path()), None);
+        let of = |name: &str| listings.iter().find(|l| l.name == name).unwrap();
+        assert!(
+            of("root")
+                .spec
+                .as_ref()
+                .is_err_and(|e| e.contains("reserved")),
+            "{:?}",
+            of("root").spec
+        );
+        assert!(of("helper").spec.is_ok(), "the invalid spec fails alone");
     }
 }

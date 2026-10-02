@@ -28,14 +28,23 @@ pub struct InvokeAgentParams {
     /// which is what every `invoke_agent` sends, lets the broker derive it
     /// from the calling node's own context; one given is clamped to that
     /// context by the root broker and refused if it reaches outside it.
+    /// Boxed: it is rarely set, and keeps [`CallRequest`] small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawn_context: Option<SpawnContext>,
+    pub spawn_context: Option<Box<SpawnContext>>,
     /// What the caller counts as left of its own budget (DP-3): its turns
     /// and dollars less what it has spent, delegated usage included, and
     /// its time as seconds. The broker only ever narrows the chain's budget
     /// with it; absent on the wire when the caller has no limit.
     #[serde(default, skip_serializing_if = "Remaining::is_unlimited")]
     pub remaining: Remaining,
+    /// The run the call is made from (ADR-0023 § 1, GT-0b): the `taskId`
+    /// of the `task.run` the calling worker is serving, which the broker
+    /// issued when it opened that task's run. A node's call is decided
+    /// under that run's chain, and refused when it names no open run of
+    /// its own. The root calls from no run and names none; a worker's
+    /// connection fills it in for the one task it serves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 /// What a spawned worker starts from: where its tree goes, what its branch
@@ -313,6 +322,7 @@ mod tests {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         });
         assert_eq!(
             serde_json::to_value(&invoke).unwrap(),
@@ -397,6 +407,7 @@ mod tests {
                     include_trace: false,
                     spawn_context: None,
                     remaining: Default::default(),
+                    run: None,
                 }))
                 .await
                 .unwrap()

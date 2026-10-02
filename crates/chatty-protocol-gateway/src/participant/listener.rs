@@ -31,7 +31,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::calls::Caller;
+use super::calls::Peer;
 use super::codec::BrokerCodec;
 use super::limits::{
     BoundedLines, CALL_BURST, CALLS_PER_SECOND, MAX_FRAME_BYTES, MAX_IN_FLIGHT_CALLS,
@@ -274,7 +274,7 @@ where
                     };
                     match broker {
                         Ok(broker) => {
-                            let stream = broker.call(Caller::Node(name.clone()), request);
+                            let stream = broker.call(Peer::Node(name.clone()), request);
                             let handle =
                                 calls.spawn(reply(id, stream, outbound_tx.clone(), parked.clone()));
                             running.insert(id, handle);

@@ -43,7 +43,7 @@ use tracing::{debug, info};
 
 use super::listener::{LocalConnection, open_connection};
 use super::protocol::{DelegatedTask, ParticipantCard, ParticipantSkill};
-use super::registry::{ParticipantRegistry, RunGuard, TaskStream};
+use super::registry::{ParticipantRegistry, TaskStream};
 use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle};
 
 /// A worker's directory, and what to do with it once the worker is gone.
@@ -336,14 +336,6 @@ impl LocalRunner {
         if let Some(permit) = permit.as_ref() {
             self.registry.set_node_permit(&name, permit);
         }
-        // The run this task is, with the chain the broker stamped on it
-        // (DP-2): recorded before the worker exists, so its first call
-        // already extends it. Released when the worker is reaped.
-        let run = task.call.as_ref().and_then(|call| {
-            self.registry
-                .open_run(&name, call.caller.as_deref(), call.chain.clone())
-        });
-
         // Where it goes comes from the task's spawn context: the caller's
         // own tree and branch (BI-5). A task without one is the root's.
         let request = match task.spawn_context.as_ref() {
@@ -402,7 +394,6 @@ impl LocalRunner {
             stderr_tail,
             stderr_drain,
             _permit: permit,
-            _run: run,
         };
 
         self.await_registration(&mut worker).await?;
@@ -587,8 +578,6 @@ pub struct Worker {
     /// once it is reaped, so the next queued run is admitted by the same
     /// event that frees the process and its workspace.
     _permit: Option<RunPermit>,
-    /// The run this worker serves in the broker's task table (DP-2).
-    _run: Option<RunGuard>,
 }
 
 impl std::fmt::Debug for Worker {
@@ -777,7 +766,7 @@ mod tests {
         );
 
         let (worker, _updates) = runner
-            .run_task(DelegatedTask::new("summarise foo.rs"))
+            .run_task(DelegatedTask::from_root("summarise foo.rs"))
             .await
             .expect("the worker said hello, so the task is delegated");
 
@@ -808,7 +797,10 @@ mod tests {
             ),
         );
 
-        let _worker = runner.run_task(DelegatedTask::new("x")).await.unwrap();
+        let _worker = runner
+            .run_task(DelegatedTask::from_root("x"))
+            .await
+            .unwrap();
         let out = std::fs::read_to_string(&out).unwrap();
         assert!(
             out.contains(&format!("--participant-fd {PARTICIPANT_FD}|")),
@@ -824,7 +816,7 @@ mod tests {
         let runner = runner(registry, "echo 'no model configured' >&2; exit 3");
 
         let error = runner
-            .run_task(DelegatedTask::new("anything"))
+            .run_task(DelegatedTask::from_root("anything"))
             .await
             .expect_err("a child that exits cannot take a task");
         let text = format!("{error:#}");
@@ -843,7 +835,7 @@ mod tests {
             runner(registry, "sleep 30").with_registration_timeout(Duration::from_millis(150));
 
         let error = runner
-            .run_task(DelegatedTask::new("anything"))
+            .run_task(DelegatedTask::from_root("anything"))
             .await
             .expect_err("a child that never registers fails the task");
         assert!(
@@ -881,7 +873,10 @@ mod tests {
             })
         });
 
-        let (worker, _updates) = runner.run_task(DelegatedTask::new("work")).await.unwrap();
+        let (worker, _updates) = runner
+            .run_task(DelegatedTask::from_root("work"))
+            .await
+            .unwrap();
         assert!(
             !released.load(Ordering::Relaxed),
             "the workspace is held while the worker is alive"
@@ -902,7 +897,7 @@ mod tests {
         }));
 
         let error = runner
-            .run_task(DelegatedTask::new("work"))
+            .run_task(DelegatedTask::from_root("work"))
             .await
             .expect_err("ADR-0012 isolation that was asked for and failed is not silently skipped");
         assert!(format!("{error:#}").contains("worktree"), "{error:#}");
@@ -913,7 +908,10 @@ mod tests {
         let registry = ParticipantRegistry::new();
         let runner = runner(registry.clone(), &waiting_worker());
 
-        let (worker, mut updates) = runner.run_task(DelegatedTask::new("work")).await.unwrap();
+        let (worker, mut updates) = runner
+            .run_task(DelegatedTask::from_root("work"))
+            .await
+            .unwrap();
         assert_eq!(registry.open_task_count("local-agent-0"), 1);
 
         drop(worker);
@@ -943,13 +941,19 @@ mod tests {
                 .with_endpoint_budget(ENDPOINT, budget.clone()),
         );
 
-        let first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
-        let second = runner.run_task(DelegatedTask::new("b")).await.unwrap();
+        let first = runner
+            .run_task(DelegatedTask::from_root("a"))
+            .await
+            .unwrap();
+        let second = runner
+            .run_task(DelegatedTask::from_root("b"))
+            .await
+            .unwrap();
         assert_eq!(budget.in_flight(ENDPOINT), 2, "the budget is spent");
 
         let third = tokio::spawn({
             let runner = Arc::clone(&runner);
-            async move { runner.run_task(DelegatedTask::new("c")).await }
+            async move { runner.run_task(DelegatedTask::from_root("c")).await }
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -981,10 +985,13 @@ mod tests {
         let registry = ParticipantRegistry::new();
         let runner = runner(registry.clone(), &waiting_worker());
 
-        let _first = runner.run_task(DelegatedTask::new("a")).await.unwrap();
+        let _first = runner
+            .run_task(DelegatedTask::from_root("a"))
+            .await
+            .unwrap();
         let second = tokio::time::timeout(
             Duration::from_secs(5),
-            runner.run_task(DelegatedTask::new("b")),
+            runner.run_task(DelegatedTask::from_root("b")),
         )
         .await
         .expect("no budget, no queue");
@@ -1031,12 +1038,15 @@ mod tests {
             .with_agent_name("local-reviewer")
             .with_endpoint_budget("http://other:8000/v1", budget.clone());
 
-        let first = coder.run_task(DelegatedTask::new("code")).await.unwrap();
+        let first = coder
+            .run_task(DelegatedTask::from_root("code"))
+            .await
+            .unwrap();
         assert_eq!(budget.in_flight("http://localhost:11434"), 1);
 
         let second = tokio::time::timeout(
             Duration::from_secs(5),
-            reviewer.run_task(DelegatedTask::new("review")),
+            reviewer.run_task(DelegatedTask::from_root("review")),
         )
         .await
         .expect("a different endpoint has its own slot, so nothing waits")
@@ -1063,12 +1073,15 @@ mod tests {
                 .with_endpoint_budget(ENDPOINT, budget.clone()),
         );
 
-        let first = coder.run_task(DelegatedTask::new("code")).await.unwrap();
+        let first = coder
+            .run_task(DelegatedTask::from_root("code"))
+            .await
+            .unwrap();
         assert_eq!(budget.in_flight(ENDPOINT), 1, "the one slot is spent");
 
         let second = tokio::spawn({
             let reviewer = Arc::clone(&reviewer);
-            async move { reviewer.run_task(DelegatedTask::new("review")).await }
+            async move { reviewer.run_task(DelegatedTask::from_root("review")).await }
         });
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
@@ -1099,7 +1112,10 @@ mod tests {
         let runner = runner(registry.clone(), &waiting_worker())
             .with_endpoint_budget(ENDPOINT, budget.clone());
 
-        let (worker, _updates) = runner.run_task(DelegatedTask::new("a")).await.unwrap();
+        let (worker, _updates) = runner
+            .run_task(DelegatedTask::from_root("a"))
+            .await
+            .unwrap();
         let permit = registry
             .node_permit(worker.name())
             .expect("the node's permit is recorded");
