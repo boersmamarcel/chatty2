@@ -73,11 +73,11 @@ Then list it in your module settings file, next to the rest of Chatty's settings
 ```bash
 mkdir -p ~/.config/chatty
 cat > ~/.config/chatty/module_settings.json <<'EOF'
-{ "virtual_agents": ["local-reviewer"] }
+{ "virtual_agents": ["local-reviewer"], "team": { "isolate": true } }
 EOF
 ```
 
-If the file already exists, add the `virtual_agents` list to it rather than replacing it. There is no settings page for this yet.
+If the file already exists, add the `virtual_agents` list and the `team` block to it rather than replacing it. There is no settings page for this yet. `"isolate": true` gives every worker its own git worktree, which step 5 looks at; without it a worker works in your workspace directly.
 
 Four fields, and each one matters:
 
@@ -141,7 +141,7 @@ git branch          # main, sub-agent/local-reviewer-0
 ls .chatty/worktrees/   # local-reviewer-0
 ```
 
-Every worker gets its own copy of the tree on its own branch, `sub-agent/<worker>-<n>` (the number counts that worker's delegations in the session), whether or not its role can write. The reviewer's copy is where it ran the tests. It committed nothing, so the reply carries no `evidence` block — that block only exists when there is something to merge. Give a `coder` role the same task and the reply ends with one: the branch, its commit count and a diff summary. That is what the next tutorial builds on.
+With `"isolate": true`, every worker gets its own copy of the tree on its own branch, `sub-agent/<worker>-<n>` (the number counts that worker's delegations in the session), whether or not its role can write. The reviewer's copy is where it ran the tests. It committed nothing, so the reply carries no `evidence` block — that block only exists when there is something to merge. Give a `coder` role the same task and the reply ends with one: the branch, its commit count and a diff summary. That is what the next tutorial builds on.
 
 Worktrees and branches are left for you to inspect and are never removed behind your back. When you are done with one: `git worktree remove .chatty/worktrees/local-reviewer-0 && git branch -D sub-agent/local-reviewer-0` (in that order — git will not delete a branch a worktree still has checked out).
 

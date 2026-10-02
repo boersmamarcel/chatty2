@@ -102,8 +102,9 @@ pub struct Broker {
 impl Broker {
     /// `workspace_dir` and `auto_approve` mirror the leader's own execution
     /// settings, exactly as the desktop passes its conversation's workspace
-    /// and approval mode to `broker_runner::local_runners`: a worker gets
-    /// its own `git worktree` under the same root, and inherits the same
+    /// and approval mode to `broker_runner::local_runners`: a worker works
+    /// in the same root — in a `git worktree` of its own under it when its
+    /// team sets `"isolate": true` (AGE-822) — and inherits the same
     /// no-human approval policy. `provider_flags` are the leader's own
     /// `--ollama`/`--openai-compat-url`/`--api-key`, forwarded verbatim
     /// (see [`provider_flags`]). `agents` is the roster's specs, already
@@ -596,8 +597,11 @@ fn local_runners(
                 .with_args(spec.args)
                 .with_workspace_root(workspace_dir.clone())
                 .with_verification(spec.verification)
-                .with_handoff(spec.handoff)
-                .with_workspace_factory(worktree_factory());
+                .with_handoff(spec.handoff);
+            // A worktree per worker only for a team that asks (AGE-822).
+            if spec.isolate {
+                runner = runner.with_workspace_factory(worktree_factory());
+            }
             if let Some((endpoint, _)) = spec.endpoint {
                 runner = runner.with_endpoint_budget(endpoint, budget.clone());
             }

@@ -22,6 +22,7 @@ use crate::services::handoff::{HandoffLedger, HandoffReport};
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::run_budget::RunBudget;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
+use crate::services::worker_start::{STOP_NOTE, WorkerStartFailure};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::filesystem_write_tool::request_relayed_write_approval;
 use chatty_fabric::wire::WireProgress;
@@ -200,6 +201,16 @@ pub enum InvokeAgentError {
         agent: String,
         messages: Vec<String>,
     },
+    /// The callee's worker — or one under it — never started: its
+    /// worktree, its process or its hello failed (AGE-822). Terminal: the
+    /// model sees the typed failure and [`STOP_NOTE`], and
+    /// [`StopOnWorkerStartFailure`](crate::services::worker_start::StopOnWorkerStartFailure)
+    /// ends its run on it.
+    #[error(
+        "{}\n\n{STOP_NOTE}",
+        chatty_fabric::worker_start_failed(&.0.agent, &.0.reason)
+    )]
+    WorkerStartFailed(WorkerStartFailure),
 }
 
 /// The line a delegation the user stopped finishes with, in its
@@ -505,7 +516,16 @@ impl Tool for InvokeAgentTool {
     /// Keep the real failure text in front of the user and the model:
     /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
     fn map_error(&self, error: Self::Error) -> ToolExecutionError {
-        crate::tools::map_tool_error(Self::NAME, error)
+        // A worker that never started is not the model's to retry (AGE-822).
+        let terminal = matches!(error, InvokeAgentError::WorkerStartFailed(_));
+        let mapped = crate::tools::map_tool_error(Self::NAME, error);
+        if terminal {
+            mapped
+                .with_retryable(false)
+                .with_code(chatty_fabric::WORKER_START_FAILED)
+        } else {
+            mapped
+        }
     }
 
     async fn call(
@@ -955,6 +975,17 @@ impl InvokeAgentTool {
         }
 
         if !success {
+            // A worker that never started, here or anywhere below the
+            // callee: terminal for this caller and shown to the user
+            // (AGE-822).
+            if let Some(failure) = error_msg.as_deref().and_then(WorkerStartFailure::find) {
+                self.send_progress(InvokeAgentProgress::Finished {
+                    success: false,
+                    result: Some(failure.card()),
+                    usage,
+                });
+                return Err(InvokeAgentError::WorkerStartFailed(failure));
+            }
             let err_text = error_msg
                 .as_ref()
                 .map(|m| format!("⚠️ {m}"))

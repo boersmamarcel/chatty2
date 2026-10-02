@@ -1,9 +1,11 @@
 use crate::assets::CustomIcon;
 use crate::chatty::models::MessageFeedback;
 use crate::chatty::views::transcript::{INLINE_IMAGE_MAX_PX, inline_chat_attachments};
+use chatty_core::services::worker_start;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::Icon;
+use gpui_component::alert::Alert;
 use std::path::PathBuf;
 use tracing::debug;
 
@@ -296,6 +298,25 @@ pub struct MessageRenderCaches<'a> {
     pub streaming: &'a mut Option<StreamingParseState>,
 }
 
+/// A start-failure card ([`worker_start::parse_card`]) as an error alert:
+/// the title, then what failed and what to do.
+fn render_error_card(card: &str, base_index: usize) -> AnyElement {
+    let (title, body) = worker_start::parse_card(card).unwrap_or((card, ""));
+    // The alert draws its own icon; the card's text mark is for plain text.
+    let title = title.trim_start_matches('\u{26d4}').trim_start();
+    div()
+        .w_full()
+        .py_1()
+        .child(
+            Alert::error(
+                ElementId::Name(format!("start-failure-{base_index}").into()),
+                body.to_string(),
+            )
+            .title(title.to_string()),
+        )
+        .into_any_element()
+}
+
 /// Render a text segment using the cache, handling embedded `<thinking>` blocks.
 ///
 /// For finalized markdown content, uses the persistent cache to avoid re-parsing.
@@ -310,6 +331,19 @@ fn render_text_segment_cached(
     caches: &mut MessageRenderCaches<'_>,
     cx: &App,
 ) -> Vec<AnyElement> {
+    // A worker that could not start, or an `/agent` refused before it
+    // started anything, ends the text with a card (AGE-822): drawn as an
+    // error alert, after whatever the turn said before it.
+    if !is_streaming && let Some(at) = text_segment.find(worker_start::CARD_TITLE) {
+        let (before, card) = text_segment.split_at(at);
+        let mut elements = if before.trim().is_empty() {
+            Vec::new()
+        } else {
+            render_text_segment_cached(before, base_index, is_markdown, false, theme, caches, cx)
+        };
+        elements.push(render_error_card(card, base_index));
+        return elements;
+    }
     if is_markdown && !is_streaming {
         // Finalized: use cache to avoid re-parsing on every render
         let cache_key = ContentCacheKey::new(text_segment, theme);
@@ -679,7 +713,9 @@ where
     // - Finalized: cache the parse result to avoid re-parsing on every render
     // - Streaming: reuse code block highlights from the previous render
     if matches!(msg.role, MessageRole::Assistant) && !should_interleave && msg.is_markdown {
-        let children = if !msg.is_streaming {
+        let children = if !msg.is_streaming && msg.content.contains(worker_start::CARD_TITLE) {
+            render_text_segment_cached(&msg.content, index, true, false, theme, caches, cx)
+        } else if !msg.is_streaming {
             // Finalized: use cached parse result
             let cache_key = ContentCacheKey::new(&msg.content, theme);
             if caches.parsed.get(&cache_key).is_none() {

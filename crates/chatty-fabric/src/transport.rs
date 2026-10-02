@@ -255,6 +255,32 @@ pub struct InvokeAgentOutcome {
 /// `error` and in the tool error its model sees (TB-7, AGE-749).
 pub const CANCELLED_BY_USER: &str = "cancelled_by_user";
 
+/// The typed reason a call's worker never started (AGE-822): its
+/// worktree, its spawn or its registration failed. It leads the failed
+/// result's `error` — `worker_start_failed: '<agent>' could not be started:
+/// <why>` — and every caller up the tree passes it on unchanged, so the
+/// user is shown the setup problem and no agent tries to work around it.
+pub const WORKER_START_FAILED: &str = "worker_start_failed";
+
+/// The `error` of a call whose worker for `agent` never started, `reason`
+/// being why (AGE-822).
+pub fn worker_start_failed(agent: &str, reason: &str) -> String {
+    format!("{WORKER_START_FAILED}: '{agent}' could not be started: {reason}")
+}
+
+/// The agent and the reason of the [`worker_start_failed`] text in
+/// `text`, wherever in it that is: a caller that wraps the error it got
+/// (a tool's `Error: …`, a sub-leader's failed task) still carries it.
+/// The reason ends at the first blank line, where a wrapper's own words
+/// begin.
+pub fn find_worker_start_failure(text: &str) -> Option<(&str, &str)> {
+    let rest = &text[text.find(WORKER_START_FAILED)? + WORKER_START_FAILED.len()..];
+    let rest = rest.strip_prefix(": '")?;
+    let (agent, rest) = rest.split_once("' could not be started: ")?;
+    let reason = rest.split("\n\n").next().unwrap_or(rest).trim();
+    Some((agent, reason))
+}
+
 /// Why a call failed. On the wire it is a [`WireError`](crate::wire::WireError),
 /// the `error` of a v3 error response; the two convert both ways.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -360,6 +386,18 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use serde_json::json;
+
+    /// AGE-822: the start failure survives every wrapper a caller puts
+    /// around it, and its reason stops where the wrapper's words begin.
+    #[test]
+    fn a_worker_start_failure_is_found_inside_a_wrapped_error() {
+        let error = worker_start_failed("data-analyst", "no worktree: no commits");
+        assert_eq!(
+            find_worker_start_failure(&format!("Error: invoke_agent: {error}\n\nStop now.")),
+            Some(("data-analyst", "no worktree: no commits"))
+        );
+        assert_eq!(find_worker_start_failure("the analyst crashed"), None);
+    }
 
     #[test]
     fn message_statuses_have_the_wire_shape() {
