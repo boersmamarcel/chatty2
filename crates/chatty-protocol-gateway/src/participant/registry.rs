@@ -34,13 +34,10 @@ use serde_json::Value;
 use super::calls::{BrokerCalls, Caller};
 use super::codec::BrokerCodec;
 use super::limits::MAX_FRAME_BYTES;
-use super::protocol::{
-    BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
-    TaskState,
-};
+use super::protocol::{BrokerFrame, DelegatedTask, ParticipantCard, ParticipantFrame, TaskState};
 use chatty_fabric::{
-    AgentOrigin, CallChain, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName,
-    NodeState, RunId, RunPermit, SpawnContext, SwarmItem, TaskTable, WeakRunPermit,
+    AgentOrigin, AskRequest, CallChain, ConversationScope, Directory, DirectoryError, Node, NodeId,
+    NodeName, NodeState, RunId, RunPermit, SpawnContext, SwarmItem, TaskTable, WeakRunPermit,
 };
 
 /// The conversation scope every node this broker admits works for, until
@@ -59,9 +56,6 @@ pub enum TaskUpdate {
         /// Opaque, forwarded to the A2A status's `metadata` (see
         /// [`ParticipantFrame::Status`](super::protocol::ParticipantFrame)).
         metadata: Option<Value>,
-        /// What an `input-required` task is waiting for; answered through
-        /// [`ParticipantRegistry::answer_task`].
-        input: Option<InputRequest>,
     },
     Artifact {
         text: String,
@@ -79,17 +73,6 @@ pub enum TaskUpdate {
 /// before dropping the sender, so a caller is never left waiting on a
 /// process that has gone away.
 pub type TaskStream = mpsc::UnboundedReceiver<TaskUpdate>;
-
-/// Why an answer could not be delivered.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum AnswerError {
-    #[error("task '{0}' is not open on any participant")]
-    UnknownTask(String),
-    #[error("the participant owning task '{0}' is disconnecting")]
-    ParticipantGone(String),
-    #[error("the answer to task '{0}' is over the {max}-byte frame cap", max = MAX_FRAME_BYTES)]
-    TooLarge(String),
-}
 
 /// A node the broker admitted for a connection it is making.
 ///
@@ -462,7 +445,6 @@ impl ParticipantRegistry {
                 state: TaskState::Failed,
                 message: Some(format!("participant '{name}' disconnected")),
                 metadata: None,
-                input: None,
             });
         }
 
@@ -633,51 +615,63 @@ impl ParticipantRegistry {
             .any(|p| p.tasks.contains_key(task_id))
     }
 
-    /// Deliver the answer to a task parked in `input-required`.
-    ///
-    /// Addressed by task id alone: the caller answered on the A2A task it
-    /// was streaming, and a runner's task is served by a worker whose
-    /// participant name the caller never learned. The task stays open — the
-    /// participant's next status un-parks it.
-    ///
-    /// An answer whose frame would be over the worker's frame cap fails
-    /// with [`AnswerError::TooLarge`]; the task and its connection stay
-    /// open. Waits while the participant's outbound queue is full.
-    pub async fn answer_task(&self, task_id: &str, input: TaskInput) -> Result<(), AnswerError> {
-        let frame = BrokerFrame::Input {
-            task_id: task_id.to_string(),
-            input,
+    /// Relay the question `question` to `name` as a broker→worker
+    /// `human.ask` (EN-2b). `false` when `name` is not connected any more,
+    /// its socket is closing, or the frame would be over the worker's frame
+    /// cap; then nobody there can answer it. Waits while the participant's
+    /// outbound queue is full.
+    pub(crate) async fn relay_question(
+        &self,
+        name: &str,
+        question: &str,
+        request: AskRequest,
+    ) -> bool {
+        let frame = BrokerFrame::Ask {
+            question: question.to_string(),
+            request,
         };
         if BrokerCodec::line_len_bound(&frame) > MAX_FRAME_BYTES {
-            return Err(AnswerError::TooLarge(task_id.to_string()));
+            warn!(participant = %name, question, "Not relaying a question over the worker's frame cap");
+            return false;
         }
-        let (name, outbound) = {
-            let inner = self.lock();
-            let Some((name, participant)) = inner
-                .participants
-                .iter()
-                .find(|(_, p)| p.tasks.contains_key(task_id))
-            else {
-                return Err(AnswerError::UnknownTask(task_id.to_string()));
-            };
-            (name.clone(), participant.outbound.clone())
-        };
-        let Ok(permit) = outbound.reserve().await else {
-            return Err(AnswerError::ParticipantGone(task_id.to_string()));
-        };
-        // The task may have ended while this waited for room.
-        let inner = self.lock();
-        if !inner
+        let Some(outbound) = self
+            .lock()
             .participants
-            .get(&name)
-            .is_some_and(|p| p.tasks.contains_key(task_id))
-        {
-            return Err(AnswerError::UnknownTask(task_id.to_string()));
+            .get(name)
+            .map(|p| p.outbound.clone())
+        else {
+            return false;
+        };
+        outbound.send(frame).await.is_ok()
+    }
+
+    /// Withdraw the question relayed to `name` as `question` (EN-2b): a
+    /// `req.cancel` of that `human.ask`. Called from `Drop`, so it never
+    /// waits here for room in a full queue.
+    pub(crate) fn withdraw_question(&self, name: &str, question: &str) {
+        let Some(outbound) = self
+            .lock()
+            .participants
+            .get(name)
+            .map(|p| p.outbound.clone())
+        else {
+            return;
+        };
+        let cancel = BrokerFrame::CancelAsk {
+            question: question.to_string(),
+        };
+        if let Err(mpsc::error::TrySendError::Full(cancel)) = outbound.try_send(cancel) {
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    runtime.spawn(async move {
+                        let _ = outbound.send(cancel).await;
+                    });
+                }
+                Err(_) => {
+                    warn!(participant = %name, question, "Could not queue a withdrawal outside a runtime")
+                }
+            }
         }
-        permit.send(frame);
-        drop(inner);
-        debug!(participant = %name, task = %task_id, "Answer delivered to a parked task");
-        Ok(())
     }
 
     /// Route one frame from `name`'s socket to the task it names.
@@ -700,14 +694,12 @@ impl ParticipantRegistry {
                 state,
                 message,
                 metadata,
-                input,
             } => (
                 task_id,
                 TaskUpdate::Status {
                     state,
                     message,
                     metadata,
-                    input,
                 },
                 state.is_terminal(),
             ),
@@ -722,11 +714,16 @@ impl ParticipantRegistry {
             // Calls are run by the connection loop, which owns their
             // lifetime; one reaching here was not routed and is dropped.
             ParticipantFrame::Call { id, .. }
-            | ParticipantFrame::CallInput { id, .. }
             | ParticipantFrame::CancelCall { id }
             | ParticipantFrame::Approve { id, .. }
-            | ParticipantFrame::CancelApproval { id } => {
+            | ParticipantFrame::CancelApproval { id }
+            | ParticipantFrame::Ask { id, .. }
+            | ParticipantFrame::CancelAsk { id } => {
                 warn!(participant = %name, call = id, "A call frame outside a connection loop");
+                return true;
+            }
+            ParticipantFrame::AskReply { question, .. } => {
+                warn!(participant = %name, question, "A question's reply outside a connection loop");
                 return true;
             }
         };
@@ -928,7 +925,6 @@ mod tests {
                 state: TaskState::Working,
                 message: Some("read_file".into()),
                 metadata: None,
-                input: None,
             },
         );
         reg.on_frame(
@@ -946,7 +942,6 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
-                input: None,
             },
         );
 
@@ -1036,74 +1031,8 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
-                input: None,
             },
         ));
-    }
-
-    #[tokio::test]
-    async fn an_answer_reaches_the_participant_that_owns_the_task() {
-        use super::super::protocol::{InputAnswer, InputQuestion};
-
-        let reg = ParticipantRegistry::new();
-        let (w, mut outbound) = register(&reg, "worker");
-        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).await.unwrap();
-        let _ = outbound.recv().await;
-
-        // The worker parks the task and says what it is waiting for.
-        reg.on_frame(
-            &w,
-            ParticipantFrame::Status {
-                task_id: task_id.clone(),
-                state: TaskState::InputRequired,
-                message: Some("Which database?".into()),
-                metadata: None,
-                input: Some(InputRequest {
-                    id: "req-1".into(),
-                    questions: vec![InputQuestion::Question {
-                        id: "q1".into(),
-                        question: "Which database?".into(),
-                        options: vec!["Postgres".into(), "SQLite".into()],
-                    }],
-                }),
-            },
-        );
-        let Some(TaskUpdate::Status {
-            state: TaskState::InputRequired,
-            input: Some(request),
-            ..
-        }) = updates.recv().await
-        else {
-            panic!("the caller sees the request behind the parked state");
-        };
-        assert_eq!(request.id, "req-1");
-        assert!(reg.owns_task(&task_id), "a parked task is still open");
-
-        // The answer is addressed by task id alone.
-        let input = TaskInput {
-            request_id: request.id,
-            answers: vec![InputAnswer {
-                id: "q1".into(),
-                answer: "Postgres".into(),
-                custom: false,
-            }],
-        };
-        reg.answer_task(&task_id, input.clone()).await.unwrap();
-        assert!(matches!(
-            outbound.recv().await,
-            Some(BrokerFrame::Input { task_id: t, input: i }) if t == task_id && i == input
-        ));
-        assert_eq!(
-            reg.open_task_count(&w),
-            1,
-            "answering does not close the task"
-        );
-
-        assert_eq!(
-            reg.answer_task("task-nobody", input).await.unwrap_err(),
-            AnswerError::UnknownTask("task-nobody".into())
-        );
-        assert!(!reg.owns_task("task-nobody"));
     }
 
     #[test]

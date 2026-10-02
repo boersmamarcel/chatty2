@@ -1377,8 +1377,8 @@ impl AgentClient {
                 .as_ref()
                 .is_some_and(|settings| settings.warn_on_external_agent),
         );
-        // A delegated agent's question is re-asked on this agent's own
-        // `ask_user` surface (ADR-0011 C7), so it needs the same store.
+        // A question the broker delivers to this agent as a root (EN-2b) is
+        // asked on its own `ask_user` surface, so it needs the same store.
         if let Some(pending) = pending_clarifications {
             invoke_agent_tool = invoke_agent_tool.with_clarifications(pending);
         }

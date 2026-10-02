@@ -33,9 +33,8 @@ use crate::settings::models::a2a_store::A2aAgentConfig;
 /// is below the gateway.
 pub const CLARIFICATION_METADATA_KEY: &str = "clarification";
 
-/// What a task parked in `input-required` is waiting for: an `ask_user`
-/// call somewhere down the chain, with the request id its store resolves
-/// on. Field for field the broker's `InputRequest`.
+/// What an A2A peer's task parked in `input-required` is waiting for: its
+/// questions, with the request id its answer must name.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct A2aClarificationRequest {
     pub id: String,

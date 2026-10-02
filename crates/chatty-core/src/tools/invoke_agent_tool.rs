@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
-use crate::models::clarification_store::{PendingClarifications, request_clarification};
+use crate::models::clarification_store::{
+    ClarificationAnswer, ClarifyingQuestion, PendingClarifications, request_clarification,
+};
 use crate::models::execution_approval_store::{
     ApprovalDetail, ApprovalKind, PendingApprovals, request_relayed_execution_approval,
 };
@@ -24,8 +26,9 @@ use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::filesystem_write_tool::request_relayed_write_approval;
 use chatty_fabric::{
-    AgentOrigin, ApprovalRequest, ApprovalVerdict, CallError, CallEvent, CallRequest,
-    InvokeAgentOutcome, InvokeAgentParams, Refusal, Remaining, Transport,
+    AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskRequest, CallError, CallEvent,
+    CallRequest, InvokeAgentOutcome, InvokeAgentParams, Question, QuestionOrigin, Refusal,
+    Remaining, Transport,
 };
 
 /// The agent name the broker publishes for "a chatty agent in its own
@@ -223,9 +226,10 @@ pub struct InvokeAgentTool {
     /// Whether to say something before handing a prompt to an agent outside
     /// this user's fleet (ADR-0011 C5).
     warn_outside_fleet: bool,
-    /// This agent's own clarification store: where a delegated agent's
-    /// question is re-asked (AGE-306). `None` means nobody here can answer,
-    /// and a question ends the delegation.
+    /// This agent's own clarification store: where a question the broker
+    /// delivers to a root call (EN-2b), or one a third-party A2A peer asks a
+    /// caller with no broker to ask through, is asked. `None` means nobody
+    /// here can answer, and a question ends the delegation.
     ///
     /// Escalating to a human is the only policy (ADR-0011 C7). Whether a
     /// leader may instead answer for its worker is an open question on the
@@ -754,12 +758,11 @@ impl InvokeAgentTool {
 
         let mut outcome = None;
         let mut failure = None;
-        // The questions the callee's subtree parked, and at the root the
-        // approvals the broker forwarded (EN-2a), each being answered here
-        // while the call goes on — so a call that ends, or a request
-        // withdrawn below (TB-7), drops the copy raised on this agent's
-        // store, which withdraws it. Keyed by the parked task, or by the
-        // broker's approval id.
+        // The questions and approvals the broker delivered to this root call
+        // (EN-2a, EN-2b), each being answered here while the call goes on —
+        // so a call that ends, or a request withdrawn below (TB-7), drops
+        // the copy raised on this agent's store, which withdraws it. Keyed
+        // by the broker's id.
         let mut parked = futures::stream::FuturesUnordered::new();
         let mut withdraw: std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>> =
             std::collections::HashMap::new();
@@ -788,7 +791,7 @@ impl InvokeAgentTool {
                 Ok(CallEvent::Swarm(event)) => {
                     self.send_progress(InvokeAgentProgress::Swarm(event));
                 }
-                Ok(event @ (CallEvent::InputRequired { .. } | CallEvent::Approve { .. })) => {
+                Ok(event @ (CallEvent::Ask { .. } | CallEvent::Approve { .. })) => {
                     let Some((key, waiting)) = Parked::from_event(event) else {
                         continue;
                     };
@@ -803,8 +806,8 @@ impl InvokeAgentTool {
                         }
                     }));
                 }
-                Ok(CallEvent::InputWithdrawn { task }) => {
-                    withdraw.remove(&task);
+                Ok(CallEvent::InputWithdrawn { id }) => {
+                    withdraw.remove(&id);
                 }
                 Ok(CallEvent::Result(value)) => {
                     outcome = Some(serde_json::from_value::<InvokeAgentOutcome>(value).map_err(
@@ -1004,33 +1007,50 @@ impl InvokeAgentTool {
         request: A2aClarificationRequest,
     ) -> Result<(), String> {
         let request_id = request.id.clone();
-        let answers = self.ask(&config.name, task_id, request).await?;
+        let answers = match self.relay_up(config, &request).await {
+            Some(answers) => answers?,
+            None => self.ask(&config.name, task_id, request.questions).await?,
+        };
         self.client
             .send_task_input(config, task_id, &request_id, &answers)
             .await
             .map_err(|e| undeliverable(&config.name, e))
     }
 
-    /// As [`answer_input_required`](Self::answer_input_required), with the
-    /// answer going back down over the fabric the call came over.
-    async fn answer_over_fabric(
+    /// A question the broker delivered to this root call under `id`
+    /// (EN-2b): ask the human, showing who asked and what it relays
+    /// literally ([`ClarifyingQuestion::forwarded`]), and send the answers
+    /// back to the broker for the worker that asked.
+    async fn answer_question(
         &self,
         transport: &dyn Transport,
         agent: &str,
-        task_id: &str,
-        request: A2aClarificationRequest,
+        id: &str,
+        request: AskRequest,
     ) -> Result<(), String> {
-        let request_id = request.id.clone();
-        let answers = self.ask(agent, task_id, request).await?;
-        let input = serde_json::json!({ "requestId": request_id, "answers": answers });
+        if self.clarifications.is_none() {
+            let first = request.questions.first().map(|q| q.question.as_str());
+            return Err(nobody_can_answer(agent, first));
+        }
+        let answers = self
+            .ask(agent, id, ClarifyingQuestion::forwarded(request))
+            .await?;
+        let answers = answers
+            .into_iter()
+            .map(|a| Answer {
+                id: a.id,
+                answer: a.answer,
+                custom: a.custom,
+            })
+            .collect();
         transport
-            .answer(task_id, input)
+            .answer(id, answers)
             .await
             .map_err(|e| undeliverable(agent, e))
     }
 
-    /// Answer what a call over the fabric is waiting on: a callee's
-    /// question is re-asked, a forwarded approval asked of the human. `Err`
+    /// Answer what a call over the fabric is waiting on: a forwarded
+    /// question or approval, asked of the human. `Err`
     /// is why the delegation cannot go on. Dropping this withdraws the copy
     /// raised here (TB-7).
     async fn answer_parked(
@@ -1040,14 +1060,8 @@ impl InvokeAgentTool {
         parked: Parked,
     ) -> Result<(), String> {
         match parked {
-            Parked::Question { task, request } => {
-                match serde_json::from_value::<A2aClarificationRequest>(request) {
-                    Ok(request) => {
-                        self.answer_over_fabric(transport, agent, &task, request)
-                            .await
-                    }
-                    Err(_) => Ok(()),
-                }
+            Parked::Question { id, request } => {
+                self.answer_question(transport, agent, &id, request).await
             }
             Parked::Approval { id, request } => {
                 self.answer_approval(transport, agent, &id, request).await;
@@ -1056,34 +1070,78 @@ impl InvokeAgentTool {
         }
     }
 
-    /// Re-ask a delegated agent's questions on this agent's own store and
-    /// wait for the answers (AGE-306).
+    /// A third-party peer's question, asked of the human through this
+    /// worker's broker connection (EN-2b): a `human.ask` whose origin this
+    /// code sets to the peer — never anything the peer or the model wrote —
+    /// so whoever answers sees the peer behind this worker. `None` when the
+    /// transport carries no questions up (the root, or no fabric), and this
+    /// agent's own human is asked instead.
+    async fn relay_up(
+        &self,
+        config: &A2aAgentConfig,
+        request: &A2aClarificationRequest,
+    ) -> Option<Result<Vec<ClarificationAnswer>, String>> {
+        let transport = self.transport.as_ref()?;
+        let ask = AskRequest {
+            questions: request
+                .questions
+                .iter()
+                .map(|q| Question {
+                    id: q.id.clone(),
+                    question: q.question.clone(),
+                    options: q.options.clone(),
+                })
+                .collect(),
+            asker: None,
+            origin: Some(QuestionOrigin {
+                agent: config.name.clone(),
+                origin: AgentOrigin::RemoteConfigured,
+            }),
+        };
+        info!(agent = %config.name, request = %request.id, "A third-party agent asked a question; relaying it up");
+        let answers = transport.ask(ask).await?;
+        Some(
+            answers
+                .map(|answers| {
+                    answers
+                        .into_iter()
+                        .map(|a| ClarificationAnswer {
+                            id: a.id,
+                            answer: a.answer,
+                            custom: a.custom,
+                        })
+                        .collect()
+                })
+                .map_err(|e| {
+                    format!(
+                        "Agent '{}' asked a question that went unanswered: {e}",
+                        config.name
+                    )
+                }),
+        )
+    }
+
+    /// Ask `questions` on this agent's own store — at the root, the human's
+    /// popover — and wait for the answers. `asked_as` names the request in
+    /// the log.
     async fn ask(
         &self,
         agent: &str,
-        task_id: &str,
-        request: A2aClarificationRequest,
-    ) -> Result<Vec<crate::models::clarification_store::ClarificationAnswer>, String> {
+        asked_as: &str,
+        questions: Vec<ClarifyingQuestion>,
+    ) -> Result<Vec<ClarificationAnswer>, String> {
         let Some(pending) = self.clarifications.as_ref() else {
-            return Err(format!(
-                "Agent '{}' asked a question and nobody here can answer it: {}",
-                agent,
-                request
-                    .questions
-                    .first()
-                    .map(|q| q.question.as_str())
-                    .unwrap_or("(no question text)")
-            ));
+            let first = questions.first().map(|q| q.question.as_str());
+            return Err(nobody_can_answer(agent, first));
         };
 
         info!(
             agent = %agent,
-            task = %task_id,
-            request = %request.id,
-            questions = request.questions.len(),
-            "Delegated agent asked a question; escalating"
+            request = %asked_as,
+            questions = questions.len(),
+            "A delegated agent asked a question; asking the human"
         );
-        request_clarification(pending, request.questions)
+        request_clarification(pending, questions)
             .await
             .map_err(|e| format!("Agent '{agent}' asked a question that went unanswered: {e}"))
     }
@@ -1091,11 +1149,8 @@ impl InvokeAgentTool {
 
 /// What a call over the fabric is waiting on.
 enum Parked {
-    /// A callee's question, `request` as the participant protocol carries it.
-    Question {
-        task: String,
-        request: serde_json::Value,
-    },
+    /// A question the broker delivered to the root under `id` (EN-2b).
+    Question { id: String, request: AskRequest },
     /// An approval the broker forwarded to the root under `id` (EN-2a).
     Approval {
         id: String,
@@ -1104,13 +1159,11 @@ enum Parked {
 }
 
 impl Parked {
-    /// What `event` waits on, keyed the way its withdrawal names it: by the
-    /// parked task, or by the broker's approval id.
+    /// What `event` waits on, keyed the way its withdrawal names it: by
+    /// the broker's id.
     fn from_event(event: CallEvent) -> Option<(String, Self)> {
         match event {
-            CallEvent::InputRequired { task, request } => {
-                Some((task.clone(), Self::Question { task, request }))
-            }
+            CallEvent::Ask { id, request } => Some((id.clone(), Self::Question { id, request })),
             CallEvent::Approve { id, request } => {
                 Some((id.clone(), Self::Approval { id, request }))
             }
@@ -1181,6 +1234,15 @@ impl InvokeAgentTool {
             warn!(agent = %agent, approval = %id, error = %e, "A forwarded approval's verdict could not be delivered");
         }
     }
+}
+
+/// Why a delegation ends on a question: nobody here can answer it. Names
+/// the question as its asker wrote it.
+fn nobody_can_answer(agent: &str, question: Option<&str>) -> String {
+    format!(
+        "Agent '{agent}' asked a question and nobody here can answer it: {}",
+        question.unwrap_or("(no question text)")
+    )
 }
 
 /// Why an answer never reached the agent that asked for it.
@@ -1726,7 +1788,7 @@ mod tests {
                 "[shell] rm -rf ~/\u{202e}gpj.exe\nrm -rf /\u{1b}[2K\u{1b}[1A echo safe\u{200b}\t{long}"
             ),
             diff_stat: None,
-            asker: Some(chatty_fabric::ApprovalAsker {
+            asker: Some(chatty_fabric::Asker {
                 agent: "coder-0\u{2067}".into(),
                 chain: vec!["root".into(), "lead\r\nroot".into(), "coder".into()],
             }),

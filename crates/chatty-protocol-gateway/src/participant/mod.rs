@@ -47,12 +47,12 @@ pub use codec::{
     PROTOCOL_VERSION, WorkerCodec, WorkerNotification, WorkerRequest, WorkerSide,
 };
 pub use protocol::{
-    BrokerFrame, CallStamp, DelegatedTask, InputAnswer, InputQuestion, InputRequest,
-    ParticipantCard, ParticipantFrame, ParticipantSkill, TaskBearer, TaskInput, TaskState,
+    BrokerFrame, CallStamp, DelegatedTask, ParticipantCard, ParticipantFrame, ParticipantSkill,
+    TaskBearer, TaskState,
 };
 pub use registry::{
-    AdmittedNode, AnswerError, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, RunGuard,
-    TaskStream, TaskUpdate,
+    AdmittedNode, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, RunGuard, TaskStream,
+    TaskUpdate,
 };
 pub use virtual_agent::{EvidenceFuture, TaskEvidence, VirtualAgent, WorkerFuture, WorkerHandle};
 

@@ -32,6 +32,8 @@ mod delegation;
 #[cfg(test)]
 mod equivalence;
 #[cfg(test)]
+mod human_ask;
+#[cfg(test)]
 mod input_required_chain;
 #[cfg(test)]
 mod one_kind_of_agent;

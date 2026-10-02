@@ -39,9 +39,22 @@
 //! only what the sub-leader may. A context the call brings is clamped to the
 //! caller's; see [`super::spawn_context`].
 //!
-//! A callee's question travels back to whoever made the call, over the
-//! root's direct handle or a worker's connection alike, so a question climbs
-//! every hop to the root's human (AGE-306, BI-5).
+//! A question climbs the caller chain (ADR-0021 § 2, EN-2b). A node's
+//! `human.ask` reaches [`BrokerCalls::raise_question`], which stamps the
+//! asker from the node's admitted name and the chain of the call running it
+//! (overwriting whatever the worker said), gives it an id unique within
+//! this broker, and relays it to whoever made that call: a calling node as
+//! a broker→worker `human.ask` on its connection, the root call it is
+//! nested under as [`CallEvent::Ask`]. A node that answers `escalate` sends
+//! the same request, first stamp intact, to its own caller, and so on up;
+//! the answers go back to the request that asked, and nowhere else. A
+//! worker that withdraws its question, or whose connection closes because
+//! its callee ended or was stopped, withdraws it from wherever it waits: a
+//! `req.cancel` to the node it was relayed to, or the root's popover
+//! ([`CallEvent::InputWithdrawn`] under the broker's id). A root call that
+//! ends leaves every question still waiting on it unanswered, and a node no
+//! call is running has nobody to ask. A call that ends withdraws whatever
+//! its callee still asks.
 //!
 //! An approval does not climb: only the root answers one (ADR-0021 § 2,
 //! EN-2a). A node's `human.approve` reaches [`BrokerCalls::raise_approval`],
@@ -104,9 +117,8 @@
 //! Its worker is reaped as the call lets go of it, which closes its
 //! connection and so drops every call it made: the subtree goes the way a
 //! hung-up caller's does, permits and pending messages with it. The
-//! caller's own run carries on, and a question the stopped subtree had
-//! parked above it is withdrawn hop by hop ([`CallEvent::InputWithdrawn`]),
-//! and an approval it was waiting on leaves the root's screen.
+//! caller's own run carries on, and a question or an approval the stopped
+//! subtree was waiting on is withdrawn from wherever it waits.
 //!
 //! Every `invoke_agent` call writes one row to the broker's edge log when it
 //! ends, every `send_message` call one message row, and every refused call
@@ -120,19 +132,19 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
-    AgentOrigin, ApprovalAsker, ApprovalRequest, ApprovalVerdict, CANCELLED_BY_USER, CallChain,
-    CallError, CallEvent, CallPolicy, CallRequest, CallStream, ChildCall, ConversationScope,
-    EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL, InvokeAgentOutcome, InvokeAgentParams, Message,
-    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, Remaining,
-    SendMessageParams, SpawnContext, SwarmBatcher, SwarmItem, Transport, UsagePricer,
-    deadline_grace,
+    AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, Asker,
+    CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallStream,
+    ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL, InvokeAgentOutcome,
+    InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal,
+    RefusalReason, Remaining, SendMessageParams, SpawnContext, SwarmBatcher, SwarmItem, Transport,
+    UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-use super::protocol::{CallStamp, DelegatedTask, TaskInput, TaskState};
+use super::protocol::{CallStamp, DelegatedTask, TaskState};
 use super::registry::{ParticipantRegistry, ROOT_SCOPE, TaskUpdate};
 use super::spawn_context;
 use super::virtual_agent::VirtualAgent;
@@ -194,6 +206,14 @@ pub struct BrokerCalls {
     approvals: Approvals,
     /// The last approval id handed out.
     next_approval: AtomicU64,
+    /// Every question waiting on a caller, by the id this broker gave it
+    /// (EN-2b).
+    questions: Questions,
+    /// The last question id handed out.
+    next_question: AtomicU64,
+    /// Who called each node a call is running, by the node's name: where
+    /// its questions go (EN-2b).
+    routes: Routes,
 }
 
 /// Approvals waiting on the root, by broker id.
@@ -254,6 +274,208 @@ impl Drop for RaisedApproval {
             debug!(approval = %id, "An approval was withdrawn before the root answered");
             let _ = pending.root.send(ToRoot::Withdrawn { id });
         }
+    }
+}
+
+/// The caller of each node a call is running, by the node's name.
+type Routes = Arc<Mutex<HashMap<String, Route>>>;
+
+/// One running call, as its callee's questions see it.
+#[derive(Clone)]
+struct Route {
+    /// Which call: the entry is its own to take off again.
+    call: u64,
+    caller: Caller,
+    /// The chain the broker stamped on the call: its root call's id, and
+    /// the specs from the root to the callee.
+    chain: CallChain,
+}
+
+fn lock_routes(routes: &Routes) -> std::sync::MutexGuard<'_, HashMap<String, Route>> {
+    routes.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A running call's entry in [`Routes`]. When the call ends — its callee
+/// finished, failed or was stopped — it leaves, and every question its
+/// callee asked is withdrawn from wherever it waits (EN-2b).
+struct RouteGuard {
+    routes: Routes,
+    questions: Questions,
+    registry: ParticipantRegistry,
+    node: String,
+    call: u64,
+}
+
+impl Drop for RouteGuard {
+    fn drop(&mut self) {
+        {
+            let mut routes = lock_routes(&self.routes);
+            if !routes
+                .get(&self.node)
+                .is_some_and(|route| route.call == self.call)
+            {
+                return;
+            }
+            routes.remove(&self.node);
+        }
+        let asked: Vec<(String, PendingQuestion)> = {
+            let mut questions = lock_questions(&self.questions);
+            let ids: Vec<String> = questions
+                .iter()
+                .filter(|(_, pending)| pending.asker == self.node)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| questions.remove(&id).map(|pending| (id, pending)))
+                .collect()
+        };
+        // Dropping each reply leaves the asker's wait unanswered.
+        for (id, pending) in asked {
+            debug!(question = %id, node = %self.node, "The asker's call ended; withdrawing its question");
+            withdraw(&self.registry, &id, pending.at);
+        }
+    }
+}
+
+/// Take question `id` off wherever it waits: the root's popover, or the
+/// node it was relayed to.
+fn withdraw(registry: &ParticipantRegistry, id: &str, at: Hop) {
+    match at {
+        Hop::Root(root) => {
+            let _ = root.send(ToRoot::Withdrawn { id: id.to_string() });
+        }
+        Hop::Node(caller) => registry.withdraw_question(&caller, id),
+    }
+}
+
+/// Questions waiting on a caller, by broker id.
+type Questions = Arc<Mutex<HashMap<String, PendingQuestion>>>;
+
+/// One question a caller has been asked and has not answered.
+struct PendingQuestion {
+    /// Where it waits now.
+    at: Hop,
+    /// The node that asked it.
+    asker: String,
+    /// The root call the hop it waits at is nested under: when that call
+    /// ends, the question goes unanswered.
+    root_task_id: String,
+    /// Where this hop's reply goes: the question's wait.
+    reply: oneshot::Sender<AskReply>,
+}
+
+/// Where a question waits.
+#[derive(Clone)]
+enum Hop {
+    /// On a root call's stream, as [`CallEvent::Ask`].
+    Root(mpsc::UnboundedSender<ToRoot>),
+    /// On a calling node's connection, as a broker→worker `human.ask`.
+    Node(String),
+}
+
+fn lock_questions(
+    questions: &Questions,
+) -> std::sync::MutexGuard<'_, HashMap<String, PendingQuestion>> {
+    questions.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A node's question, as [`BrokerCalls::raise_question`] raised it: wait on
+/// [`answers`](Self::answers), which climbs the caller chain. Dropping it
+/// before it was answered — the worker withdrew the request, or its
+/// connection closed — withdraws it from wherever it waits.
+pub(crate) struct RaisedQuestion {
+    id: String,
+    /// The node that asked.
+    asker: String,
+    /// The node whose caller is asked next: the asker, then each node that
+    /// escalated.
+    from: String,
+    request: AskRequest,
+    registry: ParticipantRegistry,
+    routes: Routes,
+    swarm: Swarm,
+    questions: Questions,
+}
+
+impl RaisedQuestion {
+    /// The answers, from the first caller up the chain that gave any.
+    /// `Err` when nobody is left to ask, or the root call it reached ended
+    /// without an answer.
+    pub(crate) async fn answers(&mut self) -> Result<Vec<Answer>, CallError> {
+        let unanswered = || CallError::Failed("the question went unanswered".to_string());
+        loop {
+            let (reply, replied) = oneshot::channel();
+            let Some(route) = lock_routes(&self.routes).get(&self.from).cloned() else {
+                warn!(participant = %self.from, question = %self.id, "A question with nobody to ask");
+                return Err(nobody_above());
+            };
+            // The root call this hop's call is nested under.
+            let root_task_id = route.chain.root_task_id;
+            let hop = match route.caller {
+                Caller::Root => {
+                    let Some(root) = lock_swarm(&self.swarm).get(&root_task_id).cloned() else {
+                        warn!(question = %self.id, "A question with no root call to ask");
+                        return Err(unanswered());
+                    };
+                    Hop::Root(root)
+                }
+                Caller::Node(caller) => Hop::Node(caller),
+            };
+            // In the table before it is sent, so an answer — or a root call
+            // that ends — in between finds it.
+            lock_questions(&self.questions).insert(
+                self.id.clone(),
+                PendingQuestion {
+                    at: hop.clone(),
+                    asker: self.asker.clone(),
+                    root_task_id,
+                    reply,
+                },
+            );
+            let sent = match &hop {
+                Hop::Root(root) => {
+                    info!(question = %self.id, "A question reached the root");
+                    root.send(ToRoot::Ask {
+                        id: self.id.clone(),
+                        request: self.request.clone(),
+                    })
+                    .is_ok()
+                }
+                Hop::Node(caller) => {
+                    debug!(question = %self.id, caller = %caller, "Relaying a question to its asker's caller");
+                    self.registry
+                        .relay_question(caller, &self.id, self.request.clone())
+                        .await
+                }
+            };
+            if !sent {
+                lock_questions(&self.questions).remove(&self.id);
+                return Err(unanswered());
+            }
+            match replied.await {
+                Ok(AskReply::Answers(answers)) => return Ok(answers),
+                Ok(AskReply::Escalate) => match hop {
+                    Hop::Node(caller) => {
+                        debug!(question = %self.id, caller = %caller, "A caller escalated a question");
+                        self.from = caller;
+                    }
+                    // The root has nobody to escalate to.
+                    Hop::Root(_) => return Err(unanswered()),
+                },
+                Err(_) => return Err(unanswered()),
+            }
+        }
+    }
+}
+
+impl Drop for RaisedQuestion {
+    fn drop(&mut self) {
+        // Answered questions are already out of the table.
+        let Some(pending) = lock_questions(&self.questions).remove(&self.id) else {
+            return;
+        };
+        debug!(question = %self.id, "A question was withdrawn before it was answered");
+        withdraw(&self.registry, &self.id, pending.at);
     }
 }
 
@@ -328,7 +550,10 @@ enum ToRoot {
         id: String,
         request: ApprovalRequest,
     },
-    /// That approval is over without the root's answer.
+    /// A node's question every caller below the root escalated, for the
+    /// root to answer (EN-2b).
+    Ask { id: String, request: AskRequest },
+    /// That approval or question is over without the root's answer.
     Withdrawn { id: String },
 }
 
@@ -340,21 +565,29 @@ struct Nested {
 }
 
 /// A root call's end of [`Swarm`]; stops listening when dropped, which
-/// denies every approval still waiting on it.
+/// denies every approval still waiting on it and leaves every question
+/// waiting on it unanswered.
 struct Listening {
     swarm: Swarm,
     approvals: Approvals,
+    questions: Questions,
     root_task_id: String,
     nested: mpsc::UnboundedReceiver<ToRoot>,
 }
 
 impl Listening {
-    fn open(swarm: &Swarm, approvals: &Approvals, root_task_id: &str) -> Self {
+    fn open(
+        swarm: &Swarm,
+        approvals: &Approvals,
+        questions: &Questions,
+        root_task_id: &str,
+    ) -> Self {
         let (tx, nested) = mpsc::unbounded_channel();
         lock_swarm(swarm).insert(root_task_id.to_string(), tx);
         Self {
             swarm: swarm.clone(),
             approvals: approvals.clone(),
+            questions: questions.clone(),
             root_task_id: root_task_id.to_string(),
             nested,
         }
@@ -375,6 +608,11 @@ impl Drop for Listening {
                 let _ = pending.answer.send(ApprovalVerdict::Denied);
             }
         }
+        drop(approvals);
+        // Dropping a question's reply leaves it unanswered.
+        lock_questions(&self.questions).retain(|_, pending| {
+            !(matches!(pending.at, Hop::Root(_)) && pending.root_task_id == self.root_task_id)
+        });
     }
 }
 
@@ -430,6 +668,12 @@ async fn next_nested(listening: &mut Option<Listening>) -> Option<ToRoot> {
         Some(listening) => listening.nested.recv().await,
         None => std::future::pending().await,
     }
+}
+
+/// Why a question has nowhere to go: no call is running its asker, or none
+/// is running the node it was escalated to.
+fn nobody_above() -> CallError {
+    CallError::Failed("nobody above this agent can answer its question".to_string())
 }
 
 /// The delegation policy of a local broker nobody gave one: every caller,
@@ -504,7 +748,91 @@ impl BrokerCalls {
             stops: Arc::default(),
             approvals: Arc::default(),
             next_approval: AtomicU64::new(0),
+            questions: Arc::default(),
+            next_question: AtomicU64::new(0),
+            routes: Arc::default(),
         }
+    }
+
+    /// Raise `node`'s `human.ask` (EN-2b): stamp it with the name `node` was
+    /// admitted under and the chain of the run it serves — whatever asker
+    /// the worker put there is overwritten, and nothing above changes it —
+    /// and give it a new id. [`RaisedQuestion::answers`] then relays it up
+    /// the caller chain. `Err` for a node no broker call is running: nobody
+    /// above it can answer.
+    ///
+    /// This and [`answer_question`](Self::answer_question) are the only ways
+    /// a question enters and leaves the broker: the seam ADR-0023's gate
+    /// (GT-0) puts its `human.ask` arms on — a `Node` raising one only for a
+    /// call that is running it, the local `Root` answering only its own.
+    pub(crate) fn raise_question(
+        &self,
+        node: &str,
+        mut request: AskRequest,
+    ) -> Result<RaisedQuestion, CallError> {
+        let Some(chain) = lock_routes(&self.routes)
+            .get(node)
+            .map(|route| route.chain.clone())
+        else {
+            warn!(participant = %node, "A question from a node no call is running");
+            return Err(nobody_above());
+        };
+        request.asker = Some(Asker {
+            agent: node.to_string(),
+            chain: chain.chain.clone(),
+        });
+        let id = format!(
+            "question-{}",
+            self.next_question.fetch_add(1, Ordering::Relaxed) + 1
+        );
+        info!(participant = %node, question = %id, "A node asked a question");
+        Ok(RaisedQuestion {
+            id,
+            asker: node.to_string(),
+            from: node.to_string(),
+            request,
+            registry: self.registry.clone(),
+            routes: self.routes.clone(),
+            swarm: self.swarm.clone(),
+            questions: self.questions.clone(),
+        })
+    }
+
+    /// The root's answers to question `id` (EN-2b), delivered to the
+    /// request that asked. `Err` when no question waits on the root under
+    /// `id`: it was answered, withdrawn, never raised, or waits on a node.
+    pub fn answer_question(&self, id: &str, answers: Vec<Answer>) -> Result<(), CallError> {
+        let mut questions = lock_questions(&self.questions);
+        if !questions
+            .get(id)
+            .is_some_and(|pending| matches!(pending.at, Hop::Root(_)))
+        {
+            return Err(CallError::Failed(format!(
+                "no question '{id}' is waiting on the root"
+            )));
+        }
+        let pending = questions.remove(id).expect("checked above");
+        drop(questions);
+        let _ = pending.reply.send(AskReply::Answers(answers));
+        Ok(())
+    }
+
+    /// `node`'s reply to the question the broker relayed to it as `id`
+    /// (EN-2b): its answers, or `escalate`. A reply for a question that
+    /// does not wait on `node` — answered, withdrawn, relayed elsewhere — is
+    /// dropped with a log line: the connection names who may answer what.
+    pub(crate) fn question_reply(&self, node: &str, id: &str, reply: AskReply) {
+        let mut questions = lock_questions(&self.questions);
+        if !questions
+            .get(id)
+            .is_some_and(|pending| matches!(&pending.at, Hop::Node(at) if at == node))
+        {
+            warn!(participant = %node, question = %id, "Dropping a reply to a question not relayed to this node");
+            return;
+        }
+        let pending = questions.remove(id).expect("checked above");
+        drop(questions);
+        let _ = pending.reply.send(reply);
     }
 
     /// Raise `node`'s `human.approve` with the root (EN-2a): stamp it with
@@ -526,7 +854,7 @@ impl BrokerCalls {
             warn!(participant = %node, "Denying an approval with no root call to ask");
             return RaisedApproval::denied(&self.approvals);
         };
-        request.asker = Some(ApprovalAsker {
+        request.asker = Some(Asker {
             agent: node.to_string(),
             chain: chain.chain.clone(),
         });
@@ -880,14 +1208,18 @@ impl BrokerCalls {
             });
         let pricer = self.pricer.clone();
         let stops = self.stops.clone();
+        let routes = self.routes.clone();
+        let questions = self.questions.clone();
         // A root call listens for the runs nested under it; a run a node's
         // call starts reports to its root call, if that is listening
         // (TB-1). Both are keyed by the chain the broker stamped.
         let chain = stamp.as_ref().map(|stamp| stamp.chain.clone());
+        let route_chain = chain.clone();
         let mut listening = match (&caller, &chain) {
             (Caller::Root, Some(chain)) => Some(Listening::open(
                 &self.swarm,
                 &self.approvals,
+                &self.questions,
                 &chain.root_task_id,
             )),
             _ => None,
@@ -947,6 +1279,23 @@ impl BrokerCalls {
                 }
             };
             edge.to = running.participant().to_string();
+            // Where the callee's questions go while this call runs it
+            // (EN-2b): before anything is yielded, so a question the worker
+            // asks at once finds it.
+            let _route = route_chain.map(|chain| {
+                let call = NEXT_STOPPABLE.fetch_add(1, Ordering::Relaxed);
+                lock_routes(&routes).insert(
+                    running.participant().to_string(),
+                    Route { call, caller: caller.clone(), chain },
+                );
+                RouteGuard {
+                    routes: routes.clone(),
+                    questions: questions.clone(),
+                    registry: registry.clone(),
+                    node: running.participant().to_string(),
+                    call,
+                }
+            });
             // As soon as admitted, before anything else: a caller that
             // only knew this callee by its spec can now name this one
             // call precisely (AGE-762), which two parallel calls to the
@@ -954,8 +1303,6 @@ impl BrokerCalls {
             yield Ok(CallEvent::Progress(json!({ "Admitted": running.participant() })));
             let (mut stopped, _stoppable) = stoppable(&stops, &caller, &agent, running.participant());
             let mut stopped_by_user = false;
-            // The task this call's callee is parked on, until it moves on.
-            let mut parked = None;
             let reporting = reports_to.map(|(to, chain)| Reporting {
                 to,
                 chain,
@@ -979,11 +1326,11 @@ impl BrokerCalls {
             let mut response = String::new();
             let mut end = None;
             loop {
+                // Biased, so the callee's updates go out in the order it
+                // sent them, ahead of a question or an approval it raised
+                // after them (EN-2b); a stop or a deadline goes first.
                 let update = tokio::select! {
-                    update = running.updates.recv() => match update {
-                        Some(update) => update,
-                        None => break,
-                    },
+                    biased;
                     _ = sleep_until_cut(cut) => {
                         warn!(agent = %agent, "A called task ran past its deadline; stopping it");
                         end = Some((
@@ -997,6 +1344,10 @@ impl BrokerCalls {
                         stopped_by_user = true;
                         break;
                     }
+                    update = running.updates.recv() => match update {
+                        Some(update) => update,
+                        None => break,
+                    },
                     Some(to_root) = next_nested(&mut listening) => {
                         match to_root {
                             ToRoot::Nested(nested) => {
@@ -1005,8 +1356,11 @@ impl BrokerCalls {
                             ToRoot::Approve { id, request } => {
                                 yield Ok(CallEvent::Approve { id, request });
                             }
+                            ToRoot::Ask { id, request } => {
+                                yield Ok(CallEvent::Ask { id, request });
+                            }
                             ToRoot::Withdrawn { id } => {
-                                yield Ok(CallEvent::InputWithdrawn { task: id });
+                                yield Ok(CallEvent::InputWithdrawn { id });
                             }
                         }
                         continue;
@@ -1031,7 +1385,7 @@ impl BrokerCalls {
                             report(item);
                         }
                     }
-                    TaskUpdate::Status { state, message, metadata, input } => {
+                    TaskUpdate::Status { state, message, metadata } => {
                         if state.is_terminal() {
                             if let Some(usage) = metadata.as_ref().and_then(|m| m.get("usage")) {
                                 report(SwarmItem::Usage { usage: usage.clone() });
@@ -1054,32 +1408,10 @@ impl BrokerCalls {
                             ));
                             break;
                         }
-                        match (state, input) {
-                            // A question goes back to whoever called, root
-                            // or worker: a worker re-asks it on its own
-                            // store, which parks its own task toward its
-                            // caller.
-                            (TaskState::InputRequired, Some(input)) => {
-                                parked = Some(running.task_id.clone());
-                                yield Ok(CallEvent::InputRequired {
-                                    task: running.task_id.clone(),
-                                    request: json!(input),
-                                });
-                            }
-                            (TaskState::Working, _) => {
-                                // Moving on un-parks the task: answered, or
-                                // withdrawn under a stopped run (TB-7). A
-                                // caller that answered has nothing left to
-                                // withdraw.
-                                if let Some(task) = parked.take() {
-                                    yield Ok(CallEvent::InputWithdrawn { task });
-                                }
-                                if let Some(step) = message {
-                                    yield Ok(CallEvent::Progress(json!({ "Step": step })));
-                                }
-                            }
-                            // A state nothing renders.
-                            _ => {}
+                        if state == TaskState::Working
+                            && let Some(step) = message
+                        {
+                            yield Ok(CallEvent::Progress(json!({ "Step": step })));
                         }
                     }
                 }
@@ -1119,7 +1451,8 @@ impl BrokerCalls {
             // reported is all here: it goes out, on the next flush, before
             // the result.
             // A withdrawal still queued goes out before the result; an
-            // approval still pending is denied as the call ends.
+            // approval still pending is denied, and a question left
+            // unanswered, as the call ends.
             if let Some(listening) = listening.as_mut() {
                 while let Ok(to_root) = listening.nested.try_recv() {
                     match to_root {
@@ -1127,9 +1460,9 @@ impl BrokerCalls {
                             batcher.push(&nested.node, &nested.chain, nested.item);
                         }
                         ToRoot::Withdrawn { id } => {
-                            yield Ok(CallEvent::InputWithdrawn { task: id });
+                            yield Ok(CallEvent::InputWithdrawn { id });
                         }
-                        ToRoot::Approve { .. } => {}
+                        ToRoot::Approve { .. } | ToRoot::Ask { .. } => {}
                     }
                 }
             }
@@ -1383,16 +1716,9 @@ impl Transport for DirectTransport {
         Ok(self.calls.call(Caller::Root, req))
     }
 
-    /// Deliver the root's answer to the task its callee parked
-    /// (AGE-306), as an A2A `message/send` on that task would.
-    async fn answer(&self, task: &str, input: Value) -> Result<(), CallError> {
-        let input: TaskInput = serde_json::from_value(input)
-            .map_err(|e| CallError::Failed(format!("not an answer: {e}")))?;
-        self.calls
-            .registry
-            .answer_task(task, input)
-            .await
-            .map_err(|e| CallError::Failed(e.to_string()))
+    /// The root's answers to a question the broker delivered (EN-2b).
+    async fn answer(&self, id: &str, answers: Vec<Answer>) -> Result<(), CallError> {
+        self.calls.answer_question(id, answers)
     }
 
     /// The root's answer to an approval the broker delivered (EN-2a).
@@ -1813,7 +2139,6 @@ mod tests {
                     state: TaskState::Completed,
                     message: None,
                     metadata: None,
-                    input: None,
                 });
             });
             let worker = SlowWorker {
@@ -2071,3 +2396,7 @@ mod swarm_forwarding_tests;
 #[cfg(all(test, unix))]
 #[path = "root_approval_tests.rs"]
 mod root_approval_tests;
+
+#[cfg(all(test, unix))]
+#[path = "question_relay_tests.rs"]
+mod question_relay_tests;

@@ -253,13 +253,11 @@ loopback HTTP:
 | broker → worker | `req.progress` notification | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
 | broker → worker | result | `id`, `result` — for `agent.invoke` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `agent.list` the aggregated card's `agents` array; for `mailbox.post` `{"status":"pending","id":"msg-1"}` or `{"status":"refused","reason":"not_on_tree"}` (see [`send_message`](#send_message)) |
 | broker → worker | error | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
-| broker → worker | `call.input_required` notification (interim) | `id`, `task` (the callee's parked task), `request` — the question, `{id, questions}` as a parked task's `input` carries it (BI-5) |
-| worker → broker | `call.input` notification (interim) | `id`, `task`, `input` — the answer, `{requestId, answers}`, the same shape `task.input` carries (BI-5) |
-| worker → broker | `req.cancel` notification | `id` — the worker withdraws its call, or its approval |
+| worker → broker | `req.cancel` notification | `id` — the worker withdraws its call, its approval or its question |
 | worker → broker | `human.approve` request | `id`, `params: {kind: exec\|write, command_or_path, diff_stat?}` — an approval only the root answers (EN-2a); the result is `"approved"` or `"denied"`. The broker stamps the asker itself and never sends this to a worker |
-
-The interim notifications carry the question traffic until ADR-0021 step 2
-(EN-2b) replaces them with `human.ask`.
+| worker → broker | `human.ask` request | `id`, `params: {questions: [{id, question, options}], origin?}` — a question (EN-2b); the result is the answers, `[{id, answer, custom}]`, or an error when nobody up the chain answered. The broker stamps the asker itself |
+| broker → worker | `human.ask` request | `id` (the broker's), `params: {question, request}` — a callee's question relayed to its caller, `question` the broker's id for it and `request` as the asker sent it, asker stamped; the result is `{"answers": […]}` or `"escalate"` |
+| broker → worker | `req.cancel` notification | `id` — the broker withdraws a relayed `human.ask` (or a `task.run`) |
 
 ```text
 worker → {"v":3,"id":2,"method":"agent.invoke","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}
@@ -279,20 +277,31 @@ worker's connection closes, the broker cancels every call still in flight on
 it, which reaps the workers those calls started — so cancelling a leader's
 task reaps its whole subtree (invariant 11).
 
-**A question comes back down the call (BI-5, AGE-637).** When a callee parks
-its task on `ask_user`, the broker sends the calling worker
-`call.input_required` with the call's `id` and the parked task; the worker's
-`invoke_agent` re-asks it on the worker's own clarification store — which
-parks the worker's own task toward *its* caller — and sends the answer up as
-`call.input`. The broker delivers it only to the task that call parked, so a
-worker answers its own callees and nobody else's. A grandchild's question
-therefore reaches the root's human however many workers sit between them, and
-the answer descends the same hops
-(`clarification_relays_across_two_hops`):
+**A question is a request that climbs the caller chain (ADR-0021 § 2, EN-2b,
+AGE-771).** A worker's `ask_user` parks its task on a `human.ask` request and
+gets the answers as its result. The broker overwrites the request's `asker`
+with the connection's admitted name and the chain of the call running it, gives
+the question an id of its own (`question-N`), and relays it to whoever made that
+call: a calling worker gets it as a broker→worker `human.ask`, the root as
+`CallEvent::Ask { id, request }`. A worker has no human, so it answers every
+relayed question `escalate`, and the broker forwards the *original* request,
+first stamp intact, to the next caller up — the root sees the agent that asked,
+never a relayer (`escalated_question_keeps_first_stamp`). The root's
+`invoke_agent` asks it on its own clarification store, each question headed by
+the stamp and shown literally (`ClarifyingQuestion::forwarded`), and answers with
+`Transport::answer(id, answers)`, which reaches only the request that asked. A
+question a worker relays from a third-party A2A peer carries that peer's
+`origin`, set by `invoke_agent`'s client code through `Transport::ask`, never by
+`ask_user`'s arguments. When the asker withdraws its question (`req.cancel`), or
+the call running it ends or is cancelled, the broker sends `req.cancel` for the
+copy relayed to a worker, or `CallEvent::InputWithdrawn { id }` for one at the
+root (`callee_cancel_withdraws_relayed_question`):
 
 ```text
-broker → {"v":3,"method":"call.input_required","params":{"id":2,"task":"task-…","request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}}
-worker → {"v":3,"method":"call.input","params":{"id":2,"task":"task-…","input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}}
+leaf   → {"v":3,"id":2,"method":"human.ask","params":{"questions":[{"id":"q1","question":"Which database?","options":[]}]}}
+broker → {"v":3,"id":3,"method":"human.ask","params":{"question":"question-1","request":{"questions":[…],"asker":{"agent":"leaf-0","chain":["root","mid","leaf"]}}}}
+mid    → {"v":3,"id":3,"result":"escalate"}
+broker → {"v":3,"id":2,"result":[{"id":"q1","answer":"SQLite","custom":false}]}
 ```
 
 **The root sees every nested run (TB-1, AGE-663).** A run a worker's call
@@ -374,9 +383,8 @@ same way minus the socket: `LazyBroker::transport` hands `invoke_agent` and
 the directory (`RouteCounter`); in a swarm of workers both stay at zero
 (invariant 4, `no_worker_call_uses_loopback`). The connection is the liveness
 signal: closing it deregisters the participant and fails every task it still
-owed. A worker's `ask_user` parks its task in `input-required` with the
-question attached; the caller answers with `message/send` on the same task id
-and the broker hands the answer down as `task.input` (AGE-306). The messages
+owed. A worker's `ask_user` parks its task on a `human.ask` request the broker
+relays up the caller chain, and the answers come back as its result (EN-2b). The messages
 and the mapping are documented in
 [`crates/chatty-protocol-gateway/README.md`](../crates/chatty-protocol-gateway/README.md#local-participants).
 
@@ -548,12 +556,10 @@ parent's tool-call trace carries every tool call the child reported, for every
 scripted scenario — how ADR-0011's first kill criterion is checked in CI rather than
 by inspection.
 
-A worker's `ask_user` does not end at the worker. `invoke_agent` re-asks the
-question on its own agent's clarification store: with a human behind it that is
-the ordinary `ask_user` popover, and in a worker it parks that worker's own task
-in `input-required` toward *its* caller, so a question climbs the chain until it
-reaches someone who can answer and the answer descends the same hops
-(ADR-0011 C7). `crates/chatty-tui/src/participant/input_required_chain.rs`
+A worker's `ask_user` does not end at the worker. It is a `human.ask` request
+the broker relays up the caller chain, each worker escalating it, until it
+reaches the root's `ask_user` popover with the asking worker named; the answers
+come back as the request's result (ADR-0021 § 2, EN-2b). `crates/chatty-tui/src/participant/input_required_chain.rs`
 runs a parent → child → grandchild chain over a real socket and asserts the
 grandchild's question reaches the parent's popover and its answer comes back.
 
