@@ -24,7 +24,9 @@
 
 mod mapper;
 
-pub use mapper::{InputReceiver, InputStores, TaskMapper, answer_inputs, clarification_answers};
+pub use mapper::{
+    InputReceiver, InputStores, TaskMapper, WorkerInput, answer_inputs, clarification_answers,
+};
 
 #[cfg(unix)]
 mod one_task;

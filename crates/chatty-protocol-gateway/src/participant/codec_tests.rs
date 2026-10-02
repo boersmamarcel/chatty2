@@ -3,8 +3,7 @@
 //! `tests/participant_socket.rs`.
 
 use super::*;
-use crate::participant::protocol::{InputAnswer, InputQuestion};
-use chatty_fabric::InvokeAgentParams;
+use chatty_fabric::{Answer, AskReply, AskRequest, Asker, InvokeAgentParams, Question};
 use serde_json::json;
 
 fn value(line: &str) -> Value {
@@ -125,7 +124,6 @@ fn a_session_uses_the_documented_envelopes() {
             state: TaskState::Working,
             message: Some("read_file".into()),
             metadata: None,
-            input: None,
         })
         .unwrap()
         .unwrap();
@@ -153,7 +151,6 @@ fn a_session_uses_the_documented_envelopes() {
             state: TaskState::Completed,
             message: None,
             metadata: Some(json!({"usage": {"inputTokens": 12}})),
-            input: None,
         })
         .unwrap()
         .unwrap();
@@ -181,72 +178,147 @@ fn a_session_uses_the_documented_envelopes() {
     assert!(broker.decode(&working).unwrap().is_none());
 }
 
-#[test]
-fn a_parked_task_and_its_answer_travel_as_interim_notifications() {
-    let (broker, worker) = connected();
-    let input = InputRequest {
-        id: "req-1".into(),
-        questions: vec![InputQuestion::Question {
+fn the_question() -> AskRequest {
+    AskRequest {
+        questions: vec![Question {
             id: "q1".into(),
             question: "Which database?".into(),
             options: vec!["Postgres".into(), "SQLite".into()],
         }],
-    };
-    let parked = ParticipantFrame::Status {
-        task_id: "task-1".into(),
-        state: TaskState::InputRequired,
-        message: Some("Which database?".into()),
-        metadata: None,
-        input: Some(input.clone()),
-    };
-    let line = worker.encode(&parked).unwrap().unwrap();
-    let json = value(&line);
-    assert_eq!(json["method"], "task.input_required");
-    assert_eq!(json["params"]["id"], 1);
-    assert_eq!(
-        json["params"]["input"]["questions"][0]["options"][1],
-        "SQLite"
-    );
-    let Some(ParticipantFrame::Status {
-        state, input: read, ..
-    }) = broker.decode(&line).unwrap()
-    else {
-        panic!("a status");
-    };
-    assert_eq!(state, TaskState::InputRequired);
-    assert_eq!(read, Some(input));
+        asker: None,
+        origin: None,
+    }
+}
 
-    let answer = TaskInput {
-        request_id: "req-1".into(),
-        answers: vec![InputAnswer {
-            id: "q1".into(),
-            answer: "Postgres".into(),
-            custom: false,
-        }],
-    };
-    let line = broker
-        .encode(&BrokerFrame::Input {
-            task_id: "task-1".into(),
-            input: answer.clone(),
+/// EN-2b: a worker's question is a `human.ask` request and its answers
+/// that request's result; a task cannot park on an `input-required`
+/// status any more.
+#[test]
+fn a_question_is_a_human_ask_request_and_its_answers_its_result() {
+    let (broker, worker) = connected();
+    let line = worker
+        .encode(&ParticipantFrame::Ask {
+            id: 4,
+            request: the_question(),
         })
         .unwrap()
         .unwrap();
     let json = value(&line);
-    assert_eq!(json["method"], "task.input");
-    assert_eq!(json["params"]["id"], 1);
-    assert_eq!(json["params"]["input"]["requestId"], "req-1");
-    let Some(BrokerFrame::Input { task_id, input }) = worker.decode(&line).unwrap() else {
-        panic!("an input");
+    assert_eq!(json["method"], "human.ask");
+    assert_eq!(json["params"]["questions"][0]["options"][1], "SQLite");
+    let request_id = json["id"].as_u64().unwrap();
+    let Some(ParticipantFrame::Ask { id, request }) = broker.decode(&line).unwrap() else {
+        panic!("a question");
     };
-    assert_eq!(task_id, "task-1");
-    assert_eq!(input, answer);
+    assert_eq!((id, request), (request_id, the_question()));
 
-    // `custom` is optional on the way in.
-    let bare = r#"{"v":3,"method":"task.input","params":{"id":1,"input":{"requestId":"r","answers":[{"id":"q1","answer":"x"}]}}}"#;
-    let Some(BrokerFrame::Input { input, .. }) = worker.decode(bare).unwrap() else {
-        panic!("an input");
+    let answers = vec![Answer {
+        id: "q1".into(),
+        answer: "Postgres".into(),
+        custom: false,
+    }];
+    let line = broker
+        .encode(&BrokerFrame::Answer {
+            id: request_id,
+            answers: Ok(answers.clone()),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&line),
+        json!({"v": 3, "id": request_id, "result": [{"id": "q1", "answer": "Postgres", "custom": false}]})
+    );
+    let Some(BrokerFrame::Answer { id, answers: read }) = worker.decode(&line).unwrap() else {
+        panic!("the answers");
     };
-    assert!(!input.answers[0].custom);
+    assert_eq!((id, read), (4, Ok(answers)));
+
+    let parked = ParticipantFrame::Status {
+        task_id: "task-1".into(),
+        state: TaskState::InputRequired,
+        message: None,
+        metadata: None,
+    };
+    assert!(matches!(
+        worker.encode(&parked),
+        Err(FrameError::Malformed(_))
+    ));
+}
+
+/// EN-2b: the broker relays a callee's question to its caller as its own
+/// `human.ask`, naming its id for the question; the caller's result is the
+/// answers or `escalate`, and a `req.cancel` withdraws it.
+#[test]
+fn a_relayed_question_is_a_broker_request_answered_or_escalated() {
+    let (broker, worker) = connected();
+    let mut stamped = the_question();
+    stamped.asker = Some(Asker {
+        agent: "leaf-0".into(),
+        chain: vec!["mid".into(), "leaf".into()],
+    });
+    let relay = |question: &str| {
+        broker
+            .encode(&BrokerFrame::Ask {
+                question: question.into(),
+                request: stamped.clone(),
+            })
+            .unwrap()
+            .unwrap()
+    };
+    let line = relay("question-1");
+    let json = value(&line);
+    assert_eq!(json["method"], "human.ask");
+    assert_eq!(json["params"]["question"], "question-1");
+    assert_eq!(json["params"]["request"]["asker"]["agent"], "leaf-0");
+    let Some(BrokerFrame::Ask { question, request }) = worker.decode(&line).unwrap() else {
+        panic!("a relayed question");
+    };
+    assert_eq!((question.as_str(), &request), ("question-1", &stamped));
+
+    let line = worker
+        .encode(&ParticipantFrame::AskReply {
+            question: "question-1".into(),
+            reply: AskReply::Escalate,
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&line),
+        json!({"v": 3, "id": json["id"], "result": "escalate"})
+    );
+    assert!(matches!(
+        broker.decode(&line).unwrap(),
+        Some(ParticipantFrame::AskReply { question, reply: AskReply::Escalate }) if question == "question-1"
+    ));
+
+    // Withdrawn: the worker hears a req.cancel naming it, and its late
+    // reply is not sent.
+    let line = relay("question-2");
+    let id = value(&line)["id"].clone();
+    worker.decode(&line).unwrap();
+    let cancel = broker
+        .encode(&BrokerFrame::CancelAsk {
+            question: "question-2".into(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&cancel),
+        json!({"v": 3, "method": "req.cancel", "params": {"id": id}})
+    );
+    assert!(matches!(
+        worker.decode(&cancel).unwrap(),
+        Some(BrokerFrame::CancelAsk { question }) if question == "question-2"
+    ));
+    assert!(
+        worker
+            .encode(&ParticipantFrame::AskReply {
+                question: "question-2".into(),
+                reply: AskReply::Escalate,
+            })
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -405,6 +477,7 @@ fn calls_map_to_requests_and_back() {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         }),
     };
     let line = worker.encode(&invoke).unwrap().unwrap();
@@ -496,49 +569,6 @@ fn calls_map_to_requests_and_back() {
         worker.decode(&line).unwrap(),
         Some(BrokerFrame::CallError { id: 9, error: CallError::UnknownAgent(m) }) if m == "lead"
     ));
-
-    // A question on call 7 and its withdrawal, then the answer to one.
-    let question = down(
-        &broker,
-        &worker,
-        BrokerFrame::CallInputRequired {
-            id: 2,
-            task: "callee".into(),
-            request: json!({"id": "r", "questions": []}),
-        },
-    );
-    assert!(matches!(
-        question,
-        BrokerFrame::CallInputRequired { id: 7, .. }
-    ));
-    let line = broker
-        .encode(&BrokerFrame::CallInputWithdrawn {
-            id: 2,
-            task: "callee".into(),
-        })
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        value(&line),
-        json!({"v": 3, "method": "call.input_withdrawn", "params": {"id": 2, "task": "callee"}})
-    );
-    assert!(matches!(
-        worker.decode(&line).unwrap(),
-        Some(BrokerFrame::CallInputWithdrawn { id: 7, .. })
-    ));
-    let answer = up(
-        &worker,
-        &broker,
-        ParticipantFrame::CallInput {
-            id: 7,
-            task: "callee".into(),
-            input: TaskInput {
-                request_id: "r".into(),
-                answers: vec![],
-            },
-        },
-    );
-    assert!(matches!(answer, ParticipantFrame::CallInput { id: 2, .. }));
 
     // The worker withdraws call 7: the broker hears req.cancel for 2, and
     // anything it still sends for 2 is dropped at both ends.
@@ -658,7 +688,6 @@ fn a_method_of_the_other_direction_does_not_decode() {
         r#"{"v":3,"id":1,"method":"task.run","params":{"taskId":"t","text":"x"}}"#,
         r#"{"v":3,"method":"req.progress","params":{"id":1,"event":{}}}"#,
         r#"{"v":3,"method":"task.input","params":{"id":1,"input":{"requestId":"r","answers":[]}}}"#,
-        r#"{"v":3,"id":1,"method":"human.approve","params":{}}"#,
     ] {
         assert!(
             matches!(broker.decode(line), Err(FrameError::WrongDirection(_))),
@@ -670,12 +699,95 @@ fn a_method_of_the_other_direction_does_not_decode() {
         r#"{"v":3,"id":1,"method":"agent.list"}"#,
         r#"{"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working"}}"#,
         r#"{"v":3,"method":"call.input","params":{"id":1,"task":"t","input":{"requestId":"r","answers":[]}}}"#,
+        // EN-2a: the broker never sends an approval to a worker.
+        r#"{"v":3,"id":1,"method":"human.approve","params":{"kind":"exec","command_or_path":"ls"}}"#,
     ] {
         assert!(
             matches!(worker.decode(line), Err(FrameError::WrongDirection(_))),
             "the worker refuses {line}"
         );
     }
+}
+
+/// EN-2a: `human.approve` is a worker's request with a typed verdict for
+/// its result. The worker's approval numbers map to request ids and back,
+/// a `req.cancel` of one is an approval's withdrawal, and a verdict for an
+/// approval already withdrawn or answered is not sent.
+#[test]
+fn an_approval_is_a_request_with_a_verdict() {
+    use chatty_fabric::{ApprovalKind, ApprovalRequest, ApprovalVerdict};
+    let (broker, worker) = connected();
+    let request = ApprovalRequest {
+        kind: ApprovalKind::Exec,
+        command_or_path: "[shell] echo hi".into(),
+        diff_stat: None,
+        asker: None,
+    };
+    let line = worker
+        .encode(&ParticipantFrame::Approve {
+            id: 7,
+            request: request.clone(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&line),
+        json!({"v": 3, "id": 2, "method": "human.approve",
+               "params": {"kind": "exec", "command_or_path": "[shell] echo hi"}})
+    );
+    let Some(ParticipantFrame::Approve { id, request: read }) = broker.decode(&line).unwrap()
+    else {
+        panic!("an approval");
+    };
+    assert_eq!((id, read), (2, request.clone()));
+
+    let verdict = BrokerFrame::Approval {
+        id: 2,
+        verdict: ApprovalVerdict::Approved,
+    };
+    let line = broker.encode(&verdict).unwrap().unwrap();
+    assert_eq!(value(&line), json!({"v": 3, "id": 2, "result": "approved"}));
+    assert!(matches!(
+        worker.decode(&line).unwrap(),
+        Some(BrokerFrame::Approval {
+            id: 7,
+            verdict: ApprovalVerdict::Approved
+        })
+    ));
+    assert!(
+        broker.encode(&verdict).unwrap().is_none(),
+        "an answered approval is not answered twice"
+    );
+
+    // Withdrawn: a cancel of an approval, and no verdict after it.
+    assert!(matches!(
+        up(
+            &worker,
+            &broker,
+            ParticipantFrame::Approve { id: 8, request }
+        ),
+        ParticipantFrame::Approve { id: 3, .. }
+    ));
+    assert!(matches!(
+        up(&worker, &broker, ParticipantFrame::CancelApproval { id: 8 }),
+        ParticipantFrame::CancelApproval { id: 3 }
+    ));
+    assert!(
+        broker
+            .encode(&BrokerFrame::Approval {
+                id: 3,
+                verdict: ApprovalVerdict::Denied,
+            })
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        worker
+            .encode(&ParticipantFrame::CancelApproval { id: 8 })
+            .unwrap()
+            .is_none(),
+        "nothing left to withdraw"
+    );
 }
 
 #[test]
@@ -709,7 +821,6 @@ fn a_response_to_nothing_in_flight_is_dropped() {
         r#"{"v":3,"id":9,"error":{"kind":"failed","message":"x"}}"#,
         r#"{"v":3,"method":"task.event","params":{"kind":"status","id":9,"state":"working"}}"#,
         r#"{"v":3,"method":"req.cancel","params":{"id":9}}"#,
-        r#"{"v":3,"method":"call.input","params":{"id":9,"task":"t","input":{"requestId":"r","answers":[]}}}"#,
     ] {
         assert!(broker.decode(line).unwrap().is_none(), "{line}");
     }
@@ -718,7 +829,6 @@ fn a_response_to_nothing_in_flight_is_dropped() {
         r#"{"v":3,"id":9,"error":{"kind":"failed","message":"x"}}"#,
         r#"{"v":3,"method":"req.progress","params":{"id":9,"event":{}}}"#,
         r#"{"v":3,"method":"req.cancel","params":{"id":9}}"#,
-        r#"{"v":3,"method":"call.input_withdrawn","params":{"id":9,"task":"t"}}"#,
     ] {
         assert!(worker.decode(line).unwrap().is_none(), "{line}");
     }

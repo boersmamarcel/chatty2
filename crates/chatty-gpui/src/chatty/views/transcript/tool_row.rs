@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
@@ -7,9 +8,10 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::clipboard::Clipboard;
 use gpui_component::skeleton::Skeleton;
 use gpui_component::tag::Tag;
-use gpui_component::{ActiveTheme, Disableable as _, Icon, IconName, Sizable};
+use gpui_component::{ActiveTheme, Disableable as _, Icon, IconName, Sizable, WindowExt as _};
 
 use super::verb::tool_row_label;
+use super::{ArtifactOpen, OpenArtifact, tool_file_path};
 
 /// What ↗ does on a delegation row: open the worker's own run.
 pub type OpenRun = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -17,24 +19,61 @@ pub type OpenRun = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Tooltip of ↗ on a delegation row with no worker run to open yet.
 pub const NO_RUN_TOOLTIP: &str = "No run to open: this agent's run is not available";
 
-/// What ↗ does on a row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Wide enough for a tool call's input/output without crowding the chat pane.
+const TOOL_DETAIL_SHEET_WIDTH: f32 = 480.;
+
+/// What ↗ does on a row (AGE-813: every row gets a real action, never a
+/// silent no-op).
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum OpenState {
     /// A delegation row with a worker run: ↗ opens it.
     Run,
     /// A delegation row with no worker run yet: ↗ is disabled, with a tooltip.
     NoRun,
-    /// Any other tool: unchanged.
-    Generic,
+    /// A tool call that named a file it read, and a panel to open it in:
+    /// ↗ opens that file.
+    File(PathBuf),
+    /// Any other tool: ↗ opens its full input and output in a sheet.
+    Detail,
 }
 
 /// Whether ↗ is disabled, and its tooltip, for a row in `state`.
-fn open_button(state: OpenState) -> (bool, &'static str) {
+fn open_button(state: &OpenState) -> (bool, &'static str) {
     match state {
         OpenState::Run => (false, "Open this agent's run"),
         OpenState::NoRun => (true, NO_RUN_TOOLTIP),
-        OpenState::Generic => (false, "Open"),
+        OpenState::File(_) => (false, "Open the file"),
+        OpenState::Detail => (false, "Open the full input and output"),
     }
+}
+
+/// `text` pretty-printed as JSON when it parses as one; left as-is otherwise.
+fn pretty(text: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or_else(|| text.to_string())
+}
+
+/// One "Input"/"Output" section of the tool-detail sheet.
+fn detail_section(title: &'static str, body: String, cx: &App) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().muted_foreground)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_xs()
+                .font_family(cx.theme().mono_font_family.clone())
+                .child(body),
+        )
 }
 
 /// Compact tool-call row. Verb tense encodes state; path and +/- are separate.
@@ -50,6 +89,9 @@ pub struct ToolRow {
     /// Opens the worker's run, for a delegation (`invoke_agent`) row. `None`
     /// on such a row means there is no run to open yet, and ↗ is disabled.
     open_run: Option<OpenRun>,
+    /// Opens a file this row read, in the artifact panel (AGE-813). `None`
+    /// means the row's ↗ falls back to the tool-detail sheet instead.
+    on_open: Option<OpenArtifact>,
 }
 
 impl ToolRow {
@@ -58,6 +100,7 @@ impl ToolRow {
             tool,
             attempt: 1,
             open_run: None,
+            on_open: None,
         }
     }
 
@@ -66,13 +109,22 @@ impl ToolRow {
         match (&self.tool.tool_name[..], &self.open_run) {
             ("invoke_agent", Some(_)) => OpenState::Run,
             ("invoke_agent", None) => OpenState::NoRun,
-            _ => OpenState::Generic,
+            _ => match tool_file_path(&self.tool.input) {
+                Some(path) if self.on_open.is_some() => OpenState::File(path),
+                _ => OpenState::Detail,
+            },
         }
     }
 
     /// What ↗ opens on a delegation row (AGE-813).
     pub fn open_run(mut self, open_run: Option<OpenRun>) -> Self {
         self.open_run = open_run;
+        self
+    }
+
+    /// Opens a file this row read, in the artifact panel (AGE-813).
+    pub fn on_open(mut self, on_open: Option<OpenArtifact>) -> Self {
+        self.on_open = on_open;
         self
     }
 
@@ -132,6 +184,7 @@ impl RenderOnce for ToolRow {
         let open_state = self.open_state();
         let tool = self.tool;
         let open_run = self.open_run;
+        let on_open = self.on_open;
         let id = if tool.id.is_empty() {
             tool.tool_name.clone()
         } else {
@@ -234,14 +287,58 @@ impl RenderOnce for ToolRow {
                     .icon(Icon::new(IconName::ExternalLink))
                     .debug_selector(|| format!("tool-open-{}", tool.tool_name));
                 // Never a silent no-op: a disabled ↗ says why (AGE-813).
-                let (disabled, tooltip) = open_button(open_state);
+                let (disabled, tooltip) = open_button(&open_state);
                 let open = open.disabled(disabled).tooltip(tooltip);
-                match (open_state, open_run) {
+                match open_state {
                     // The worker's own run: its steps and tool calls.
-                    (OpenState::Run, Some(open_run)) => {
-                        open.on_click(move |_, window, cx| open_run(window, cx))
+                    OpenState::Run => match open_run {
+                        Some(open_run) => open.on_click(move |_, window, cx| open_run(window, cx)),
+                        None => open,
+                    },
+                    OpenState::NoRun => open,
+                    // The file this row read, in the artifact panel.
+                    OpenState::File(path) => match on_open {
+                        Some(on_open) => open.on_click(move |_, _window, cx| {
+                            on_open(
+                                ArtifactOpen {
+                                    path: path.clone(),
+                                    source: String::new(),
+                                    old: None,
+                                },
+                                cx,
+                            );
+                        }),
+                        None => open,
+                    },
+                    // Any other tool: its full input and output, in a sheet.
+                    OpenState::Detail => {
+                        let title: SharedString = tool.display_name.clone().into();
+                        let input = pretty(&tool.input);
+                        let output = tool.output.clone();
+                        open.on_click(move |_, window, cx| {
+                            let title = title.clone();
+                            let input = input.clone();
+                            let output = output.clone();
+                            window.open_sheet(cx, move |sheet, _window, cx| {
+                                let output_body = output
+                                    .clone()
+                                    .map(|o| pretty(&o))
+                                    .unwrap_or_else(|| "No output yet.".to_string());
+                                sheet
+                                    .title(div().child(title.clone()))
+                                    .size(px(TOOL_DETAIL_SHEET_WIDTH))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_3()
+                                            .p_3()
+                                            .child(detail_section("Input", input.clone(), cx))
+                                            .child(detail_section("Output", output_body, cx)),
+                                    )
+                            });
+                        })
                     }
-                    _ => open,
                 }
             });
 
@@ -293,18 +390,23 @@ impl RenderOnce for ToolRow {
 #[cfg(test)]
 mod tests {
     use super::{
-        NO_RUN_TOOLTIP, OpenRun, OpenState, ToolRow, error_headline, open_button, shell_command,
-        strip_error_prefixes,
+        NO_RUN_TOOLTIP, OpenRun, OpenState, ToolRow, error_headline, open_button, pretty,
+        shell_command, strip_error_prefixes,
     };
     use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
+    use std::path::PathBuf;
     use std::rc::Rc;
 
     fn tool(name: &str) -> ToolCallBlock {
+        tool_with_input(name, "{}")
+    }
+
+    fn tool_with_input(name: &str, input: &str) -> ToolCallBlock {
         ToolCallBlock {
             id: "t".into(),
             tool_name: name.into(),
             display_name: name.into(),
-            input: "{}".into(),
+            input: input.into(),
             output: None,
             output_preview: None,
             state: ToolCallState::Success,
@@ -317,14 +419,15 @@ mod tests {
 
     #[test]
     fn open_button_is_disabled_with_a_tooltip_only_without_a_run() {
-        assert_eq!(open_button(OpenState::NoRun), (true, NO_RUN_TOOLTIP));
-        assert!(!open_button(OpenState::Run).0);
-        assert!(!open_button(OpenState::Generic).0);
+        assert_eq!(open_button(&OpenState::NoRun), (true, NO_RUN_TOOLTIP));
+        assert!(!open_button(&OpenState::Run).0);
+        assert!(!open_button(&OpenState::Detail).0);
+        assert!(!open_button(&OpenState::File(PathBuf::from("a.md"))).0);
         assert!(!NO_RUN_TOOLTIP.is_empty());
     }
 
     /// AGE-813: ↗ on a delegation row with a worker run opens it; with none
-    /// it is disabled (never a silent no-op); other tools are untouched.
+    /// it is disabled (never a silent no-op).
     #[test]
     fn open_on_a_delegation_row_needs_a_run() {
         let run: OpenRun = Rc::new(|_, _| {});
@@ -338,10 +441,45 @@ mod tests {
             ToolRow::new(tool("invoke_agent")).open_state(),
             OpenState::NoRun
         );
+    }
+
+    /// AGE-813: a read with a resolvable path opens that file in the
+    /// artifact panel, but only once the caller wires `on_open` up — with no
+    /// panel to open it in, ↗ falls back to the detail sheet instead of
+    /// silently doing nothing.
+    #[test]
+    fn a_file_read_opens_the_file_once_a_panel_is_wired() {
+        let on_open = Rc::new(|_, _: &mut gpui::App| {});
         assert_eq!(
-            ToolRow::new(tool("read_file")).open_state(),
-            OpenState::Generic
+            ToolRow::new(tool_with_input("read_file", r#"{"path":"src/main.rs"}"#))
+                .on_open(Some(on_open))
+                .open_state(),
+            OpenState::File(PathBuf::from("src/main.rs"))
         );
+        assert_eq!(
+            ToolRow::new(tool_with_input("read_file", r#"{"path":"src/main.rs"}"#)).open_state(),
+            OpenState::Detail
+        );
+    }
+
+    /// AGE-813: a tool with no resolvable file (shell, fetch, search, …)
+    /// opens its input/output in the detail sheet rather than doing nothing.
+    #[test]
+    fn a_tool_with_no_file_opens_the_detail_sheet() {
+        assert_eq!(
+            ToolRow::new(tool("shell_execute")).open_state(),
+            OpenState::Detail
+        );
+        assert_eq!(
+            ToolRow::new(tool("fetch_url")).open_state(),
+            OpenState::Detail
+        );
+    }
+
+    #[test]
+    fn pretty_formats_json_and_leaves_plain_text_alone() {
+        assert_eq!(pretty(r#"{"a":1}"#), "{\n  \"a\": 1\n}");
+        assert_eq!(pretty("not json"), "not json");
     }
 
     /// Only shell commands get "Show in terminal", with the command as sent.

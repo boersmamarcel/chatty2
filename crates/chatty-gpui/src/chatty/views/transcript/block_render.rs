@@ -82,7 +82,8 @@ pub fn render_typed_block(
             let open = activity_open.unwrap_or(false);
             let mut group = ActivityGroup::new(tools.clone())
                 .open(open)
-                .settled(!turn_streaming);
+                .settled(!turn_streaming)
+                .on_open(on_open.clone());
             if let Some(toggle) = on_activity_toggle {
                 let block_id = id.0;
                 group = group.on_toggle(move |cx| toggle(block_id, cx));

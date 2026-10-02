@@ -132,8 +132,9 @@ impl Tool for SendMessageTool {
                     return Ok(SendMessageOutput { status });
                 }
                 CallEvent::Progress(_)
-                | CallEvent::InputRequired { .. }
+                | CallEvent::Ask { .. }
                 | CallEvent::InputWithdrawn { .. }
+                | CallEvent::Approve { .. }
                 | CallEvent::Swarm(_) => {}
             }
         }

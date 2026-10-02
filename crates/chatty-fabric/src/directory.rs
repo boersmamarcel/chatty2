@@ -142,6 +142,10 @@ pub enum DirectoryError {
     },
     #[error("unknown node {0}")]
     UnknownNode(NodeId),
+    /// A node of spec [`ROOT_NAME`]: only the root goes by that name, so
+    /// no node may be admitted as it (ADR-0023 § 2).
+    #[error("'{ROOT_NAME}' is the root's name; no node is admitted as it")]
+    ReservedSpec,
 }
 
 /// Every node one root process's broker admitted, ended ones included.
@@ -171,6 +175,9 @@ impl Directory {
         owner: Option<NodeId>,
         scope: ConversationScope,
     ) -> Result<Node, DirectoryError> {
+        if spec == ROOT_NAME {
+            return Err(DirectoryError::ReservedSpec);
+        }
         if let Some(owner) = owner {
             let owner_node = self
                 .nodes
@@ -378,5 +385,17 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, DirectoryError::ScopeMismatch { .. }));
         assert_eq!(ids(&dir, &b).len(), 2);
+    }
+
+    /// ADR-0023 § 2: no node may take the root's name; the root's chain
+    /// element stays its own.
+    #[test]
+    fn no_node_is_admitted_as_the_root() {
+        let mut dir = Directory::new();
+        assert!(matches!(
+            dir.admit(ROOT_NAME, None, scope("c")),
+            Err(DirectoryError::ReservedSpec)
+        ));
+        assert!(dir.by_name("root-0").is_none());
     }
 }

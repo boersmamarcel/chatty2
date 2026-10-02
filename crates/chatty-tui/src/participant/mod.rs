@@ -32,9 +32,13 @@ mod delegation;
 #[cfg(test)]
 mod equivalence;
 #[cfg(test)]
+mod human_ask;
+#[cfg(test)]
 mod input_required_chain;
 #[cfg(test)]
 mod one_kind_of_agent;
+#[cfg(test)]
+mod root_only_approvals;
 #[cfg(test)]
 mod slash_agent;
 #[cfg(test)]
@@ -150,10 +154,11 @@ pub async fn run_participant(
             // It runs under the tighter of its own budget and what its
             // caller left it (DP-3), before its clock starts.
             engine.narrow_budget(&task.budget);
-            // A question or an approval this turn waits on goes up the
-            // chain as `input-required`; the answer comes back down here and
-            // lands on the store the turn's `ask_user`, command or write is
-            // waiting on (AGE-306, AGE-646).
+            // A question this turn waits on goes up the chain as
+            // `input-required`, an approval to the root as `human.approve`
+            // (EN-2a); the answer or verdict comes back down here and lands
+            // on the store the turn's `ask_user`, command or write is
+            // waiting on.
             tokio::spawn(answer_inputs(
                 inputs,
                 InputStores {

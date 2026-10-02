@@ -14,11 +14,16 @@
 //!   [`Outbound::Call`] for the connection's writer, and returns a stream fed
 //!   by whatever the broker answers under that id.
 //! - [`CallReplies`] is what the connection's reader hands the broker's
-//!   `req.progress`, `call.input_required`, results and errors to. Several calls can be in flight at once; each
-//!   reply lands on the call its id names, whatever order they finish in.
-//! - [`SocketTransport::answer`] queues the answer to a callee's question
-//!   as an [`Outbound::Answer`], which the connection writes as a
-//!   `call.input` on the call that carried the question (BI-5).
+//!   `req.progress`, results and errors to. Several calls can be in flight
+//!   at once; each reply lands on the call its id names, whatever order they
+//!   finish in.
+//! - [`SocketTransport::ask`] queues a question this worker relays from a
+//!   third-party A2A peer as an [`Outbound::Ask`], which the connection
+//!   writes as a `human.ask` request (EN-2b); its answers come back through
+//!   [`CallReplies::answered`]. It numbers its questions from the same
+//!   counter as the worker's own `ask_user` questions
+//!   ([`SocketTransport::question_numbers`]), so the two never collide on
+//!   the connection.
 //!
 //! The gateway's worker loop (`chatty_protocol_gateway::worker`) owns both
 //! ends of the socket and does the framing.
@@ -31,11 +36,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chatty_fabric::{CallError, CallEvent, CallRequest, CallStream, Transport};
+use chatty_fabric::{Answer, AskRequest, CallError, CallEvent, CallRequest, CallStream, Transport};
 use futures::StreamExt;
 use parking_lot::Mutex;
 use serde_json::Value;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
@@ -44,22 +49,26 @@ use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 pub enum Outbound {
     /// A call: the body of a `call` frame.
     Call { id: u64, request: CallRequest },
-    /// The answer to the question call `id`'s callee parked `task` on: the
-    /// params of a `call.input`. `input` is `{requestId, answers}`.
-    Answer { id: u64, task: String, input: Value },
+    /// A question this worker relays from a third-party peer: a `human.ask`
+    /// request, numbered `id` (EN-2b).
+    Ask { id: u64, request: AskRequest },
+    /// Question `id` is withdrawn: nobody waits on its answers any more.
+    CancelAsk { id: u64 },
 }
 
 type Pending = Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<Result<CallEvent, CallError>>>>>;
 
-/// Callee task → the call its question arrived on.
-type Parked = Arc<Mutex<HashMap<String, u64>>>;
+/// Question number → where its answers go.
+type Asks = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Vec<Answer>, CallError>>>>>;
 
 /// Calls over a broker-made connection. See the module docs.
 pub struct SocketTransport {
     outbound: mpsc::UnboundedSender<Outbound>,
     pending: Pending,
-    parked: Parked,
+    asks: Asks,
     next_id: AtomicU64,
+    /// Every question this worker asks is numbered from this counter.
+    questions: Arc<AtomicU64>,
 }
 
 /// Where the connection's reader delivers the broker's replies. Cheap to
@@ -67,25 +76,50 @@ pub struct SocketTransport {
 #[derive(Clone)]
 pub struct CallReplies {
     pending: Pending,
-    parked: Parked,
+    asks: Asks,
 }
 
 impl SocketTransport {
     /// A transport, the queue its calls and answers go out on, and the
     /// handle replies come back in through. The caller owns the connection:
-    /// it writes each [`Outbound`] as a request or a `call.input` and hands
+    /// it writes each [`Outbound`] as a request or a `req.cancel` and hands
     /// each reply to [`CallReplies`].
     pub fn new() -> (Arc<Self>, mpsc::UnboundedReceiver<Outbound>, CallReplies) {
         let (outbound, calls) = mpsc::unbounded_channel();
         let pending: Pending = Arc::default();
-        let parked: Parked = Arc::default();
+        let asks: Asks = Arc::default();
         let transport = Arc::new(Self {
             outbound,
             pending: pending.clone(),
-            parked: parked.clone(),
+            asks: asks.clone(),
             next_id: AtomicU64::new(1),
+            questions: Arc::default(),
         });
-        (transport, calls, CallReplies { pending, parked })
+        (transport, calls, CallReplies { pending, asks })
+    }
+
+    /// The counter every question this worker asks is numbered from: the
+    /// questions relayed here and its own `ask_user` questions, which the
+    /// connection's task mapper numbers (EN-2b). The number before the
+    /// first is 0.
+    pub fn question_numbers(&self) -> Arc<AtomicU64> {
+        self.questions.clone()
+    }
+}
+
+/// Withdraws a question whose asker stopped waiting before its answers
+/// came, so the broker takes it off whoever's screen it is on.
+struct Withdraw {
+    asks: Asks,
+    outbound: mpsc::UnboundedSender<Outbound>,
+    id: u64,
+}
+
+impl Drop for Withdraw {
+    fn drop(&mut self) {
+        if self.asks.lock().remove(&self.id).is_some() {
+            let _ = self.outbound.send(Outbound::CancelAsk { id: self.id });
+        }
     }
 }
 
@@ -124,12 +158,7 @@ impl Transport for SocketTransport {
         Ok(async_stream::stream! {
             let _forget = forget;
             while let Some(item) = rx.recv().await {
-                let last = !matches!(
-                    item,
-                    Ok(CallEvent::Progress(_))
-                        | Ok(CallEvent::InputRequired { .. })
-                        | Ok(CallEvent::InputWithdrawn { .. })
-                );
+                let last = !matches!(item, Ok(CallEvent::Progress(_)));
                 yield item;
                 if last {
                     break;
@@ -139,24 +168,31 @@ impl Transport for SocketTransport {
         .boxed())
     }
 
-    /// Send the answer to `task`'s question up on the call it arrived on
-    /// (BI-5). The broker delivers it to the parked task; if that task is
-    /// gone by then, its call ends on its own.
-    async fn answer(&self, task: &str, input: Value) -> Result<(), CallError> {
-        let Some(id) = self.parked.lock().get(task).copied() else {
-            return Err(CallError::Failed(format!(
-                "no call of this worker is waiting on task '{task}'"
-            )));
+    /// Ask the human a third-party peer's question as this worker's
+    /// `human.ask` (EN-2b), and wait for the answers. Dropping the wait
+    /// withdraws it.
+    async fn ask(&self, request: AskRequest) -> Option<Result<Vec<Answer>, CallError>> {
+        let id = self.questions.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = oneshot::channel();
+        self.asks.lock().insert(id, tx);
+        let withdraw = Withdraw {
+            asks: self.asks.clone(),
+            outbound: self.outbound.clone(),
+            id,
         };
-        self.outbound
-            .send(Outbound::Answer {
-                id,
-                task: task.to_string(),
-                input,
-            })
-            .map_err(|_| {
-                CallError::Disconnected("the connection to the broker is closed".to_string())
-            })
+        if self.outbound.send(Outbound::Ask { id, request }).is_err() {
+            self.asks.lock().remove(&id);
+            return Some(Err(CallError::Disconnected(
+                "the connection to the broker is closed".to_string(),
+            )));
+        }
+        let answers = rx.await.unwrap_or_else(|_| {
+            Err(CallError::Disconnected(
+                "the connection to the broker closed before the question was answered".to_string(),
+            ))
+        });
+        drop(withdraw);
+        Some(answers)
     }
 }
 
@@ -166,18 +202,14 @@ impl CallReplies {
         self.deliver(id, Ok(CallEvent::Progress(event)), false);
     }
 
-    /// `call.input_required`: a callee of call `id` parked `task`
-    /// on the question `request` (BI-5).
-    pub fn input_required(&self, id: u64, task: String, request: Value) {
-        self.parked.lock().insert(task.clone(), id);
-        self.deliver(id, Ok(CallEvent::InputRequired { task, request }), false);
-    }
-
-    /// `call.input_withdrawn`: the question call `id`'s callee
-    /// parked `task` on is over without this worker's answer (TB-7).
-    pub fn input_withdrawn(&self, id: u64, task: String) {
-        self.parked.lock().remove(&task);
-        self.deliver(id, Ok(CallEvent::InputWithdrawn { task }), false);
+    /// The result of question `id`, if it is one [`SocketTransport::ask`]
+    /// asked: `false` for any other question number.
+    pub fn answered(&self, id: u64, answers: Result<Vec<Answer>, CallError>) -> bool {
+        let Some(tx) = self.asks.lock().remove(&id) else {
+            return false;
+        };
+        let _ = tx.send(answers);
+        true
     }
 
     /// A result: call `id` is over.
@@ -190,8 +222,11 @@ impl CallReplies {
         self.deliver(id, Err(error), true);
     }
 
-    /// The connection closed: every call still in flight fails.
+    /// The connection closed: every call and question still in flight
+    /// fails.
     pub fn disconnected(&self) {
+        // Dropping a question's sender fails its wait.
+        self.asks.lock().clear();
         let pending: Vec<_> = self.pending.lock().drain().collect();
         for (_, tx) in pending {
             let _ = tx.send(Err(CallError::Disconnected(
@@ -208,9 +243,6 @@ impl CallReplies {
             pending.get(&id).cloned()
         };
         drop(pending);
-        if last {
-            self.parked.lock().retain(|_, call| *call != id);
-        }
         match tx {
             Some(tx) => {
                 let _ = tx.send(item);
@@ -244,6 +276,7 @@ mod tests {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         })
     }
 
@@ -302,48 +335,49 @@ mod tests {
         replies.result(id, json!([]));
     }
 
-    /// BI-5: a callee's question reaches the call that made it, and the
-    /// answer goes back up on that call, naming the parked task.
+    /// EN-2b: a peer's question goes up as a numbered `human.ask`, its
+    /// answers come back to the wait that asked, and a wait dropped first
+    /// withdraws its question.
     #[tokio::test]
-    async fn an_answer_goes_up_on_the_call_the_question_came_down_on() {
+    async fn a_relayed_question_is_answered_or_withdrawn() {
         let (transport, mut calls, replies) = SocketTransport::new();
-        let mut call = transport.call(invoke("a")).await.unwrap();
-        let Some(Outbound::Call { id, .. }) = calls.recv().await else {
-            panic!("the call went out");
+        // A number the worker's own `ask_user` took first.
+        transport.question_numbers().fetch_add(1, Ordering::Relaxed);
+        let request = AskRequest {
+            questions: Vec::new(),
+            asker: None,
+            origin: None,
         };
-        assert!(
-            transport.answer("task-1", json!({})).await.is_err(),
-            "nothing is parked yet"
-        );
-
-        replies.input_required(id, "task-1".to_string(), json!({"id": "req-1"}));
-        assert_eq!(
-            call.next().await,
-            Some(Ok(CallEvent::InputRequired {
-                task: "task-1".to_string(),
-                request: json!({"id": "req-1"}),
-            }))
-        );
-        let input = json!({"requestId": "req-1", "answers": []});
-        transport.answer("task-1", input.clone()).await.unwrap();
+        let asking = tokio::spawn({
+            let (transport, request) = (transport.clone(), request.clone());
+            async move { transport.ask(request).await }
+        });
         assert_eq!(
             calls.recv().await,
-            Some(Outbound::Answer {
-                id,
-                task: "task-1".to_string(),
-                input,
+            Some(Outbound::Ask {
+                id: 2,
+                request: request.clone(),
             })
         );
+        assert!(!replies.answered(1, Ok(Vec::new())), "not the transport's");
+        let answers = vec![Answer {
+            id: "q1".into(),
+            answer: "SQLite".into(),
+            custom: false,
+        }];
+        assert!(replies.answered(2, Ok(answers.clone())));
+        assert_eq!(asking.await.unwrap(), Some(Ok(answers)));
 
-        replies.result(id, json!("done"));
-        assert_eq!(
-            call.next().await,
-            Some(Ok(CallEvent::Result(json!("done"))))
-        );
-        assert!(
-            transport.answer("task-1", json!({})).await.is_err(),
-            "a finished call has nothing parked"
-        );
+        let gave_up = tokio::spawn({
+            let transport = transport.clone();
+            async move { transport.ask(request).await }
+        });
+        assert!(matches!(
+            calls.recv().await,
+            Some(Outbound::Ask { id: 3, .. })
+        ));
+        gave_up.abort();
+        assert_eq!(calls.recv().await, Some(Outbound::CancelAsk { id: 3 }));
     }
 
     #[test]

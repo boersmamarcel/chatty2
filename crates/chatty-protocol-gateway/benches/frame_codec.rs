@@ -43,7 +43,6 @@ fn updates() -> Vec<ParticipantFrame> {
                     state: TaskState::Working,
                     message: Some(format!("read_file src/module_{i}.rs")),
                     metadata: None,
-                    input: None,
                 }
             } else {
                 ParticipantFrame::Artifact {

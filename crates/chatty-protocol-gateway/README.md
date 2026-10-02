@@ -192,11 +192,24 @@ closes the connection, as does a line that does not decode at all; an
 
 | Sender | Requests | Notifications |
 |---|---|---|
-| worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post` | `task.event`, `req.cancel`; interim `task.input_required`, `call.input` |
-| broker | `task.run` | `req.progress`, `req.cancel`; interim `task.input`, `call.input_required`, `call.input_withdrawn` |
+| worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `human.ask`, `human.approve` | `task.event`, `req.cancel` |
+| broker | `task.run`, `human.ask` | `req.progress`, `req.cancel` |
 
-The interim notifications carry the question and approval traffic until
-ADR-0021 step 2 turns it into `human.ask` / `human.approve` requests.
+**Only the root answers an approval** (ADR-0021 § 2, EN-2a). A worker whose
+command or write needs a human sends `human.approve` (`kind: exec | write`,
+`command_or_path`, `diff_stat`) and waits for its result, `"approved"` or
+`"denied"`. The broker overwrites any `asker` with the connection's admitted
+name and chain, and delivers the request straight to the root's call under
+an id of its own; no caller in between sees it, and the broker never sends
+`human.approve` to a worker. The root's verdict is the request's result. A
+worker withdraws its own with `req.cancel`; a closed connection withdraws all
+of its own. At most four wait per connection; one more, or one with no root
+to ask, is denied.
+
+```
+participant → {"v":3,"id":4,"method":"human.approve","params":{"kind":"exec","command_or_path":"[shell] echo hi"}}
+broker      → {"v":3,"id":4,"result":"approved"}
+```
 
 `scope` is the conversation the node works for and `owner` the node that
 asked for it; for now every node is the root's, in scope `root`. `task.run`
@@ -206,20 +219,24 @@ Task states are A2A's (`submitted`, `working`, `input-required`,
 `completed`, `failed`, `canceled`); a terminal one is the `task.run`'s
 result and ends the task.
 
-**A question goes up the chain, the answer comes back down** (ADR-0011 C7,
-AGE-306). A worker whose `ask_user` is waiting parks its task in
-`input-required` and says what it is waiting for — the request id and every
-question with its options — under `input`. The broker serves that to the A2A
-caller under the status's `metadata.clarification`; the caller answers with
-A2A `message/send` carrying the task's id on the message and the answers under
-the message's `metadata.clarification`, which the broker turns into
-`task.input` on the same `task.run`. The worker's next status un-parks it.
+**A question is a request that climbs the caller chain** (ADR-0021 § 2,
+EN-2b). A worker whose `ask_user` is waiting parks its task on a `human.ask`
+request carrying every question with its options, and gets the answers as its
+result. The broker overwrites any `asker` with the connection's admitted name
+and chain and relays the request, under an id of its own (`question`), to the
+caller of the asking worker: a worker gets it as a broker→worker `human.ask`,
+the root on its call's stream. A worker answers `escalate`, and the broker
+forwards the original request, first stamp intact, to the next caller up, so
+the root sees the agent that asked. A question a worker relays from a
+third-party A2A peer carries the peer's `origin`, set by the worker's client
+code. A worker withdraws its own with `req.cancel`; when the asker's call ends
+or is cancelled, the broker withdraws the relayed copy with `req.cancel`.
 
 ```
-participant → {"v":3,"method":"task.input_required","params":{"id":1,"message":"Which database?",
-               "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}}
-broker      → {"v":3,"method":"task.input","params":{"id":1,"input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}}
-participant → {"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working","message":"✓ ask_user"}}
+leaf        → {"v":3,"id":2,"method":"human.ask","params":{"questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}
+broker      → {"v":3,"id":3,"method":"human.ask","params":{"question":"question-1","request":{"questions":[…],"asker":{"agent":"leaf-0","chain":["root","mid","leaf"]}}}}
+mid         → {"v":3,"id":3,"result":"escalate"}
+broker      → {"v":3,"id":2,"result":[{"id":"q1","answer":"Postgres","custom":false}]}
 ```
 
 **Calls over the connection (ADR-0020, BI-4).** A worker's `invoke_agent`,
@@ -244,17 +261,6 @@ a callee whose task failed ends with a result whose `success` is false.
 The in-process root uses `ProtocolGateway::transport()`, the same calls with no
 socket.
 
-**A callee's question comes back down the call** (BI-5). When a callee parks
-its task, the broker tells the calling worker with `call.input_required`, and
-the worker's answer goes up as `call.input`, in `task.input`'s shape. The
-broker delivers it only to the task that call parked. A question withdrawn
-below (TB-7) reaches the caller as `call.input_withdrawn`.
-
-```
-broker      → {"v":3,"method":"call.input_required","params":{"id":2,"task":"task-…","request":{"id":"req-…","questions":[…]}}}
-participant → {"v":3,"method":"call.input","params":{"id":2,"task":"task-…","input":{"requestId":"req-…","answers":[…]}}}
-```
-
 **The spawn context rides the request** (ADR-0020 invariants 5–6, BI-5). Only
 a root process runs a broker; a sub-leader delegates over its connection. A
 worker a call starts is spawned with a `SpawnContext {workspace_root,
@@ -266,12 +272,10 @@ clamped to the caller's own and refused otherwise with an `error`
 `{"kind":"spawn_context_refused","message":{"field":…,"reason":…}}`
 (`participant::spawn_context`).
 
-`invoke_agent` is the caller: it re-asks the question on its own agent's
-`ask_user` store, so a human behind it sees the ordinary popover, and an agent
-that is itself a worker parks its own task the same way — the question climbs
-until it reaches someone who can answer, and the answer descends the same
-hops. Escalate-to-human is the only policy; whether a leader may answer on a
-worker's behalf is an open question on ADR-0011. A level with nobody to ask
+At the root, `invoke_agent` asks a question the broker delivers on its own
+agent's `ask_user` store, headed by who asked, so the human sees the ordinary
+popover. Escalate-to-human is the only policy; whether a leader may answer on a
+worker's behalf is an open question on ADR-0011. A root with nobody to ask
 ends the delegation rather than guessing.
 
 **A non-streaming caller gets the question as a failure** (AGE-321). A plain

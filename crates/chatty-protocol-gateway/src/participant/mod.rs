@@ -17,6 +17,8 @@
 //!   the broker's public format, a child process is not public.
 //! * [`registry`] — who is registered and where each open task's updates go,
 //!   and the way back down to a task parked on a question (AGE-306).
+//! * [`gate`] — the one pure decision every request passes before any
+//!   effect, over a typed caller (ADR-0023, GT-0).
 //! * [`calls`] — the calls a worker makes over its connection, and the
 //!   root's direct handle, run as the node that made them (BI-4). A
 //!   caller's endpoint permit (`chatty_fabric::RunPermit`) is released while
@@ -35,25 +37,25 @@
 
 mod calls;
 mod codec;
+pub mod gate;
 pub mod limits;
 mod protocol;
 mod registry;
 pub mod spawn_context;
 mod virtual_agent;
 
-pub use calls::{BrokerCalls, Caller, DirectTransport, LocalPermissive};
+pub use calls::{BrokerCalls, DirectTransport, LocalPermissive, Peer};
 pub use codec::{
     BrokerCodec, BrokerNotification, BrokerRequest, BrokerSide, FrameCodec, FrameError,
     PROTOCOL_VERSION, WorkerCodec, WorkerNotification, WorkerRequest, WorkerSide,
 };
+pub use gate::{Caller, decide};
 pub use protocol::{
-    ApprovalAsker, ApprovalKind, BrokerFrame, CallStamp, DelegatedTask, InputAnswer, InputQuestion,
-    InputRequest, ParticipantCard, ParticipantFrame, ParticipantSkill, TaskBearer, TaskInput,
-    TaskState,
+    BrokerFrame, CallStamp, DelegatedTask, ParticipantCard, ParticipantFrame, ParticipantSkill,
+    TaskBearer, TaskState,
 };
 pub use registry::{
-    AdmittedNode, AnswerError, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, RunGuard,
-    TaskStream, TaskUpdate,
+    AdmittedNode, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, TaskStream, TaskUpdate,
 };
 pub use virtual_agent::{EvidenceFuture, TaskEvidence, VirtualAgent, WorkerFuture, WorkerHandle};
 

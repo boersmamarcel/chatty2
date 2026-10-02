@@ -24,22 +24,21 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::calls::Caller;
+use super::calls::Peer;
 use super::codec::BrokerCodec;
 use super::limits::{
     BoundedLines, CALL_BURST, CALLS_PER_SECOND, MAX_FRAME_BYTES, MAX_IN_FLIGHT_CALLS,
-    OUTBOUND_QUEUE_FRAMES, RateLimit,
+    MAX_PENDING_APPROVALS, MAX_PENDING_QUESTIONS, OUTBOUND_QUEUE_FRAMES, RateLimit,
 };
-use super::protocol::{BrokerFrame, ParticipantFrame, TaskInput};
+use super::protocol::{BrokerFrame, ParticipantFrame};
 use super::registry::{AdmittedNode, ParticipantRegistry};
-use chatty_fabric::{AgentOrigin, CallError, CallEvent, CallStream};
+use chatty_fabric::{AgentOrigin, ApprovalVerdict, CallError, CallEvent, CallStream};
 use futures::StreamExt;
 use tokio::task::JoinSet;
 
@@ -234,14 +233,23 @@ where
     let mut calls = JoinSet::new();
     // Each call's task, by request id, so the worker can withdraw one.
     let mut running: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
-    // Which callee task each of this connection's calls has parked on a
-    // question (BI-5): an answer is delivered only to the task its call
-    // names, so a worker answers its own callees and nobody else's.
-    let parked: Parked = Arc::default();
+    // The worker's `human.approve`s waiting on the root (EN-2a), by request
+    // id, so the worker can withdraw one; the set owns them, so closing the
+    // connection withdraws every one.
+    let mut approvals = JoinSet::new();
+    let mut waiting: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
+    // The worker's `human.ask`s climbing the caller chain (EN-2b), the same
+    // way: by request id, owned by the set.
+    let mut questions = JoinSet::new();
+    let mut asking: HashMap<u64, tokio::task::AbortHandle> = HashMap::new();
     let mut rate = RateLimit::new(CALLS_PER_SECOND, CALL_BURST, tokio::time::Instant::now());
     loop {
         while calls.try_join_next().is_some() {}
         running.retain(|_, handle| !handle.is_finished());
+        while approvals.try_join_next().is_some() {}
+        waiting.retain(|_, handle| !handle.is_finished());
+        while questions.try_join_next().is_some() {}
+        asking.retain(|_, handle| !handle.is_finished());
         match lines.next_line().await {
             Ok(Some(line)) if line.trim().is_empty() => continue,
             Ok(Some(line)) => match decode(&line) {
@@ -267,9 +275,8 @@ where
                     };
                     match broker {
                         Ok(broker) => {
-                            let stream = broker.call(Caller::Node(name.clone()), request);
-                            let handle =
-                                calls.spawn(reply(id, stream, outbound_tx.clone(), parked.clone()));
+                            let stream = broker.call(Peer::Node(name.clone()), request);
+                            let handle = calls.spawn(reply(id, stream, outbound_tx.clone()));
                             running.insert(id, handle);
                         }
                         Err(reason) => {
@@ -283,8 +290,82 @@ where
                         }
                     }
                 }
-                Ok(Some(ParticipantFrame::CallInput { id, task, input })) => {
-                    answer_callee(&registry, &parked, &name, id, &task, input).await;
+                Ok(Some(ParticipantFrame::Ask { id, request })) => {
+                    let raised = match registry.calls() {
+                        None => Err(CallError::Refused("this broker takes no questions".into())),
+                        Some(_) if asking.len() >= MAX_PENDING_QUESTIONS => {
+                            Err(CallError::Refused(format!(
+                                "too many questions waiting: at most {MAX_PENDING_QUESTIONS} per connection"
+                            )))
+                        }
+                        Some(broker) => broker.raise_question(&name, request),
+                    };
+                    match raised {
+                        Ok(mut raised) => {
+                            let outbound = outbound_tx.clone();
+                            let handle = questions.spawn(async move {
+                                let answers = raised.answers().await;
+                                let _ = outbound.send(BrokerFrame::Answer { id, answers }).await;
+                            });
+                            asking.insert(id, handle);
+                        }
+                        Err(error) => {
+                            debug!(participant = %name, question = id, %error, "A question nobody can answer");
+                            let _ = outbound_tx
+                                .send(BrokerFrame::Answer {
+                                    id,
+                                    answers: Err(error),
+                                })
+                                .await;
+                        }
+                    }
+                }
+                Ok(Some(ParticipantFrame::CancelAsk { id })) => {
+                    // Dropping the wait withdraws the question wherever it is.
+                    if let Some(handle) = asking.remove(&id) {
+                        debug!(participant = %name, question = id, "The worker withdrew a question");
+                        handle.abort();
+                    }
+                }
+                Ok(Some(ParticipantFrame::AskReply { question, reply })) => {
+                    if let Some(broker) = registry.calls() {
+                        broker.question_reply(&name, &question, reply);
+                    }
+                }
+                Ok(Some(ParticipantFrame::Approve { id, request })) => {
+                    let raised = match registry.calls() {
+                        Some(_) if waiting.len() >= MAX_PENDING_APPROVALS => {
+                            warn!(participant = %name, approval = id, "Denying an approval: too many pending on this connection");
+                            None
+                        }
+                        Some(broker) => Some(broker.raise_approval(&name, request)),
+                        None => None,
+                    };
+                    match raised {
+                        Some(mut raised) => {
+                            let outbound = outbound_tx.clone();
+                            let handle = approvals.spawn(async move {
+                                let verdict = raised.verdict().await;
+                                let _ = outbound.send(BrokerFrame::Approval { id, verdict }).await;
+                            });
+                            waiting.insert(id, handle);
+                        }
+                        None => {
+                            let _ = outbound_tx
+                                .send(BrokerFrame::Approval {
+                                    id,
+                                    verdict: ApprovalVerdict::Denied,
+                                })
+                                .await;
+                        }
+                    }
+                }
+                Ok(Some(ParticipantFrame::CancelApproval { id })) => {
+                    // Dropping the wait withdraws the root's card.
+                    if let Some(handle) = waiting.remove(&id) {
+                        debug!(participant = %name, approval = id, "The worker withdrew an approval");
+                        handle.abort();
+                    }
                 }
                 Ok(Some(ParticipantFrame::CancelCall { id })) => {
                     // Aborting the call's task drops its stream, which
@@ -324,56 +405,41 @@ where
 
     // 3. However we got here, the participant is gone, and so is everything
     // it had asked for: its calls are cancelled, which reaps the workers
-    // they started.
+    // they started, and its approvals and questions are withdrawn.
     calls.abort_all();
+    // Waited for, not just aborted: each withdrawal is on its way before
+    // the task's end is, so the root's card and popover — or a caller's
+    // copy of a question — go first.
+    approvals.shutdown().await;
+    questions.shutdown().await;
     registry.deregister(&name);
     drop(outbound_tx);
     let _ = writer.await;
     info!(participant = %name, "Participant connection closed");
 }
 
-/// Call id → the callee task that call has parked on a question.
-type Parked = Arc<Mutex<HashMap<u64, String>>>;
-
-/// Send call `id`'s events back as `req.progress` (and
-/// `call.input_required` when its callee asks a question), then one result
-/// or error for the request.
+/// Send call `id`'s events back as `req.progress`, then one result or
+/// error for the request.
 ///
 /// A frame that would be over the worker's frame cap — a callee's result
 /// larger than this connection accepts — fails this call with an `error`
 /// and ends it; the connection and its other calls go on.
 /// Waits while the outbound queue is full, which holds the callee's stream
 /// back rather than buffering it.
-async fn reply(
-    id: u64,
-    mut stream: CallStream,
-    outbound: mpsc::Sender<BrokerFrame>,
-    parked: Parked,
-) {
-    // However the call ends, it has nothing parked any more.
-    struct Unpark(Parked, u64);
-    impl Drop for Unpark {
-        fn drop(&mut self) {
-            lock(&self.0).remove(&self.1);
-        }
-    }
-    let _unpark = Unpark(parked.clone(), id);
-
+async fn reply(id: u64, mut stream: CallStream, outbound: mpsc::Sender<BrokerFrame>) {
     while let Some(event) = stream.next().await {
         let (frame, last) = match event {
             Ok(CallEvent::Progress(event)) => (BrokerFrame::CallProgress { id, event }, false),
-            Ok(CallEvent::InputRequired { task, request }) => {
-                lock(&parked).insert(id, task.clone());
-                (BrokerFrame::CallInputRequired { id, task, request }, false)
-            }
-            Ok(CallEvent::InputWithdrawn { task }) => {
-                lock(&parked).remove(&id);
-                (BrokerFrame::CallInputWithdrawn { id, task }, false)
-            }
             Ok(CallEvent::Result(result)) => (BrokerFrame::CallResult { id, result }, true),
-            // Only a root call hears its nested runs (TB-1); a worker's
-            // call is one of them.
-            Ok(CallEvent::Swarm(_)) => continue,
+            // Only a root call hears its nested runs (TB-1), their approvals
+            // (EN-2a) and their questions (EN-2b); a worker's call is one of
+            // them, and a question reaches a worker on its own connection.
+            Ok(
+                CallEvent::Swarm(_)
+                | CallEvent::Approve { .. }
+                | CallEvent::Ask { .. }
+                | CallEvent::InputWithdrawn { .. },
+            ) => continue,
             Err(error) => (BrokerFrame::CallError { id, error }, true),
         };
         let size = BrokerCodec::line_len_bound(&frame);
@@ -398,31 +464,6 @@ async fn reply(
             error: CallError::Failed("the call ended without a result".to_string()),
         })
         .await;
-}
-
-/// Deliver `node`'s answer to the question its call `id`'s callee parked
-/// `task` on. Anything else — a call with nothing parked, another task — is
-/// refused with a log line: the connection names who may answer what.
-async fn answer_callee(
-    registry: &ParticipantRegistry,
-    parked: &Parked,
-    node: &str,
-    id: u64,
-    task: &str,
-    input: TaskInput,
-) {
-    if lock(parked).get(&id).map(String::as_str) != Some(task) {
-        warn!(participant = %node, call = id, task, "Refused an answer for a task its call did not park");
-        return;
-    }
-    if let Err(error) = registry.answer_task(task, input).await {
-        // The callee's task is gone; its call ends on its own.
-        warn!(participant = %node, call = id, task, %error, "Could not deliver a worker's answer");
-    }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Write one frame as a line, copying it to `tap` when there is one. A

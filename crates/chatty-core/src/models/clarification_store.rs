@@ -6,6 +6,8 @@ use tokio::sync::{mpsc, oneshot};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use super::execution_approval_store::literal;
+
 /// How long the agent waits for the user to answer before giving up.
 /// Matches the execution-approval timeout.
 ///
@@ -58,6 +60,47 @@ pub struct ClarifyingQuestion {
     pub question: String,
     /// Pre-made options the user can pick with one click.
     pub options: Vec<String>,
+}
+
+impl ClarifyingQuestion {
+    /// The questions of a `human.ask` the broker delivered to the root
+    /// (ADR-0021 § 2, EN-2b), as the popover shows them: each question
+    /// headed by who asked — the broker's stamp of the agent and its chain,
+    /// and the third-party peer it relays, if any — and every field a
+    /// worker or a peer wrote shown [`literal`]ly, so nothing in it can
+    /// pass for another agent's name or restyle what the human reads. The
+    /// ids stay as they are: they are what the answers are matched by.
+    pub fn forwarded(request: chatty_fabric::AskRequest) -> Vec<Self> {
+        let mut header = match request.asker.as_ref() {
+            Some(asker) => format!(
+                "Asked by {} ({})",
+                literal(&asker.agent),
+                asker
+                    .chain
+                    .iter()
+                    .map(|spec| literal(spec))
+                    .collect::<Vec<_>>()
+                    .join(" \u{203a} ")
+            ),
+            None => "Asked by an agent the broker did not name".to_string(),
+        };
+        if let Some(origin) = request.origin.as_ref() {
+            header.push_str(&format!(
+                ", relaying {} ({})",
+                literal(&origin.agent),
+                origin.origin.as_str()
+            ));
+        }
+        request
+            .questions
+            .into_iter()
+            .map(|q| Self {
+                id: q.id,
+                question: format!("{header}\n{}", literal(&q.question)),
+                options: q.options.iter().map(|option| literal(option)).collect(),
+            })
+            .collect()
+    }
 }
 
 /// The user's answer to one [`ClarifyingQuestion`].
@@ -190,6 +233,12 @@ impl ClarificationStore {
         } else {
             false
         }
+    }
+
+    /// Drop request `id`, unblocking its waiting tool with an error:
+    /// nobody is left to answer it. Whether it existed.
+    pub fn cancel(&self, id: &str) -> bool {
+        self.pending_requests.lock().requests.remove(id).is_some()
     }
 
     /// Drop every pending request, unblocking each waiting tool with an error.

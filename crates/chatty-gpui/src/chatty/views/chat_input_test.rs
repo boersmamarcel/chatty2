@@ -594,3 +594,97 @@ fn chat_input_agent_picker_enter_tab_and_escape(cx: &mut gpui::TestAppContext) {
     let open = vcx.update(|_, cx| state.read(cx).is_agent_picker_open("/agent re"));
     assert!(!open, "Escape closed the picker");
 }
+
+/// A chat view that reaches two enabled remote A2A agents, `agent-alpha`
+/// and `agent-beta`, in that order (no module settings, so no local
+/// roster) — for picking the *second* row rather than the first.
+fn composer_with_two_remote_agents(
+    cx: &mut gpui::TestAppContext,
+) -> (gpui::Entity<super::ChatInputState>, gpui::VisualTestContext) {
+    use crate::chatty::views::chat_view::ChatView;
+    use crate::settings::models::{ExecutionSettingsModel, ExtensionsModel, GeneralSettingsModel};
+    use chatty_core::settings::models::a2a_store::A2aAgentConfig;
+    use chatty_core::settings::models::extensions_store::{
+        ExtensionKind, ExtensionSource, InstalledExtension,
+    };
+    use gpui::AppContext as _;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    cx.update(|cx| {
+        gpui_component::init(cx);
+        cx.set_global(GeneralSettingsModel::default());
+        cx.set_global(ExecutionSettingsModel {
+            workspace_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            ..ExecutionSettingsModel::default()
+        });
+        let mut extensions = ExtensionsModel::default();
+        for name in ["agent-alpha", "agent-beta"] {
+            extensions.add(InstalledExtension {
+                id: name.into(),
+                display_name: name.into(),
+                description: format!("{name} description"),
+                kind: ExtensionKind::A2aAgent(A2aAgentConfig {
+                    name: name.into(),
+                    url: "https://example.invalid/a2a".into(),
+                    api_key: None,
+                    enabled: true,
+                    skills: Vec::new(),
+                    allow_private_network: false,
+                }),
+                source: ExtensionSource::Custom,
+                pricing_model: None,
+                enabled: true,
+            });
+        }
+        cx.set_global(extensions);
+        cx.set_global(chatty_core::models::ErrorStore::new(100));
+        cx.set_global(crate::auto_updater::AutoUpdater::new("0.0.0"));
+        cx.set_global(chatty_core::models::ConversationsStore::new());
+    });
+    let slot: Rc<RefCell<Option<gpui::Entity<ChatView>>>> = Rc::default();
+    let slot_for_window = slot.clone();
+    let window = cx.add_window(move |window, cx| {
+        let view = cx.new(|cx| ChatView::new(window, cx));
+        *slot_for_window.borrow_mut() = Some(view.clone());
+        gpui_component::Root::new(view, window, cx)
+    });
+    let view = slot.borrow_mut().take().expect("ChatView captured");
+    let state = cx.read(|cx| view.read(cx).chat_input_state().clone());
+    (
+        state,
+        gpui::VisualTestContext::from_window(window.into(), cx),
+    )
+}
+
+/// AGE-814: pressing ↓ then Tab (or Enter) on the *second* picker row
+/// inserts that row's agent, not the first one — the real keystroke path
+/// (the interceptor in `chat_view/mod.rs`), not just the pure
+/// `apply_slash_command` unit test above.
+#[gpui::test]
+fn chat_input_tab_on_a_highlighted_non_first_row_inserts_that_row(cx: &mut gpui::TestAppContext) {
+    let (state, mut vcx) = composer_with_two_remote_agents(cx);
+
+    vcx.simulate_input("/agent ");
+    let items = vcx.update(|_, cx| state.read(cx).slash_menu_items("/agent "));
+    assert_eq!(agent_names(&items), vec!["agent-alpha", "agent-beta"]);
+    assert_eq!(
+        vcx.update(|_, cx| state.read(cx).slash_menu_selected()),
+        0,
+        "the picker opens with the first row highlighted"
+    );
+
+    vcx.simulate_keystrokes("down");
+    assert_eq!(
+        vcx.update(|_, cx| state.read(cx).slash_menu_selected()),
+        1,
+        "down arrow highlights the second row"
+    );
+
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(
+        composer_text(&state, &mut vcx),
+        "/agent agent-beta ",
+        "Tab on the highlighted second row must insert it, not the first"
+    );
+}

@@ -31,15 +31,13 @@ use tracing::{debug, info, warn};
 
 use serde_json::Value;
 
-use super::calls::{BrokerCalls, Caller};
+use super::calls::{BrokerCalls, Peer};
 use super::codec::BrokerCodec;
+use super::gate::OpenRun;
 use super::limits::MAX_FRAME_BYTES;
-use super::protocol::{
-    BrokerFrame, DelegatedTask, InputRequest, ParticipantCard, ParticipantFrame, TaskInput,
-    TaskState,
-};
+use super::protocol::{BrokerFrame, DelegatedTask, ParticipantCard, ParticipantFrame, TaskState};
 use chatty_fabric::{
-    AgentOrigin, CallChain, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName,
+    AgentOrigin, AskRequest, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName,
     NodeState, RunId, RunPermit, SpawnContext, SwarmItem, TaskTable, WeakRunPermit,
 };
 
@@ -59,9 +57,6 @@ pub enum TaskUpdate {
         /// Opaque, forwarded to the A2A status's `metadata` (see
         /// [`ParticipantFrame::Status`](super::protocol::ParticipantFrame)).
         metadata: Option<Value>,
-        /// What an `input-required` task is waiting for; answered through
-        /// [`ParticipantRegistry::answer_task`].
-        input: Option<InputRequest>,
     },
     Artifact {
         text: String,
@@ -79,17 +74,6 @@ pub enum TaskUpdate {
 /// before dropping the sender, so a caller is never left waiting on a
 /// process that has gone away.
 pub type TaskStream = mpsc::UnboundedReceiver<TaskUpdate>;
-
-/// Why an answer could not be delivered.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum AnswerError {
-    #[error("task '{0}' is not open on any participant")]
-    UnknownTask(String),
-    #[error("the participant owning task '{0}' is disconnecting")]
-    ParticipantGone(String),
-    #[error("the answer to task '{0}' is over the {max}-byte frame cap", max = MAX_FRAME_BYTES)]
-    TooLarge(String),
-}
 
 /// A node the broker admitted for a connection it is making.
 ///
@@ -141,8 +125,15 @@ struct Participant {
     /// Frames queued for this participant's socket writer; bounded, so a
     /// producer waits while the worker is slow to read (EN-0b).
     outbound: mpsc::Sender<BrokerFrame>,
-    /// Open tasks: id → where this task's updates go.
-    tasks: HashMap<String, mpsc::UnboundedSender<TaskUpdate>>,
+    /// Open tasks: id → where this task's updates go, and its run.
+    tasks: HashMap<String, OpenTask>,
+}
+
+/// A task a participant is serving: where its updates go, and the run it
+/// opened in the broker's task table (ADR-0023 § 1), which closes with it.
+struct OpenTask {
+    sink: mpsc::UnboundedSender<TaskUpdate>,
+    run: RunId,
 }
 
 #[derive(Default)]
@@ -168,34 +159,46 @@ struct Inner {
     /// someone asked for one ([`ParticipantRegistry::tap_wire`]).
     wire_tap: Option<mpsc::UnboundedSender<String>>,
     /// The runs broker calls started, each with the chain the broker
-    /// stamped on it (DP-2). A node's calls extend the chain of the run it
-    /// serves.
+    /// stamped on it (DP-2). Every task a node is handed opens one; a
+    /// node's call names the run it is made from and extends that run's
+    /// chain (ADR-0023 § 1, GT-0b).
     runs: TaskTable,
+    /// The name each open run goes by: the `taskId` of the `task.run` that
+    /// opened it, which is what a node's call names.
+    run_names: HashMap<RunId, String>,
 }
 
-/// A run in the broker's task table, released when this is dropped: when
-/// the worker serving it is reaped, however the call ended.
+impl Inner {
+    /// `run`'s task has ended — its result, a cancel, or its connection
+    /// closing: the run closes (as soon as its last child does), and no
+    /// call can name it any more.
+    fn close_run(&mut self, run: RunId) {
+        self.runs.release(run);
+        self.run_names.remove(&run);
+    }
+}
+
+/// A run a test opened by hand ([`ParticipantRegistry::open_run`]),
+/// released when this is dropped.
+#[cfg(test)]
 #[must_use = "dropping the guard releases the run"]
-pub struct RunGuard {
+pub(crate) struct RunGuard {
     registry: ParticipantRegistry,
     run: RunId,
 }
 
+#[cfg(test)]
 impl RunGuard {
-    pub fn run(&self) -> RunId {
-        self.run
+    /// The name a call made from this run names.
+    pub(crate) fn name(&self) -> String {
+        self.run.to_string()
     }
 }
 
+#[cfg(test)]
 impl Drop for RunGuard {
     fn drop(&mut self) {
-        self.registry.lock().runs.release(self.run);
-    }
-}
-
-impl std::fmt::Debug for RunGuard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("RunGuard").field(&self.run).finish()
+        self.registry.lock().close_run(self.run);
     }
 }
 
@@ -297,48 +300,43 @@ impl ParticipantRegistry {
         self.lock().contexts.get(name).cloned()
     }
 
-    /// Open the run a broker call started, served by the node admitted as
-    /// `callee` and called by `caller` (`None`: the root), under `chain`
-    /// (DP-2). A runner does this once it has admitted the node and before
-    /// the worker exists, so every call the worker makes finds its chain.
-    /// `None` when `callee` was never admitted.
-    pub fn open_run(
-        &self,
-        callee: &str,
-        caller: Option<&str>,
-        chain: CallChain,
-    ) -> Option<RunGuard> {
-        let mut inner = self.lock();
-        let callee = inner.directory.by_name(callee)?.id();
-        let caller = caller.and_then(|name| inner.directory.by_name(name).map(Node::id));
-        let parent = caller.and_then(|node| inner.runs.served_by(node).map(|(run, _)| run).last());
-        let run = inner.runs.open(caller, callee, parent, chain).ok()?;
-        drop(inner);
-        Some(RunGuard {
-            registry: self.clone(),
-            run,
-        })
-    }
-
-    /// The chain of the run `name` serves (DP-2): the broker's own record,
-    /// never anything the node said. `None` for a node no broker call
-    /// started.
-    pub(crate) fn run_chain(&self, name: &str) -> Option<CallChain> {
+    /// The runs `name` serves that are still open, each with the name a
+    /// call made from it names and the chain the broker stamped on it
+    /// (DP-2): the broker's own record, never anything the node said.
+    /// Alongside, the spec `name` was admitted as. `None` for a name no
+    /// node was admitted under; no runs for a node with no task in hand,
+    /// which calls as a chainless `External` (ADR-0023 § 2).
+    pub(crate) fn open_runs_of(&self, name: &str) -> Option<(String, Vec<OpenRun>)> {
         let inner = self.lock();
-        let node = inner.directory.by_name(name)?.id();
-        inner
+        let node = inner.directory.by_name(name)?;
+        let runs = inner
             .runs
-            .served_by(node)
-            .map(|(_, entry)| entry.chain.clone())
-            .max_by_key(|chain| chain.depth)
+            .served_by(node.id())
+            .filter(|(_, entry)| !entry.released)
+            .filter_map(|(run, entry)| {
+                Some(OpenRun {
+                    name: inner.run_names.get(&run)?.clone(),
+                    id: run,
+                    chain: entry.chain.clone(),
+                })
+            })
+            .collect();
+        Some((node.spec().to_string(), runs))
     }
 
-    /// The spec `name` was admitted as.
-    pub(crate) fn node_spec(&self, name: &str) -> Option<String> {
-        self.lock()
-            .directory
-            .by_name(name)
-            .map(|node| node.spec().to_string())
+    /// The spec the participant registered as `name` was admitted as:
+    /// `None` when nothing is registered under `name`, `Some(None)` when it
+    /// is but the directory has no node for it — a registry that does not
+    /// add up, which the gate refuses as an internal error.
+    pub(crate) fn registered_spec(&self, name: &str) -> Option<Option<String>> {
+        let inner = self.lock();
+        let participant = inner.participants.get(name)?;
+        Some(
+            inner
+                .directory
+                .get(participant.node)
+                .map(|node| node.spec().to_string()),
+        )
     }
 
     /// Every node this broker ever admitted, ended ones included, in
@@ -451,18 +449,21 @@ impl ParticipantRegistry {
                 return;
             };
             let _ = inner.directory.end(participant.node);
+            // Connection loss closes every run it was serving.
+            for task in participant.tasks.values() {
+                inner.close_run(task.run);
+            }
             participant
         };
         self.ended(participant.node, name);
 
         let open = participant.tasks.len();
-        for (task_id, sink) in participant.tasks {
+        for (task_id, task) in participant.tasks {
             debug!(participant = %name, task = %task_id, "Failing a task whose participant went away");
-            let _ = sink.send(TaskUpdate::Status {
+            let _ = task.sink.send(TaskUpdate::Status {
                 state: TaskState::Failed,
                 message: Some(format!("participant '{name}' disconnected")),
                 metadata: None,
-                input: None,
             });
         }
 
@@ -529,6 +530,14 @@ impl ParticipantRegistry {
     /// A new task is the participant's next run: the messages waiting for
     /// it open the task's text, and each sender's allowance starts over
     /// (tree messages, TM-2).
+    ///
+    /// The task opens its run (ADR-0023 § 1) in the step that queues its
+    /// frame, under the chain its [`CallStamp`](super::protocol::CallStamp)
+    /// carries and named by its task id, so a call the worker makes on
+    /// receiving it already finds it. The run the stamp says the call came
+    /// from is re-checked there: a call whose own run has closed since it
+    /// was granted hands nothing over. A task with no stamp is refused:
+    /// every task a node is handed opens a run.
     pub async fn submit_task(
         &self,
         name: &str,
@@ -537,9 +546,13 @@ impl ParticipantRegistry {
         if !self.is_registered(name) {
             return None;
         }
+        let Some(call) = task.call.clone() else {
+            warn!(participant = %name, "Refusing a task no grant stamped: it would open no run");
+            return None;
+        };
         let messages = self
             .calls()
-            .map(|calls| calls.start_run(&Caller::Node(name.to_string())))
+            .map(|calls| calls.start_run(&Peer::Node(name.to_string())))
             .unwrap_or_default();
         if !messages.is_empty() {
             task.text = format!("{}\n\n{}", messages.join("\n"), task.text);
@@ -576,8 +589,34 @@ impl ParticipantRegistry {
         };
         let (tx, rx) = mpsc::unbounded_channel();
         let mut inner = self.lock();
+        let callee = inner.participants.get(name)?.node;
+        let caller = call
+            .caller
+            .as_deref()
+            .and_then(|caller| inner.directory.by_name(caller))
+            .map(Node::id);
+        if let Some(from) = call.from_run {
+            let still_open = inner
+                .runs
+                .get(from)
+                .is_some_and(|entry| !entry.released && Some(entry.callee) == caller);
+            if !still_open {
+                warn!(participant = %name, run = %from, "Refusing a task: the run its call came from has closed");
+                return None;
+            }
+        }
+        let run = match inner.runs.open(caller, callee, call.from_run, call.chain) {
+            Ok(run) => run,
+            Err(error) => {
+                warn!(participant = %name, %error, "Refusing a task: its run could not open");
+                return None;
+            }
+        };
+        inner.run_names.insert(run, task_id.clone());
         let participant = inner.participants.get_mut(name)?;
-        participant.tasks.insert(task_id.clone(), tx);
+        participant
+            .tasks
+            .insert(task_id.clone(), OpenTask { sink: tx, run });
         permit.send(frame);
         drop(inner);
 
@@ -595,7 +634,7 @@ impl ParticipantRegistry {
         let Some(participant) = inner.participants.get_mut(name) else {
             return;
         };
-        if participant.tasks.remove(task_id).is_some() {
+        if let Some(task) = participant.tasks.remove(task_id) {
             let cancel = BrokerFrame::Cancel {
                 task_id: task_id.to_string(),
             };
@@ -617,6 +656,7 @@ impl ParticipantRegistry {
                     }
                 }
             }
+            inner.close_run(task.run);
             debug!(participant = %name, task = %task_id, "Task cancelled");
         }
     }
@@ -633,51 +673,63 @@ impl ParticipantRegistry {
             .any(|p| p.tasks.contains_key(task_id))
     }
 
-    /// Deliver the answer to a task parked in `input-required`.
-    ///
-    /// Addressed by task id alone: the caller answered on the A2A task it
-    /// was streaming, and a runner's task is served by a worker whose
-    /// participant name the caller never learned. The task stays open — the
-    /// participant's next status un-parks it.
-    ///
-    /// An answer whose frame would be over the worker's frame cap fails
-    /// with [`AnswerError::TooLarge`]; the task and its connection stay
-    /// open. Waits while the participant's outbound queue is full.
-    pub async fn answer_task(&self, task_id: &str, input: TaskInput) -> Result<(), AnswerError> {
-        let frame = BrokerFrame::Input {
-            task_id: task_id.to_string(),
-            input,
+    /// Relay the question `question` to `name` as a broker→worker
+    /// `human.ask` (EN-2b). `false` when `name` is not connected any more,
+    /// its socket is closing, or the frame would be over the worker's frame
+    /// cap; then nobody there can answer it. Waits while the participant's
+    /// outbound queue is full.
+    pub(crate) async fn relay_question(
+        &self,
+        name: &str,
+        question: &str,
+        request: AskRequest,
+    ) -> bool {
+        let frame = BrokerFrame::Ask {
+            question: question.to_string(),
+            request,
         };
         if BrokerCodec::line_len_bound(&frame) > MAX_FRAME_BYTES {
-            return Err(AnswerError::TooLarge(task_id.to_string()));
+            warn!(participant = %name, question, "Not relaying a question over the worker's frame cap");
+            return false;
         }
-        let (name, outbound) = {
-            let inner = self.lock();
-            let Some((name, participant)) = inner
-                .participants
-                .iter()
-                .find(|(_, p)| p.tasks.contains_key(task_id))
-            else {
-                return Err(AnswerError::UnknownTask(task_id.to_string()));
-            };
-            (name.clone(), participant.outbound.clone())
-        };
-        let Ok(permit) = outbound.reserve().await else {
-            return Err(AnswerError::ParticipantGone(task_id.to_string()));
-        };
-        // The task may have ended while this waited for room.
-        let inner = self.lock();
-        if !inner
+        let Some(outbound) = self
+            .lock()
             .participants
-            .get(&name)
-            .is_some_and(|p| p.tasks.contains_key(task_id))
-        {
-            return Err(AnswerError::UnknownTask(task_id.to_string()));
+            .get(name)
+            .map(|p| p.outbound.clone())
+        else {
+            return false;
+        };
+        outbound.send(frame).await.is_ok()
+    }
+
+    /// Withdraw the question relayed to `name` as `question` (EN-2b): a
+    /// `req.cancel` of that `human.ask`. Called from `Drop`, so it never
+    /// waits here for room in a full queue.
+    pub(crate) fn withdraw_question(&self, name: &str, question: &str) {
+        let Some(outbound) = self
+            .lock()
+            .participants
+            .get(name)
+            .map(|p| p.outbound.clone())
+        else {
+            return;
+        };
+        let cancel = BrokerFrame::CancelAsk {
+            question: question.to_string(),
+        };
+        if let Err(mpsc::error::TrySendError::Full(cancel)) = outbound.try_send(cancel) {
+            match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    runtime.spawn(async move {
+                        let _ = outbound.send(cancel).await;
+                    });
+                }
+                Err(_) => {
+                    warn!(participant = %name, question, "Could not queue a withdrawal outside a runtime")
+                }
+            }
         }
-        permit.send(frame);
-        drop(inner);
-        debug!(participant = %name, task = %task_id, "Answer delivered to a parked task");
-        Ok(())
     }
 
     /// Route one frame from `name`'s socket to the task it names.
@@ -700,14 +752,12 @@ impl ParticipantRegistry {
                 state,
                 message,
                 metadata,
-                input,
             } => (
                 task_id,
                 TaskUpdate::Status {
                     state,
                     message,
                     metadata,
-                    input,
                 },
                 state.is_terminal(),
             ),
@@ -722,9 +772,16 @@ impl ParticipantRegistry {
             // Calls are run by the connection loop, which owns their
             // lifetime; one reaching here was not routed and is dropped.
             ParticipantFrame::Call { id, .. }
-            | ParticipantFrame::CallInput { id, .. }
-            | ParticipantFrame::CancelCall { id } => {
+            | ParticipantFrame::CancelCall { id }
+            | ParticipantFrame::Approve { id, .. }
+            | ParticipantFrame::CancelApproval { id }
+            | ParticipantFrame::Ask { id, .. }
+            | ParticipantFrame::CancelAsk { id } => {
                 warn!(participant = %name, call = id, "A call frame outside a connection loop");
+                return true;
+            }
+            ParticipantFrame::AskReply { question, .. } => {
+                warn!(participant = %name, question, "A question's reply outside a connection loop");
                 return true;
             }
         };
@@ -737,9 +794,17 @@ impl ParticipantRegistry {
         // out before the send: the sink is dropped with this scope, which is
         // what ends the caller's stream.
         let sink = if terminal {
-            participant.tasks.remove(&task_id)
+            let task = participant.tasks.remove(&task_id);
+            // Its result closes its run.
+            task.map(|task| {
+                inner.close_run(task.run);
+                task.sink
+            })
         } else {
-            participant.tasks.get(&task_id).cloned()
+            participant
+                .tasks
+                .get(&task_id)
+                .map(|task| task.sink.clone())
         };
         drop(inner);
 
@@ -784,6 +849,42 @@ impl ParticipantRegistry {
             .expect("admitted")
             .name()
             .to_string()
+    }
+
+    /// Open a run by hand, served by the node admitted as `callee` and
+    /// called by `caller` (`None`: the root) from its run `from`, under
+    /// `chain` — what handing it a task does, for a node with no
+    /// connection. Named as the guard says. `None` when `callee` was never
+    /// admitted.
+    pub(crate) fn open_run(
+        &self,
+        callee: &str,
+        caller: Option<&str>,
+        from: Option<RunId>,
+        chain: chatty_fabric::CallChain,
+    ) -> Option<RunGuard> {
+        let mut inner = self.lock();
+        let callee = inner.directory.by_name(callee)?.id();
+        let caller = caller.and_then(|name| inner.directory.by_name(name).map(Node::id));
+        let run = inner.runs.open(caller, callee, from, chain).ok()?;
+        inner.run_names.insert(run, run.to_string());
+        drop(inner);
+        Some(RunGuard {
+            registry: self.clone(),
+            run,
+        })
+    }
+
+    /// [`admit_under`](Self::admit_under), with a run from the root open
+    /// for the node until the registry goes: a node with a task in hand,
+    /// which calls as a `Node` (ADR-0023 § 2).
+    pub(crate) fn admit_running(&self, spec: &str, owner: Option<&str>) -> String {
+        let name = self.admit_under(spec, owner);
+        let chain = chatty_fabric::CallChain::root(format!("t-{name}"))
+            .extend(spec)
+            .expect("a chain");
+        std::mem::forget(self.open_run(&name, None, None, chain).expect("a run"));
+        name
     }
 
     /// Mark the node named `name` ended, as its connection closing does.
@@ -897,7 +998,8 @@ mod tests {
         let (task_id, mut updates) = reg
             .submit_task(
                 &w,
-                DelegatedTask::new("summarise foo.rs").with_bearer(Some(TaskBearer::new("tok"))),
+                DelegatedTask::from_root("summarise foo.rs")
+                    .with_bearer(Some(TaskBearer::new("tok"))),
             )
             .await
             .expect("the participant is registered");
@@ -926,7 +1028,6 @@ mod tests {
                 state: TaskState::Working,
                 message: Some("read_file".into()),
                 metadata: None,
-                input: None,
             },
         );
         reg.on_frame(
@@ -944,7 +1045,6 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
-                input: None,
             },
         );
 
@@ -979,8 +1079,14 @@ mod tests {
         let reg = ParticipantRegistry::new();
         let (w, _outbound) = register(&reg, "worker");
 
-        let (_a, mut first) = reg.submit_task(&w, DelegatedTask::new("a")).await.unwrap();
-        let (_b, mut second) = reg.submit_task(&w, DelegatedTask::new("b")).await.unwrap();
+        let (_a, mut first) = reg
+            .submit_task(&w, DelegatedTask::from_root("a"))
+            .await
+            .unwrap();
+        let (_b, mut second) = reg
+            .submit_task(&w, DelegatedTask::from_root("b"))
+            .await
+            .unwrap();
 
         reg.deregister(&w);
 
@@ -1004,7 +1110,7 @@ mod tests {
     async fn a_task_for_an_unregistered_participant_is_not_accepted() {
         let reg = ParticipantRegistry::new();
         assert!(
-            reg.submit_task("nobody", DelegatedTask::new("hello"))
+            reg.submit_task("nobody", DelegatedTask::from_root("hello"))
                 .await
                 .is_none()
         );
@@ -1014,7 +1120,10 @@ mod tests {
     async fn cancelling_forgets_the_task_and_tells_the_participant() {
         let reg = ParticipantRegistry::new();
         let (w, mut outbound) = register(&reg, "worker");
-        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).await.unwrap();
+        let (task_id, mut updates) = reg
+            .submit_task(&w, DelegatedTask::from_root("a"))
+            .await
+            .unwrap();
         let _ = outbound.recv().await;
 
         reg.cancel_task(&w, &task_id);
@@ -1034,74 +1143,8 @@ mod tests {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
-                input: None,
             },
         ));
-    }
-
-    #[tokio::test]
-    async fn an_answer_reaches_the_participant_that_owns_the_task() {
-        use super::super::protocol::{InputAnswer, InputQuestion};
-
-        let reg = ParticipantRegistry::new();
-        let (w, mut outbound) = register(&reg, "worker");
-        let (task_id, mut updates) = reg.submit_task(&w, DelegatedTask::new("a")).await.unwrap();
-        let _ = outbound.recv().await;
-
-        // The worker parks the task and says what it is waiting for.
-        reg.on_frame(
-            &w,
-            ParticipantFrame::Status {
-                task_id: task_id.clone(),
-                state: TaskState::InputRequired,
-                message: Some("Which database?".into()),
-                metadata: None,
-                input: Some(InputRequest {
-                    id: "req-1".into(),
-                    questions: vec![InputQuestion::Question {
-                        id: "q1".into(),
-                        question: "Which database?".into(),
-                        options: vec!["Postgres".into(), "SQLite".into()],
-                    }],
-                }),
-            },
-        );
-        let Some(TaskUpdate::Status {
-            state: TaskState::InputRequired,
-            input: Some(request),
-            ..
-        }) = updates.recv().await
-        else {
-            panic!("the caller sees the request behind the parked state");
-        };
-        assert_eq!(request.id, "req-1");
-        assert!(reg.owns_task(&task_id), "a parked task is still open");
-
-        // The answer is addressed by task id alone.
-        let input = TaskInput {
-            request_id: request.id,
-            answers: vec![InputAnswer {
-                id: "q1".into(),
-                answer: "Postgres".into(),
-                custom: false,
-            }],
-        };
-        reg.answer_task(&task_id, input.clone()).await.unwrap();
-        assert!(matches!(
-            outbound.recv().await,
-            Some(BrokerFrame::Input { task_id: t, input: i }) if t == task_id && i == input
-        ));
-        assert_eq!(
-            reg.open_task_count(&w),
-            1,
-            "answering does not close the task"
-        );
-
-        assert_eq!(
-            reg.answer_task("task-nobody", input).await.unwrap_err(),
-            AnswerError::UnknownTask("task-nobody".into())
-        );
-        assert!(!reg.owns_task("task-nobody"));
     }
 
     #[test]

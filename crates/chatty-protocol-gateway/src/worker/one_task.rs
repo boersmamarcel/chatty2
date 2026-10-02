@@ -23,24 +23,34 @@
 //! # The way back down
 //!
 //! The socket is read for the whole task, not only until the task arrives:
-//! a worker whose `ask_user` parked the task gets its answer as an `input`
-//! frame (AGE-306), which lands on the [`InputReceiver`] the turn was
-//! handed. What the turn does with it is [`answer_inputs`] — the
-//! embedder spawns that beside its turn with the session's store.
+//! a worker whose `ask_user` parked the task on a `human.ask` gets the
+//! answers as that request's result (EN-2b), which lands on the
+//! [`InputReceiver`] the turn was handed. What the turn does with it is
+//! [`answer_inputs`] — the embedder spawns that beside its turn with the
+//! session's store.
 //!
 //! # Calls (BI-4)
 //!
 //! The same connection carries the worker's own calls: its `invoke_agent`
 //! and `list_agents` go up as requests and their replies come down beside
-//! the task's messages. A callee's question comes down as
-//! `call.input_required` and the worker's answer goes up as `call.input`
-//! (BI-5), so a question from any depth reaches the root's human.
+//! the task's messages. A callee's question comes down as a broker→worker
+//! `human.ask` (EN-2b); a worker has no human of its own, so it answers
+//! every one `escalate` and the broker carries the original question, its
+//! asker's stamp intact, on up toward the root.
+//! An approval does not climb (EN-2a): the turn's command or write asks
+//! the root with a `human.approve` request on this connection, and the
+//! root's verdict comes back as its result, onto the same
+//! [`InputReceiver`].
+//!
 //! [`WorkerConnection`] is a welcomed connection with a [`SocketTransport`]
 //! over it, so the worker connects first and
 //! builds its agent second, handing the agent [`WorkerConnection::transport`]
 //! (connect-then-build). The read half routes each `call_*` reply to the
 //! call it names; the write half interleaves `call` frames with the task's
 //! progress.
+//! Every `agent.invoke` it writes names the task's run — the `taskId` of
+//! the `task.run` it serves — which is the run the broker decides the call
+//! under (ADR-0023 § 1, GT-0b).
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -49,12 +59,12 @@ use anyhow::{Context, Result};
 use chatty_core::services::fabric_transport::{CallReplies, Outbound, SocketTransport};
 use chatty_core::services::{StreamError, StreamErrorKind};
 use chatty_core::session::SessionEvent;
-use chatty_fabric::Transport;
+use chatty_fabric::{AskReply, CallRequest, InvokeAgentParams, Transport};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::{InputReceiver, TaskMapper};
+use super::{InputReceiver, TaskMapper, WorkerInput};
 use crate::participant::{
     BrokerFrame, DelegatedTask, ParticipantCard, ParticipantConnection, ParticipantFrame,
     ParticipantReader, ParticipantSkill,
@@ -162,7 +172,7 @@ impl WorkerConnection {
     {
         let Self {
             mut connection,
-            transport: _,
+            transport,
             mut calls,
             replies,
         } = self;
@@ -185,13 +195,20 @@ impl WorkerConnection {
             TaskMapper::new(task_id.clone())
                 .with_capture_conversation(task.capture_conversation)
                 .with_handoff(task.handoff.clone())
-                .with_swarm_events(task.swarm_events),
+                .with_swarm_events(task.swarm_events)
+                .with_question_numbers(transport.question_numbers()),
         ));
+        // The reader answers the questions relayed to this worker on the
+        // turn's frame queue.
+        let escalations = frames_tx.clone();
 
         let sink: EventSink = {
             let mapper = mapper.clone();
             Arc::new(move |event: &SessionEvent| {
                 let mut mapper = lock(&mapper);
+                if let Some(frame) = mapper.withdrawn_approval(event) {
+                    let _ = frames_tx.send(frame);
+                }
                 if let Some(frame) = mapper.map(event) {
                     let _ = frames_tx.send(frame);
                 }
@@ -202,6 +219,9 @@ impl WorkerConnection {
         };
 
         let (reader, mut writer_half) = connection.into_split();
+        // Every call this worker makes is made from the one task it serves,
+        // and names that task's run (ADR-0023 § 1, GT-0b).
+        let task_run = task_id.clone();
         // The turn's progress and its calls share the write half, until the
         // turn is over; then whatever progress is still queued goes out, and
         // the socket is free for the terminal status.
@@ -219,16 +239,12 @@ impl WorkerConnection {
                         }
                     },
                     Some(outbound) = calls.recv() => match outbound {
-                        Outbound::Call { id, request } => ParticipantFrame::Call { id, request },
-                        Outbound::Answer { id, task, input } => {
-                            match serde_json::from_value(input) {
-                                Ok(input) => ParticipantFrame::CallInput { id, task, input },
-                                Err(e) => {
-                                    warn!(call = id, error = %e, "Dropping an answer that is not an input frame's shape");
-                                    continue;
-                                }
-                            }
-                        }
+                        Outbound::Call { id, request } => ParticipantFrame::Call {
+                            id,
+                            request: from_run(request, &task_run),
+                        },
+                        Outbound::Ask { id, request } => ParticipantFrame::Ask { id, request },
+                        Outbound::CancelAsk { id } => ParticipantFrame::CancelAsk { id },
                     },
                     _ = &mut turn_over_rx => break,
                 };
@@ -257,6 +273,8 @@ impl WorkerConnection {
             task_id.clone(),
             inputs_tx,
             replies.clone(),
+            mapper.clone(),
+            escalations,
         ));
 
         let outcome = run(task, sink, inputs_rx).await;
@@ -311,16 +329,23 @@ where
         .await
 }
 
+/// `request`, made from the run named `run`: an `agent.invoke` names it.
+fn from_run(request: CallRequest, run: &str) -> CallRequest {
+    match request {
+        CallRequest::InvokeAgent(params) => CallRequest::InvokeAgent(InvokeAgentParams {
+            run: Some(run.to_string()),
+            ..params
+        }),
+        other @ (CallRequest::ListAgents | CallRequest::SendMessage(_)) => other,
+    }
+}
+
 /// Hand a `call_*` frame to the call it names. `false` for any other frame.
 fn route_reply(replies: &CallReplies, frame: &BrokerFrame) -> bool {
     match frame {
         BrokerFrame::CallProgress { id, event } => replies.progress(*id, event.clone()),
         BrokerFrame::CallResult { id, result } => replies.result(*id, result.clone()),
         BrokerFrame::CallError { id, error } => replies.error(*id, error.clone()),
-        BrokerFrame::CallInputRequired { id, task, request } => {
-            replies.input_required(*id, task.clone(), request.clone())
-        }
-        BrokerFrame::CallInputWithdrawn { id, task } => replies.input_withdrawn(*id, task.clone()),
         _ => return false,
     }
     true
@@ -331,23 +356,67 @@ fn route_reply(replies: &CallReplies, frame: &BrokerFrame) -> bool {
 async fn forward_inputs(
     mut reader: ParticipantReader,
     task_id: String,
-    inputs: mpsc::UnboundedSender<crate::participant::TaskInput>,
+    inputs: mpsc::UnboundedSender<WorkerInput>,
     replies: CallReplies,
+    mapper: Arc<Mutex<TaskMapper>>,
+    escalations: mpsc::UnboundedSender<ParticipantFrame>,
 ) {
     loop {
         match reader.next_frame().await {
             Ok(Some(frame)) if route_reply(&replies, &frame) => {}
-            Ok(Some(BrokerFrame::Input {
-                task_id: for_task,
-                input,
-            })) if for_task == task_id => {
+            // The answers to one of this worker's questions (EN-2b): the
+            // turn's own, for the store it was raised on, or one its
+            // transport relayed from a third-party peer.
+            Ok(Some(BrokerFrame::Answer { id, answers })) => {
+                let Some(store_id) = lock(&mapper).take_question(id) else {
+                    if !replies.answered(id, answers) {
+                        debug!(question = id, "Answers for a question nobody waits on");
+                    }
+                    continue;
+                };
+                let input = match answers {
+                    Ok(answers) => WorkerInput::Answer {
+                        id: store_id,
+                        answers,
+                    },
+                    Err(error) => {
+                        warn!(task = %task_id, %error, "Nobody answered this worker's question");
+                        WorkerInput::Unanswered { id: store_id }
+                    }
+                };
                 if inputs.send(input).is_err() {
-                    debug!(task = %task_id, "An answer arrived after the turn stopped listening");
+                    debug!(task = %task_id, "Answers arrived after the turn stopped listening");
                     break;
                 }
             }
-            Ok(Some(BrokerFrame::Input { task_id: other, .. })) => {
-                debug!(task = %other, "Ignoring an answer for a task this worker does not run")
+            // A callee's question (EN-2b). This worker has no human to ask,
+            // so it passes it on, untouched, to its own caller.
+            Ok(Some(BrokerFrame::Ask { question, .. })) => {
+                debug!(%question, "Escalating a callee's question");
+                let _ = escalations.send(ParticipantFrame::AskReply {
+                    question,
+                    reply: AskReply::Escalate,
+                });
+            }
+            Ok(Some(BrokerFrame::CancelAsk { question })) => {
+                debug!(%question, "A callee's question was withdrawn");
+            }
+            // The root's verdict on one of this task's approvals (EN-2a),
+            // for the store it was raised on.
+            Ok(Some(BrokerFrame::Approval { id, verdict })) => {
+                let Some((approval, kind)) = lock(&mapper).take_approval(id) else {
+                    debug!(approval = id, "A verdict for an approval nobody waits on");
+                    continue;
+                };
+                let input = WorkerInput::Approval {
+                    id: approval,
+                    kind,
+                    verdict,
+                };
+                if inputs.send(input).is_err() {
+                    debug!(task = %task_id, "A verdict arrived after the turn stopped listening");
+                    break;
+                }
             }
             Ok(Some(BrokerFrame::Cancel { .. })) => {
                 debug!(task = %task_id, "Cancel received; the broker reaps the worker")
@@ -470,6 +539,7 @@ mod tests {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         })
     }
 
@@ -483,8 +553,9 @@ mod tests {
             match event? {
                 CallEvent::Result(result) => return Ok(serde_json::from_value(result).unwrap()),
                 CallEvent::Progress(_)
-                | CallEvent::InputRequired { .. }
+                | CallEvent::Ask { .. }
                 | CallEvent::InputWithdrawn { .. }
+                | CallEvent::Approve { .. }
                 | CallEvent::Swarm(_) => {}
             }
         }
@@ -526,7 +597,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         let (_task, _updates) = registry
-            .submit_task(&name, DelegatedTask::new("call three agents"))
+            .submit_task(&name, DelegatedTask::from_root("call three agents"))
             .await
             .expect("the caller is connected");
 

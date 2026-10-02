@@ -72,6 +72,17 @@ pub(crate) use conversation_ops_modify::move_ui_enabled;
 /// could serve them on this platform: a name listed without one fails
 /// every delegation (AGE-759).
 pub(crate) fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<Vec<String>> {
+    gateway_and_roster_from(cx, workspace, dirs::data_dir().as_deref())
+}
+
+/// [`gateway_and_roster`] with the data directory given rather than the
+/// platform's, so a test can see a "global" spec (`<data dir>/chatty/agents/`)
+/// without touching the real one (AGE-814).
+pub(crate) fn gateway_and_roster_from(
+    cx: &App,
+    workspace: Option<&Path>,
+    data_dir: Option<&Path>,
+) -> Option<Vec<String>> {
     let m = cx.try_global::<crate::settings::models::ModuleSettingsModel>()?;
     if !crate::settings::models::agent_specs::broker_reachable(cx) {
         return Some(Vec::new());
@@ -92,7 +103,7 @@ pub(crate) fn gateway_and_roster(cx: &App, workspace: Option<&Path>) -> Option<V
         );
         return Some(Vec::new());
     }
-    Some(m.roster_names(workspace))
+    Some(m.roster_names_from(workspace, data_dir))
 }
 
 /// Wait for the memory service to finish initializing (with a timeout), then return it.
@@ -1039,6 +1050,53 @@ mod tests {
             let names = gateway_and_roster(cx, None).expect("module settings exist");
             if cfg!(unix) {
                 assert_eq!(names, vec!["data-analyst".to_string()]);
+            } else {
+                assert!(names.is_empty(), "no runners on this platform: {names:?}");
+            }
+        });
+    }
+
+    /// AGE-814: the desktop roster sees a spec from the conversation's
+    /// workspace (`<workspace>/.chatty/agents/`) *and* a spec from the
+    /// platform data directory (`<data dir>/chatty/agents/`) — the same two
+    /// places `chatty-tui`'s `/agents` reads, and what the tutorial's "add
+    /// the team" step relies on.
+    #[gpui::test]
+    fn desktop_roster_sees_a_workspace_spec_and_a_global_spec(cx: &mut gpui::TestAppContext) {
+        let workspace = tempfile::tempdir().unwrap();
+        let data_dir = tempfile::tempdir().unwrap();
+        let ws_agents = workspace.path().join(".chatty").join("agents");
+        let global_agents = data_dir.path().join("chatty").join("agents");
+        std::fs::create_dir_all(&ws_agents).unwrap();
+        std::fs::create_dir_all(&global_agents).unwrap();
+        std::fs::write(
+            ws_agents.join("my-workspace-agent.toml"),
+            "[agent]\nname = \"my-workspace-agent\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            global_agents.join("my-global-agent.toml"),
+            "[agent]\nname = \"my-global-agent\"\n",
+        )
+        .unwrap();
+
+        cx.update(|cx| {
+            cx.set_global(crate::settings::models::ModuleSettingsModel::default());
+            cx.set_global(crate::settings::models::DiscoveredModulesModel {
+                lazy_broker: Some(std::sync::Arc::new(PendingBroker)),
+                ..Default::default()
+            });
+            let names = gateway_and_roster_from(cx, Some(workspace.path()), Some(data_dir.path()))
+                .expect("module settings exist");
+            if cfg!(unix) {
+                assert!(
+                    names.contains(&"my-workspace-agent".to_string()),
+                    "workspace spec missing from the desktop roster: {names:?}"
+                );
+                assert!(
+                    names.contains(&"my-global-agent".to_string()),
+                    "global spec missing from the desktop roster: {names:?}"
+                );
             } else {
                 assert!(names.is_empty(), "no runners on this platform: {names:?}");
             }

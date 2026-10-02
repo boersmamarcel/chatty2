@@ -6,6 +6,7 @@
 //! test can send a line no real worker would, or stop reading.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,8 @@ struct Raw {
     name: String,
     lines: Lines<BufReader<OwnedReadHalf>>,
     write: OwnedWriteHalf,
+    /// The task this worker serves, whose run its calls name (GT-0b).
+    task: Option<String>,
 }
 
 impl Raw {
@@ -39,6 +42,7 @@ impl Raw {
             name,
             lines: BufReader::new(read).lines(),
             write,
+            task: None,
         };
         raw.send(json!({"id": 0, "method": "session.hello", "params": {"card": {}}}))
             .await;
@@ -47,6 +51,27 @@ impl Raw {
         assert_eq!(welcome["result"]["name"], raw.name.as_str());
         wait_for(|| registry.is_registered(&raw.name), "registered").await;
         raw
+    }
+
+    /// [`connect`](Self::connect), then take a task from the root: a node
+    /// with a run open, whose calls are made from it (ADR-0023 § 1).
+    async fn serving(registry: &ParticipantRegistry, spec: &str) -> Self {
+        let mut raw = Self::connect(registry, spec).await;
+        let (task, _updates) = registry
+            .submit_task(&raw.name, DelegatedTask::from_root("serve"))
+            .await
+            .expect("the connection takes work");
+        let run = raw.next().await.expect("its task.run");
+        assert_eq!(run["params"]["taskId"], task.as_str());
+        raw.task = Some(task);
+        raw
+    }
+
+    /// An `agent.invoke` of `agent` with `prompt`, as request `id`, from
+    /// the run of the task this worker serves.
+    fn invoke(&self, id: u64, agent: &str, prompt: &str) -> Value {
+        json!({"id": id, "method": "agent.invoke",
+               "params": {"agent": agent, "prompt": prompt, "run": self.task}})
     }
 
     async fn send(&mut self, mut frame: Value) {
@@ -83,11 +108,6 @@ async fn wait_for(done: impl Fn() -> bool, what: &str) {
         assert!(start.elapsed() < Duration::from_secs(30), "never {what}");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-}
-
-fn invoke(id: u64, agent: &str, prompt: &str) -> Value {
-    json!({"id": id, "method": "agent.invoke",
-           "params": {"agent": agent, "prompt": prompt}})
 }
 
 /// A virtual agent whose worker answers in-process: with `prompt` bytes of
@@ -146,7 +166,6 @@ impl VirtualAgent for Answering {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
-                input: None,
             });
         }
         Box::pin(async move {
@@ -191,7 +210,7 @@ async fn oversized_line_closes_only_sender() {
 
     assert!(registry.is_registered(&other.name), "the other one stays");
     let (task_id, _updates) = registry
-        .submit_task(&other.name, DelegatedTask::new("still here"))
+        .submit_task(&other.name, DelegatedTask::from_root("still here"))
         .await
         .expect("the other connection takes work");
     let task = other.next().await.expect("its task");
@@ -208,12 +227,12 @@ async fn oversized_line_closes_only_sender() {
 #[tokio::test]
 async fn relayed_result_over_receiver_cap_fails_only_that_request() {
     let (registry, _calls) = broker();
-    let mut caller = Raw::connect(&registry, "caller").await;
+    let mut caller = Raw::serving(&registry, "caller").await;
 
     // The callee's answer is exactly the cap; wrapped in the caller's
     // result envelope, it is over it.
     caller
-        .send(invoke(1, "answering", &MAX_FRAME_BYTES.to_string()))
+        .send(caller.invoke(1, "answering", &MAX_FRAME_BYTES.to_string()))
         .await;
     let failed = caller.answer(1).await;
     assert!(failed.get("error").is_some(), "an error: {}", failed["id"]);
@@ -224,7 +243,7 @@ async fn relayed_result_over_receiver_cap_fails_only_that_request() {
         failed["error"]
     );
 
-    caller.send(invoke(2, "answering", "small")).await;
+    caller.send(caller.invoke(2, "answering", "small")).await;
     let ok = caller.answer(2).await;
     assert!(ok.get("result").is_some(), "{ok}");
     assert_eq!(ok["id"], 2);
@@ -251,7 +270,7 @@ async fn full_outbound_queue_backpressures_and_keeps_connection() {
             let mut streams = Vec::new();
             for _ in 0..total {
                 let task = registry
-                    .submit_task(&name, DelegatedTask::new(text.clone()))
+                    .submit_task(&name, DelegatedTask::from_root(text.clone()))
                     .await
                     .expect("a full queue waits, it does not fail");
                 streams.push(task);
@@ -294,11 +313,11 @@ async fn full_outbound_queue_backpressures_and_keeps_connection() {
 #[tokio::test]
 async fn in_flight_cap_refuses_extra_call() {
     let (registry, _calls) = broker();
-    let mut caller = Raw::connect(&registry, "caller").await;
+    let mut caller = Raw::serving(&registry, "caller").await;
 
     let extra = MAX_IN_FLIGHT_CALLS as u64 + 1;
     for id in 1..=extra {
-        caller.send(invoke(id, "answering", "hang")).await;
+        caller.send(caller.invoke(id, "answering", "hang")).await;
     }
     let refused = caller.next().await.expect("a refusal");
     assert!(refused.get("error").is_some(), "{refused}");
@@ -321,6 +340,7 @@ async fn first_line(registry: &ParticipantRegistry, spec: &str, first: Value) ->
         name,
         lines: BufReader::new(read).lines(),
         write,
+        task: None,
     };
     raw.send(first).await;
     raw
@@ -403,12 +423,12 @@ async fn wrong_direction_method_closes_connection() {
 #[tokio::test]
 async fn reused_inflight_id_closes_connection() {
     let (registry, _calls) = broker();
-    let mut caller = Raw::connect(&registry, "caller").await;
-    caller.send(invoke(7, "answering", "hang")).await;
+    let mut caller = Raw::serving(&registry, "caller").await;
+    caller.send(caller.invoke(7, "answering", "hang")).await;
     // Once a call has answered, its id is no longer in flight.
-    caller.send(invoke(8, "answering", "small")).await;
+    caller.send(caller.invoke(8, "answering", "small")).await;
     assert!(caller.answer(8).await.get("result").is_some());
-    caller.send(invoke(7, "answering", "small")).await;
+    caller.send(caller.invoke(7, "answering", "small")).await;
     assert_eq!(caller.next().await, None, "closed without a reply");
     wait_for(|| !registry.is_registered(&caller.name), "deregistered").await;
 }
@@ -418,7 +438,7 @@ async fn reused_inflight_id_closes_connection() {
 #[tokio::test]
 async fn late_or_unknown_response_is_dropped_not_fatal() {
     let (registry, _calls) = broker();
-    let mut worker = Raw::connect(&registry, "worker").await;
+    let mut worker = Raw::serving(&registry, "worker").await;
     for line in [
         json!({"id": 99, "result": {"state": "completed"}}),
         json!({"id": 99, "error": {"kind": "failed", "message": "x"}}),
@@ -430,7 +450,7 @@ async fn late_or_unknown_response_is_dropped_not_fatal() {
 
     // A task's result, then the same result again: the second is late.
     let (_task_id, mut updates) = registry
-        .submit_task(&worker.name, DelegatedTask::new("do it"))
+        .submit_task(&worker.name, DelegatedTask::from_root("do it"))
         .await
         .expect("the connection takes work");
     let run = worker.next().await.expect("its task.run");
@@ -447,7 +467,7 @@ async fn late_or_unknown_response_is_dropped_not_fatal() {
     assert_eq!(states, [TaskState::Completed], "one terminal status");
 
     // Still connected: the next call is answered.
-    worker.send(invoke(3, "answering", "small")).await;
+    worker.send(worker.invoke(3, "answering", "small")).await;
     assert!(worker.answer(3).await.get("result").is_some());
     assert!(registry.is_registered(&worker.name));
 }

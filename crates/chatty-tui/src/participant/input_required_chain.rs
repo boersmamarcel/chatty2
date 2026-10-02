@@ -10,10 +10,10 @@
 //! own `request_clarification`, the child's turn calls `invoke_agent`, and
 //! the parent is the test itself, playing the human behind the popover.
 //!
-//! What makes it a *chain* rather than a hop: the child has no human. Its
-//! `invoke_agent` re-asks the grandchild's question on the child's own
-//! clarification store, which parks the child's task in `input-required`
-//! toward the parent — the same path, one level up.
+//! What makes it a *chain* rather than a hop: the child has no human. The
+//! broker relays the grandchild's `human.ask` to the child, which answers
+//! `escalate`, and the broker forwards the original question — the
+//! grandchild's stamp intact — to the parent (ADR-0021 § 2, EN-2b).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,8 +95,8 @@ impl Broker {
     }
 
     /// The `invoke_agent` a level of the chain holds, addressing `agent`
-    /// through this broker's direct handle (ADR-0020, BI-7) and re-asking
-    /// its questions on `store`.
+    /// through this broker's direct handle (ADR-0020, BI-7) and asking the
+    /// questions the broker delivers on `store`.
     fn invoke_agent(&self, agent: &str, store: Option<&ClarificationStore>) -> InvokeAgentTool {
         let tool = InvokeAgentTool::new(vec![])
             .with_local_agents([agent])
@@ -160,6 +160,16 @@ fn tool_finished(sink: &EventSink, name: &str, result: &str) {
         id: format!("{name}-1"),
         result: result.to_string(),
     });
+}
+
+/// The question as the root's popover shows it: headed by the broker's
+/// stamp of the agent that asked, the grandchild, never the child that
+/// relayed it (EN-2b).
+fn the_question_from(asker: &str) -> ClarifyingQuestion {
+    ClarifyingQuestion {
+        question: format!("Asked by {asker}\nWhich database?"),
+        ..the_question()
+    }
 }
 
 fn the_question() -> ClarifyingQuestion {
@@ -237,7 +247,12 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
         .await
         .expect("the question reaches the parent before the deadline")
         .expect("the parent's store announces it");
-    assert_eq!(asked.questions, vec![the_question()]);
+    assert_eq!(
+        asked.questions,
+        vec![the_question_from(
+            "grandchild-0 (root \u{203a} child \u{203a} grandchild)"
+        )]
+    );
 
     // The human answers.
     assert!(
@@ -284,8 +299,8 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
 /// The child: a worker with no human, whose `invoke_agent` reaches the
 /// grandchild over the connection the broker made for it (ADR-0020), never
 /// over loopback (BI-7) — so the grandchild's question comes down that
-/// connection as `call_input_required` and the child's answer goes back up
-/// it as `call_input` (BI-5). Returns the child's name.
+/// connection as a relayed `human.ask`, which the child escalates (EN-2b).
+/// Returns the child's name.
 async fn child_over_its_connection(broker: &Broker, grandchild: String) -> String {
     let (stream, name) = broker.connect(CHILD);
     let worker = WorkerConnection::connect(stream, worker_card("test"))
@@ -356,7 +371,12 @@ async fn clarification_relays_across_two_hops() {
         .await
         .expect("the grandchild's question reaches the root before the deadline")
         .expect("the root's store announces it");
-    assert_eq!(asked.questions, vec![the_question()]);
+    assert_eq!(
+        asked.questions,
+        vec![the_question_from(
+            "grandchild-0 (root \u{203a} child \u{203a} grandchild)"
+        )]
+    );
     assert!(root_store.resolve(
         &asked.id,
         vec![ClarificationAnswer {

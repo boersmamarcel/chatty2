@@ -5,17 +5,18 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
-use crate::models::clarification_store::{PendingClarifications, request_clarification};
+use crate::models::clarification_store::{
+    ClarificationAnswer, ClarifyingQuestion, PendingClarifications, request_clarification,
+};
 use crate::models::execution_approval_store::{
-    ApprovalKind, PendingApprovals, request_relayed_execution_approval,
+    ApprovalDetail, ApprovalKind, PendingApprovals, request_relayed_execution_approval,
 };
 use crate::models::message_types::ToolSource;
 use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::a2a_client::{
-    A2aApprovalRequest, A2aClarificationRequest, A2aClient, A2aStreamEvent, APPROVAL_DENIED,
-    APPROVAL_GRANTED, conversation_from_status_metadata, trace_from_status_metadata,
-    usage_from_status_metadata,
+    A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
+    trace_from_status_metadata, usage_from_status_metadata,
 };
 use crate::services::fabric_transport::progress_from_value;
 use crate::services::handoff::{HandoffLedger, HandoffReport};
@@ -25,7 +26,8 @@ use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::filesystem_write_tool::request_relayed_write_approval;
 use chatty_fabric::{
-    AgentOrigin, CallError, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Refusal,
+    AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskRequest, CallError, CallEvent,
+    CallRequest, InvokeAgentOutcome, InvokeAgentParams, Question, QuestionOrigin, Refusal,
     Remaining, Transport,
 };
 
@@ -224,17 +226,19 @@ pub struct InvokeAgentTool {
     /// Whether to say something before handing a prompt to an agent outside
     /// this user's fleet (ADR-0011 C5).
     warn_outside_fleet: bool,
-    /// This agent's own clarification store: where a delegated agent's
-    /// question is re-asked (AGE-306). `None` means nobody here can answer,
-    /// and a question ends the delegation.
+    /// This agent's own clarification store: where a question the broker
+    /// delivers to a root call (EN-2b), or one a third-party A2A peer asks a
+    /// caller with no broker to ask through, is asked. `None` means nobody
+    /// here can answer, and a question ends the delegation.
     ///
     /// Escalating to a human is the only policy (ADR-0011 C7). Whether a
     /// leader may instead answer for its worker is an open question on the
     /// ADR; nothing selects such a policy today.
     clarifications: Option<PendingClarifications>,
-    /// This agent's own execution and write approval stores: where a
-    /// delegated agent's approval is re-raised (AGE-646). `None` means
-    /// nobody here can approve, and the request is denied.
+    /// This agent's own execution and write approval stores: where an
+    /// approval the broker forwards to the root is raised (EN-2a). Only a
+    /// root call is ever forwarded one. `None` means nobody here can
+    /// approve, and the request is denied.
     approvals: Option<RelayedApprovals>,
     /// The hosted per-user spend cap (AGE-416 / ADR-0010), asked before any
     /// delegation starts. `None` — the desktop, chatty-tui, any leader
@@ -337,9 +341,10 @@ impl InvokeAgentTool {
         self
     }
 
-    /// Re-raise a delegated agent's execution and write approvals on this
-    /// agent's own approval stores (AGE-646) — the ones its own tools hold,
-    /// so at the root they reach the human's approval card like any other.
+    /// Raise the approvals the broker forwards to the root (EN-2a) on this
+    /// agent's own approval stores — the ones its own tools hold, so they
+    /// reach the human's approval card like any other. A worker is never
+    /// forwarded one, so on a worker these stores are never asked.
     pub fn with_approvals(
         mut self,
         execution: PendingApprovals,
@@ -740,6 +745,7 @@ impl InvokeAgentTool {
             include_trace,
             spawn_context: None,
             remaining: self.remaining(),
+            run: None,
         });
         let mut stream = transport.call(request).await.map_err(|e| {
             let err_text = format!("\u{26a0}\u{fe0f} Failed to invoke agent '{agent}': {e}");
@@ -753,11 +759,11 @@ impl InvokeAgentTool {
 
         let mut outcome = None;
         let mut failure = None;
-        // The questions the callee's subtree parked, each being answered
-        // here while the call goes on — so a call that ends, or a question
-        // withdrawn below (TB-7), drops the copy re-raised on this agent's
-        // store, which withdraws it. At most one per task: a task parks on
-        // one question at a time.
+        // The questions and approvals the broker delivered to this root call
+        // (EN-2a, EN-2b), each being answered here while the call goes on —
+        // so a call that ends, or a request withdrawn below (TB-7), drops
+        // the copy raised on this agent's store, which withdraws it. Keyed
+        // by the broker's id.
         let mut parked = futures::stream::FuturesUnordered::new();
         let mut withdraw: std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>> =
             std::collections::HashMap::new();
@@ -786,10 +792,13 @@ impl InvokeAgentTool {
                 Ok(CallEvent::Swarm(event)) => {
                     self.send_progress(InvokeAgentProgress::Swarm(event));
                 }
-                Ok(CallEvent::InputRequired { task, request }) => {
+                Ok(event @ (CallEvent::Ask { .. } | CallEvent::Approve { .. })) => {
+                    let Some((key, waiting)) = Parked::from_event(event) else {
+                        continue;
+                    };
                     let (withdrawn_tx, withdrawn) = tokio::sync::oneshot::channel::<()>();
-                    let answer = self.answer_parked(transport, agent, task.clone(), request);
-                    withdraw.insert(task, withdrawn_tx);
+                    let answer = self.answer_parked(transport, agent, waiting);
+                    withdraw.insert(key, withdrawn_tx);
                     parked.push(Box::pin(async move {
                         tokio::select! {
                             answered = answer => answered,
@@ -798,8 +807,8 @@ impl InvokeAgentTool {
                         }
                     }));
                 }
-                Ok(CallEvent::InputWithdrawn { task }) => {
-                    withdraw.remove(&task);
+                Ok(CallEvent::InputWithdrawn { id }) => {
+                    withdraw.remove(&id);
                 }
                 Ok(CallEvent::Result(value)) => {
                     outcome = Some(serde_json::from_value::<InvokeAgentOutcome>(value).map_err(
@@ -999,90 +1008,173 @@ impl InvokeAgentTool {
         request: A2aClarificationRequest,
     ) -> Result<(), String> {
         let request_id = request.id.clone();
-        let answers = self.ask(&config.name, task_id, request).await?;
+        let answers = match self.relay_up(config, &request).await {
+            Some(answers) => answers?,
+            None => self.ask(&config.name, task_id, request.questions).await?,
+        };
         self.client
             .send_task_input(config, task_id, &request_id, &answers)
             .await
             .map_err(|e| undeliverable(&config.name, e))
     }
 
-    /// As [`answer_input_required`](Self::answer_input_required), with the
-    /// answer going back down over the fabric the call came over.
-    async fn answer_over_fabric(
+    /// A question the broker delivered to this root call under `id`
+    /// (EN-2b): ask the human, showing who asked and what it relays
+    /// literally ([`ClarifyingQuestion::forwarded`]), and send the answers
+    /// back to the broker for the worker that asked.
+    async fn answer_question(
         &self,
         transport: &dyn Transport,
         agent: &str,
-        task_id: &str,
-        request: A2aClarificationRequest,
+        id: &str,
+        request: AskRequest,
     ) -> Result<(), String> {
-        let request_id = request.id.clone();
-        let answers = self.ask(agent, task_id, request).await?;
-        let input = serde_json::json!({ "requestId": request_id, "answers": answers });
+        if self.clarifications.is_none() {
+            let first = request.questions.first().map(|q| q.question.as_str());
+            return Err(nobody_can_answer(agent, first));
+        }
+        let answers = self
+            .ask(agent, id, ClarifyingQuestion::forwarded(request))
+            .await?;
+        let answers = answers
+            .into_iter()
+            .map(|a| Answer {
+                id: a.id,
+                answer: a.answer,
+                custom: a.custom,
+            })
+            .collect();
         transport
-            .answer(task_id, input)
+            .answer(id, answers)
             .await
             .map_err(|e| undeliverable(agent, e))
     }
 
-    /// Answer the question a callee over the fabric parked `task` on: an
-    /// approval is relayed, a clarification re-asked; a request that is
-    /// neither has nothing to answer. `Err` is why the delegation cannot
-    /// go on. Dropping this withdraws the copy raised here (TB-7).
+    /// Answer what a call over the fabric is waiting on: a forwarded
+    /// question or approval, asked of the human. `Err`
+    /// is why the delegation cannot go on. Dropping this withdraws the copy
+    /// raised here (TB-7).
     async fn answer_parked(
         &self,
         transport: &dyn Transport,
         agent: &str,
-        task: String,
-        request: serde_json::Value,
+        parked: Parked,
     ) -> Result<(), String> {
-        if let Ok(approval) = serde_json::from_value::<A2aApprovalRequest>(request.clone()) {
-            self.relay_approval(transport, agent, &task, approval).await;
-            return Ok(());
-        }
-        match serde_json::from_value::<A2aClarificationRequest>(request) {
-            Ok(request) => {
-                self.answer_over_fabric(transport, agent, &task, request)
-                    .await
+        match parked {
+            Parked::Question { id, request } => {
+                self.answer_question(transport, agent, &id, request).await
             }
-            Err(_) => Ok(()),
+            Parked::Approval { id, request } => {
+                self.answer_approval(transport, agent, &id, request).await;
+                Ok(())
+            }
         }
     }
 
-    /// Re-ask a delegated agent's questions on this agent's own store and
-    /// wait for the answers (AGE-306).
+    /// A third-party peer's question, asked of the human through this
+    /// worker's broker connection (EN-2b): a `human.ask` whose origin this
+    /// code sets to the peer — never anything the peer or the model wrote —
+    /// so whoever answers sees the peer behind this worker. `None` when the
+    /// transport carries no questions up (the root, or no fabric), and this
+    /// agent's own human is asked instead.
+    async fn relay_up(
+        &self,
+        config: &A2aAgentConfig,
+        request: &A2aClarificationRequest,
+    ) -> Option<Result<Vec<ClarificationAnswer>, String>> {
+        let transport = self.transport.as_ref()?;
+        let ask = AskRequest {
+            questions: request
+                .questions
+                .iter()
+                .map(|q| Question {
+                    id: q.id.clone(),
+                    question: q.question.clone(),
+                    options: q.options.clone(),
+                })
+                .collect(),
+            asker: None,
+            origin: Some(QuestionOrigin {
+                agent: config.name.clone(),
+                origin: AgentOrigin::RemoteConfigured,
+            }),
+        };
+        info!(agent = %config.name, request = %request.id, "A third-party agent asked a question; relaying it up");
+        let answers = transport.ask(ask).await?;
+        Some(
+            answers
+                .map(|answers| {
+                    answers
+                        .into_iter()
+                        .map(|a| ClarificationAnswer {
+                            id: a.id,
+                            answer: a.answer,
+                            custom: a.custom,
+                        })
+                        .collect()
+                })
+                .map_err(|e| {
+                    format!(
+                        "Agent '{}' asked a question that went unanswered: {e}",
+                        config.name
+                    )
+                }),
+        )
+    }
+
+    /// Ask `questions` on this agent's own store — at the root, the human's
+    /// popover — and wait for the answers. `asked_as` names the request in
+    /// the log.
     async fn ask(
         &self,
         agent: &str,
-        task_id: &str,
-        request: A2aClarificationRequest,
-    ) -> Result<Vec<crate::models::clarification_store::ClarificationAnswer>, String> {
+        asked_as: &str,
+        questions: Vec<ClarifyingQuestion>,
+    ) -> Result<Vec<ClarificationAnswer>, String> {
         let Some(pending) = self.clarifications.as_ref() else {
-            return Err(format!(
-                "Agent '{}' asked a question and nobody here can answer it: {}",
-                agent,
-                request
-                    .questions
-                    .first()
-                    .map(|q| q.question.as_str())
-                    .unwrap_or("(no question text)")
-            ));
+            let first = questions.first().map(|q| q.question.as_str());
+            return Err(nobody_can_answer(agent, first));
         };
 
         info!(
             agent = %agent,
-            task = %task_id,
-            request = %request.id,
-            questions = request.questions.len(),
-            "Delegated agent asked a question; escalating"
+            request = %asked_as,
+            questions = questions.len(),
+            "A delegated agent asked a question; asking the human"
         );
-        request_clarification(pending, request.questions)
+        request_clarification(pending, questions)
             .await
             .map_err(|e| format!("Agent '{agent}' asked a question that went unanswered: {e}"))
     }
 }
 
-/// The approval stores a delegated agent's approvals are re-raised on
-/// (AGE-646).
+/// What a call over the fabric is waiting on.
+enum Parked {
+    /// A question the broker delivered to the root under `id` (EN-2b).
+    Question { id: String, request: AskRequest },
+    /// An approval the broker forwarded to the root under `id` (EN-2a).
+    Approval {
+        id: String,
+        request: ApprovalRequest,
+    },
+}
+
+impl Parked {
+    /// What `event` waits on, keyed the way its withdrawal names it: by
+    /// the broker's id.
+    fn from_event(event: CallEvent) -> Option<(String, Self)> {
+        match event {
+            CallEvent::Ask { id, request } => Some((id.clone(), Self::Question { id, request })),
+            CallEvent::Approve { id, request } => {
+                Some((id.clone(), Self::Approval { id, request }))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The approval stores the approvals forwarded to the root are raised on
+/// (EN-2a).
 #[derive(Clone)]
 struct RelayedApprovals {
     execution: PendingApprovals,
@@ -1090,61 +1182,68 @@ struct RelayedApprovals {
 }
 
 impl InvokeAgentTool {
-    /// A delegated agent — at any depth below — is waiting on an execution
-    /// or write approval (AGE-646): re-raise it on this agent's own store and
-    /// send the decision back down. Deny and timeout both go down as a
-    /// denial, which the worker's tool turns into an error; dropping this
-    /// future (a cancelled turn) withdraws the re-raised request.
-    async fn relay_approval(
+    /// A node under this root call is waiting on an execution or write
+    /// approval, which the broker forwarded here under `id` (EN-2a): ask the
+    /// human, always — this root's approval mode and a callee's sandbox
+    /// never decide it — with the request shown literally, and send the
+    /// verdict back to the broker. Deny and timeout both go back as a
+    /// denial; dropping this future (a cancelled turn, a withdrawn request)
+    /// withdraws the card.
+    async fn answer_approval(
         &self,
         transport: &dyn Transport,
         agent: &str,
-        task_id: &str,
-        request: A2aApprovalRequest,
+        id: &str,
+        request: ApprovalRequest,
     ) {
-        let mut answers = Vec::new();
-        for question in request.questions {
-            let granted = match self.approvals.as_ref() {
-                None => {
-                    warn!(agent = %agent, task = %task_id, "A delegated agent asked for an approval nobody here can give; denying");
+        let detail = ApprovalDetail::forwarded(request);
+        let approved = match self.approvals.as_ref() {
+            None => {
+                warn!(agent = %agent, approval = %id, "A forwarded approval nobody here can give; denying");
+                false
+            }
+            Some(stores) => {
+                info!(
+                    agent = %agent,
+                    approval = %id,
+                    kind = ?detail.kind,
+                    "The broker forwarded an approval to the root; asking the human"
+                );
+                let decided = match detail.kind {
+                    ApprovalKind::Exec => {
+                        request_relayed_execution_approval(&stores.execution, detail).await
+                    }
+                    ApprovalKind::Write => {
+                        request_relayed_write_approval(&stores.write, detail).await
+                    }
+                };
+                decided.unwrap_or_else(|e| {
+                    warn!(agent = %agent, error = %e, "A forwarded approval went unanswered; denying");
                     false
-                }
-                Some(stores) => {
-                    info!(
-                        agent = %agent,
-                        task = %task_id,
-                        request = %request.id,
-                        kind = ?question.detail.kind,
-                        "Delegated agent asked for an approval; escalating"
-                    );
-                    let decided = match question.detail.kind {
-                        ApprovalKind::Exec => {
-                            request_relayed_execution_approval(&stores.execution, question.detail)
-                                .await
-                        }
-                        ApprovalKind::Write => {
-                            request_relayed_write_approval(&stores.write, question.detail).await
-                        }
-                    };
-                    decided.unwrap_or_else(|e| {
-                        warn!(agent = %agent, error = %e, "A relayed approval went unanswered; denying");
-                        false
-                    })
-                }
-            };
-            answers.push(serde_json::json!({
-                "id": question.id,
-                "answer": if granted { APPROVAL_GRANTED } else { APPROVAL_DENIED },
-            }));
-        }
-        let input = serde_json::json!({ "requestId": request.id, "answers": answers });
-        // Unlike a lost answer to a question, a lost decision ends nothing
-        // here: the worker's own tool settles it (its timeout is a denial),
-        // and a worker that went away ends the call on its own.
-        if let Err(e) = transport.answer(task_id, input).await {
-            warn!(agent = %agent, task = %task_id, error = %e, "A relayed approval's decision could not be delivered");
+                })
+            }
+        };
+        let verdict = if approved {
+            ApprovalVerdict::Approved
+        } else {
+            ApprovalVerdict::Denied
+        };
+        // A lost verdict ends nothing here: the worker's own store settles
+        // it (its timeout is a denial), and a worker that went away ends
+        // the call on its own.
+        if let Err(e) = transport.approve(id, verdict).await {
+            warn!(agent = %agent, approval = %id, error = %e, "A forwarded approval's verdict could not be delivered");
         }
     }
+}
+
+/// Why a delegation ends on a question: nobody here can answer it. Names
+/// the question as its asker wrote it.
+fn nobody_can_answer(agent: &str, question: Option<&str>) -> String {
+    format!(
+        "Agent '{agent}' asked a question and nobody here can answer it: {}",
+        question.unwrap_or("(no question text)")
+    )
 }
 
 /// Why an answer never reached the agent that asked for it.
@@ -1630,5 +1729,128 @@ mod tests {
                 "the transcript's card ends failed: {events:?}"
             );
         }
+    }
+
+    /// A broker that forwards one approval to the root's call, waits for
+    /// the root's verdict, and only then answers the call.
+    struct Forwarding {
+        request: chatty_fabric::ApprovalRequest,
+        verdicts: Arc<Mutex<Vec<(String, ApprovalVerdict)>>>,
+        answered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for Forwarding {
+        async fn call(&self, _req: CallRequest) -> Result<chatty_fabric::CallStream, CallError> {
+            use futures::StreamExt;
+            let approve = CallEvent::Approve {
+                id: "approval-7".into(),
+                request: self.request.clone(),
+            };
+            let answered = self.answered.clone();
+            Ok(async_stream::stream! {
+                yield Ok(approve);
+                // The call stays open until the root has answered.
+                answered.notified().await;
+                yield Ok(CallEvent::Result(serde_json::json!(InvokeAgentOutcome {
+                    success: true,
+                    response: "done".into(),
+                    error: None,
+                    metadata: None,
+                    messages: Vec::new(),
+                    cancelled_by_user: false,
+                })));
+            }
+            .boxed())
+        }
+
+        async fn approve(&self, id: &str, verdict: ApprovalVerdict) -> Result<(), CallError> {
+            self.verdicts.lock().push((id.to_string(), verdict));
+            self.answered.notify_one();
+            Ok(())
+        }
+    }
+
+    /// EN-2a: the card for a forwarded approval shows what the worker sent
+    /// literally — bidi overrides, escape sequences and other control
+    /// characters escaped, line breaks visible, a cut marked — and the
+    /// human's verdict goes back to the broker under the broker's id.
+    #[tokio::test]
+    async fn approval_card_escapes_bidi_and_control_chars() {
+        use crate::models::execution_approval_store::{
+            ApprovalDecision, ExecutionApprovalStore, LITERAL_CAP,
+        };
+        use crate::models::write_approval_store::WriteApprovalStore;
+
+        let long = "x".repeat(LITERAL_CAP + 10);
+        let request = chatty_fabric::ApprovalRequest {
+            kind: chatty_fabric::ApprovalKind::Exec,
+            command_or_path: format!(
+                "[shell] rm -rf ~/\u{202e}gpj.exe\nrm -rf /\u{1b}[2K\u{1b}[1A echo safe\u{200b}\t{long}"
+            ),
+            diff_stat: None,
+            asker: Some(chatty_fabric::Asker {
+                agent: "coder-0\u{2067}".into(),
+                chain: vec!["root".into(), "lead\r\nroot".into(), "coder".into()],
+            }),
+        };
+        let mut execution = ExecutionApprovalStore::new();
+        let (raised_tx, mut raised) = tokio::sync::mpsc::unbounded_channel();
+        let (resolved_tx, _resolved) = tokio::sync::mpsc::unbounded_channel();
+        execution.set_notifiers(raised_tx, resolved_tx);
+        let broker = Arc::new(Forwarding {
+            request,
+            verdicts: Arc::default(),
+            answered: Arc::default(),
+        });
+        let tool = InvokeAgentTool::new(vec![])
+            .with_local_agents(["coder"])
+            .with_transport(broker.clone())
+            .with_approvals(
+                execution.get_pending_approvals(),
+                WriteApprovalStore::new().get_pending_approvals(),
+            );
+        let run = tokio::spawn(async move {
+            tool.call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "coder".into(),
+                    prompt: "go".into(),
+                    include_trace: false,
+                },
+            )
+            .await
+        });
+
+        let card = raised.recv().await.expect("the root's human is asked");
+        let shown = format!(
+            "[shell] rm -rf ~/\\u{{202e}}gpj.exe\\nrm -rf /\\u{{001b}}[2K\\u{{001b}}[1A echo safe\\u{{200b}}\\t{}",
+            "x".repeat(LITERAL_CAP - 54)
+        );
+        assert_eq!(
+            card.command,
+            format!("{shown}… [64 more characters not shown]"),
+            "the card's line is the request, literally, with the cut marked"
+        );
+        assert_eq!(card.detail.command_or_path, card.command);
+        assert!(
+            !card.is_sandboxed,
+            "a forwarded approval is never sandboxed"
+        );
+        let asker = card.detail.asker.clone().expect("the broker's stamp");
+        assert_eq!(asker.agent, "coder-0\\u{2067}");
+        assert_eq!(asker.chain, ["root", "lead\\r\\nroot", "coder"]);
+        assert!(
+            !card.command.chars().any(|c| c.is_control()
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')),
+            "nothing on the card is invisible or reorders it"
+        );
+
+        assert!(execution.resolve(&card.id, ApprovalDecision::Approved));
+        run.await.unwrap().expect("the call completes");
+        assert_eq!(
+            broker.verdicts.lock().as_slice(),
+            [("approval-7".to_string(), ApprovalVerdict::Approved)]
+        );
     }
 }
