@@ -247,9 +247,6 @@ pub enum CallError {
 /// Progress, then one result. An `Err` item ends the stream.
 pub type CallStream = BoxStream<'static, Result<CallEvent, CallError>>;
 
-// Rust 1.99's clippy reads `async_trait`'s expansion of a default-bodied
-// method as a `#[must_use]` function returning a `#[must_use]` future.
-#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
     async fn call(&self, req: CallRequest) -> Result<CallStream, CallError>;
