@@ -50,7 +50,8 @@ superseded-by: []
 
 One decision per ADR; the Decision is one direct paragraph. Kill criteria is never empty: \
 each criterion is an observable condition, how it is measured, and what happens then. Each \
-alternative is stated at its strongest, with why it lost. The status stays proposed.
+alternative is stated at its strongest, with why it lost. The status stays proposed, even \
+when the code already does what the ADR decides: say so in the Context instead.
 
 A design doc goes to docs/design/<component>.md. It is exactly this frontmatter, then \
 exactly these headings, in this order, and ends with a one-line changelog:
