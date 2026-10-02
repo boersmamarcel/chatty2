@@ -892,9 +892,15 @@ impl StreamManager {
     }
 
     /// Fold one event of the turn into its swarm's tree, and hand the tree
-    /// to the transcript when a delegation's progress or a swarm batch
-    /// moved it and the turn has a swarm: some run sits below the root's
-    /// callee. A delegation whose callee works alone keeps its plain row.
+    /// to the transcript whenever a delegation's progress or a swarm batch
+    /// moved it and the root has delegated to someone.
+    ///
+    /// A lone callee (no further delegation under it) still gets a tree of
+    /// its own, just a one-node one: the transcript needs it to know this
+    /// row has a run to open (AGE-813), even though it renders the row
+    /// plain rather than as a tree (that decision lives in
+    /// `ChatView::set_swarm_trace`, keyed on whether the callee has
+    /// children).
     fn fold_swarm(
         &mut self,
         conv_id: &str,
@@ -918,9 +924,13 @@ impl StreamManager {
         if revision == state.swarm_revision {
             return;
         }
-        let tree = state.swarm.tree();
-        let has_swarm = tree.len() > 2 && tree.preorder().into_iter().any(|id| tree.depth(id) >= 2);
-        if !has_swarm {
+        // Any delegation at all (AGE-813): the root plus at least one
+        // callee. Used to require a nested run (depth >= 2) before handing
+        // the tree out, which meant a lone delegation — `/agent <name>
+        // <prompt>` with no further sub-delegation — never got a tree, so
+        // its row's ↗ never had a run to open.
+        let has_delegation = state.swarm.tree().len() > 1;
+        if !has_delegation {
             return;
         }
         state.swarm_revision = revision;
@@ -1680,8 +1690,10 @@ mod tests {
     }
 
     /// The swarm tree (TB-4) arrives through this manager's own event path:
-    /// a lone delegation stays a plain row, the first nested run hands the
-    /// tree out, and the root's own text does not re-send it.
+    /// a lone delegation already gets its own (one-node) tree, so its row's
+    /// ↗ has a run to open (AGE-813); a nested run grows that same tree
+    /// rather than resending a separate one; and the root's own text does
+    /// not re-send it.
     #[gpui::test]
     async fn swarm_tree_arrives_through_the_stream_manager(cx: &mut gpui::TestAppContext) {
         use chatty_core::models::message_types::ToolSource;
@@ -1725,10 +1737,10 @@ mod tests {
             }),
             cx,
         );
-        assert!(
-            swarm_events(&events).is_empty(),
-            "a lone callee has no tree"
-        );
+        // AGE-813: a lone callee still gets its own tree (root + reviewer),
+        // so ↗ on its row has a run to open, even though the row itself
+        // stays plain (ChatView::set_swarm_trace's call, not this one's).
+        assert_eq!(swarm_events(&events), [2], "root, reviewer");
 
         send(
             SessionEvent::SwarmEvent(SwarmEvent {
@@ -1739,9 +1751,9 @@ mod tests {
             }),
             cx,
         );
-        assert_eq!(swarm_events(&events), [3], "root, reviewer, coder-0");
+        assert_eq!(swarm_events(&events), [2, 3], "root, reviewer, coder-0");
 
         send(SessionEvent::Text("the root's own words".into()), cx);
-        assert_eq!(swarm_events(&events), [3]);
+        assert_eq!(swarm_events(&events), [2, 3]);
     }
 }
