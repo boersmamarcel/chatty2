@@ -152,24 +152,24 @@ pub enum CallEvent {
     /// A progress event; for `invoke_agent` an `InvokeAgentProgress`, as
     /// JSON, which chatty-core converts back at its edge.
     Progress(Value),
-    /// The callee parked its task on a question (`ask_user`, AGE-306).
-    /// `request` is the question as the participant protocol carries it
-    /// (`{id, questions}`); the caller answers with
-    /// [`Transport::answer`] on `task`. The root's direct handle and a
-    /// worker's connection both carry the answer back down, so a question
-    /// climbs any number of hops (BI-5).
-    InputRequired { task: String, request: Value },
-    /// The question `task` was parked on is over without this caller's
-    /// answer: its asker withdrew it, because the run below it was stopped
-    /// (TB-7, AGE-749). The caller withdraws the copy it re-raised on its
-    /// own store, which un-parks its own task toward its caller in turn, so
-    /// the withdrawal climbs every hop to the root's human. A caller that
-    /// already answered has nothing left to withdraw.
-    ///
-    /// For an approval (EN-2a) `task` is the broker's approval id: the
-    /// worker that asked withdrew it, or its callee ended or was cancelled,
-    /// and the root's card goes.
-    InputWithdrawn { task: String },
+    /// A node anywhere under this call asked a human a question
+    /// (`human.ask`, ADR-0021 § 2, EN-2b), and every caller between it and
+    /// this one escalated it. Only a root call receives these: the broker
+    /// relays a worker's question to the worker that called it as a
+    /// broker→worker `human.ask`, never on a call's stream. `id` is the
+    /// broker's, unique within it; the root answers with
+    /// [`Transport::answer`]. `request.asker` is the broker's stamp of the
+    /// agent that asked, and `request.origin` the third-party peer it
+    /// relays, if any.
+    Ask {
+        id: String,
+        request: crate::AskRequest,
+    },
+    /// The question or approval the broker delivered to this root call as
+    /// `id` is over without the root's answer: the worker that asked
+    /// withdrew it, or its callee ended or was cancelled (TB-7, EN-2a,
+    /// EN-2b). The root's popover or card goes.
+    InputWithdrawn { id: String },
     /// A node anywhere under this call is waiting on an execution or write
     /// approval (`human.approve`, ADR-0021 § 2). Only a root call receives
     /// these: the broker delivers every approval straight to the root,
@@ -264,17 +264,29 @@ pub type CallStream = BoxStream<'static, Result<CallEvent, CallError>>;
 pub trait Transport: Send + Sync {
     async fn call(&self, req: CallRequest) -> Result<CallStream, CallError>;
 
-    /// Answer the question a call's callee parked `task` on
-    /// ([`CallEvent::InputRequired`]). `input` is the participant
-    /// protocol's `{requestId, answers}`.
-    ///
-    /// A transport that never yields [`CallEvent::InputRequired`] has
-    /// nothing to answer, which is the default.
-    async fn answer(&self, task: &str, input: Value) -> Result<(), CallError> {
-        let _ = input;
+    /// Answer the question the broker delivered as [`CallEvent::Ask`]
+    /// `id` (EN-2b): the answers become the result of the asking worker's
+    /// `human.ask`. Only the root's direct handle can: a worker is relayed
+    /// questions over its own connection, never on a call's stream. The
+    /// default refuses.
+    async fn answer(&self, id: &str, answers: Vec<crate::Answer>) -> Result<(), CallError> {
+        let _ = answers;
         Err(CallError::Failed(format!(
-            "task '{task}' cannot be answered over this transport"
+            "question '{id}' cannot be answered over this transport"
         )))
+    }
+
+    /// Ask the human a question this caller relays from a third-party peer
+    /// it called over A2A (`human.ask` with `request.origin` set, EN-2b),
+    /// and wait for the answers. Only a worker's connection carries one up;
+    /// the default is `None`, and a caller with no transport to ask through
+    /// asks its own human.
+    async fn ask(
+        &self,
+        request: crate::AskRequest,
+    ) -> Option<Result<Vec<crate::Answer>, CallError>> {
+        let _ = request;
+        None
     }
 
     /// Answer the approval the broker delivered as

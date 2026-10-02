@@ -191,7 +191,7 @@ fn outsiders_are_refused_every_request() {
             Request::Invoke(&params),
             Request::List,
             Request::Post(&post),
-            Request::Answer { task: "t" },
+            Request::Answer { id: "question-1" },
             Request::Cancel { node: "n" },
             Request::TakeRunMessages,
         ] {
@@ -273,7 +273,7 @@ fn only_the_root_answers_cancels_and_takes_its_messages() {
     let policy = Watching::new([]);
     let snapshot = reaching(&policy, "x");
     for request in [
-        Request::Answer { task: "t" },
+        Request::Answer { id: "question-1" },
         Request::Cancel { node: "n" },
         Request::TakeRunMessages,
     ] {
@@ -371,4 +371,68 @@ fn human_approve_is_raised_from_the_run_a_node_serves() {
         );
     }
     assert!(policy.consulted().is_empty(), "approvals consult no spec");
+}
+
+/// EN-2b's `human.ask` under the gate (ADR-0023 § 3), mirroring
+/// `human.approve`: a node raises one from the task it serves, whose run's
+/// chain stamps the asker; one serving two tasks is refused; the root only
+/// answers; outsiders get nothing.
+#[test]
+fn human_ask_is_raised_from_the_run_a_node_serves() {
+    let policy = Watching::new([]);
+    let snapshot = reaching(&policy, "x");
+    let request = chatty_fabric::AskRequest {
+        questions: Vec::new(),
+        asker: None,
+        origin: None,
+    };
+
+    let decision = decide(
+        &node("lead-0", "lead", "task-1"),
+        &Request::Ask(&request),
+        &snapshot,
+    );
+    assert_eq!(decision.row.to_string(), "node/human.ask");
+    assert_eq!(
+        decision.outcome,
+        Ok(Grant::Ask {
+            chain: CallChain::root("t-node").extend("lead").unwrap()
+        })
+    );
+
+    let Caller::Node(mut busy) = node("lead-0", "lead", "task-1") else {
+        unreachable!()
+    };
+    busy.runs.push(OpenRun {
+        name: "task-2".to_string(),
+        id: run_id(8),
+        chain: CallChain::root("t-other").extend("lead").unwrap(),
+    });
+    assert!(matches!(
+        decide(&Caller::Node(busy), &Request::Ask(&request), &snapshot).outcome,
+        Err(Refused::Caller(_))
+    ));
+
+    assert!(
+        decide(&Caller::Root, &Request::Ask(&request), &snapshot)
+            .outcome
+            .is_err()
+    );
+    assert_eq!(
+        decide(
+            &Caller::Root,
+            &Request::Answer { id: "question-1" },
+            &snapshot
+        )
+        .outcome,
+        Ok(Grant::Answer)
+    );
+    for caller in outsiders() {
+        assert!(
+            decide(&caller, &Request::Ask(&request), &snapshot)
+                .outcome
+                .is_err()
+        );
+    }
+    assert!(policy.consulted().is_empty(), "questions consult no spec");
 }

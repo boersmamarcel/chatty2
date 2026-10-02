@@ -7,7 +7,8 @@
 //! its writer, and runs at most [`MAX_IN_FLIGHT_CALLS`] calls at a time,
 //! started at no more than [`CALLS_PER_SECOND`] (with a burst of
 //! [`CALL_BURST`]), and keeps at most [`MAX_PENDING_APPROVALS`]
-//! `human.approve` requests waiting on the root.
+//! `human.approve` requests waiting on the root and at most
+//! [`MAX_PENDING_QUESTIONS`] `human.ask` requests waiting on a caller.
 //!
 //! What happens at each limit follows one rule: only a peer's own frame
 //! closes its connection.
@@ -46,6 +47,11 @@ pub const MAX_IN_FLIGHT_CALLS: usize = 32;
 /// is headroom for parallel tool calls, not a queue to fill the root's
 /// screen with.
 pub const MAX_PENDING_APPROVALS: usize = 4;
+
+/// `human.ask` requests one connection may have waiting on a caller at once
+/// (EN-2b). A worker's turn parks on one question at a time; the rest is
+/// headroom, not a queue to fill the root's screen with.
+pub const MAX_PENDING_QUESTIONS: usize = 4;
 
 /// Calls one connection may start per second, sustained.
 pub const CALLS_PER_SECOND: u32 = 10;

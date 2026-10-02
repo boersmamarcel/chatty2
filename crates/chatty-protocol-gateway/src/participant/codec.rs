@@ -26,14 +26,15 @@
 //!
 //! | Sender | Requests | Notifications |
 //! |---|---|---|
-//! | worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `human.approve` | `task.event`, `req.cancel`, interim `task.input_required`, `call.input` |
-//! | broker | `task.run` | `req.progress`, `req.cancel`, interim `task.input`, `call.input_required`, `call.input_withdrawn` |
+//! | worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `human.ask`, `human.approve` | `task.event`, `req.cancel` |
+//! | broker | `task.run`, `human.ask` | `req.progress`, `req.cancel` |
 //!
 //! `human.approve` (EN-2a) is a worker's request only: the broker answers
 //! it with the root's verdict and never sends one, so a worker that is sent
-//! one closes the connection. The interim notifications carry ADR-0021's
-//! *step 2* question rows unchanged in meaning until EN-2b replaces them
-//! with `human.ask`, which is also when that request joins the table.
+//! one closes the connection. `human.ask` (EN-2b) goes both ways: a worker
+//! asks a question with it, and the broker relays a callee's question to
+//! its caller with it, under the broker's own id for the question
+//! (`question`), and the caller's result is the answers or `escalate`.
 //!
 //! # Ids
 //!
@@ -61,18 +62,17 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use chatty_fabric::{
-    ApprovalRequest, ApprovalVerdict, CallError, CallRequest, ConversationScope, HandoffContract,
-    InvokeAgentParams, NodeName, Remaining, SendMessageParams, SpawnContext, SwarmItem,
+    Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, CallError, CallRequest,
+    ConversationScope, HandoffContract, InvokeAgentParams, NodeName, Remaining, SendMessageParams,
+    SpawnContext, SwarmItem,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use serde_json::value::RawValue;
-use tracing::warn;
+use tracing::{debug, warn};
 
-use super::protocol::{
-    BrokerFrame, InputRequest, ParticipantCard, ParticipantFrame, TaskBearer, TaskInput, TaskState,
-};
+use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskBearer, TaskState};
 
 /// The participant protocol's version. Every line carries it as `v`.
 pub const PROTOCOL_VERSION: u64 = 3;
@@ -318,6 +318,8 @@ pub enum WorkerRequest {
     MailboxPost(SendMessageParams),
     /// `human.approve` (EN-2a): an approval only the root answers.
     HumanApprove(ApprovalRequest),
+    /// `human.ask` (EN-2b): a question, relayed up the caller chain.
+    HumanAsk(AskRequest),
 }
 
 /// A notification a worker may send.
@@ -327,12 +329,6 @@ pub enum WorkerNotification {
     TaskEvent(TaskEvent<'static>),
     /// `req.cancel`: the worker withdraws one of its own requests.
     ReqCancel(IdParams),
-    /// `task.input_required` (interim, *step 2*): a `task.run` parked on a
-    /// question or an approval.
-    TaskInputRequired(InputRequiredParams<'static>),
-    /// `call.input` (interim, *step 2*): the answer to a question a callee
-    /// of one of the worker's `agent.invoke` requests asked.
-    CallInput(CallInputParams<'static>),
 }
 
 /// A request the broker may make.
@@ -340,6 +336,8 @@ pub enum WorkerNotification {
 pub enum BrokerRequest {
     /// `task.run`: work.
     TaskRun(Box<TaskRunParams<'static>>),
+    /// `human.ask` (EN-2b): a callee's question, relayed to its caller.
+    HumanAsk(RelayedAskParams<'static>),
 }
 
 /// A notification the broker may send.
@@ -347,15 +345,9 @@ pub enum BrokerRequest {
 pub enum BrokerNotification {
     /// `req.progress`: progress on one of the worker's requests.
     ReqProgress(ProgressParams<'static>),
-    /// `req.cancel`: the broker withdraws one of its `task.run`s.
+    /// `req.cancel`: the broker withdraws one of its `task.run`s or relayed
+    /// `human.ask`s.
     ReqCancel(IdParams),
-    /// `task.input` (interim, *step 2*): the answer to a parked `task.run`.
-    TaskInput(TaskInputParams<'static>),
-    /// `call.input_required` (interim, *step 2*): a callee of one of the
-    /// worker's requests parked on a question.
-    CallInputRequired(CallQuestionParams<'static>),
-    /// `call.input_withdrawn` (interim, *step 2*): that question is over.
-    CallInputWithdrawn(CallTaskParams<'static>),
 }
 
 impl WorkerRequest {
@@ -369,6 +361,7 @@ impl WorkerRequest {
             }
             "mailbox.post" => Self::MailboxPost(params(method, raw)?),
             "human.approve" => Self::HumanApprove(params(method, raw)?),
+            "human.ask" => Self::HumanAsk(params(method, raw)?),
             other => return Err(FrameError::WrongDirection(other.to_string())),
         })
     }
@@ -379,8 +372,6 @@ impl WorkerNotification {
         Ok(match method {
             "task.event" => Self::TaskEvent(params(method, raw)?),
             "req.cancel" => Self::ReqCancel(params(method, raw)?),
-            "task.input_required" => Self::TaskInputRequired(params(method, raw)?),
-            "call.input" => Self::CallInput(params(method, raw)?),
             other => return Err(FrameError::WrongDirection(other.to_string())),
         })
     }
@@ -390,6 +381,7 @@ impl BrokerRequest {
     fn decode(method: &str, raw: Option<&RawValue>) -> Result<Self, FrameError> {
         Ok(match method {
             "task.run" => Self::TaskRun(Box::new(params(method, raw)?)),
+            "human.ask" => Self::HumanAsk(params(method, raw)?),
             other => return Err(FrameError::WrongDirection(other.to_string())),
         })
     }
@@ -400,9 +392,6 @@ impl BrokerNotification {
         Ok(match method {
             "req.progress" => Self::ReqProgress(params(method, raw)?),
             "req.cancel" => Self::ReqCancel(params(method, raw)?),
-            "task.input" => Self::TaskInput(params(method, raw)?),
-            "call.input_required" => Self::CallInputRequired(params(method, raw)?),
-            "call.input_withdrawn" => Self::CallInputWithdrawn(params(method, raw)?),
             other => return Err(FrameError::WrongDirection(other.to_string())),
         })
     }
@@ -464,26 +453,6 @@ pub struct TaskOutcome<'a> {
     pub metadata: Option<Cow<'a, Value>>,
 }
 
-/// `task.input_required`'s params.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct InputRequiredParams<'a> {
-    pub id: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<Cow<'a, str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Cow<'a, Value>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<Cow<'a, InputRequest>>,
-}
-
-/// `call.input`'s params: `id` is the worker's `agent.invoke`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CallInputParams<'a> {
-    pub id: u64,
-    pub task: Cow<'a, str>,
-    pub input: Cow<'a, TaskInput>,
-}
-
 /// `task.run`'s params: today's task fields.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -515,26 +484,13 @@ pub struct ProgressParams<'a> {
     pub event: Cow<'a, Value>,
 }
 
-/// `task.input`'s params: `id` is the parked `task.run`.
+/// A broker→worker `human.ask`'s params: the broker's id for the question
+/// and the question as its asker sent it, asker stamped.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TaskInputParams<'a> {
-    pub id: u64,
-    pub input: Cow<'a, TaskInput>,
-}
-
-/// `call.input_required`'s params.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CallQuestionParams<'a> {
-    pub id: u64,
-    pub task: Cow<'a, str>,
-    pub request: Cow<'a, Value>,
-}
-
-/// `call.input_withdrawn`'s params.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CallTaskParams<'a> {
-    pub id: u64,
-    pub task: Cow<'a, str>,
+#[serde(deny_unknown_fields)]
+pub struct RelayedAskParams<'a> {
+    pub question: Cow<'a, str>,
+    pub request: Cow<'a, AskRequest>,
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +572,21 @@ struct State {
     /// `human.approve`s, so a `req.cancel` withdraws an approval and only an
     /// approval is answered with a verdict.
     their_approvals: HashSet<u64>,
+    /// A worker's `human.ask` requests: request id → the question number
+    /// the worker gave it.
+    asks: HashMap<u64, u64>,
+    /// The reverse of `asks`.
+    ask_ids: HashMap<u64, u64>,
+    /// The broker's end: which of the peer's requests in flight are
+    /// `human.ask`s, so a `req.cancel` withdraws a question and only a
+    /// question is answered with answers.
+    their_asks: HashSet<u64>,
+    /// The broker's relayed `human.ask`s in flight: request id → the
+    /// broker's id for the question. The broker's own requests on the
+    /// broker's end, the broker's on the worker's.
+    relayed: HashMap<u64, String>,
+    /// The reverse of `relayed`.
+    relayed_ids: HashMap<String, u64>,
     /// How many messages this end has dropped, for rate-limited logging.
     dropped: u64,
 }
@@ -658,6 +629,23 @@ impl State {
         let task_id = self.runs.remove(&id)?;
         self.run_ids.remove(&task_id);
         Some(task_id)
+    }
+
+    fn open_relay(&mut self, id: u64, question: &str) {
+        self.relayed.insert(id, question.to_string());
+        self.relayed_ids.insert(question.to_string(), id);
+    }
+
+    fn close_relay_by_question(&mut self, question: &str) -> Option<u64> {
+        let id = self.relayed_ids.remove(question)?;
+        self.relayed.remove(&id);
+        Some(id)
+    }
+
+    fn close_relay(&mut self, id: u64) -> Option<String> {
+        let question = self.relayed.remove(&id)?;
+        self.relayed_ids.remove(&question);
+        Some(question)
     }
 }
 
@@ -725,17 +713,6 @@ impl FrameCodec<BrokerSide> {
                 };
                 notification(m, "req.cancel", IdParams { id })?
             }
-            BrokerFrame::Input { task_id, input } => {
-                let Some(&id) = state.run_ids.get(task_id) else {
-                    state.drop_message("task.input", 0);
-                    return Ok(None);
-                };
-                let params = TaskInputParams {
-                    id,
-                    input: Cow::Borrowed(input),
-                };
-                notification(m, "task.input", params)?
-            }
             BrokerFrame::CallProgress { id, event } => {
                 if !state.theirs.contains(id) {
                     state.drop_message("req.progress", *id);
@@ -761,29 +738,6 @@ impl FrameCodec<BrokerSide> {
                 }
                 error(m, *id, e)?
             }
-            BrokerFrame::CallInputRequired { id, task, request } => {
-                if !state.theirs.contains(id) {
-                    state.drop_message("call.input_required", *id);
-                    return Ok(None);
-                }
-                let params = CallQuestionParams {
-                    id: *id,
-                    task: Cow::Borrowed(task),
-                    request: Cow::Borrowed(request),
-                };
-                notification(m, "call.input_required", params)?
-            }
-            BrokerFrame::CallInputWithdrawn { id, task } => {
-                if !state.theirs.contains(id) {
-                    state.drop_message("call.input_withdrawn", *id);
-                    return Ok(None);
-                }
-                let params = CallTaskParams {
-                    id: *id,
-                    task: Cow::Borrowed(task),
-                };
-                notification(m, "call.input_withdrawn", params)?
-            }
             BrokerFrame::Approval { id, verdict } => {
                 if !state.their_approvals.remove(id) {
                     state.drop_message("result", *id);
@@ -791,6 +745,38 @@ impl FrameCodec<BrokerSide> {
                 }
                 state.theirs.remove(id);
                 result(m, *id, verdict)?
+            }
+            BrokerFrame::Answer { id, answers } => {
+                if !state.their_asks.remove(id) {
+                    state.drop_message("result", *id);
+                    return Ok(None);
+                }
+                state.theirs.remove(id);
+                match answers {
+                    Ok(answers) => result(m, *id, answers)?,
+                    Err(e) => error(m, *id, e)?,
+                }
+            }
+            BrokerFrame::Ask {
+                question,
+                request: ask,
+            } => {
+                let id = state.next_id();
+                state.open_relay(id, question);
+                let params = RelayedAskParams {
+                    question: Cow::Borrowed(question),
+                    request: Cow::Borrowed(ask),
+                };
+                request(m, id, "human.ask", Some(params))?
+            }
+            BrokerFrame::CancelAsk { question } => {
+                // Answered already, or never sent: nothing to withdraw.
+                let Some(id) = state.relayed_ids.get(question).copied() else {
+                    state.drop_message("req.cancel", 0);
+                    return Ok(None);
+                };
+                state.close_relay(id);
+                notification(m, "req.cancel", IdParams { id })?
             }
         };
         Ok(Some(line))
@@ -828,6 +814,10 @@ impl FrameCodec<BrokerSide> {
                         state.their_approvals.insert(id);
                         ParticipantFrame::Approve { id, request }
                     }
+                    WorkerRequest::HumanAsk(request) => {
+                        state.their_asks.insert(id);
+                        ParticipantFrame::Ask { id, request }
+                    }
                 }
             }
             Message::Notification { method, params } => {
@@ -861,7 +851,6 @@ impl FrameCodec<BrokerSide> {
                                     state: task_state,
                                     message: message.map(Cow::into_owned),
                                     metadata: metadata.map(Cow::into_owned),
-                                    input: None,
                                 }
                             }
                             TaskEvent::Artifact {
@@ -877,19 +866,6 @@ impl FrameCodec<BrokerSide> {
                             },
                         }
                     }
-                    WorkerNotification::TaskInputRequired(params) => {
-                        let Some(task_id) = state.runs.get(&params.id).cloned() else {
-                            state.drop_message("task.input_required", params.id);
-                            return Ok(None);
-                        };
-                        ParticipantFrame::Status {
-                            task_id,
-                            state: TaskState::InputRequired,
-                            message: params.message.map(Cow::into_owned),
-                            metadata: params.metadata.map(Cow::into_owned),
-                            input: params.input.map(Cow::into_owned),
-                        }
-                    }
                     WorkerNotification::ReqCancel(IdParams { id }) => {
                         if !state.theirs.remove(&id) {
                             state.drop_message("req.cancel", id);
@@ -897,24 +873,19 @@ impl FrameCodec<BrokerSide> {
                         }
                         if state.their_approvals.remove(&id) {
                             ParticipantFrame::CancelApproval { id }
+                        } else if state.their_asks.remove(&id) {
+                            ParticipantFrame::CancelAsk { id }
                         } else {
                             ParticipantFrame::CancelCall { id }
-                        }
-                    }
-                    WorkerNotification::CallInput(params) => {
-                        if !state.theirs.contains(&params.id) {
-                            state.drop_message("call.input", params.id);
-                            return Ok(None);
-                        }
-                        ParticipantFrame::CallInput {
-                            id: params.id,
-                            task: params.task.into_owned(),
-                            input: params.input.into_owned(),
                         }
                     }
                 }
             }
             Message::Result { id, result } => {
+                if let Some(question) = state.close_relay(id) {
+                    let reply: AskReply = serde_json::from_str(result.get()).map_err(malformed)?;
+                    return Ok(Some(ParticipantFrame::AskReply { question, reply }));
+                }
                 let Some(task_id) = state.close_run(id) else {
                     state.drop_message("result", id);
                     return Ok(None);
@@ -932,21 +903,27 @@ impl FrameCodec<BrokerSide> {
                     state: outcome.state,
                     message: outcome.message.map(Cow::into_owned),
                     metadata: outcome.metadata.map(Cow::into_owned),
-                    input: None,
                 }
             }
             Message::Error { id, error } => {
+                let error: CallError = serde_json::from_str(error.get()).map_err(malformed)?;
+                if let Some(question) = state.close_relay(id) {
+                    // A caller that could not answer passes it on.
+                    debug!(%question, %error, "A caller failed a relayed question; escalating it");
+                    return Ok(Some(ParticipantFrame::AskReply {
+                        question,
+                        reply: AskReply::Escalate,
+                    }));
+                }
                 let Some(task_id) = state.close_run(id) else {
                     state.drop_message("error", id);
                     return Ok(None);
                 };
-                let error: CallError = serde_json::from_str(error.get()).map_err(malformed)?;
                 ParticipantFrame::Status {
                     task_id,
                     state: TaskState::Failed,
                     message: Some(error.to_string()),
                     metadata: None,
-                    input: None,
                 }
             }
         };
@@ -964,23 +941,25 @@ impl FrameCodec<BrokerSide> {
             state.hello = Some(u64::MAX);
             state.last_id = u64::MAX - 1;
             match frame {
-                BrokerFrame::Cancel { task_id } | BrokerFrame::Input { task_id, .. } => {
-                    state.open_run(u64::MAX, task_id)
-                }
+                BrokerFrame::Cancel { task_id } => state.open_run(u64::MAX, task_id),
+                BrokerFrame::CancelAsk { question } => state.open_relay(u64::MAX, question),
                 BrokerFrame::CallProgress { id, .. }
                 | BrokerFrame::CallResult { id, .. }
-                | BrokerFrame::CallError { id, .. }
-                | BrokerFrame::CallInputRequired { id, .. }
-                | BrokerFrame::CallInputWithdrawn { id, .. } => {
+                | BrokerFrame::CallError { id, .. } => {
                     state.theirs.insert(*id);
                 }
                 BrokerFrame::Approval { id, .. } => {
                     state.theirs.insert(*id);
                     state.their_approvals.insert(*id);
                 }
+                BrokerFrame::Answer { id, .. } => {
+                    state.theirs.insert(*id);
+                    state.their_asks.insert(*id);
+                }
                 BrokerFrame::Welcome { .. }
                 | BrokerFrame::Error { .. }
-                | BrokerFrame::Task { .. } => {}
+                | BrokerFrame::Task { .. }
+                | BrokerFrame::Ask { .. } => {}
             }
         }
         // A frame that cannot be encoded is not sent either; it counts as
@@ -1010,7 +989,6 @@ impl FrameCodec<WorkerSide> {
                 state: task_state,
                 message,
                 metadata,
-                input,
             } => {
                 let Some(&id) = state.run_ids.get(task_id) else {
                     state.drop_message("status", 0);
@@ -1028,13 +1006,11 @@ impl FrameCodec<WorkerSide> {
                     };
                     result(m, id, outcome)?
                 } else if *task_state == TaskState::InputRequired {
-                    let params = InputRequiredParams {
-                        id,
-                        message,
-                        metadata,
-                        input: input.as_ref().map(Cow::Borrowed),
-                    };
-                    notification(m, "task.input_required", params)?
+                    // A question is a `human.ask` request (EN-2b).
+                    return Err(FrameError::Malformed(
+                        "a task waits on a human with human.ask, not an input-required status"
+                            .to_string(),
+                    ));
                 } else {
                     let event = TaskEvent::Status {
                         id,
@@ -1089,22 +1065,6 @@ impl FrameCodec<WorkerSide> {
                     }
                 }
             }
-            ParticipantFrame::CallInput {
-                id: call,
-                task,
-                input,
-            } => {
-                let Some(&id) = state.call_ids.get(call) else {
-                    state.drop_message("call.input", *call);
-                    return Ok(None);
-                };
-                let params = CallInputParams {
-                    id,
-                    task: Cow::Borrowed(task),
-                    input: Cow::Borrowed(input),
-                };
-                notification(m, "call.input", params)?
-            }
             ParticipantFrame::CancelCall { id: call } => {
                 // A request this end cancelled is withdrawn: whatever the
                 // broker still sends for it is dropped.
@@ -1132,6 +1092,33 @@ impl FrameCodec<WorkerSide> {
                 };
                 state.approvals.remove(&id);
                 notification(m, "req.cancel", IdParams { id })?
+            }
+            ParticipantFrame::Ask {
+                id: question,
+                request: ask,
+            } => {
+                let id = state.next_id();
+                state.asks.insert(id, *question);
+                state.ask_ids.insert(*question, id);
+                request(m, id, "human.ask", Some(ask))?
+            }
+            ParticipantFrame::CancelAsk { id: question } => {
+                // Answered already, or never sent: nothing to withdraw.
+                let Some(id) = state.ask_ids.remove(question) else {
+                    state.drop_message("req.cancel", *question);
+                    return Ok(None);
+                };
+                state.asks.remove(&id);
+                notification(m, "req.cancel", IdParams { id })?
+            }
+            ParticipantFrame::AskReply { question, reply } => {
+                // Withdrawn already: nobody is waiting on the reply.
+                let Some(id) = state.close_relay_by_question(question) else {
+                    state.drop_message("result", 0);
+                    return Ok(None);
+                };
+                state.theirs.remove(&id);
+                result(m, id, reply)?
             }
         };
         Ok(line.text())
@@ -1170,6 +1157,15 @@ impl FrameCodec<WorkerSide> {
                             swarm_events,
                         }
                     }
+                    BrokerRequest::HumanAsk(params) => {
+                        state.take_theirs(id)?;
+                        let question = params.question.into_owned();
+                        state.open_relay(id, &question);
+                        BrokerFrame::Ask {
+                            question,
+                            request: params.request.into_owned(),
+                        }
+                    }
                 }
             }
             Message::Notification { method, params } => {
@@ -1185,41 +1181,16 @@ impl FrameCodec<WorkerSide> {
                         }
                     }
                     BrokerNotification::ReqCancel(IdParams { id }) => {
-                        let Some(task_id) = state.runs.get(&id).cloned() else {
+                        if let Some(task_id) = state.runs.get(&id).cloned() {
+                            BrokerFrame::Cancel { task_id }
+                        } else if let Some(question) = state.close_relay(id) {
+                            // A request the broker cancelled is withdrawn:
+                            // the worker sends no result for it.
+                            state.theirs.remove(&id);
+                            BrokerFrame::CancelAsk { question }
+                        } else {
                             state.drop_message("req.cancel", id);
                             return Ok(None);
-                        };
-                        BrokerFrame::Cancel { task_id }
-                    }
-                    BrokerNotification::TaskInput(params) => {
-                        let Some(task_id) = state.runs.get(&params.id).cloned() else {
-                            state.drop_message("task.input", params.id);
-                            return Ok(None);
-                        };
-                        BrokerFrame::Input {
-                            task_id,
-                            input: params.input.into_owned(),
-                        }
-                    }
-                    BrokerNotification::CallInputRequired(params) => {
-                        let Some(&call) = state.calls.get(&params.id) else {
-                            state.drop_message("call.input_required", params.id);
-                            return Ok(None);
-                        };
-                        BrokerFrame::CallInputRequired {
-                            id: call,
-                            task: params.task.into_owned(),
-                            request: params.request.into_owned(),
-                        }
-                    }
-                    BrokerNotification::CallInputWithdrawn(params) => {
-                        let Some(&call) = state.calls.get(&params.id) else {
-                            state.drop_message("call.input_withdrawn", params.id);
-                            return Ok(None);
-                        };
-                        BrokerFrame::CallInputWithdrawn {
-                            id: call,
-                            task: params.task.into_owned(),
                         }
                     }
                 }
@@ -1246,6 +1217,14 @@ impl FrameCodec<WorkerSide> {
                         id: approval,
                         verdict,
                     }
+                } else if let Some(question) = state.asks.remove(&id) {
+                    state.ask_ids.remove(&question);
+                    let answers: Vec<Answer> =
+                        serde_json::from_str(result.get()).map_err(malformed)?;
+                    BrokerFrame::Answer {
+                        id: question,
+                        answers: Ok(answers),
+                    }
                 } else {
                     state.drop_message("result", id);
                     return Ok(None);
@@ -1270,6 +1249,12 @@ impl FrameCodec<WorkerSide> {
                     BrokerFrame::Approval {
                         id: approval,
                         verdict: ApprovalVerdict::Denied,
+                    }
+                } else if let Some(question) = state.asks.remove(&id) {
+                    state.ask_ids.remove(&question);
+                    BrokerFrame::Answer {
+                        id: question,
+                        answers: Err(error),
                     }
                 } else {
                     state.drop_message("error", id);

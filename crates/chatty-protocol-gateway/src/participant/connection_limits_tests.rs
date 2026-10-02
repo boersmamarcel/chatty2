@@ -6,6 +6,7 @@
 //! test can send a line no real worker would, or stop reading.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -165,7 +166,6 @@ impl VirtualAgent for Answering {
                 state: TaskState::Completed,
                 message: None,
                 metadata: None,
-                input: None,
             });
         }
         Box::pin(async move {

@@ -21,10 +21,11 @@ pub enum ApprovalKind {
     Write,
 }
 
-/// The agent that asked: its broker-assigned name and the chain of spec
-/// names it runs under, root first.
+/// The agent that asked for an approval or asked a question: its
+/// broker-assigned name and the chain of spec names it runs under, root
+/// first. The broker's stamp, on both `human.*` methods.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApprovalAsker {
+pub struct Asker {
     pub agent: String,
     pub chain: Vec<String>,
 }
@@ -42,7 +43,7 @@ pub struct ApprovalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff_stat: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asker: Option<ApprovalAsker>,
+    pub asker: Option<Asker>,
 }
 
 /// `human.approve`'s result. Anything short of a human's approval — a deny,

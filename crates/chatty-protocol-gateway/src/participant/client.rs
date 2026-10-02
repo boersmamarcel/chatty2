@@ -137,7 +137,6 @@ impl ParticipantConnection {
             state,
             message,
             metadata: None,
-            input: None,
         })
         .await
     }
@@ -156,7 +155,6 @@ impl ParticipantConnection {
             state,
             message,
             metadata,
-            input: None,
         })
         .await
     }

@@ -66,7 +66,6 @@ pub(crate) fn card_to_json(card: &ParticipantCard) -> Value {
 /// which runs a worker's `invoke_agent` over its connection with exactly
 /// the lifecycle an A2A request gets.
 pub(crate) struct RunningTask {
-    pub(crate) task_id: String,
     pub(crate) updates: TaskStream,
     /// Cancels the task if the caller hangs up before it finishes.
     guard: TaskGuard,
@@ -131,8 +130,7 @@ pub(crate) async fn submit(
 ) -> Option<RunningTask> {
     let (task_id, updates) = registry.submit_task(name, task).await?;
     Some(RunningTask {
-        guard: TaskGuard::new(registry.clone(), name.to_string(), task_id.clone()),
-        task_id,
+        guard: TaskGuard::new(registry.clone(), name.to_string(), task_id),
         updates,
         worker: None,
     })
@@ -152,9 +150,8 @@ pub(crate) async fn spawn(
         guard: TaskGuard::new(
             runner.registry().clone(),
             worker.name().to_string(),
-            task_id.clone(),
+            task_id,
         ),
-        task_id,
         updates,
         worker: Some(worker),
     })

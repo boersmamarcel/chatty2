@@ -243,7 +243,6 @@ async fn idle_participant_is_chainless() {
             state: TaskState::Completed,
             message: None,
             metadata: None,
-            input: None,
         },
     ));
     assert_eq!(kit.resolve(&lead), Caller::External(Admitter::Chainless));

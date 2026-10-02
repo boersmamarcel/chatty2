@@ -61,34 +61,32 @@
 //! A2A task. When the worker's connection closes, the broker cancels every
 //! call still in flight on it, which reaps the workers those calls started.
 //!
-//! # A question on a call (BI-5, AGE-637)
+//! # A question (EN-2b, AGE-771)
 //!
-//! A callee that asks a question parks its task (below); the broker tells
-//! the calling worker with `call.input_required`, naming the request and the
-//! parked task, and the worker's answer goes back up as `call.input` with
-//! the same `input` shape `task.input` carries. The broker delivers it only
-//! to a task parked on that request, so a worker can answer its own callees
-//! and nobody else's. Each hop re-asks the question on its own
-//! clarification store, which parks its own task toward its caller, so a
-//! grandchild's `ask_user` climbs to the root's human however many workers
-//! sit in between.
+//! A worker whose `ask_user` waits on someone parks its task on a
+//! `human.ask` request and gets the answers as its result. The broker
+//! stamps the asker from the connection (whatever the worker put there is
+//! overwritten) and relays the request, under an id of its own, to whoever
+//! called the asking worker: a worker gets it as a broker→worker
+//! `human.ask`, the root as [`chatty_fabric::CallEvent::Ask`]. A worker
+//! that cannot answer it answers `escalate`, and the broker forwards the
+//! original request, first stamp intact, to the next caller up, so the root
+//! sees the agent that asked and never a relayer's name. A worker's model
+//! has no human, so it escalates every question relayed to it.
 //!
 //! ```text
-//! broker      → {"v":3,"method":"call.input_required","params":{"id":2,"task":"task-…",
-//!                "request":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":[]}]}}}
-//! participant → {"v":3,"method":"call.input","params":{"id":2,"task":"task-…",
-//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"SQLite","custom":false}]}}}
+//! leaf   → {"v":3,"id":2,"method":"human.ask","params":{"questions":[{"id":"q1","question":"Which database?","options":["SQLite"]}]}}
+//! broker → {"v":3,"id":3,"method":"human.ask","params":{"question":"question-1","request":{"questions":[…],
+//!           "asker":{"agent":"leaf-0","chain":["mid","leaf"]}}}}            (to mid, the leaf's caller)
+//! mid    → {"v":3,"id":3,"result":"escalate"}
+//! broker → {"v":3,"id":2,"result":[{"id":"q1","answer":"SQLite","custom":false}]}   (to leaf, once the root answered)
 //! ```
 //!
-//! A question can end without an answer: the run under it was stopped
-//! (TB-7, AGE-749), so the asker withdrew it and its task went back to
-//! `working`. The broker tells the calling worker with
-//! `call.input_withdrawn`, and the worker withdraws the copy it re-raised,
-//! which un-parks its own task toward its caller in turn.
-//!
-//! These three, and `task.input_required` / `task.input` below, are interim
-//! notifications for questions: ADR-0021's step 2 (EN-2b) replaces them with
-//! the `human.ask` request.
+//! A question ends without an answer when the worker withdraws it
+//! (`req.cancel`) or its callee ends or is cancelled, which closes its
+//! connection: the broker sends `req.cancel` for the copy it relayed to a
+//! worker, or withdraws the root's popover
+//! ([`chatty_fabric::CallEvent::InputWithdrawn`], by the broker's id).
 //!
 //! # An approval (EN-2a, AGE-770)
 //!
@@ -104,21 +102,6 @@
 //! ```text
 //! participant → {"v":3,"id":4,"method":"human.approve","params":{"kind":"exec","command_or_path":"[shell] echo hi"}}
 //! broker      → {"v":3,"id":4,"result":"approved"}
-//! ```
-//!
-//! # A parked task
-//!
-//! A worker that asks a question (`ask_user`) parks its task in
-//! `input-required` and says what it is waiting for; the answer comes back
-//! down as `task.input` on the same `task.run`, and the task resumes
-//! (ADR-0011 C7, AGE-306).
-//!
-//! ```text
-//! participant → {"v":3,"method":"task.input_required","params":{"id":1,"message":"Which database?",
-//!                "input":{"id":"req-…","questions":[{"id":"q1","question":"Which database?","options":["Postgres","SQLite"]}]}}}
-//! broker      → {"v":3,"method":"task.input","params":{"id":1,
-//!                "input":{"requestId":"req-…","answers":[{"id":"q1","answer":"Postgres","custom":false}]}}}
-//! participant → {"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working","message":"✓ ask_user"}}
 //! ```
 //!
 //! # A nested run's events (TB-1, AGE-663)
@@ -139,8 +122,9 @@
 //! ```
 
 use chatty_fabric::{
-    ApprovalRequest, ApprovalVerdict, CallChain, CallError, CallRequest, ConversationScope,
-    HandoffContract, NodeName, Remaining, RunId, SpawnContext, SwarmItem,
+    Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, CallChain, CallError,
+    CallRequest, ConversationScope, HandoffContract, NodeName, Remaining, RunId, SpawnContext,
+    SwarmItem,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -156,8 +140,9 @@ use serde_json::Value;
 pub enum TaskState {
     Submitted,
     Working,
-    /// The participant is blocked on a human. Routing this up the chain to
-    /// `ask_user` is AGE-306; the broker forwards the state either way.
+    /// The participant is blocked on a human. On a worker's connection that
+    /// is a `human.ask` request, never a status (EN-2b); the state is A2A's,
+    /// for an A2A peer's task.
     InputRequired,
     Completed,
     Failed,
@@ -183,44 +168,6 @@ impl std::fmt::Display for TaskState {
             .unwrap_or_else(|| "unknown".to_string());
         f.write_str(&s)
     }
-}
-
-/// One thing a parked task is waiting on: an `ask_user` question, field for
-/// field chatty-core's `ClarifyingQuestion`. Spelled out here because the
-/// wire's schema belongs with the wire, and this crate does not depend on
-/// chatty-core without the `worker` feature. Approvals are not questions:
-/// they go to the root as `human.approve` (EN-2a).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum InputQuestion {
-    /// One `ask_user` question.
-    Question {
-        id: String,
-        question: String,
-        #[serde(default)]
-        options: Vec<String>,
-    },
-}
-
-/// What a task in `input-required` is waiting for: one `ask_user` call.
-///
-/// `id` is the worker's own request id — the key its clarification store
-/// resolves on — and it rides up and back down unchanged so the answer
-/// lands on the call that asked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InputRequest {
-    pub id: String,
-    pub questions: Vec<InputQuestion>,
-}
-
-/// The answer to one [`InputQuestion`]; the shape of chatty-core's
-/// `ClarificationAnswer`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InputAnswer {
-    pub id: String,
-    pub answer: String,
-    #[serde(default)]
-    pub custom: bool,
 }
 
 /// The caller's bearer token, carried to the worker that runs their task
@@ -395,16 +342,6 @@ impl DelegatedTask {
     }
 }
 
-/// The answers for a parked task: A2A `message/send` on the same task id,
-/// in the broker's vocabulary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskInput {
-    /// The [`InputRequest::id`] this answers.
-    pub request_id: String,
-    pub answers: Vec<InputAnswer>,
-}
-
 /// One skill on a participant's agent card.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParticipantSkill {
@@ -444,25 +381,19 @@ pub enum ParticipantFrame {
     Hello { card: ParticipantCard },
     /// A task moved, optionally with progress text. The broker turns this
     /// into an A2A `TaskStatusUpdateEvent`. On the wire a terminal one is
-    /// the `task.run`'s result, `input-required` is `task.input_required`,
-    /// and any other is a `task.event` of kind `status`.
+    /// the `task.run`'s result and any other a `task.event` of kind
+    /// `status`; a task waiting on a human sends [`Self::Ask`] instead.
     ///
     /// `metadata` is copied verbatim into the A2A status's `metadata` field.
     /// It is where a turn's token usage rides back: A2A has no usage concept
     /// — usage belongs to the ledger, not to the task protocol — and
     /// inventing a frame for it would put accounting in the wire format.
     /// The broker's ledger (AGE-307) reads it from there.
-    ///
-    /// `input` accompanies `input-required` and says what the task is
-    /// waiting for. The broker serves it to the caller under the A2A
-    /// status's `metadata.clarification`, and the caller's answer comes
-    /// back as [`BrokerFrame::Input`].
     Status {
         task_id: String,
         state: TaskState,
         message: Option<String>,
         metadata: Option<Value>,
-        input: Option<InputRequest>,
     },
     /// A chunk of the task's output, in stream order. The broker turns this
     /// into an A2A `TaskArtifactUpdateEvent`.
@@ -476,15 +407,6 @@ pub enum ParticipantFrame {
     /// `id` is the worker's own call id on its side and the request id the
     /// worker gave it on the broker's; the codec maps between them.
     Call { id: u64, request: CallRequest },
-    /// The answer to a question a callee of call `id` asked
-    /// ([`BrokerFrame::CallInputRequired`]): `task` is the callee's parked
-    /// task, `input` the same shape an [`BrokerFrame::Input`] carries
-    /// (BI-5).
-    CallInput {
-        id: u64,
-        task: String,
-        input: TaskInput,
-    },
     /// One of the worker's own turns or tool events on a task sent with
     /// `swarmEvents` (TB-1). The broker tags it; the frame cannot.
     Event { task_id: String, event: SwarmItem },
@@ -499,6 +421,17 @@ pub enum ParticipantFrame {
     /// The worker withdraws approval `id` (`req.cancel`): nobody is waiting
     /// on it any more.
     CancelApproval { id: u64 },
+    /// A `human.ask` request (EN-2b): the worker parks its task on a
+    /// question and waits for the answers, [`BrokerFrame::Answer`]. `id` is
+    /// the worker's own question number on its side and the request id on
+    /// the broker's; the codec maps between them.
+    Ask { id: u64, request: AskRequest },
+    /// The worker withdraws question `id` (`req.cancel`): nobody is waiting
+    /// on its answers any more.
+    CancelAsk { id: u64 },
+    /// The worker's result to the question the broker relayed to it as
+    /// `question` ([`BrokerFrame::Ask`]): the answers, or `escalate`.
+    AskReply { question: String, reply: AskReply },
 }
 
 /// A frame from the broker to a participant.
@@ -548,29 +481,32 @@ pub enum BrokerFrame {
     /// The caller went away: `req.cancel` of the task's `task.run`. Stop
     /// working on `taskId`.
     Cancel { task_id: String },
-    /// The answer to a task parked in `input-required`. Resolve the request
-    /// it names and carry on; the next `Status` frame un-parks the task.
-    Input { task_id: String, input: TaskInput },
     /// Progress on call `id`: an `InvokeAgentProgress`, as JSON.
     CallProgress { id: u64, event: Value },
     /// Call `id` is over, and this is what it returned.
     CallResult { id: u64, result: Value },
     /// Call `id` could not be carried out, and is over.
     CallError { id: u64, error: CallError },
-    /// A callee of call `id` parked its task `task` on a question
-    /// (`request`, an [`InputRequest`] as JSON). The call stays open; answer
-    /// with [`ParticipantFrame::CallInput`] (BI-5).
-    CallInputRequired {
-        id: u64,
-        task: String,
-        request: Value,
-    },
-    /// The question call `id`'s callee parked `task` on is over without
-    /// this worker's answer (TB-7): withdraw the copy re-raised for it.
-    CallInputWithdrawn { id: u64, task: String },
     /// The root's answer to the worker's approval `id`: the `human.approve`
     /// request's result (EN-2a).
     Approval { id: u64, verdict: ApprovalVerdict },
+    /// The result of the worker's question `id` (`human.ask`, EN-2b): the
+    /// answers, or why nobody gave any.
+    Answer {
+        id: u64,
+        answers: Result<Vec<Answer>, CallError>,
+    },
+    /// A question one of this worker's callees asked (a broker→worker
+    /// `human.ask`, EN-2b), under the broker's id `question`, asker
+    /// stamped. Answer it, or escalate it, with
+    /// [`ParticipantFrame::AskReply`].
+    Ask {
+        question: String,
+        request: AskRequest,
+    },
+    /// The broker withdraws the question it relayed as `question`
+    /// (`req.cancel`): its asker is gone or stopped waiting.
+    CancelAsk { question: String },
 }
 
 #[cfg(test)]

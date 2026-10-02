@@ -31,21 +31,24 @@
 //!
 //! # Rows
 //!
-//! | Caller | `agent.invoke` | `agent.list` | `mailbox.post` | `human.approve` | Local root requests |
+//! | Caller | `agent.invoke` | `agent.list` | `mailbox.post` | `human.approve`, `human.ask` | Local root requests |
 //! |---|---|---|---|---|---|
 //! | `Root` | Root policy, chain, budget, then (spawning) roster and spawn context | Granted | Refused (`not_on_tree`: no owner) | Answers its pending ones | Granted |
 //! | `Node` | The named run must be its own open run; `may_call` from its admitted spec, chain, budget, then (spawning) roster and spawn context | Granted | Owner only | Raises one from the task it serves (its open run) | Refused |
 //! | `Remote` | Refused | Refused | Refused | Refused | Refused |
 //! | `External` | Refused | Refused | Refused | Refused | Refused |
 //!
-//! The local root requests are its own: answering a question its callee
-//! parked, stopping one run, and taking its run's waiting messages.
+//! The local root requests are its own: answering a question or an
+//! approval the broker delivered to it, stopping one run, and taking its
+//! run's waiting messages.
 //!
 //! `human.approve` (EN-2a, ADR-0021 § 2) is raised by a node from the task
 //! it serves, whose run's chain stamps the asker; a refused one is denied
 //! without asking. `human.approve` names no run on the wire, so a node
 //! serving several tasks at once is refused one: which run asks would be a
-//! guess. `human.ask` joins with EN-2b, under the same rule.
+//! guess. `human.ask` (EN-2b) follows the same rule: a node asks from the
+//! task it serves, whose run's chain stamps the asker, and the root only
+//! answers.
 //! `session.hello` is admission (ADR-0020): the connection the broker made
 //! is what admits a node, before any request.
 //!
@@ -66,8 +69,8 @@ use std::fmt;
 use std::time::SystemTime;
 
 use chatty_fabric::{
-    ApprovalRequest, CallChain, CallError, CallPolicy, InvokeAgentParams, NodeId, ROOT_NAME,
-    Refusal, RefusalReason, RunId, SendMessageParams, SpawnContext,
+    ApprovalRequest, AskRequest, CallChain, CallError, CallPolicy, InvokeAgentParams, NodeId,
+    ROOT_NAME, Refusal, RefusalReason, RunId, SendMessageParams, SpawnContext,
 };
 
 use super::protocol::CallStamp;
@@ -194,8 +197,10 @@ pub enum Request<'a> {
     Approve(&'a ApprovalRequest),
     /// The local root answers the approval it was handed under `id`.
     AnswerApproval { id: &'a str },
-    /// The local root answers the question its callee parked `task` on.
-    Answer { task: &'a str },
+    /// `human.ask`, raised (EN-2b).
+    Ask(&'a AskRequest),
+    /// The local root answers the question it was handed under `id`.
+    Answer { id: &'a str },
     /// The local root stops the run `node` names (TB-7).
     Cancel { node: &'a str },
     /// The local root takes the messages waiting for its next run (TM-2).
@@ -211,6 +216,7 @@ impl Request<'_> {
             Self::Post(_) => Method::Post,
             Self::Approve(_) => Method::Approve,
             Self::AnswerApproval { .. } => Method::AnswerApproval,
+            Self::Ask(_) => Method::Ask,
             Self::Answer { .. } => Method::Answer,
             Self::Cancel { .. } => Method::Cancel,
             Self::TakeRunMessages => Method::TakeRunMessages,
@@ -226,6 +232,7 @@ pub enum Method {
     Post,
     Approve,
     AnswerApproval,
+    Ask,
     Answer,
     Cancel,
     TakeRunMessages,
@@ -239,6 +246,7 @@ impl Method {
             Self::Post => "mailbox.post",
             Self::Approve => "human.approve",
             Self::AnswerApproval => "root.answer_approval",
+            Self::Ask => "human.ask",
             Self::Answer => "root.answer",
             Self::Cancel => "root.cancel",
             Self::TakeRunMessages => "root.take_run_messages",
@@ -346,6 +354,11 @@ pub enum Grant {
         chain: CallChain,
     },
     AnswerApproval,
+    /// Raise the question, its asker stamped with `chain`: the chain of the
+    /// run it was raised from.
+    Ask {
+        chain: CallChain,
+    },
     Answer,
     Cancel,
     TakeRunMessages,
@@ -443,6 +456,10 @@ fn decide_row(
             "the root answers approvals; it raises none through its broker".to_string(),
         )),
         (Caller::Root, Request::AnswerApproval { .. }) => Ok(Grant::AnswerApproval),
+        (Caller::Node(node), Request::Ask(_)) => ask(node),
+        (Caller::Root, Request::Ask(_)) => Err(Refused::Caller(
+            "the root answers questions; it raises none through its broker".to_string(),
+        )),
         (Caller::Root, Request::Answer { .. }) => Ok(Grant::Answer),
         (Caller::Root, Request::Cancel { .. }) => Ok(Grant::Cancel),
         (Caller::Root, Request::TakeRunMessages) => Ok(Grant::TakeRunMessages),
@@ -467,6 +484,7 @@ fn decide_row(
             | Request::List
             | Request::Approve(_)
             | Request::AnswerApproval { .. }
+            | Request::Ask(_)
             | Request::Answer { .. }
             | Request::Cancel { .. }
             | Request::TakeRunMessages,
@@ -585,6 +603,22 @@ fn spawn_from(
             spawn_context::clamp(*requested, &spawn.own, &spawn.target, spawn.inside_own_tree)
                 .map_err(Refused::SpawnContext)
         }
+    }
+}
+
+/// `human.ask` from a node: raised from the task it serves, whose run's
+/// chain stamps the asker (EN-2b). Like `human.approve`, it names no run,
+/// so a node serving more than one is refused rather than guessed for.
+fn ask(node: &NodeCaller) -> Result<Grant, Refused> {
+    match &node.runs[..] {
+        [run] => Ok(Grant::Ask {
+            chain: run.chain.clone(),
+        }),
+        runs => Err(Refused::Caller(format!(
+            "{} serves {} runs, and its human.ask names none",
+            node.name,
+            runs.len()
+        ))),
     }
 }
 
