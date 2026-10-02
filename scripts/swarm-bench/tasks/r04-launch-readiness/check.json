@@ -1,0 +1,28 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "launch-blockers.md",
+    "launch-plan-v1.md",
+    "launch-plan-v2.md",
+    "launch-raci.md"
+  ],
+  "facts": [
+    {
+      "fact": "launch 2026-11-18",
+      "pattern": "2026-11-18|18 November 2026|November 18"
+    },
+    {
+      "fact": "price 29",
+      "pattern": "\\b29\\b"
+    },
+    {
+      "fact": "blocker BUG-311",
+      "pattern": "BUG-311"
+    },
+    {
+      "fact": "runbook owner Diego Alvarez",
+      "pattern": "Diego Alvarez"
+    }
+  ]
+}

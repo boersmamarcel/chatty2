@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Which month is missing from the 2025 sales extract",
+  "prompt": "This should be a complete extract of daily sales for 2025. Is any calendar month missing entirely? Answer NONE if every month is present. Use the data in daily_sales.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: JANUARY, FEBRUARY, MARCH, APRIL, MAY, JUNE, JULY, AUGUST, SEPTEMBER, OCTOBER, NOVEMBER, DECEMBER, NONE."
+}

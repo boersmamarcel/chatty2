@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Q1 2027 engineering hiring plan",
+  "prompt": "Using only the documents in docs/, write brief.md: a summary of the Q1 2027 engineering hiring plan: how many engineers will be hired, the hiring budget, the rule on contractors, and who approves exceptions. Keep it short. Cite the source file of every fact in square brackets, e.g. [contractor-policy.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}

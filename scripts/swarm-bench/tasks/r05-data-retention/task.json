@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Data retention periods",
+  "prompt": "Using only the documents in docs/, write brief.md: a summary of how long we keep application logs, database backups and a terminated customer's data, and the one exception to deletion. Keep it short. Cite the source file of every fact in square brackets, e.g. [retention-exceptions.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}

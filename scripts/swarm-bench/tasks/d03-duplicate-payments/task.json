@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Which vendor was paid twice for the same invoice",
+  "prompt": "Audit the payments for duplicates: the same invoice paid twice for the same amount. Which vendor has duplicate payments? Use the data in payments.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: Acme Supplies, Brightline, Corvus Freight, Delta Office, Evergreen IT, Fulton Print."
+}

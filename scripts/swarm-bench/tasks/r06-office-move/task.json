@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Office move facts for staff",
+  "prompt": "Using only the documents in docs/, write brief.md: a note for staff on the office move: the new address, the moving date, how many parking spaces the new office has, and whom to contact with questions. Keep it short. Cite the source file of every fact in square brackets, e.g. [office-move-announcement.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}

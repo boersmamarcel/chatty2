@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Which store has an abnormal refund rate",
+  "prompt": "Which store's refund rate (refunds as a share of its transactions) is far above the others? Note that stores differ a lot in size. Use the data in transactions.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: Amsterdam, Berlin, Copenhagen, Dublin, Edinburgh, Florence."
+}

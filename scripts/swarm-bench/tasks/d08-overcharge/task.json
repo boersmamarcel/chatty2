@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Which supplier invoices above the contract price",
+  "prompt": "Every supplier is contracted at the same unit price per SKU: SKU-100 12.50, SKU-200 7.25, SKU-300 31.00. Which supplier invoices above the contract price? Use the data in invoice_lines.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: Norfield, Oakmont, Pinecrest, Quayside."
+}

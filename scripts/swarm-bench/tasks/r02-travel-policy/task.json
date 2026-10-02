@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Current travel rules for a trip to Germany",
+  "prompt": "Using only the documents in docs/, write brief.md: a summary for an employee planning a 3-day trip to Munich in November 2026: the daily allowance for Germany, the flight class allowed for a flight of about 2 hours, and who must approve a trip costing more than EUR 2,500. Keep it short. Cite the source file of every fact in square brackets, e.g. [per-diem-rates-2026.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}
