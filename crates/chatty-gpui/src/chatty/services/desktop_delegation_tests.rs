@@ -89,11 +89,15 @@ fn answering_worker(dir: &Path) -> PathBuf {
         .collect();
     std::fs::write(dir.join("frames.jsonl"), frames).expect("frames written");
     let fd = PARTICIPANT_FD;
+    // The broker refuses a hello whose `schema` does not match its own
+    // build's canonical wire schema (ADR-0021 § 1, EN-3b); this stand-in
+    // runs in the same build, so its own hash is always right.
+    let schema = chatty_fabric::wire::schema::hash();
     worker_script(
         dir,
         &format!(
             r#"here="$(dirname "$0")"
-printf '{{"v":3,"id":1,"method":"session.hello","params":{{"card":{{"name":"stand-in"}}}}}}\n' >&{fd}
+printf '{{"v":3,"id":1,"method":"session.hello","params":{{"card":{{"name":"stand-in"}},"schema":"{schema}"}}}}\n' >&{fd}
 read -r welcome <&{fd}
 read -r task <&{fd}
 id=$(printf '%s' "$task" | sed 's/^{{"v":3,"id":\([0-9]*\),.*/\1/')

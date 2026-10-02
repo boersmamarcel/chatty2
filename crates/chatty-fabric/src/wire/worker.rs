@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -69,15 +70,22 @@ impl WorkerNotification {
 }
 
 /// `session.hello`'s params.
-#[derive(Debug, Default, Serialize, Deserialize)]
+///
+/// `schema` is the SHA-256 (hex) of this build's canonical wire schema
+/// export (ADR-0021 § 1, EN-3b): [`crate::wire::schema::hash`]. The broker
+/// refuses a hello whose `schema` does not match its own with
+/// `error{kind: protocol}`, then closes the connection.
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HelloParams {
     #[serde(default)]
     pub card: ParticipantCard,
+    #[serde(default)]
+    pub schema: String,
 }
 
 /// One skill on a participant's agent card.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ParticipantSkill {
     pub name: String,
@@ -92,7 +100,7 @@ pub struct ParticipantSkill {
 /// `name` is the address callers reach it at, and it is the broker's to
 /// give: whatever a worker puts here is replaced by the name the broker
 /// admitted its connection under (ADR-0020). A worker leaves it empty.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ParticipantCard {
     #[serde(default)]
@@ -108,7 +116,7 @@ pub struct ParticipantCard {
 }
 
 /// `task.event`: one update on a `task.run`, named by that request's id.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TaskEvent<'a> {
     /// A non-terminal status. A terminal one is the `task.run`'s result,
@@ -135,7 +143,7 @@ pub enum TaskEvent<'a> {
 }
 
 /// `task.run`'s result: how the task ended.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskOutcome<'a> {
     pub state: TaskState,
@@ -149,7 +157,7 @@ pub struct TaskOutcome<'a> {
 /// `swarmEvents` (TB-1): its turns and its tool events. Text, usage and the
 /// end are the broker's to read off the task's own frames, so a worker
 /// cannot send them, and the node and chain are the broker's to stamp.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerSwarmItem {
     TurnStarted,

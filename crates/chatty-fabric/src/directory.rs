@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::task_table::RunId;
@@ -36,7 +37,9 @@ impl fmt::Display for NodeId {
 
 /// A node's name, e.g. `local-coder-3`. Assigned by the broker, never
 /// claimed by the node.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(transparent)]
 pub struct NodeName(String);
 
@@ -53,7 +56,9 @@ impl fmt::Display for NodeName {
 }
 
 /// The root conversation a node works for: the unit of a swarm.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(transparent)]
 pub struct ConversationScope(String);
 

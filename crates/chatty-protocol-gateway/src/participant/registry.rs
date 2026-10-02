@@ -1154,7 +1154,8 @@ mod tests {
         assert!(!reg.on_frame(
             &w,
             ParticipantFrame::Hello {
-                card: card("other")
+                card: card("other"),
+                schema: chatty_fabric::wire::schema::hash().to_string(),
             }
         ));
     }

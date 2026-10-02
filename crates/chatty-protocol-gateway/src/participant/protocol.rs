@@ -276,8 +276,14 @@ impl DelegatedTask {
 pub enum ParticipantFrame {
     /// `session.hello`: the first message on a connection. A second one
     /// is a protocol error. The card's `name` is ignored: the connection
-    /// already names the node.
-    Hello { card: ParticipantCard },
+    /// already names the node. `schema` is the SHA-256 hex of this
+    /// worker's canonical wire schema export (ADR-0021 § 1, EN-3b); the
+    /// broker closes the connection with [`BrokerFrame::SchemaMismatch`]
+    /// when it does not match its own.
+    Hello {
+        card: ParticipantCard,
+        schema: String,
+    },
     /// A task moved, optionally with progress text. The broker turns this
     /// into an A2A `TaskStatusUpdateEvent`. On the wire a terminal one is
     /// the `task.run`'s result and any other a `task.event` of kind
@@ -350,6 +356,11 @@ pub enum BrokerFrame {
     /// `error` for the hello's id, after which the broker closes the
     /// connection. Without a pending hello nothing is sent.
     Error { reason: String },
+    /// The worker's `session.hello` named a `schema` that does not match
+    /// this broker's canonical wire schema export (ADR-0021 § 1, EN-3b): an
+    /// `error{kind: protocol}` for the hello's id, after which the broker
+    /// closes the connection. Without a pending hello nothing is sent.
+    SchemaMismatch { reason: String },
     /// Work: a `task.run` request. Answer with `Status` / `Artifact` frames
     /// carrying this `taskId` and end with a terminal state. `identity` is
     /// whose task it is, absent on the wire for a desktop root's task.

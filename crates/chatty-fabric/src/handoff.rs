@@ -6,12 +6,13 @@
 //! matching it. Validation lives in `chatty-core`; this is only the shape
 //! both ends of the socket agree on.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::wire::Opaque;
 
 /// The role a worker answers as and the JSON Schema its handoff must match.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HandoffContract {
     /// The role's agent spec name, as the team file lists it.

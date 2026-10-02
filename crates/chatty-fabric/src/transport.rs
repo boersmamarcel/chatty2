@@ -8,13 +8,14 @@
 //! result or error of participant protocol v3 (ADR-0021).
 
 use futures::stream::BoxStream;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::Remaining;
 use crate::wire::{AgentEntry, TaskMetadata, WireProgress};
 
 /// `invoke_agent`'s arguments as they cross the fabric.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InvokeAgentParams {
     pub agent: String,
@@ -57,7 +58,7 @@ pub struct InvokeAgentParams {
 /// included, so the context that used to live in a sub-leader's own broker
 /// travels on the spawn request instead. The broker sets it from the
 /// calling node's own context; a worker cannot widen it (invariant 6).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnContext {
     /// The tree the worker's own tree is made under: the caller's own tree.
@@ -83,7 +84,7 @@ pub struct SpawnContext {
 }
 
 /// `send_message`'s arguments as they cross the fabric (tree messages).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageParams {
     pub to: String,
@@ -96,7 +97,7 @@ pub struct SendMessageParams {
 ///
 /// A refusal is an answer, not a [`CallError`]: the sender's model reads it
 /// as the tool's result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MessageStatus {
     /// Accepted; it waits for the recipient's next delivery point.
@@ -109,7 +110,7 @@ pub enum MessageStatus {
 }
 
 /// Why the broker refused a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
     /// The recipient is not the sender's owner (nor, once resumable
@@ -222,7 +223,7 @@ impl Serialize for CallResult {
 /// as it renders a failed A2A task. `metadata` is the terminal status's —
 /// usage, trace, conversation and the runner's evidence ride there, as
 /// they do on A2A.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InvokeAgentOutcome {
     pub success: bool,

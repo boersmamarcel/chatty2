@@ -75,7 +75,12 @@ impl ParticipantConnection {
             write: Box::new(write) as BoxedWrite,
             codec,
         };
-        writer.send(ParticipantFrame::Hello { card }).await?;
+        writer
+            .send(ParticipantFrame::Hello {
+                card,
+                schema: chatty_fabric::wire::schema::hash().to_string(),
+            })
+            .await?;
 
         match reader.next_frame().await? {
             Some(BrokerFrame::Welcome { name, scope, owner }) => {
@@ -90,6 +95,9 @@ impl ParticipantConnection {
             }
             Some(BrokerFrame::Error { reason }) => {
                 bail!("the broker refused the connection: {reason}")
+            }
+            Some(BrokerFrame::SchemaMismatch { reason }) => {
+                bail!("the broker closed the connection: {reason}")
             }
             Some(other) => bail!("expected a welcome, got {other:?}"),
             None => bail!("the broker closed the connection without a welcome"),

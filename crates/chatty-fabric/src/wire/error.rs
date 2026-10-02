@@ -1,5 +1,6 @@
 //! The `error` of a v3 error response (ADR-0021 § 1, EN-3a).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{CallError, Refusal};
@@ -16,7 +17,7 @@ use crate::{CallError, Refusal};
 /// {"kind":"refused","reason":"over the call cap","message":"refused: over the call cap"}
 /// {"kind":"delegation","refusal":{"reason":"too_deep","depth":5,"max":4},"message":"too_deep: depth 5 > max 4"}
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
 #[serde(into = "Repr", from = "Repr")]
 pub enum WireError {
     #[error("unknown agent: {agent}")]
@@ -40,7 +41,7 @@ pub enum WireError {
 }
 
 /// [`WireError`] as it is written: the variant's fields and its display.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Repr {
     UnknownAgent {

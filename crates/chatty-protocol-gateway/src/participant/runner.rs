@@ -721,10 +721,13 @@ mod tests {
     }
 
     /// A stand-in worker's script: say hello on the connection the runner
-    /// handed it, then `then`.
+    /// handed it, then `then`. The schema must match this build's (ADR-0021
+    /// § 1, EN-3b) or the broker closes the connection with
+    /// `error{kind: protocol}` instead of welcoming it.
     fn hello(then: &str) -> String {
+        let schema = chatty_fabric::wire::schema::hash();
         format!(
-            "printf '{{\"v\":3,\"id\":1,\"method\":\"session.hello\",\"params\":{{}}}}\\n' >&{PARTICIPANT_FD}; {then}"
+            "printf '{{\"v\":3,\"id\":1,\"method\":\"session.hello\",\"params\":{{\"schema\":\"{schema}\"}}}}\\n' >&{PARTICIPANT_FD}; {then}"
         )
     }
 

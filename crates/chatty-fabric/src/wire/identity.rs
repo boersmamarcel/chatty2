@@ -1,5 +1,6 @@
 //! Whose task it is (ADR-0021 § 2, EN-3a).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// The tenant and user a task runs for, carried to the worker that runs it.
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// task as that user, and a hosted root answers an approval only for a
 /// request from the same `(tenant, user)`. A local worker has no use for it,
 /// and a desktop root sends none.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskIdentity {
     pub tenant: String,

@@ -30,8 +30,10 @@ mod error;
 mod identity;
 mod opaque;
 pub mod payload;
+pub mod schema;
 pub mod worker;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub use broker::{
@@ -89,7 +91,7 @@ fn no_params(method: &str, raw: Option<&serde_json::value::RawValue>) -> Result<
 /// copied verbatim into the `status.state` field the broker serves, so the
 /// serde renaming here is part of the public contract rather than a style
 /// choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskState {
     Submitted,
@@ -127,7 +129,7 @@ impl std::fmt::Display for TaskState {
 }
 
 /// A request id, for `req.cancel` (both directions).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct IdParams {
     pub id: u64,

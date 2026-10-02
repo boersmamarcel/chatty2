@@ -192,7 +192,27 @@ where
     // is registered, so it is on the wire ahead of any task.
     let name = match lines.next_line().await {
         Ok(Some(line)) => match decode(&line) {
-            Ok(Some(ParticipantFrame::Hello { card })) => {
+            Ok(Some(ParticipantFrame::Hello { card, schema })) => {
+                let ours = chatty_fabric::wire::schema::hash();
+                if schema != ours {
+                    warn!(
+                        node = node.name(),
+                        theirs = %schema,
+                        ours = %ours,
+                        "Closing a connection: its hello's schema does not match this broker's (ADR-0021 § 1)"
+                    );
+                    let _ = outbound_tx
+                        .send(BrokerFrame::SchemaMismatch {
+                            reason: "the participant protocol schema does not match this \
+                                     broker's; the two builds disagree on the wire"
+                                .to_string(),
+                        })
+                        .await;
+                    registry.abandon(node);
+                    drop(outbound_tx);
+                    let _ = writer.await;
+                    return;
+                }
                 let _ = outbound_tx.send(node.welcome()).await;
                 registry.register(node, card, outbound_tx.clone())
             }
