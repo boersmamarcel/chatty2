@@ -1,0 +1,12 @@
+{
+  "type": "verdict",
+  "choices": [
+    "Amsterdam",
+    "Berlin",
+    "Copenhagen",
+    "Dublin",
+    "Edinburgh",
+    "Florence"
+  ],
+  "label": "Copenhagen"
+}

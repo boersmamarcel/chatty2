@@ -1,0 +1,1 @@
+Applications close 2026-12-15; the grant is at most EUR 400,000 and needs 20% co-funding [grant-call-2026.md]. Only companies under 250 employees qualify, so a 310-employee company is not eligible [grant-eligibility.md].

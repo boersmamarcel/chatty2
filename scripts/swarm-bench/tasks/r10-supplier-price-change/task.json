@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Acme price increase and the notice clause",
+  "prompt": "Using only the documents in docs/, write brief.md: an assessment of Acme's announced price increase: the size of the increase, when it takes effect, the contract's notice requirement and clause, and whether Acme gave enough notice. Keep it short. Cite the source file of every fact in square brackets, e.g. [acme-account-notes.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}

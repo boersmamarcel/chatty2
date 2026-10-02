@@ -1,0 +1,1 @@
+Acme announced a 7.5% increase effective 2026-11-01 on 2026-09-17 [acme-letter-2026-09-17.md], which is 45 days' notice. Clause 9.2 requires at least 60 days, so the notice is too short [acme-contract.md].

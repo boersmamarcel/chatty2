@@ -1,0 +1,28 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "contracts-index.md",
+    "initech-draft-msa.md",
+    "internal-audit-2026q2.md",
+    "privacy-register.md"
+  ],
+  "facts": [
+    {
+      "fact": "contract term ends 2027-03-31",
+      "pattern": "2027-03-31|31 March 2027|March 31, 2027"
+    },
+    {
+      "fact": "annual cap 120,000",
+      "pattern": "120[,.\\s]?000|120k|120 ?K"
+    },
+    {
+      "fact": "DPA signed",
+      "pattern": "DPA|data processing agreement"
+    },
+    {
+      "fact": "open finding AF-12",
+      "pattern": "AF-12"
+    }
+  ]
+}

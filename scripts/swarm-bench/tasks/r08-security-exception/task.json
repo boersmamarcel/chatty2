@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Status of the legacy FTP security exception",
+  "prompt": "Using only the documents in docs/, write brief.md: a status note on the security exception for the legacy FTP server: its id, when it expires, the compensating control, and who owns it. Keep it short. Cite the source file of every fact in square brackets, e.g. [ex-44-detail.md]. Do not use the web.",
+  "deliverable": "brief.md"
+}

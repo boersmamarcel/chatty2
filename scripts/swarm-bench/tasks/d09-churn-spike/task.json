@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Which plan's churn jumped in Q3 2026",
+  "prompt": "Compare cancellations (ended_on) in Q3 2026 with H1 2026, per plan, relative to the plan's size. Which plan's churn rose the most? Use the data in subscriptions.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: Free, Starter, Team, Enterprise."
+}

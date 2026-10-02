@@ -87,6 +87,9 @@ jobs:
               # resume_spike_dry_run / rebrief_template_is_frozen (AGE-650)
               - 'scripts/resume-spike/**'
               - 'docs/research/resume-spike-template.md'
+              # swarm_bench_dry_run / prereg_exists_and_is_frozen (AGE-670)
+              - 'scripts/swarm-bench/**'
+              - 'docs/research/swarm-vs-single-prereg.md'
               - '.github/workflows/ci.yml'
               - 'Makefile'
 

@@ -1,0 +1,10 @@
+{
+  "type": "verdict",
+  "choices": [
+    "Free",
+    "Starter",
+    "Team",
+    "Enterprise"
+  ],
+  "label": "Team"
+}

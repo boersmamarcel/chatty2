@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Does the expense ledger follow Benford's law",
+  "prompt": "Check whether the leading digits of the expense amounts follow Benford's law (digit 1 about 30%, digit 9 about 5%). Does the ledger conform? Use the data in expenses.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: CONFORMS, NONCONFORMS."
+}

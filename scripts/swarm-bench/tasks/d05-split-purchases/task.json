@@ -1,0 +1,5 @@
+{
+  "family": "data-audit",
+  "title": "Who splits purchases under the approval limit",
+  "prompt": "Purchases of 5,000 or more need a second approval. Look for purchases split into several orders just below that limit (same requester, same vendor, same day). Which requester does it? Use the data in purchases.csv. Base every number on the file, not on a guess. End your answer with exactly one line of the form `VERDICT: <answer>`, where <answer> is one of: Ahmed, Bianca, Chen, Dolores, Emeka."
+}

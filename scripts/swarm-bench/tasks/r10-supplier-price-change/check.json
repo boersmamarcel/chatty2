@@ -1,0 +1,31 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "acme-account-notes.md",
+    "acme-contract.md",
+    "acme-letter-2026-09-17.md"
+  ],
+  "facts": [
+    {
+      "fact": "7.5% increase",
+      "pattern": "7[.,]5 ?%"
+    },
+    {
+      "fact": "effective 2026-11-01",
+      "pattern": "2026-11-01|1 November 2026|November 1"
+    },
+    {
+      "fact": "60 days notice",
+      "pattern": "\\b60\\b"
+    },
+    {
+      "fact": "clause 9.2",
+      "pattern": "9\\.2"
+    },
+    {
+      "fact": "notice too short (45 days)",
+      "pattern": "\\b45\\b|insufficient|not enough|too short|short of|less than"
+    }
+  ]
+}

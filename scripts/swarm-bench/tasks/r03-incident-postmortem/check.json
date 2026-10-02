@@ -1,0 +1,28 @@
+{
+  "type": "facts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "inc-2180-unrelated.md",
+    "inc-2291-actions.md",
+    "inc-2291-impact.md",
+    "inc-2291-timeline.md"
+  ],
+  "facts": [
+    {
+      "fact": "expired certificate",
+      "pattern": "expir\\w* (TLS )?certificate|certificate[^.\\n]{0,40}expir"
+    },
+    {
+      "fact": "47 minutes",
+      "pattern": "\\b47\\b"
+    },
+    {
+      "fact": "1,240 customers",
+      "pattern": "1[,.\\s]?240"
+    },
+    {
+      "fact": "owner Priya Raman",
+      "pattern": "Priya Raman"
+    }
+  ]
+}

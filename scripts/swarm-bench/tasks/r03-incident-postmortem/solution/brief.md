@@ -1,0 +1,1 @@
+INC-2291 was caused by an expired certificate on the API gateway; the outage lasted 47 minutes [inc-2291-timeline.md]. 1,240 customers saw a failed payment [inc-2291-impact.md]. Priya Raman owns the certificate automation follow-up [inc-2291-actions.md].

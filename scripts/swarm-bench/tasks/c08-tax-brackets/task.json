@@ -1,0 +1,5 @@
+{
+  "family": "code-fix",
+  "title": "Tax applies the top rate to all income",
+  "prompt": "The project's tests fail. Find the bug and fix it without changing the tests. The tests run with: python3 -m unittest discover -s tests -t . -v"
+}

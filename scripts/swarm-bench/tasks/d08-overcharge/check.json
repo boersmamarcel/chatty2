@@ -1,0 +1,10 @@
+{
+  "type": "verdict",
+  "choices": [
+    "Norfield",
+    "Oakmont",
+    "Pinecrest",
+    "Quayside"
+  ],
+  "label": "Pinecrest"
+}
