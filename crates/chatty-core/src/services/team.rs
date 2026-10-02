@@ -34,7 +34,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent_spec::{AgentSpec, load_agent_spec_from};
 use crate::services::handoff::{self, HandoffContract};
-use crate::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
+use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
+use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+use crate::settings::models::{ExecutionSettingsModel, ModuleSettingsModel, ProviderModel};
 
 /// A team compiled into the binary: its `team.json`, the `SKILL.md` beside
 /// it when it has one, and the handoff schemas its `handoffs` names, by the
@@ -52,8 +54,10 @@ pub struct TeamPreset {
 ///
 /// Every preset team is experimental (PL-S8): none is a documented default
 /// until a benchmark shows it beats a single agent. Their specs name no
-/// models on purpose: they come from the roster's default, `--model`, or a
-/// spec of your own that shadows one. A preset without a `SKILL.md` has its
+/// models on purpose, so they come from the roster's default, `--model`, or a
+/// spec of your own that shadows one; the exception is
+/// `architecture-review` (AGE-808), whose specs pin hosted models and which
+/// [`check_model_providers`] refuses to start without that provider. A preset without a `SKILL.md` has its
 /// playbook in the leader's preamble, so `/agent <leader>` runs it the same
 /// as `--team <id>`.
 pub const PRESETS: &[TeamPreset] = &[
@@ -87,6 +91,25 @@ pub const PRESETS: &[TeamPreset] = &[
             (
                 "schemas/adjudicator.json",
                 include_str!("../../teams/analyst-panel/schemas/adjudicator.json"),
+            ),
+        ],
+    },
+    TeamPreset {
+        id: "architecture-review",
+        team_json: include_str!("../../teams/architecture-review/team.json"),
+        skill: Some(include_str!("../../teams/architecture-review/SKILL.md")),
+        schemas: &[
+            (
+                "schemas/proposer.json",
+                include_str!("../../teams/architecture-review/schemas/proposer.json"),
+            ),
+            (
+                "schemas/review.json",
+                include_str!("../../teams/architecture-review/schemas/review.json"),
+            ),
+            (
+                "schemas/verify.json",
+                include_str!("../../teams/architecture-review/schemas/verify.json"),
             ),
         ],
     },
@@ -211,6 +234,20 @@ impl Team {
         } else {
             self.file.agents.clone()
         }
+    }
+
+    /// The roster's specs for one run. With `model` (`--model`), every
+    /// member runs that model, a pinned one included, so one flag moves a
+    /// whole team onto one model (AGE-808); without it, each spec keeps its
+    /// own `model`, or the roster's default.
+    pub fn run_roster(&self, model: Option<&str>) -> Vec<AgentSpec> {
+        let mut roster = self.agents.clone();
+        if let Some(model) = model {
+            for spec in &mut roster {
+                spec.agent.model = Some(model.to_string());
+            }
+        }
+        roster
     }
 
     /// The leader's turn budget for the run, when the file names one.
@@ -347,11 +384,17 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
             .map(|loaded| loaded.spec)
             .with_context(|| format!("team '{id}' names agent spec '{name}'"))
     };
-    let leader = spec(&file.leader)?;
+    let today = chrono::Local::now().date_naive();
+    let mut leader = spec(&file.leader)?;
+    fill_today(&mut leader, today);
     let agents = file
         .agents
         .iter()
-        .map(|name| spec(name))
+        .map(|name| {
+            let mut member = spec(name)?;
+            fill_today(&mut member, today);
+            Ok(member)
+        })
         .collect::<Result<Vec<_>>>()?;
     let handoffs = load_handoffs(id, &file, &source)
         .with_context(|| format!("team '{id}' names a handoff schema that does not load"))?;
@@ -364,6 +407,122 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         agents,
         handoffs,
     })
+}
+
+/// What a team member's preamble writes where today's date goes. A model
+/// asked for "today" makes one up (AGE-808: an ADR came back dated
+/// 2026-07-24), so [`load_team`] replaces the token with the local date,
+/// `YYYY-MM-DD`, before anyone sees the preamble.
+pub const TODAY_TOKEN: &str = "{{today}}";
+
+/// Replace every [`TODAY_TOKEN`] in `spec`'s preamble with `today`.
+pub fn fill_today(spec: &mut AgentSpec, today: chrono::NaiveDate) {
+    if let Some(preamble) = spec.agent.preamble.as_mut()
+        && preamble.contains(TODAY_TOKEN)
+    {
+        *preamble = preamble.replace(TODAY_TOKEN, &today.format("%Y-%m-%d").to_string());
+    }
+}
+
+/// Refuse to start agents whose pinned model cannot run, naming each agent,
+/// its pin, the provider it needs when that is known, and the override that
+/// fixes it (AGE-808), rather than letting each worker fail on its own the
+/// first time it is delegated to.
+///
+/// A pinned model that resolves among `models` needs its own provider
+/// configured (an API key; Azure's endpoint and key or Entra ID; Ollama
+/// always counts). A pin that resolves to nothing needs OpenRouter when it
+/// is an OpenRouter id — `vendor/model`, the form OpenRouter's catalogue and
+/// Chatty's sync of it use — and OpenRouter is not configured; otherwise it
+/// names no model the user has. A spec without a model passes. The caller
+/// leaves out a spec whose model came from `--model`: a mistyped flag gets
+/// the "model not found" error that lists the models there are.
+pub fn check_model_providers<'a>(
+    specs: impl IntoIterator<Item = &'a AgentSpec>,
+    models: &[ModelConfig],
+    providers: &[ProviderConfig],
+) -> Result<()> {
+    let mut store = ProviderModel::new();
+    store.replace_all(providers.to_vec());
+    let configured = |kind: &ProviderType| {
+        store
+            .configured_providers()
+            .any(|provider| &provider.provider_type == kind)
+    };
+    let mut no_provider: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut no_model: Vec<String> = Vec::new();
+    for spec in specs {
+        let Some(query) = spec.agent.model.as_deref() else {
+            continue;
+        };
+        let pin = format!("{} (model = \"{query}\")", spec.agent.name);
+        match resolve_model_query(models, Some(query)) {
+            Some(model) if !configured(&model.provider_type) => no_provider
+                .entry(model.provider_type.display_name().to_string())
+                .or_default()
+                .push(pin),
+            Some(_) => {}
+            None if is_openrouter_id(query) && !configured(&ProviderType::OpenRouter) => {
+                no_provider
+                    .entry(ProviderType::OpenRouter.display_name().to_string())
+                    .or_default()
+                    .push(pin)
+            }
+            None => no_model.push(pin),
+        }
+    }
+    if no_provider.is_empty() && no_model.is_empty() {
+        return Ok(());
+    }
+    let mut lines: Vec<String> = no_provider
+        .into_iter()
+        .map(|(provider, pins)| {
+            format!(
+                "{provider} is not configured, and these agents pin a model it serves: {}. \
+                 Add your {provider} credentials in Settings → Providers, or run them on a model \
+                 you have (below).",
+                pins.join(", ")
+            )
+        })
+        .collect();
+    if !no_model.is_empty() {
+        let yours = models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect::<Vec<_>>();
+        lines.push(format!(
+            "No model you have matches these pins: {}. Your models: {}.",
+            no_model.join(", "),
+            if yours.is_empty() {
+                "none".to_string()
+            } else {
+                yours.join(", ")
+            }
+        ));
+    }
+    lines.push(
+        "To run on a model you have: `--model <model>` runs every agent of a `--team` run on \
+         it; or override one agent with <workspace>/.chatty/agents/<agent>.toml, a copy of its \
+         built-in spec with the `model` line set to one of your models, or removed to use your \
+         default model."
+            .to_string(),
+    );
+    bail!("{}", lines.join("\n"))
+}
+
+/// Whether `query` has the shape of an OpenRouter model id: one `vendor/`
+/// prefix (no dots in it, so not a registry host like `hf.co/…`) and a model.
+fn is_openrouter_id(query: &str) -> bool {
+    match query.split_once('/') {
+        Some((vendor, model)) => {
+            !vendor.is_empty()
+                && !vendor.contains('.')
+                && !model.is_empty()
+                && !model.contains('/')
+                && !query.contains(char::is_whitespace)
+        }
+        None => false,
+    }
 }
 
 /// Read and compile every schema `file.handoffs` names, from the team's
@@ -443,6 +602,7 @@ fn load_handoffs(
 mod tests {
     use super::*;
     use crate::agent_spec::WORKSPACE_AGENTS_DIR;
+    use crate::services::architecture_doc;
 
     fn write_team(dir: &Path, id: &str, json: &str, skill: Option<&str>) -> PathBuf {
         let team_dir = dir.join(id);
@@ -522,8 +682,12 @@ mod tests {
             }
             assert_eq!(team.agent_names(), team.file.agents, "{id}");
             let settings = team.run_module_settings(&ModuleSettingsModel::default());
-            let roster = crate::agent_spec::load_roster_from(&settings.virtual_agents, None, None)
-                .expect("the team's roster loads");
+            let mut roster =
+                crate::agent_spec::load_roster_from(&settings.virtual_agents, None, None)
+                    .expect("the team's roster loads");
+            // `load_team` dates its members' preambles (AGE-808).
+            let today = chrono::Local::now().date_naive();
+            roster.iter_mut().for_each(|spec| fill_today(spec, today));
             assert_eq!(roster, team.agents, "{id}: the run serves the team");
         }
     }
@@ -730,6 +894,492 @@ mod tests {
             handoff::check(analyst, "```json\n{\"answer\": \"NL\"}\n```"),
             handoff::HandoffOutcome::Valid(_)
         ));
+    }
+
+    const STRONGEST_CLAUDE: &str = "anthropic/claude-opus-5";
+    const CHEAPER_CLAUDE: &str = "anthropic/claude-sonnet-5";
+    const ARCH_REVIEWERS: [&str; 3] = [
+        "arch-maint-reviewer",
+        "arch-sec-reviewer",
+        "arch-devils-advocate",
+    ];
+
+    /// The models the OpenRouter sync makes of the two pinned ids.
+    fn synced_claude_models() -> Vec<ModelConfig> {
+        [
+            (STRONGEST_CLAUDE, "Claude Opus 5"),
+            (CHEAPER_CLAUDE, "Claude Sonnet 5"),
+        ]
+        .into_iter()
+        .map(|(id, name)| {
+            ModelConfig::new(
+                id.replace('/', "-"),
+                name.to_string(),
+                ProviderType::OpenRouter,
+                id.to_string(),
+            )
+        })
+        .collect()
+    }
+
+    fn openrouter(key: Option<&str>) -> ProviderConfig {
+        let provider = ProviderConfig::new("OpenRouter".to_string(), ProviderType::OpenRouter);
+        match key {
+            Some(key) => provider.with_api_key(key.to_string()),
+            None => provider,
+        }
+    }
+
+    fn arch_specs(team: &Team) -> Vec<&AgentSpec> {
+        std::iter::once(&team.leader).chain(&team.agents).collect()
+    }
+
+    /// The architecture-review preset (AGE-808): a coordinator leader that
+    /// delegates to exactly its roster, a proposer that owns the document
+    /// (the only writer), three blank read-only reviewers, a read-only
+    /// verifier, all callable by the leader only; typed handoffs for every
+    /// worker; and the first pinned models of any preset: the strongest
+    /// Claude model for every role but the verifier, which checks one diff
+    /// on a cheaper one.
+    #[test]
+    fn the_architecture_review_preset_loads_with_its_roster_handoffs_and_pinned_models() {
+        let team = load_team("architecture-review", None, None).expect("the preset loads");
+        assert_eq!(team.source, TeamSource::Preset);
+        assert_eq!(team.file.leader, "arch-lead");
+        assert_eq!(
+            team.file.agents,
+            [
+                "arch-proposer",
+                "arch-maint-reviewer",
+                "arch-sec-reviewer",
+                "arch-devils-advocate",
+                "arch-verifier"
+            ]
+        );
+        assert_eq!(team.file.max_agent_turns, Some(160));
+        assert_eq!(team.leader.tools.profile.as_deref(), Some("coordinator"));
+        assert_eq!(team.leader.swarm.delegates_to, team.file.agents);
+        assert!(team.leader.budget.max_duration.is_some());
+        let spec = |name: &str| team.agents.iter().find(|a| a.agent.name == name).unwrap();
+        for worker in &team.agents {
+            assert_eq!(
+                worker.swarm.callers.as_deref(),
+                Some(&["arch-lead".to_string()][..]),
+                "{}",
+                worker.agent.name
+            );
+            assert!(
+                worker.budget.max_agent_turns.is_some() && worker.budget.max_duration.is_some()
+            );
+        }
+
+        // The proposer writes; everyone else only reads.
+        let proposer = spec("arch-proposer");
+        assert_eq!(proposer.tools.profile.as_deref(), Some("coder"));
+        assert_eq!(proposer.tools.disable, ["execute_code", "git"]);
+        for reviewer in ARCH_REVIEWERS {
+            assert_eq!(
+                spec(reviewer).tools.profile.as_deref(),
+                Some("reviewer"),
+                "{reviewer}"
+            );
+            assert!(spec(reviewer).tools.disable.is_empty(), "{reviewer}");
+        }
+        let verifier = spec("arch-verifier");
+        assert_eq!(verifier.tools.profile.as_deref(), Some("reviewer"));
+        assert_eq!(verifier.tools.disable, ["shell"]);
+
+        // The proposer's templates are the format `architecture_doc` checks.
+        let preamble = proposer.agent.preamble.as_deref().unwrap();
+        for key in architecture_doc::ADR_KEYS
+            .iter()
+            .chain(architecture_doc::DESIGN_KEYS)
+        {
+            assert!(
+                preamble.contains(&format!("\n{key}: ")),
+                "the templates carry `{key}:`"
+            );
+        }
+        for (level, heading) in architecture_doc::ADR_HEADINGS
+            .iter()
+            .chain(architecture_doc::DESIGN_HEADINGS)
+        {
+            let line = format!("\n{} {heading}", "#".repeat(*level));
+            assert!(preamble.contains(&line), "the templates carry {line:?}");
+        }
+        assert!(preamble.contains("status: proposed"));
+        // The template dates itself: `load_team` filled in today's date.
+        let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
+        assert!(
+            !preamble.contains(TODAY_TOKEN),
+            "every {TODAY_TOKEN} is filled"
+        );
+        assert!(preamble.contains(&format!("\ndecision-date: {today}\n")));
+        assert!(preamble.contains(&format!("(verified {today})")));
+        assert!(preamble.contains("docs/adr/ADR-NNNN-slug.md"));
+
+        // Pinned models: they resolve among the models the OpenRouter sync
+        // makes, which is what `spec.validate` checks.
+        let models = synced_claude_models();
+        for member in arch_specs(&team) {
+            let name = &member.agent.name;
+            let expected = if name == "arch-verifier" {
+                CHEAPER_CLAUDE
+            } else {
+                STRONGEST_CLAUDE
+            };
+            assert_eq!(member.agent.model.as_deref(), Some(expected), "{name}");
+            member
+                .validate(Some(&models))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let resolved = resolve_model_query(&models, member.agent.model.as_deref()).unwrap();
+            assert_eq!(resolved.model_identifier, expected);
+        }
+
+        assert_eq!(
+            team.handoffs.keys().collect::<Vec<_>>(),
+            [
+                "arch-devils-advocate",
+                "arch-maint-reviewer",
+                "arch-proposer",
+                "arch-sec-reviewer",
+                "arch-verifier"
+            ]
+        );
+        for reviewer in ARCH_REVIEWERS {
+            assert_eq!(
+                team.handoffs[reviewer].schema, team.handoffs["arch-sec-reviewer"].schema,
+                "the three reviewers share one schema"
+            );
+        }
+        assert!(team.handoff_ledger().is_some());
+        assert_eq!(
+            team.first_turn_instruction().as_deref(),
+            Some("read_skill architecture-review and follow it.")
+        );
+        let skill = team.skill().unwrap();
+        assert!(skill.content.contains("## When a step fails"));
+        assert!(
+            skill
+                .content
+                .contains("delegate to the same reviewer once more with a new persona")
+        );
+        assert!(
+            skill
+                .content
+                .contains("## Personas (one per round, in order)")
+        );
+        assert!(skill.content.contains("**Devil's advocate:**"));
+        assert!(skill.content.contains("record the gap"));
+        assert!(
+            skill.content.contains("`ask_user`"),
+            "product questions go to the human"
+        );
+    }
+
+    /// The handoffs are small and flat on purpose (E8, AGE-754: invalid
+    /// handoffs were the panel's biggest loss): each rejects a malformed
+    /// reply and accepts a valid one, and requires only what the leader
+    /// acts on.
+    #[test]
+    fn the_architecture_review_handoffs_reject_a_malformed_reply_and_accept_a_valid_one() {
+        let team = load_team("architecture-review", None, None).unwrap();
+        let invalid = |role: &str, reply: &str| {
+            assert!(
+                matches!(
+                    handoff::check(&team.handoffs[role], reply),
+                    handoff::HandoffOutcome::Invalid { .. }
+                ),
+                "{role} must reject {reply:?}"
+            );
+        };
+        let valid = |role: &str, reply: &str| match handoff::check(&team.handoffs[role], reply) {
+            handoff::HandoffOutcome::Valid(value) => value,
+            other => panic!("{role} must accept {reply:?}: {other:?}"),
+        };
+
+        for reviewer in ARCH_REVIEWERS {
+            invalid(reviewer, "The draft looks good.");
+            invalid(reviewer, "```json\n{\"findings\": \"1. must-fix: x\"}\n```");
+            invalid(
+                reviewer,
+                "```json\n{\"must_fix\": -1, \"findings\": \"x\"}\n```",
+            );
+            invalid(
+                reviewer,
+                "```json\n{\"must_fix\": 0, \"findings\": \"\"}\n```",
+            );
+            invalid(
+                reviewer,
+                "```json\n{\"must_fix\": 0, \"findings\": \"ok\", \"verdict\": \"LGTM\"}\n```",
+            );
+            invalid(
+                reviewer,
+                "```json\n{\"must_fix\": 1, \"findings\": [{\"severity\": \"must-fix\"}]}\n```",
+            );
+            // Only the count the leader loops on and the text the proposer
+            // reads are required.
+            valid(
+                reviewer,
+                "```json\n{\"must_fix\": 0, \"findings\": \"No findings: the decision holds.\"}\n```",
+            );
+            let review = valid(
+                reviewer,
+                "Review done.\n```json\n{\"verdict\": \"REWORK\", \"must_fix\": 1, \"should_fix\": 1, \"findings\": \"1. must-fix: Decision says the flag isolates the agent; nothing enforces it. Evidence: crates/chatty-core/src/services/a2a_client.rs:40. Fix: say what enforces it.\\n2. should-fix: no owner for the allowlist.\"}\n```",
+            );
+            assert_eq!(review["must_fix"], 1);
+        }
+
+        let proposer = "arch-proposer";
+        invalid(proposer, "I revised the document.");
+        invalid(
+            proposer,
+            "```json\n{\"accepted\": 1, \"rejected\": 0, \"human_questions\": [], \"summary\": \"x\"}\n```",
+        );
+        invalid(
+            proposer,
+            "```json\n{\"accepted\": 1, \"rejected\": 0, \"rejected_must_fix\": 0, \"human_questions\": \"none\", \"summary\": \"x\"}\n```",
+        );
+        invalid(
+            proposer,
+            "```json\n{\"accepted\": 0, \"rejected\": 0, \"rejected_must_fix\": 0, \"human_questions\": [], \"summary\": \"\"}\n```",
+        );
+        let report = valid(
+            proposer,
+            "Written.\n```json\n{\"accepted\": 2, \"partial\": 1, \"rejected\": 1, \"rejected_must_fix\": 1, \"words\": 900, \"human_questions\": [\"Default on or off? I recommend off.\"], \"summary\": \"Named the owner; rejected F3: ssrf_guard.rs:30 already blocks it.\"}\n```",
+        );
+        assert_eq!(report["rejected_must_fix"], 1);
+        valid(
+            proposer,
+            "```json\n{\"accepted\": 0, \"rejected\": 0, \"rejected_must_fix\": 0, \"human_questions\": [], \"summary\": \"First draft.\"}\n```",
+        );
+
+        let verifier = "arch-verifier";
+        invalid(verifier, "Looks like wording only.");
+        invalid(verifier, "```json\n{\"verdict\": \"PASS\"}\n```");
+        invalid(
+            verifier,
+            "```json\n{\"verdict\": \"ok\", \"blockers\": []}\n```",
+        );
+        valid(
+            verifier,
+            "```json\n{\"verdict\": \"PASS\", \"blockers\": []}\n```",
+        );
+        valid(
+            verifier,
+            "```json\n{\"verdict\": \"FAIL\", \"blockers\": [\"Kill criteria: two releases became three; restore two.\"]}\n```",
+        );
+    }
+
+    /// The loop rule is the leader's: a coordinator model follows the skill,
+    /// and a scripted model would only replay whatever decisions a test
+    /// scripts, so what pins the rule is the skill's own text. A round with
+    /// no must-fix ends the review; a must-fix the proposer rejected with
+    /// evidence does not count; the two safety valves and the 10-round cap
+    /// end it as not converged; the review file records every round.
+    #[test]
+    fn the_architecture_review_skill_states_the_loop_rule() {
+        let team = load_team("architecture-review", None, None).unwrap();
+        let skill = team.skill().unwrap().content;
+        let step = |n: usize| {
+            skill
+                .split(&format!("\n{n}. **"))
+                .nth(1)
+                .and_then(|rest| rest.split(&format!("\n{}. **", n + 1)).next())
+                .unwrap_or_else(|| panic!("the skill has a step {n}"))
+        };
+        let count = step(3);
+        assert!(
+            count.contains("sum of the three reviewers' `must_fix`"),
+            "{count}"
+        );
+        assert!(
+            count.contains("`M(N)` is 0 and all three reviewers returned a review")
+                && count.contains("**converged**"),
+            "{count}"
+        );
+        let revise = step(4);
+        assert!(
+            revise.contains("Subtract its `rejected_must_fix`"),
+            "{revise}"
+        );
+        assert!(revise.contains("**converged**"), "{revise}");
+        let rule = step(5);
+        let clauses: Vec<&str> = rule
+            .lines()
+            .filter(|l| l.trim_start().starts_with("- "))
+            .collect();
+        assert_eq!(clauses.len(), 4, "{rule}");
+        assert!(clauses[0].contains("`M(N-1) >= M(N-2)` and `M(N) >= M(N-1)`"));
+        assert!(clauses[1].contains("accepted in an earlier round"));
+        assert!(clauses[2].contains("`N` is 10"));
+        for valve in &clauses[..3] {
+            assert!(valve.contains("**not converged**"), "{valve}");
+        }
+        assert!(clauses[3].contains("step 2 with N + 1"));
+        assert!(skill.contains("the round does not converge, even at 0 must-fix"));
+        let record = step(8);
+        assert!(record.contains("Round <N>: <M(N)> must-fix"), "{record}");
+        assert!(
+            record.contains("## Open questions for the human"),
+            "{record}"
+        );
+        assert!(skill.contains("`.review.md`"));
+        assert!(skill.contains("Never call a not-converged review done"));
+        assert!(skill.contains("never saved up for the end"));
+    }
+
+    /// AGE-808: without the provider a pinned model needs, the team fails
+    /// before anything runs, naming the provider and the agents; with it, or
+    /// with every spec shadowed by one without a pin, it passes.
+    #[test]
+    fn a_pinned_model_without_its_provider_names_the_provider() {
+        let team = load_team("architecture-review", None, None).unwrap();
+        let text = |models: &[ModelConfig], providers: &[ProviderConfig]| {
+            format!(
+                "{:#}",
+                check_model_providers(arch_specs(&team), models, providers).unwrap_err()
+            )
+        };
+
+        // No OpenRouter at all, so the sync never added the models.
+        let error = text(&[], &[]);
+        assert!(error.contains("OpenRouter is not configured"), "{error}");
+        assert!(
+            error.contains("arch-lead (model = \"anthropic/claude-opus-5\")"),
+            "{error}"
+        );
+        assert!(
+            error.contains("arch-verifier (model = \"anthropic/claude-sonnet-5\")"),
+            "{error}"
+        );
+        assert!(error.contains("Settings → Providers"), "{error}");
+        assert!(
+            error.contains("`--model <model>` runs every agent"),
+            "{error}"
+        );
+        assert!(
+            error.contains("<workspace>/.chatty/agents/<agent>.toml"),
+            "{error}"
+        );
+
+        // The models are there, but the provider has no key.
+        let error = text(&synced_claude_models(), &[openrouter(None)]);
+        assert!(error.contains("OpenRouter is not configured"), "{error}");
+        let error = text(&synced_claude_models(), &[openrouter(Some("  "))]);
+        assert!(error.contains("OpenRouter is not configured"), "{error}");
+
+        check_model_providers(
+            arch_specs(&team),
+            &synced_claude_models(),
+            &[openrouter(Some("sk-or-test"))],
+        )
+        .expect("with a key the team runs");
+
+        // OpenRouter is there but the pin is not among the models (an Azure
+        // user's roster, say): the error names the agent, the pin, the
+        // models there are, and the override.
+        let mut azure = ModelConfig::new(
+            "gpt-56".to_string(),
+            "GPT-5.6 (Azure)".to_string(),
+            ProviderType::AzureOpenAI,
+            "gpt-5.6-deployment".to_string(),
+        );
+        azure.supports_temperature = false;
+        let error = text(
+            std::slice::from_ref(&azure),
+            &[openrouter(Some("sk-or-test"))],
+        );
+        assert!(
+            error.contains("No model you have matches these pins"),
+            "{error}"
+        );
+        assert!(
+            error.contains("arch-proposer (model = \"anthropic/claude-opus-5\")"),
+            "{error}"
+        );
+        assert!(error.contains("Your models: GPT-5.6 (Azure)."), "{error}");
+        assert!(!error.contains("is not configured"), "{error}");
+
+        // A pin in no provider's id form is reported the same way.
+        let mut local = AgentSpec::named("local");
+        local.agent.model = Some("qwen3:4b".to_string());
+        let error = format!(
+            "{:#}",
+            check_model_providers([&local], &[], &[]).unwrap_err()
+        );
+        assert!(error.contains("local (model = \"qwen3:4b\")"), "{error}");
+        assert!(error.contains("Your models: none."), "{error}");
+        assert!(!is_openrouter_id("hf.co/bartowski/qwen"));
+        assert!(is_openrouter_id("deepseek/deepseek-r1:free"));
+
+        // Every spec shadowed without a pin: the roster's default runs it.
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        for member in arch_specs(&team) {
+            let mut shadow = member.clone();
+            shadow.agent.model = None;
+            std::fs::write(
+                dir.join(format!("{}.toml", shadow.agent.name)),
+                shadow.to_toml().unwrap(),
+            )
+            .unwrap();
+        }
+        let shadowed = load_team("architecture-review", Some(workspace.path()), None).unwrap();
+        check_model_providers(arch_specs(&shadowed), &[], &[])
+            .expect("a shadowed team needs no hosted provider");
+    }
+
+    /// AGE-808: `--model` on a team run is the one-flag way onto a single
+    /// model: every member runs it, the preset's pins included; without it
+    /// the pins stand.
+    /// AGE-808: a preamble's `{{today}}` becomes the date; a spec without
+    /// the token is left as it was.
+    #[test]
+    fn a_members_preamble_gets_todays_date() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let mut spec = AgentSpec::from_toml(
+            "[agent]\nname = \"p\"\npreamble = \"decision-date: {{today}}; again {{today}}\"\n",
+        )
+        .unwrap();
+        fill_today(&mut spec, date);
+        assert_eq!(
+            spec.agent.preamble.as_deref(),
+            Some("decision-date: 2026-10-02; again 2026-10-02")
+        );
+        let mut plain = AgentSpec::from_toml("[agent]\nname = \"q\"\n").unwrap();
+        fill_today(&mut plain, date);
+        assert_eq!(plain.agent.preamble, None);
+    }
+
+    #[test]
+    fn model_for_the_run_replaces_every_members_pin() {
+        let team = load_team("architecture-review", None, None).unwrap();
+        let pinned = team.run_roster(None);
+        assert_eq!(pinned, team.agents);
+        assert!(pinned.iter().all(|spec| spec.agent.model.is_some()));
+        let one = team.run_roster(Some("gpt-5.6-deployment"));
+        assert_eq!(one.len(), team.agents.len());
+        for spec in &one {
+            assert_eq!(
+                spec.agent.model.as_deref(),
+                Some("gpt-5.6-deployment"),
+                "{}",
+                spec.agent.name
+            );
+        }
+        let data = load_team("data-analysis", None, None).unwrap();
+        assert!(
+            data.run_roster(None)
+                .iter()
+                .all(|s| s.agent.model.is_none())
+        );
+        assert!(
+            data.run_roster(Some("m"))
+                .iter()
+                .all(|s| s.agent.model.as_deref() == Some("m"))
+        );
     }
 
     /// A preset whose `handoffs` names a schema it does not compile in fails

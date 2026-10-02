@@ -835,7 +835,7 @@ beside it.
 
 | Field | Meaning |
 |-------|---------|
-| `leader` | The spec the leader runs as. `--model`, `--tools` and `--preamble` still beat its fields. |
+| `leader` | The spec the leader runs as. `--model`, `--tools` and `--preamble` still beat its fields; `--model` also replaces every roster member's model for the run, a pinned one included (`Team::run_roster`, AGE-808). |
 | `agents` | The roster, by spec name. Replaces `module_settings.virtual_agents` for the run. |
 | `verification` | Optional. The team's verification command (`team.verification` above) for the run. |
 | `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
@@ -893,9 +893,10 @@ as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
 `crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
-Four presets ship, all **experimental**: teams are supported, and a team becomes a
-documented default only after a benchmark shows it beats a single agent (PL-S8). Their specs name no models, and a
-changed prompt is a new preset name, so a run of one stays comparable with an earlier one.
+Five presets ship, all **experimental**: teams are supported, and a team becomes a
+documented default only after a benchmark shows it beats a single agent (PL-S8). Their specs name no models, except
+`architecture-review`'s (below), and a changed prompt is a new preset name, so a run of one stays comparable with an
+earlier one.
 
 | Team | Leader | Workers | Shows |
 |------|--------|---------|-------|
@@ -935,6 +936,52 @@ a unanimous panel to the adjudicator with every trace, and deliver the chosen an
 verbatim; a failed analyst drops out rather than being re-asked. Dataset-specific help
 (helper code, conventions) is not part of the preset: the analysts read a `BRIEF.md` in
 the workspace root when there is one. Measurement: `docs/research/`.
+
+The fifth preset, `architecture-review` (experimental, AGE-808), brings one architecture
+document to acceptance by repeated blank review: an ADR (`docs/adr/ADR-NNNN-slug.md`) or a
+design doc (`docs/design/<component>.md`), in the frontmatter-and-headings format that
+`chatty_core::services::architecture_doc` checks. It is derived from an ADR review team run by
+hand. The roster:
+
+| Agent | Profile | Model | Job |
+|-------|---------|-------|-----|
+| `arch-lead` | `coordinator` | `anthropic/claude-opus-5` | Picks the mode and path, runs the rounds, counts, merges the proposer's branches, asks the human product questions with `ask_user` as they come up; writes nothing. |
+| `arch-proposer` | `coder` (no `execute_code`) | `anthropic/claude-opus-5` | Owns the document: reads the code itself, writes it, and verifies every finding against the code before accepting it or rejecting it with evidence. |
+| `arch-maint-reviewer`, `arch-sec-reviewer`, `arch-devils-advocate` | `reviewer` | `anthropic/claude-opus-5` | Blank reviewers: a fresh instance every round with a new persona from the skill's lists, seeing neither earlier rounds nor each other. |
+| `arch-verifier` | `reviewer` (no shell) | `anthropic/claude-sonnet-5` | Checks only the final polish diff (`<branch>~1..<branch>`): every hunk true, nothing meaning-bearing lost. |
+
+The handoffs are small and flat (E8's biggest loss was invalid handoffs): `schemas/review.json`
+(`must_fix`, and the review as one Markdown `findings` string, each finding tagged
+`must-fix`/`should-fix`/`nit` with its claim, evidence and fix; optional `verdict`,
+`should_fix`), `schemas/proposer.json` (`accepted`, `rejected`, `rejected_must_fix`,
+`human_questions`, `summary`; optional `partial`, `words`, `sections_edited`) and
+`schemas/verify.json` (`verdict` `PASS`/`FAIL`, `blockers`). The loop rule is the skill's: rounds
+repeat until one has zero must-fix findings, not counting a must-fix the proposer rejected with
+evidence; it stops as **not converged** when two consecutive rounds do not lower the count, when
+a fixed must-fix comes back, or at 10 rounds. The leader merges each proposer branch
+(`git_merge`, no fast-forward) before the next delegation, so the next blank reviewer reads the
+current document, and merges the polish only on the verifier's `PASS`. An ADR never changes
+status from `proposed`; the round log, the human's decisions, the open questions and the polish
+verdict go to `<document>.review.md` beside it. The templates date themselves: `load_team` replaces
+`{{today}}` in every member's preamble with the local date (`team::fill_today`), since a model asked
+for today's date makes one up; the checker's `dates` rule rejects a date key that is not `YYYY-MM-DD`.
+To check a document's format:
+
+```bash
+cargo run -p chatty-core --example check_architecture_doc -- docs/adr/ADR-0001-*.md
+```
+
+The run needs the git tools (`--enable git`), since the leader merges the proposer's branches with `git_merge`. It is the one preset that pins models, so it is also the one that needs a hosted provider:
+`chatty-tui` checks every pinned model of the run (`team::check_model_providers`) before
+anything starts, and without OpenRouter configured it fails naming OpenRouter and each agent
+with its model. The same check names each agent's pin when no configured model matches it (an Azure-only
+user's roster, say), with the models there are. To run the whole team on one model,
+`--model <model>` replaces every member's model for that run; to change one agent's model,
+shadow its spec with a `<workspace>/.chatty/agents/<name>.toml` of the same name, without
+`model` (the roster's default runs it) or with your own. There is no way yet to remap only the
+model of one role without copying its spec. A run on the pinned models costs hosted-model tokens for six roles
+over up to ten rounds; nothing measures yet whether it writes a better document than a single
+agent.
 
 **Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`
 sometimes writes its tool call inside the thinking channel; Ollama surfaces tool calls

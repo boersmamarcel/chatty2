@@ -1,0 +1,19 @@
+{
+  "leader": "arch-lead",
+  "agents": [
+    "arch-proposer",
+    "arch-maint-reviewer",
+    "arch-sec-reviewer",
+    "arch-devils-advocate",
+    "arch-verifier"
+  ],
+  "skill": "architecture-review",
+  "max_agent_turns": 160,
+  "handoffs": {
+    "arch-proposer": "schemas/proposer.json",
+    "arch-maint-reviewer": "schemas/review.json",
+    "arch-sec-reviewer": "schemas/review.json",
+    "arch-devils-advocate": "schemas/review.json",
+    "arch-verifier": "schemas/verify.json"
+  }
+}

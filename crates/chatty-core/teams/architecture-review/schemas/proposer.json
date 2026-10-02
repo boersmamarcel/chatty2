@@ -1,0 +1,20 @@
+{
+  "title": "The proposer's report on one draft or revision",
+  "type": "object",
+  "required": ["accepted", "rejected", "rejected_must_fix", "human_questions", "summary"],
+  "properties": {
+    "accepted": { "type": "integer", "minimum": 0 },
+    "partial": { "type": "integer", "minimum": 0 },
+    "rejected": { "type": "integer", "minimum": 0, "description": "Each rejection carries its evidence in the summary." },
+    "rejected_must_fix": { "type": "integer", "minimum": 0, "description": "How many of the must-fix findings you rejected with evidence." },
+    "words": { "type": "integer", "minimum": 0, "description": "Body word count after the revision." },
+    "human_questions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Decisions only the human can make, each with your recommendation. Empty when none."
+    },
+    "sections_edited": { "type": "array", "items": { "type": "string" }, "description": "Only on the final polish: the sections a verifier must check." },
+    "summary": { "type": "string", "minLength": 1, "description": "5-10 lines: what changed, each rejection with its evidence, and what you are unsure about." }
+  },
+  "additionalProperties": false
+}
