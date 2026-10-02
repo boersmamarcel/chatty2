@@ -384,11 +384,17 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
             .map(|loaded| loaded.spec)
             .with_context(|| format!("team '{id}' names agent spec '{name}'"))
     };
-    let leader = spec(&file.leader)?;
+    let today = chrono::Local::now().date_naive();
+    let mut leader = spec(&file.leader)?;
+    fill_today(&mut leader, today);
     let agents = file
         .agents
         .iter()
-        .map(|name| spec(name))
+        .map(|name| {
+            let mut member = spec(name)?;
+            fill_today(&mut member, today);
+            Ok(member)
+        })
         .collect::<Result<Vec<_>>>()?;
     let handoffs = load_handoffs(id, &file, &source)
         .with_context(|| format!("team '{id}' names a handoff schema that does not load"))?;
@@ -401,6 +407,21 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         agents,
         handoffs,
     })
+}
+
+/// What a team member's preamble writes where today's date goes. A model
+/// asked for "today" makes one up (AGE-808: an ADR came back dated
+/// 2026-07-24), so [`load_team`] replaces the token with the local date,
+/// `YYYY-MM-DD`, before anyone sees the preamble.
+pub const TODAY_TOKEN: &str = "{{today}}";
+
+/// Replace every [`TODAY_TOKEN`] in `spec`'s preamble with `today`.
+pub fn fill_today(spec: &mut AgentSpec, today: chrono::NaiveDate) {
+    if let Some(preamble) = spec.agent.preamble.as_mut()
+        && preamble.contains(TODAY_TOKEN)
+    {
+        *preamble = preamble.replace(TODAY_TOKEN, &today.format("%Y-%m-%d").to_string());
+    }
 }
 
 /// Refuse to start agents whose pinned model cannot run, naming each agent,
@@ -661,8 +682,12 @@ mod tests {
             }
             assert_eq!(team.agent_names(), team.file.agents, "{id}");
             let settings = team.run_module_settings(&ModuleSettingsModel::default());
-            let roster = crate::agent_spec::load_roster_from(&settings.virtual_agents, None, None)
-                .expect("the team's roster loads");
+            let mut roster =
+                crate::agent_spec::load_roster_from(&settings.virtual_agents, None, None)
+                    .expect("the team's roster loads");
+            // `load_team` dates its members' preambles (AGE-808).
+            let today = chrono::Local::now().date_naive();
+            roster.iter_mut().for_each(|spec| fill_today(spec, today));
             assert_eq!(roster, team.agents, "{id}: the run serves the team");
         }
     }
@@ -983,6 +1008,14 @@ mod tests {
             assert!(preamble.contains(&line), "the templates carry {line:?}");
         }
         assert!(preamble.contains("status: proposed"));
+        // The template dates itself: `load_team` filled in today's date.
+        let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
+        assert!(
+            !preamble.contains(TODAY_TOKEN),
+            "every {TODAY_TOKEN} is filled"
+        );
+        assert!(preamble.contains(&format!("\ndecision-date: {today}\n")));
+        assert!(preamble.contains(&format!("(verified {today})")));
         assert!(preamble.contains("docs/adr/ADR-NNNN-slug.md"));
 
         // Pinned models: they resolve among the models the OpenRouter sync
@@ -1301,6 +1334,25 @@ mod tests {
     /// AGE-808: `--model` on a team run is the one-flag way onto a single
     /// model: every member runs it, the preset's pins included; without it
     /// the pins stand.
+    /// AGE-808: a preamble's `{{today}}` becomes the date; a spec without
+    /// the token is left as it was.
+    #[test]
+    fn a_members_preamble_gets_todays_date() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let mut spec = AgentSpec::from_toml(
+            "[agent]\nname = \"p\"\npreamble = \"decision-date: {{today}}; again {{today}}\"\n",
+        )
+        .unwrap();
+        fill_today(&mut spec, date);
+        assert_eq!(
+            spec.agent.preamble.as_deref(),
+            Some("decision-date: 2026-10-02; again 2026-10-02")
+        );
+        let mut plain = AgentSpec::from_toml("[agent]\nname = \"q\"\n").unwrap();
+        fill_today(&mut plain, date);
+        assert_eq!(plain.agent.preamble, None);
+    }
+
     #[test]
     fn model_for_the_run_replaces_every_members_pin() {
         let team = load_team("architecture-review", None, None).unwrap();

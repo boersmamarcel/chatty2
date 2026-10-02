@@ -955,7 +955,10 @@ a fixed must-fix comes back, or at 10 rounds. The leader merges each proposer br
 (`git_merge`, no fast-forward) before the next delegation, so the next blank reviewer reads the
 current document, and merges the polish only on the verifier's `PASS`. An ADR never changes
 status from `proposed`; the round log, the human's decisions, the open questions and the polish
-verdict go to `<document>.review.md` beside it. To check a document's format:
+verdict go to `<document>.review.md` beside it. The templates date themselves: `load_team` replaces
+`{{today}}` in every member's preamble with the local date (`team::fill_today`), since a model asked
+for today's date makes one up; the checker's `dates` rule rejects a date key that is not `YYYY-MM-DD`.
+To check a document's format:
 
 ```bash
 cargo run -p chatty-core --example check_architecture_doc -- docs/adr/ADR-0001-*.md

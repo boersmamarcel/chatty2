@@ -410,11 +410,15 @@ impl Broker {
 /// child that does not get them has no provider at all — in a Harbor
 /// sandbox every delegation then fails and looks like "the leader never
 /// delegates". A leader configured by settings has none of these set and
-/// forwards nothing; the child reads the same config dir.
+/// forwards nothing; the child reads the same config dir. `--think` rides
+/// along too (AGE-808): it sets the thinking switch on the leader's model
+/// only, so a team run with `--think false` otherwise had every worker
+/// thinking.
 pub fn provider_flags(
     ollama: Option<&str>,
     openai_compat_url: Option<&str>,
     api_key: Option<&str>,
+    think: Option<bool>,
 ) -> Vec<String> {
     let mut flags = Vec::new();
     if let Some(url) = ollama {
@@ -428,6 +432,10 @@ pub fn provider_flags(
     if let Some(key) = api_key {
         flags.push("--api-key".to_string());
         flags.push(key.to_string());
+    }
+    if let Some(think) = think {
+        flags.push("--think".to_string());
+        flags.push(think.to_string());
     }
     flags
 }
@@ -1030,14 +1038,21 @@ mod tests {
     /// flags; a settings-configured one forwards nothing.
     #[test]
     fn provider_flags_are_forwarded_verbatim_and_only_when_set() {
-        assert!(provider_flags(None, None, None).is_empty());
+        assert!(provider_flags(None, None, None, None).is_empty());
         assert_eq!(
-            provider_flags(Some("http://localhost:11434"), None, None),
+            provider_flags(Some("http://localhost:11434"), None, None, None),
             vec!["--ollama", "http://localhost:11434"]
         );
         assert_eq!(
-            provider_flags(None, Some("http://x"), Some("k")),
-            vec!["--openai-compat-url", "http://x", "--api-key", "k"]
+            provider_flags(None, Some("http://x"), Some("k"), Some(false)),
+            vec![
+                "--openai-compat-url",
+                "http://x",
+                "--api-key",
+                "k",
+                "--think",
+                "false"
+            ]
         );
     }
 }

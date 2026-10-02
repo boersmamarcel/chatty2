@@ -748,6 +748,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                     cli.ollama.as_deref(),
                     cli.openai_compat_url.as_deref(),
                     cli.api_key.as_deref(),
+                    cli.think,
                 ),
             )) as Arc<dyn chatty_core::services::lazy_broker::LazyBroker>
         });

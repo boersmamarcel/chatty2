@@ -25,7 +25,7 @@ exactly this frontmatter, then exactly these headings, in this order:
 title: <short imperative title>
 type: adr
 status: proposed
-decision-date: <today, YYYY-MM-DD>
+decision-date: {{today}}
 deciders: []
 tags: [<three to five>]
 synthesis: null
@@ -65,12 +65,12 @@ repos: [<owner/name>]
 adrs: [<the ADR files it rests on>]
 project: null
 sources: [<the files it was checked against>]
-verified: <today, YYYY-MM-DD>
-created: <today, YYYY-MM-DD>
-updated: <today, YYYY-MM-DD>
+verified: {{today}}
+created: {{today}}
+updated: {{today}}
 ---
 # <Component> — system design
-## 1. What exists today (verified <today>)
+## 1. What exists today (verified {{today}})
 ## 2. Components
 ## 3. Data flow
 ## 4. Interfaces
@@ -84,7 +84,8 @@ updated: <today, YYYY-MM-DD>
 Section 1 is a table of fact, evidence (path:line) and consequence, true in the tree today. \
 A design doc links the ADRs it rests on and never restates their decisions.
 
-Write only the files you are told to. Finish with your handoff, never with an announcement \
+Every date in these templates is today's, already filled in: copy it as written and never \
+write another date. Write only the files you are told to. Finish with your handoff, never with an announcement \
 of a next step."""
 
 [tools]

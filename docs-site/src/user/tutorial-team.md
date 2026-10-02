@@ -232,7 +232,7 @@ chatty-tui --team architecture-review --enable git --auto-approve \
   -m "Write an ADR for adding a per-agent private-network flag to A2A remote agents."
 ```
 
-`--enable git` gives the lead `git_merge`: the proposer writes on its own branch, and the lead merges it before each review so the reviewers read the current document. Leave `--headless` off so the lead can ask you its questions. In a headless run with `--disable ask_user`, the questions go to the review file.
+`--enable git` gives the lead `git_merge`: the proposer writes on its own branch, and the lead merges it before each review so the reviewers read the current document. Leave `--headless` off so the lead can ask you its questions. In a headless run with `--disable ask-user`, the questions go to the review file.
 
 **Models, and what they cost.** This is the one built-in team that names its models. The lead, the proposer and the three reviewers run `anthropic/claude-opus-5`, and the verifier runs the cheaper `anthropic/claude-sonnet-5`, both through OpenRouter. A run costs hosted-model tokens for all six agents, over as many as 10 rounds. Without an OpenRouter key the team does not start: the error lists each agent with the model it names, and the two ways to run it on a model you have. They follow.
 
@@ -245,16 +245,17 @@ chatty-tui --team architecture-review --model <model> --enable git --auto-approv
 
 ### Run it on Azure OpenAI
 
+One model for every agent, the pinned ones included:
+
+```bash
+chatty-tui --team architecture-review --model <deployment> --enable git --auto-approve \
+  -m "Write an ADR for adding a per-agent private-network flag to A2A remote agents."
+```
+
+`<deployment>` is the model's id, its name, or part of the deployment name, as for any `--model`. Before the first run:
+
 1. **Configure the provider.** In **Settings → Providers → Azure OpenAI**, enter your resource's endpoint URL and either an API key or **Use Entra ID instead of a key**. With Entra ID, Chatty signs in the way the Azure SDK does: a service principal from `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_CLIENT_SECRET`; workload identity from `AZURE_FEDERATED_TOKEN_FILE`; otherwise your `az login` (or `azd auth login`) session. See [Providers & models](./providers-and-models.md#azure-openai).
 2. **Add a model per deployment.** Its identifier is the deployment name. A GPT-5-class reasoning deployment rejects a temperature, so turn its **Temperature** capability off: set `"supports_temperature": false` on that model in `models.json` (the desktop has no switch for it yet, and keeps the value when you edit the model).
-3. **Run the whole team on that deployment:**
-
-   ```bash
-   chatty-tui --team architecture-review --model <deployment> --enable git --auto-approve \
-     -m "Write an ADR for adding a per-agent private-network flag to A2A remote agents."
-   ```
-
-   `<deployment>` is the model's id, its name, or part of the deployment name, as for any `--model`.
 
 **A different model per agent.** To keep a strong model for most agents and a cheaper one for the verifier, say, *shadow* the agents whose model you change: put a spec with the same name in `<workspace>/.chatty/agents/`, which replaces the built-in one for that workspace. Copy the agent's spec from the Chatty source (`crates/chatty-core/agents/arch-*.toml`), then change its `model` line to one of your models, or delete it so the agent runs your default model. The rest of the spec stays as it was:
 

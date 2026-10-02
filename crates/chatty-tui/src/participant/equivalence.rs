@@ -923,6 +923,7 @@ pub(super) mod named_virtual_agents {
             cli.ollama.as_deref(),
             cli.openai_compat_url.as_deref(),
             cli.api_key.as_deref(),
+            cli.think,
         );
         let broker = start_team_broker(dir.path(), &flags).await;
 

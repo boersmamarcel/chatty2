@@ -200,6 +200,32 @@ pub fn check(file_name: Option<&str>, text: &str) -> DocReport {
         format!("`{status}`, allowed: {}", statuses.join(" | ")),
     );
 
+    // A model asked for "today" invents a date, so the templates carry the
+    // run's date; what is checked here is that each date key holds one.
+    let date_keys: &[&str] = match kind {
+        DocKind::Adr => &["decision-date"],
+        DocKind::Design => &["verified", "created", "updated"],
+    };
+    let bad_dates: Vec<String> = date_keys
+        .iter()
+        .filter(|key| present(key))
+        .filter_map(|key| {
+            let v = value(key).unwrap_or_default();
+            chrono::NaiveDate::parse_from_str(&v, "%Y-%m-%d")
+                .is_err()
+                .then(|| format!("{key}: `{v}`"))
+        })
+        .collect();
+    outcome(
+        "dates",
+        bad_dates.is_empty(),
+        if bad_dates.is_empty() {
+            format!("{} is YYYY-MM-DD", date_keys.join(", "))
+        } else {
+            format!("not a YYYY-MM-DD date: {}", bad_dates.join(", "))
+        },
+    );
+
     let all_headings = headings_of(body);
     let title = all_headings.iter().find(|(level, _)| *level == 1);
     match kind {
@@ -406,6 +432,14 @@ mod tests {
             keys.contains("linear-issue") && keys.contains("superseded-by"),
             "{keys}"
         );
+        // A date the model was left to make up as a placeholder fails.
+        let undated = GOOD_ADR.replacen(
+            "decision-date: 2026-09-30",
+            "decision-date: <today, YYYY-MM-DD>",
+            1,
+        );
+        assert_ne!(undated, GOOD_ADR, "the good fixture is dated 2026-09-30");
+        assert_eq!(failed(&check(None, &undated)), ["dates"]);
         assert!(
             check(Some("adr-2.md"), GOOD_ADR)
                 .rule("file name")
