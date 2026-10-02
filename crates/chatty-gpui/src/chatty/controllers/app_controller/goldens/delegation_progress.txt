@@ -1,4 +1,7 @@
 StreamStarted
+SwarmTreeChanged(nodes=2)
+SwarmTreeChanged(nodes=2)
+SwarmTreeChanged(nodes=2)
 ToolCallStarted(id="call-1", "invoke_agent")
 ToolCallResult(id="call-1", "Three releases since 0.3.45.")
 StreamEnded(status=Completed, usage=None)

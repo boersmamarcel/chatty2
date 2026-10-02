@@ -7,6 +7,7 @@ use gpui_component::collapsible::Collapsible as CollapsibleEl;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
+use super::OpenArtifact;
 use super::tool_row::{OpenRun, ToolRow};
 use super::verb::tool_row_label;
 
@@ -231,6 +232,7 @@ pub struct ActivityGroup {
     settled: bool,
     on_toggle: Option<ActivityToggle>,
     open_run: Option<OpenRun>,
+    on_open: Option<OpenArtifact>,
 }
 
 impl ActivityGroup {
@@ -241,6 +243,7 @@ impl ActivityGroup {
             settled: true,
             on_toggle: None,
             open_run: None,
+            on_open: None,
         }
     }
 
@@ -248,6 +251,13 @@ impl ActivityGroup {
     /// (AGE-813). `None` leaves that ↗ disabled.
     pub fn open_run(mut self, open_run: Option<OpenRun>) -> Self {
         self.open_run = open_run;
+        self
+    }
+
+    /// What ↗ opens on a row that read a file, in the artifact panel
+    /// (AGE-813). `None` falls back to the tool-detail sheet.
+    pub fn on_open(mut self, on_open: Option<OpenArtifact>) -> Self {
+        self.on_open = on_open;
         self
     }
 
@@ -392,6 +402,7 @@ impl RenderOnce for ActivityGroup {
                                 ToolRow::new(tool)
                                     .attempt(attempt)
                                     .open_run(self.open_run.clone())
+                                    .on_open(self.on_open.clone())
                             })
                             .collect::<Vec<_>>()
                     }),
