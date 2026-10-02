@@ -21,6 +21,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::directory::ROOT_NAME;
@@ -39,7 +40,7 @@ pub fn deadline_grace(budget: Duration) -> Duration {
 
 /// What is left of a budget where a call is made (DP-3). `None` is no
 /// limit.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Remaining {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,7 +198,7 @@ impl CallChain {
 /// Why a delegation is refused before it starts. Serialises as
 /// `{"reason": "cycle", …}`; its display is what the calling model reads
 /// after `Error: invoke_agent: `.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, thiserror::Error)]
 #[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Refusal {
     /// The caller's `delegates_to` has no entry matching the callee.

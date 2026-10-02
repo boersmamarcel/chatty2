@@ -591,7 +591,8 @@ impl Raw {
             lines: BufReader::new(read).lines(),
             write,
         };
-        raw.send(&[json!({"id": 1, "method": "session.hello", "params": {"card": {}}})])
+        raw.send(&[json!({"id": 1, "method": "session.hello",
+            "params": {"card": {}, "schema": chatty_fabric::wire::schema::hash()}})])
             .await;
         raw.reply(1).await;
         while !registry.is_registered(&raw.name) {

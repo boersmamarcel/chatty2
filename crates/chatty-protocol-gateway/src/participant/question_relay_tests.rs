@@ -55,7 +55,8 @@ async fn serve(stream: UnixStream, behaviour: Behaviour, seen: Seen) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     let mut name = String::new();
-    let hello = json!({"id": 1, "method": "session.hello", "params": {"card": {}}});
+    let hello = json!({"id": 1, "method": "session.hello",
+        "params": {"card": {}, "schema": chatty_fabric::wire::schema::hash()}});
     write.write_all(line(hello).as_bytes()).await.unwrap();
     let mut run = None;
     while let Ok(Some(text)) = lines.next_line().await {

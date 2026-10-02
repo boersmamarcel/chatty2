@@ -69,12 +69,15 @@ impl Harness {
             "v": 3,
             "id": 1,
             "method": "session.hello",
-            "params": {"card": {
-                "name": "stub-worker",
-                "description": "a stub worker",
-                "version": "0.1.0",
-                "skills": [],
-            }}
+            "params": {
+                "card": {
+                    "name": "stub-worker",
+                    "description": "a stub worker",
+                    "version": "0.1.0",
+                    "skills": [],
+                },
+                "schema": chatty_fabric::wire::schema::hash(),
+            }
         });
         worker
             .write_all(format!("{hello}\n").as_bytes())

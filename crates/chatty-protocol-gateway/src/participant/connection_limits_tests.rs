@@ -44,7 +44,8 @@ impl Raw {
             write,
             task: None,
         };
-        raw.send(json!({"id": 0, "method": "session.hello", "params": {"card": {}}}))
+        raw.send(json!({"id": 0, "method": "session.hello",
+            "params": {"card": {}, "schema": chatty_fabric::wire::schema::hash()}}))
             .await;
         let welcome = raw.next().await.expect("a welcome");
         assert_eq!(welcome["id"], 0, "the hello's result: {welcome}");
@@ -344,6 +345,30 @@ async fn first_line(registry: &ParticipantRegistry, spec: &str, first: Value) ->
     };
     raw.send(first).await;
     raw
+}
+
+/// EN-3b (ADR-0021 § 1): a `session.hello` whose `schema` does not match
+/// this broker's canonical wire schema export gets `error{kind: protocol}`
+/// for its own id, then the connection closes without a welcome and
+/// without registering — a mismatch never reaches the registry.
+#[tokio::test]
+async fn hello_schema_mismatch_is_protocol_error() {
+    let registry = ParticipantRegistry::new();
+    let mut worker = first_line(
+        &registry,
+        "mismatched",
+        json!({"id": 1, "method": "session.hello",
+               "params": {"card": {}, "schema": "not-this-builds-hash"}}),
+    )
+    .await;
+    let reply = worker.next().await.expect("an error, not a silent close");
+    assert_eq!(reply["id"], 1, "the error names the hello: {reply}");
+    assert_eq!(reply["error"]["kind"], "protocol", "{reply}");
+    assert_eq!(worker.next().await, None, "then closed");
+    assert!(
+        !registry.is_registered(&worker.name),
+        "a schema mismatch never registers"
+    );
 }
 
 /// EN-1: a second `session.hello` closes the connection, as a second hello

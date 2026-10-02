@@ -522,6 +522,13 @@ impl FrameCodec<BrokerSide> {
                 state.theirs.remove(&id);
                 error(m, id, &CallError::Refused(reason.clone()))?
             }
+            BrokerFrame::SchemaMismatch { reason } => {
+                let Some(id) = state.hello.take() else {
+                    return Ok(None);
+                };
+                state.theirs.remove(&id);
+                error(m, id, &CallError::Protocol(reason.clone()))?
+            }
             BrokerFrame::Task {
                 task_id,
                 text,
@@ -632,11 +639,11 @@ impl FrameCodec<BrokerSide> {
                 let request = WorkerRequest::decode(&method, params.as_deref())?;
                 state.take_theirs(id)?;
                 match request {
-                    WorkerRequest::SessionHello(HelloParams { card }) => {
+                    WorkerRequest::SessionHello(HelloParams { card, schema }) => {
                         if state.hello.is_none() {
                             state.hello = Some(id);
                         }
-                        ParticipantFrame::Hello { card }
+                        ParticipantFrame::Hello { card, schema }
                     }
                     WorkerRequest::AgentInvoke(params) => ParticipantFrame::Call {
                         id,
@@ -796,6 +803,7 @@ impl FrameCodec<BrokerSide> {
                 }
                 BrokerFrame::Welcome { .. }
                 | BrokerFrame::Error { .. }
+                | BrokerFrame::SchemaMismatch { .. }
                 | BrokerFrame::Task { .. }
                 | BrokerFrame::Ask { .. } => {}
             }
@@ -817,10 +825,15 @@ impl FrameCodec<WorkerSide> {
         let m = false;
         let mut state = self.lock();
         let line = match frame {
-            ParticipantFrame::Hello { card } => {
+            ParticipantFrame::Hello { card, schema } => {
                 let id = state.next_id();
                 state.hello = Some(id);
-                request(m, id, "session.hello", Some(HelloParamsRef { card }))?
+                request(
+                    m,
+                    id,
+                    "session.hello",
+                    Some(HelloParamsRef { card, schema }),
+                )?
             }
             ParticipantFrame::Status {
                 task_id,
@@ -1112,6 +1125,7 @@ impl FrameCodec<WorkerSide> {
 #[derive(Serialize)]
 struct HelloParamsRef<'a> {
     card: &'a ParticipantCard,
+    schema: &'a str,
 }
 
 #[cfg(test)]

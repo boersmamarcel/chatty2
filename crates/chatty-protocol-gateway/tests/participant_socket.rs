@@ -138,12 +138,15 @@ impl StubParticipant {
         stub.send(json!({
             "id": 1,
             "method": "session.hello",
-            "params": {"card": {
-                "name": card_name,
-                "description": "a stub worker",
-                "version": "0.1.0",
-                "skills": [{ "name": "echo", "description": "repeats the task" }],
-            }}
+            "params": {
+                "card": {
+                    "name": card_name,
+                    "description": "a stub worker",
+                    "version": "0.1.0",
+                    "skills": [{ "name": "echo", "description": "repeats the task" }],
+                },
+                "schema": chatty_fabric::wire::schema::hash(),
+            }
         }))
         .await;
         stub

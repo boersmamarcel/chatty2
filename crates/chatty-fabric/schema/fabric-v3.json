@@ -1,0 +1,1551 @@
+{
+  "$defs": {
+    "AgentCapabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "streaming": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "streaming"
+      ],
+      "type": "object"
+    },
+    "AgentEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "$ref": "#/$defs/AgentCapabilities"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/AgentOrigin"
+        },
+        "skills": {
+          "items": {
+            "$ref": "#/$defs/AgentEntrySkill"
+          },
+          "type": "array"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "displayName",
+        "description",
+        "version",
+        "skills",
+        "capabilities",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "AgentEntrySkill": {
+      "additionalProperties": false,
+      "properties": {
+        "examples": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "examples"
+      ],
+      "type": "object"
+    },
+    "AgentOrigin": {
+      "oneOf": [
+        {
+          "const": "local",
+          "type": "string"
+        },
+        {
+          "const": "fleet",
+          "type": "string"
+        },
+        {
+          "const": "remote_configured",
+          "type": "string"
+        },
+        {
+          "const": "discovered",
+          "type": "string"
+        }
+      ]
+    },
+    "Answer": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "type": "string"
+        },
+        "custom": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "answer"
+      ],
+      "type": "object"
+    },
+    "ApprovalKind": {
+      "enum": [
+        "exec",
+        "write"
+      ],
+      "type": "string"
+    },
+    "ApprovalRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "asker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Asker"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "command_or_path": {
+          "type": "string"
+        },
+        "diff_stat": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/ApprovalKind"
+        }
+      },
+      "required": [
+        "kind",
+        "command_or_path"
+      ],
+      "type": "object"
+    },
+    "ApprovalVerdict": {
+      "enum": [
+        "approved",
+        "denied"
+      ],
+      "type": "string"
+    },
+    "AskReply": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "answers": {
+              "items": {
+                "$ref": "#/$defs/Answer"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "answers"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "escalate",
+          "type": "string"
+        }
+      ]
+    },
+    "AskRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "asker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Asker"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuestionOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "questions": {
+          "items": {
+            "$ref": "#/$defs/Question"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "questions"
+      ],
+      "type": "object"
+    },
+    "Asker": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "chain": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agent",
+        "chain"
+      ],
+      "type": "object"
+    },
+    "ConversationScope": {
+      "type": "string"
+    },
+    "HandoffContract": {
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "schema": {}
+      },
+      "required": [
+        "role",
+        "schema"
+      ],
+      "type": "object"
+    },
+    "HandoffInvalid": {
+      "additionalProperties": false,
+      "properties": {
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "errors"
+      ],
+      "type": "object"
+    },
+    "HelloParams": {
+      "additionalProperties": false,
+      "properties": {
+        "card": {
+          "$ref": "#/$defs/ParticipantCard",
+          "default": {
+            "display_name": null,
+            "name": "",
+            "skills": [],
+            "version": ""
+          }
+        },
+        "schema": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "IdParams": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "InvokeAgentOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "cancelled_by_user": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "messages": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response": {
+          "default": "",
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "success"
+      ],
+      "type": "object"
+    },
+    "InvokeAgentParams": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "handle": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "include_trace": {
+          "default": false,
+          "type": "boolean"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "remaining": {
+          "$ref": "#/$defs/Remaining"
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spawn_context": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpawnContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "agent",
+        "prompt"
+      ],
+      "type": "object"
+    },
+    "MessageStatus": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "status": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/RefusalReason"
+            },
+            "status": {
+              "const": "refused",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "NodeName": {
+      "type": "string"
+    },
+    "ParticipantCard": {
+      "additionalProperties": false,
+      "properties": {
+        "display_name": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "skills": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ParticipantSkill"
+          },
+          "type": "array"
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ParticipantSkill": {
+      "additionalProperties": false,
+      "properties": {
+        "examples": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ProgressParams": {
+      "additionalProperties": false,
+      "properties": {
+        "event": {
+          "$ref": "#/$defs/WireProgress"
+        },
+        "id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "event"
+      ],
+      "type": "object"
+    },
+    "Question": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "question"
+      ],
+      "type": "object"
+    },
+    "QuestionOrigin": {
+      "additionalProperties": false,
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/AgentOrigin"
+        }
+      },
+      "required": [
+        "agent",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "Refusal": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "callee": {
+              "type": "string"
+            },
+            "caller": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "not_listed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "caller",
+            "callee"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "callee": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "not_exposed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "callee"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "callee": {
+              "type": "string"
+            },
+            "caller": {
+              "type": "string"
+            },
+            "reason": {
+              "const": "caller_not_allowed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "caller",
+            "callee"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "callee": {
+              "type": "string"
+            },
+            "chain": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "reason": {
+              "const": "cycle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "chain",
+            "callee"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "depth": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "max": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "reason": {
+              "const": "too_deep",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "depth",
+            "max"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "reason": {
+              "const": "budget_spent",
+              "type": "string"
+            },
+            "what": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "what"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RefusalReason": {
+      "oneOf": [
+        {
+          "const": "not_on_tree",
+          "type": "string"
+        },
+        {
+          "const": "over_allowance",
+          "type": "string"
+        },
+        {
+          "const": "recipient_ended",
+          "type": "string"
+        }
+      ]
+    },
+    "RelayedAskParams": {
+      "additionalProperties": false,
+      "properties": {
+        "question": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/AskRequest"
+        }
+      },
+      "required": [
+        "question",
+        "request"
+      ],
+      "type": "object"
+    },
+    "Remaining": {
+      "additionalProperties": false,
+      "properties": {
+        "seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "SendMessageParams": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "to",
+        "text"
+      ],
+      "type": "object"
+    },
+    "SpawnContext": {
+      "additionalProperties": false,
+      "properties": {
+        "base_branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "roster": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "verification": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TaskEvent": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "status",
+              "type": "string"
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/$defs/TaskState"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "artifact",
+              "type": "string"
+            },
+            "lastChunk": {
+              "default": false,
+              "type": "boolean"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "event": {
+              "$ref": "#/$defs/WorkerSwarmItem"
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "swarm",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "event"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TaskIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "tenant": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant",
+        "user"
+      ],
+      "type": "object"
+    },
+    "TaskMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation": {},
+        "conversationTooLarge": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "evidence": {},
+        "handoff": {},
+        "handoffInvalid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandoffInvalid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handoffInvalidCount": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "trace": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WireUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TaskOutcome": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TaskState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "TaskRunParams": {
+      "additionalProperties": false,
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/Remaining"
+        },
+        "captureConversation": {
+          "type": "boolean"
+        },
+        "handoff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandoffContract"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskIdentity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "spawnContext": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SpawnContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "swarmEvents": {
+          "type": "boolean"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "taskId",
+        "text"
+      ],
+      "type": "object"
+    },
+    "TaskState": {
+      "oneOf": [
+        {
+          "enum": [
+            "submitted",
+            "working",
+            "completed",
+            "failed",
+            "canceled"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "input-required",
+          "type": "string"
+        }
+      ]
+    },
+    "Welcome": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NodeName"
+        },
+        "owner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "$ref": "#/$defs/ConversationScope"
+        }
+      },
+      "required": [
+        "name",
+        "scope"
+      ],
+      "type": "object"
+    },
+    "WireError": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "unknown_agent",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "agent",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "field": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "spawn_context_refused",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "field",
+            "reason",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "refused",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "delegation",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "refusal": {
+              "$ref": "#/$defs/Refusal"
+            }
+          },
+          "required": [
+            "kind",
+            "refusal",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "cancelled",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "disconnected",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "failed",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "protocol",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "reason",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WireModelRef": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model_id"
+      ],
+      "type": "object"
+    },
+    "WireProgress": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Admitted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Admitted"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Step": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Step"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Text"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WireUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "cacheReadTokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cacheWriteTokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inputTokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/WireUsageLine"
+          },
+          "type": "array"
+        },
+        "outputTokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheWriteTokens",
+        "lines"
+      ],
+      "type": "object"
+    },
+    "WireUsageLine": {
+      "additionalProperties": false,
+      "properties": {
+        "at": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cacheReadTokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cacheWriteTokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "durationMs": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "inputTokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WireModelRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outputTokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "WorkerSwarmItem": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "turn_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call_started",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call_result",
+              "type": "string"
+            },
+            "result": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "error"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "agent.invoke": {
+      "$ref": "#/$defs/InvokeAgentParams"
+    },
+    "agent.invoke#result": {
+      "$ref": "#/$defs/InvokeAgentOutcome"
+    },
+    "agent.list#result": {
+      "items": {
+        "$ref": "#/$defs/AgentEntry"
+      },
+      "type": "array"
+    },
+    "broker.human_ask": {
+      "$ref": "#/$defs/RelayedAskParams"
+    },
+    "error": {
+      "$ref": "#/$defs/WireError"
+    },
+    "human.approve": {
+      "$ref": "#/$defs/ApprovalRequest"
+    },
+    "human.approve#result": {
+      "$ref": "#/$defs/ApprovalVerdict"
+    },
+    "human.ask": {
+      "$ref": "#/$defs/AskRequest"
+    },
+    "human.ask#answers": {
+      "items": {
+        "$ref": "#/$defs/Answer"
+      },
+      "type": "array"
+    },
+    "human.ask#reply": {
+      "$ref": "#/$defs/AskReply"
+    },
+    "mailbox.post": {
+      "$ref": "#/$defs/SendMessageParams"
+    },
+    "mailbox.post#result": {
+      "$ref": "#/$defs/MessageStatus"
+    },
+    "req.cancel": {
+      "$ref": "#/$defs/IdParams"
+    },
+    "req.progress": {
+      "$ref": "#/$defs/ProgressParams"
+    },
+    "session.hello": {
+      "$ref": "#/$defs/HelloParams"
+    },
+    "session.hello#result": {
+      "$ref": "#/$defs/Welcome"
+    },
+    "task.event": {
+      "$ref": "#/$defs/TaskEvent"
+    },
+    "task.run": {
+      "$ref": "#/$defs/TaskRunParams"
+    },
+    "task.run#result": {
+      "$ref": "#/$defs/TaskOutcome"
+    }
+  },
+  "required": [
+    "session.hello",
+    "session.hello#result",
+    "agent.invoke",
+    "agent.invoke#result",
+    "agent.list#result",
+    "mailbox.post",
+    "mailbox.post#result",
+    "human.approve",
+    "human.approve#result",
+    "human.ask",
+    "human.ask#reply",
+    "human.ask#answers",
+    "task.run",
+    "task.run#result",
+    "task.event",
+    "req.progress",
+    "req.cancel",
+    "broker.human_ask",
+    "error"
+  ],
+  "type": "object"
+}

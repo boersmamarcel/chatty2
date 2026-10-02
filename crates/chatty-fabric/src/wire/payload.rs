@@ -7,6 +7,7 @@
 //! The lenient `Value` usage parser stays only on the A2A edge, for peers
 //! that are not chatty.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::Opaque;
@@ -14,7 +15,7 @@ use super::Opaque;
 /// A task's token usage: the four totals and one line per model (AGE-682).
 /// The totals are the lines summed, for a reader that only wants the
 /// number; nothing on it is a price.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WireUsage {
     pub input_tokens: u32,
@@ -44,7 +45,7 @@ impl WireUsage {
 
 /// One usage line: tokens, the model they were spent on, and when — never
 /// a price. The reader prices it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WireUsageLine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,7 +67,7 @@ pub struct WireUsageLine {
 
 /// The model a usage line was spent on: chatty-core's `ModelRef`, with the
 /// provider as its snake_case name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireModelRef {
     pub provider: String,
@@ -75,7 +76,7 @@ pub struct WireModelRef {
 
 /// Progress on an `agent.invoke` (`req.progress`'s `event`): the part of
 /// chatty-core's `InvokeAgentProgress` the broker sends a caller.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum WireProgress {
     /// The broker admitted the callee's node under this name.
     Admitted(String),
@@ -89,7 +90,7 @@ pub enum WireProgress {
 /// `task.run` result's `metadata`, and the `metadata` of an `agent.invoke`
 /// result. Every key the worker's mapper writes, plus the evidence a
 /// virtual agent's runner adds; anything else does not decode.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskMetadata {
     /// What the task spent, its own calls included (ADR-0011, AGE-682).
@@ -130,7 +131,7 @@ impl TaskMetadata {
 }
 
 /// A handoff that failed its schema: the role and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HandoffInvalid {
     pub role: String,

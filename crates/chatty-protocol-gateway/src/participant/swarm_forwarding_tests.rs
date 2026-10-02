@@ -43,7 +43,8 @@ fn line(value: Value) -> String {
 async fn serve(stream: UnixStream, behaviour: Behaviour, asked: Asked) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
-    let hello = json!({"id": 1, "method": "session.hello", "params": {"card": {}}});
+    let hello = json!({"id": 1, "method": "session.hello",
+        "params": {"card": {}, "schema": chatty_fabric::wire::schema::hash()}});
     write.write_all(line(hello).as_bytes()).await.unwrap();
     while let Ok(Some(text)) = lines.next_line().await {
         let frame: Value = serde_json::from_str(&text).unwrap();

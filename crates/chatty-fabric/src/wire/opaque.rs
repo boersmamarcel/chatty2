@@ -1,5 +1,6 @@
 //! A payload the wire carries but does not type (ADR-0021 § 1).
 
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -95,6 +96,25 @@ impl<'de> Deserialize<'de> for Opaque {
             )));
         }
         Ok(Self(raw))
+    }
+}
+
+/// [`Opaque`] is not the wire's to type: its schema is the unconstrained
+/// `true` ("any value"), inlined at each of the four pointers ADR-0021 § 1
+/// fixes it to, never a `$ref` to a shared definition. The any-value check
+/// (`export_has_no_any_value_outside_four_opaque_payloads`) walks the
+/// export for exactly that literal.
+impl JsonSchema for Opaque {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Opaque".into()
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        Schema::from(true)
     }
 }
 

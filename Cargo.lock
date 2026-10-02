@@ -1973,8 +1973,11 @@ version = "0.5.7"
 dependencies = [
  "async-trait",
  "futures",
+ "hex",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

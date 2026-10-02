@@ -52,11 +52,15 @@ fn canned_frames(events: &[SessionEvent]) -> String {
 pub(crate) fn scripted_worker_binary(dir: &Path, events: &[SessionEvent]) -> PathBuf {
     std::fs::write(dir.join("frames.jsonl"), canned_frames(events)).expect("frames written");
     let fd = PARTICIPANT_FD;
+    // The broker refuses a hello whose `schema` does not match its own
+    // build's canonical wire schema (ADR-0021 § 1, EN-3b); the stand-in is
+    // built and run in the same build, so its own hash is always right.
+    let schema = chatty_fabric::wire::schema::hash();
     let script = format!(
         r#"#!/bin/sh
 here="$(dirname "$0")"
 printf '%s\n' "$*" >> "$here/argv.log"
-printf '{{"v":3,"id":1,"method":"session.hello","params":{{"card":{{"name":"stand-in"}}}}}}\n' >&{fd}
+printf '{{"v":3,"id":1,"method":"session.hello","params":{{"card":{{"name":"stand-in"}},"schema":"{schema}"}}}}\n' >&{fd}
 read -r welcome <&{fd}
 read -r task <&{fd}
 id=$(printf '%s' "$task" | sed 's/^{{"v":3,"id":\([0-9]*\),.*/\1/')

@@ -50,6 +50,7 @@ fn connected() -> (BrokerCodec, WorkerCodec) {
     let hello = worker
         .encode(&ParticipantFrame::Hello {
             card: ParticipantCard::default(),
+            schema: chatty_fabric::wire::schema::hash().to_string(),
         })
         .unwrap()
         .unwrap();
@@ -96,6 +97,7 @@ fn a_session_uses_the_documented_envelopes() {
     let hello = worker
         .encode(&ParticipantFrame::Hello {
             card: ParticipantCard::default(),
+            schema: chatty_fabric::wire::schema::hash().to_string(),
         })
         .unwrap()
         .unwrap();
@@ -442,7 +444,7 @@ fn a_hello_carries_a_card() {
     let broker = BrokerCodec::new();
     let line = r#"{"v":3,"id":1,"method":"session.hello","params":{"card":{"name":"worker-1",
                    "description":"a worker","skills":[{"name":"edit"}]}}}"#;
-    let Some(ParticipantFrame::Hello { card }) = broker.decode(line).unwrap() else {
+    let Some(ParticipantFrame::Hello { card, .. }) = broker.decode(line).unwrap() else {
         panic!("a hello");
     };
     assert_eq!(card.name, "worker-1", "carried, and ignored by the broker");
@@ -451,7 +453,7 @@ fn a_hello_carries_a_card() {
     assert!(card.display_name.is_none());
 
     let bare = BrokerCodec::new();
-    let Some(ParticipantFrame::Hello { card }) = bare
+    let Some(ParticipantFrame::Hello { card, .. }) = bare
         .decode(r#"{"v":3,"id":1,"method":"session.hello","params":{}}"#)
         .unwrap()
     else {
@@ -490,6 +492,7 @@ fn a_refused_hello_is_an_error_for_its_id() {
     worker
         .encode(&ParticipantFrame::Hello {
             card: ParticipantCard::default(),
+            schema: chatty_fabric::wire::schema::hash().to_string(),
         })
         .unwrap();
     let refused =

@@ -70,6 +70,11 @@ flate2 = "1.0"
 tar = "0.4"
 sha2 = "0.11"
 hex = "0.4"
+# The wire schema export (ADR-0021 § 1, EN-3b): generates JSON Schema from
+# the wire types instead of hand-writing it. Already in the lockfile
+# transitively (rig/rmcp); pinned here as a direct dependency of
+# chatty-fabric.
+schemars = "1"
 ed25519-dalek = { version = "3.0.0", features = ["rand_core"] }
 percent-encoding = "2"
 

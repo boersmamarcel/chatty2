@@ -12,11 +12,12 @@
 //! describes itself in its card; it does not get to describe its own
 //! provenance, or the label would be worth nothing.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Whose machine an agent runs on, from the point of view of the user whose
 /// broker is answering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentOrigin {
     /// A process on this machine: a spawned worker, a WASM module, the

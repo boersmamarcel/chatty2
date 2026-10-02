@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -57,7 +58,7 @@ impl BrokerNotification {
 }
 
 /// `session.hello`'s result: who this connection is.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Welcome<'a> {
     pub name: Cow<'a, NodeName>,
@@ -66,7 +67,7 @@ pub struct Welcome<'a> {
 }
 
 /// `task.run`'s params.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskRunParams<'a> {
     /// The task's A2A id. Events and the result name the `task.run`'s
@@ -93,7 +94,7 @@ fn is_unlimited<B: std::ops::Deref<Target = Remaining>>(budget: &B) -> bool {
 }
 
 /// `req.progress`'s params.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressParams<'a> {
     pub id: u64,
@@ -102,7 +103,7 @@ pub struct ProgressParams<'a> {
 
 /// A broker→worker `human.ask`'s params: the broker's id for the question
 /// and the question as its asker sent it, asker stamped.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelayedAskParams<'a> {
     pub question: Cow<'a, str>,
@@ -110,7 +111,7 @@ pub struct RelayedAskParams<'a> {
 }
 
 /// One agent the caller may address: an entry of `agent.list`'s result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentEntry {
     pub name: String,
@@ -151,7 +152,7 @@ impl AgentEntry {
 }
 
 /// One skill of an [`AgentEntry`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentEntrySkill {
     pub name: String,
@@ -160,7 +161,7 @@ pub struct AgentEntrySkill {
 }
 
 /// What an [`AgentEntry`]'s agent can do.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCapabilities {
     pub streaming: bool,

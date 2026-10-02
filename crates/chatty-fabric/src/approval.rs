@@ -10,11 +10,12 @@
 //! goes back to the request that asked. No intermediate sees it, so none can
 //! answer it.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Which kind of approval: a command (shell, git, browser, plugin) or a
 /// filesystem write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
     Exec,
@@ -24,7 +25,7 @@ pub enum ApprovalKind {
 /// The agent that asked for an approval or asked a question: its
 /// broker-assigned name and the chain of spec names it runs under, root
 /// first. The broker's stamp, on both `human.*` methods.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Asker {
     pub agent: String,
@@ -37,7 +38,7 @@ pub struct Asker {
 /// overwritten on the first broker hop with the name and chain its
 /// connection was admitted under, so the root's card names the agent that
 /// actually asked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalRequest {
     pub kind: ApprovalKind,
@@ -50,7 +51,7 @@ pub struct ApprovalRequest {
 
 /// `human.approve`'s result. Anything short of a human's approval — a deny,
 /// a timeout, no root to ask, too many approvals pending — is `Denied`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalVerdict {
     Approved,
