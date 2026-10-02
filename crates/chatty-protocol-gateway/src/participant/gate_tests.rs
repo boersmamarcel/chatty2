@@ -97,6 +97,8 @@ fn reaching<'a>(policy: &'a dyn CallPolicy, spec: &str) -> Result<Snapshot<'a>, 
             spec: spec.to_string(),
         },
         owner: Owner::None,
+        binding: None,
+        answer_nonce: None,
     })
 }
 
@@ -191,7 +193,10 @@ fn outsiders_are_refused_every_request() {
             Request::Invoke(&params),
             Request::List,
             Request::Post(&post),
-            Request::Answer { id: "question-1" },
+            Request::Answer {
+                id: "question-1",
+                nonce: None,
+            },
             Request::Cancel { node: "n" },
             Request::TakeRunMessages,
         ] {
@@ -273,7 +278,10 @@ fn only_the_root_answers_cancels_and_takes_its_messages() {
     let policy = Watching::new([]);
     let snapshot = reaching(&policy, "x");
     for request in [
-        Request::Answer { id: "question-1" },
+        Request::Answer {
+            id: "question-1",
+            nonce: None,
+        },
         Request::Cancel { node: "n" },
         Request::TakeRunMessages,
     ] {
@@ -348,7 +356,10 @@ fn human_approve_is_raised_from_the_run_a_node_serves() {
     assert_eq!(
         decide(
             &Caller::Root,
-            &Request::AnswerApproval { id: "approval-1" },
+            &Request::AnswerApproval {
+                id: "approval-1",
+                nonce: None
+            },
             &snapshot
         )
         .outcome,
@@ -357,7 +368,10 @@ fn human_approve_is_raised_from_the_run_a_node_serves() {
     assert!(
         decide(
             &node("lead-0", "lead", "task-1"),
-            &Request::AnswerApproval { id: "approval-1" },
+            &Request::AnswerApproval {
+                id: "approval-1",
+                nonce: None
+            },
             &snapshot
         )
         .outcome
@@ -421,7 +435,10 @@ fn human_ask_is_raised_from_the_run_a_node_serves() {
     assert_eq!(
         decide(
             &Caller::Root,
-            &Request::Answer { id: "question-1" },
+            &Request::Answer {
+                id: "question-1",
+                nonce: None
+            },
             &snapshot
         )
         .outcome,
@@ -435,4 +452,84 @@ fn human_ask_is_raised_from_the_run_a_node_serves() {
         );
     }
     assert!(policy.consulted().is_empty(), "questions consult no spec");
+}
+
+/// HS-4a: the hosted client's rows. Bound to the broker's `(tenant, user)`;
+/// answers need their nonce; conversations are its rows alone; a local
+/// root on a hosted broker is refused; on a typed root only cancel and read
+/// pass.
+#[test]
+fn hosted_client_rows() {
+    let policy = crate::participant::LocalPermissive::new();
+    let binding = Binding {
+        tenant: "acme".to_string(),
+        user: "ada".to_string(),
+        root: BrokerRoot::Hosted,
+    };
+    let ada = Caller::HostedRoot(HostedClient {
+        tenant: "acme".to_string(),
+        user: "ada".to_string(),
+    });
+    let other = Caller::HostedRoot(HostedClient {
+        tenant: "evil".to_string(),
+        user: "ada".to_string(),
+    });
+    fn bound<'a>(
+        policy: &'a dyn CallPolicy,
+        binding: &'a Binding,
+        nonce: Option<&str>,
+    ) -> Result<Snapshot<'a>, Unreadable> {
+        reaching(policy, "analyst").map(|snapshot| Snapshot {
+            binding: Some(binding),
+            answer_nonce: nonce.map(str::to_string),
+            ..snapshot
+        })
+    }
+    let snapshot = bound(&policy, &binding, Some("n-1"));
+    let granted =
+        |caller: &Caller, request: &Request<'_>| decide(caller, request, &snapshot).outcome.is_ok();
+
+    let answer = Request::Answer {
+        id: "question-1",
+        nonce: Some("n-1"),
+    };
+    let conversation = Request::Conversation(ConversationOp::Create);
+    for request in [
+        Request::List,
+        Request::Cancel { node: "analyst-0" },
+        Request::TakeRunMessages,
+        answer,
+        conversation,
+    ] {
+        assert!(granted(&ada, &request), "{request:?}");
+        assert!(!granted(&other, &request), "cross-tenant {request:?}");
+        assert!(!granted(&Caller::Root, &request), "local root {request:?}");
+    }
+    for nonce in [None, Some("n-2")] {
+        assert!(!granted(
+            &ada,
+            &Request::AnswerApproval {
+                id: "approval-1",
+                nonce
+            }
+        ));
+    }
+    // Conversations are no local root's row, bound or not.
+    assert!(
+        decide(&Caller::Root, &conversation, &reaching(&policy, "analyst"))
+            .outcome
+            .is_err()
+    );
+
+    let typed = Binding {
+        root: BrokerRoot::Typed { key_owner: None },
+        ..binding.clone()
+    };
+    let snapshot = bound(&policy, &typed, Some("n-1"));
+    let typed_granted = |request: &Request<'_>| decide(&ada, request, &snapshot).outcome.is_ok();
+    assert!(typed_granted(&Request::Cancel { node: "analyst-0" }));
+    assert!(typed_granted(&Request::TakeRunMessages));
+    for request in [Request::List, answer, conversation] {
+        assert!(!typed_granted(&request), "typed root {request:?}");
+    }
 }
