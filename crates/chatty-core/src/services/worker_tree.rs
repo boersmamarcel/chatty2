@@ -28,6 +28,15 @@
 //! from the spawn context; a worker spawned for the root starts at the
 //! workspace's `HEAD` and is measured against the default branch.
 //!
+//! The sub-leader's branch handed in this way can be stale: its own tree
+//! may have collided with a leftover directory or branch from an earlier,
+//! uncleaned run and been renamed to `name-N` (AGE-402). A grandchild told
+//! to start from the un-renamed, nominal name would be handed a branch that
+//! was never created. [`create`] guards against this itself (AGE-820): a
+//! base that does not exist falls back to whatever branch the sub-leader's
+//! tree is actually on, read off `git` rather than trusted from a cached or
+//! reconstructed name.
+//!
 //! # What the leader is told
 //!
 //! Not the worker's word for it. When the task ends the runner commits the
@@ -136,13 +145,61 @@ pub async fn create(
 async fn add_worktree(git: &GitService, name: &str, base: Option<&str>) -> Result<WorkerTree> {
     let tree_name = free_worktree_name(git, name).await?;
     let branch = format!("sub-agent/{tree_name}");
-    let path = git.worktree_add(&tree_name, &branch, base).await?;
+    let base = resolve_base(git, base).await?;
+    let path = git
+        .worktree_add(&tree_name, &branch, base.as_deref())
+        .await?;
     Ok(WorkerTree {
         name: tree_name,
         branch,
         path,
-        base: base.map(str::to_string),
+        base,
     })
+}
+
+/// What a nested worker's tree actually starts from (AGE-820).
+///
+/// `wanted` is the sub-leader's branch as the caller believes it to be —
+/// ordinarily correct, but stale when the sub-leader's own tree collided
+/// with a leftover directory or branch from an earlier, uncleaned run and
+/// was renamed to `name-N` (AGE-402): `wanted` then names a branch nobody
+/// ever created, and handing it straight to `git worktree add` is the
+/// `fatal: invalid reference` a caller cannot recover from.
+///
+/// Rather than trust a name reconstructed or cached upstream, a `wanted`
+/// that does not exist falls back to reading `git` directly: `workspace_root`
+/// (the `GitService` this runs on) *is* the sub-leader's own tree for a
+/// nested call, so whatever branch is actually checked out there is the
+/// sub-leader's real one, renamed or not. `None` (no sub-leader, or one
+/// with no tree of its own) passes through unchanged — the worker starts at
+/// `HEAD`, exactly as a root-spawned worker does.
+///
+/// Only when even that cannot answer — the tree is on no branch at all —
+/// does this fail, with a message naming the branch that was asked for;
+/// silently starting somewhere else would hide a genuinely broken base
+/// rather than report it.
+async fn resolve_base(git: &GitService, wanted: Option<&str>) -> Result<Option<String>> {
+    let Some(wanted) = wanted else {
+        return Ok(None);
+    };
+    if git.branch_exists(wanted).await? {
+        return Ok(Some(wanted.to_string()));
+    }
+    match git.current_branch().await? {
+        Some(actual) => {
+            warn!(
+                wanted,
+                actual = %actual,
+                "The sub-leader's recorded branch no longer exists; starting its \
+                 worker from its tree's actual branch instead"
+            );
+            Ok(Some(actual))
+        }
+        None => bail!(
+            "worker tree base '{wanted}' does not exist, and its tree is not on any \
+             branch to fall back to"
+        ),
+    }
 }
 
 /// `name`, or the first `name-N` (from 2) whose branch and directory are
@@ -665,6 +722,110 @@ mod tests {
         assert_eq!(evidence.commits, 1);
         assert!(evidence.diff_stat.contains("coder.txt"), "{evidence:?}");
         assert!(!evidence.diff_stat.contains("lead.txt"), "{evidence:?}");
+    }
+
+    /// AGE-820: a sub-leader that never got a tree of its own — the
+    /// `coordinator` profile case, which writes nothing and so never asked
+    /// for one — still lets its own workers start somewhere sane: directly
+    /// under the workspace's own worktree directory, at `HEAD`, measured
+    /// against the default branch, exactly like a worker spawned for the
+    /// root. Nothing here reconstructs a branch name from the sub-leader's
+    /// own name to send it to instead.
+    #[tokio::test]
+    async fn nested_worker_of_a_treeless_sub_leader_starts_at_head() {
+        let dir = repo().await;
+        let root = dir.path().to_string_lossy().to_string();
+
+        // A treeless sub-leader passes its own context along unchanged: the
+        // workspace root it was given, and no base branch, just as a
+        // worker spawned for the root gets.
+        let nested = create(&root, "local-coder-0", None).await.unwrap().unwrap();
+
+        assert!(
+            nested.path.starts_with(dir.path()),
+            "with no sub-leader tree to nest under, the worker's tree sits directly \
+             under the workspace's own worktree directory"
+        );
+        assert_eq!(nested.base, None);
+
+        commit_a_change(&nested, "added.rs", "fn main() {}\n").await;
+        let evidence = collect(&nested, None).await.expect("a commit was made");
+        assert_eq!(
+            evidence.base, "main",
+            "a treeless sub-leader's worker is measured against the default branch"
+        );
+    }
+
+    /// AGE-820: a sub-leader's tree collided with a leftover
+    /// `.chatty/worktrees` directory from an earlier, uncleaned run of the
+    /// same tutorial and was renamed to `local-lead-0-2`; the nominal,
+    /// un-renamed branch `sub-agent/local-lead-0` was consequently never
+    /// created. A grandchild told to start from that nominal name — the
+    /// bug's "invalid reference" — is instead put on the sub-leader's
+    /// *actual* branch.
+    #[tokio::test]
+    async fn nested_worker_base_follows_a_renamed_sub_leader_tree() {
+        let dir = repo().await;
+        let root = dir.path().to_string_lossy().to_string();
+
+        // The leftover: no worktree metadata, just the path, which is
+        // enough to make `local-lead-0` taken.
+        std::fs::create_dir_all(dir.path().join(".chatty/worktrees/local-lead-0")).unwrap();
+
+        let lead = create(&root, "local-lead-0", None).await.unwrap().unwrap();
+        assert_eq!(
+            lead.branch, "sub-agent/local-lead-0-2",
+            "the leftover directory took the nominal name"
+        );
+        std::fs::write(lead.path.join("lead.txt"), "lead\n").unwrap();
+        git(&["add", "lead.txt"], &lead.path).await;
+        git(&["commit", "-q", "-m", "lead"], &lead.path).await;
+
+        // The nominal, un-renamed branch genuinely does not exist — exactly
+        // what a caller that rebuilds it from the sub-leader's name would
+        // hand `create`.
+        let nominal = "sub-agent/local-lead-0";
+        let nested_root = lead.path.to_string_lossy().to_string();
+        let nested = create(&nested_root, "local-coder-0", Some(nominal))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            nested.base.as_deref(),
+            Some(lead.branch.as_str()),
+            "the nested worker's base follows the sub-leader's actual branch, not \
+             the nominal name it was wrongly given"
+        );
+        assert!(
+            nested.path.join("lead.txt").exists(),
+            "its tree starts at the sub-leader's real tip"
+        );
+    }
+
+    /// AGE-820: when the base a caller asked for is gone *and* the tree it
+    /// would otherwise fall back to is on no branch at all, `create` fails
+    /// with a message naming the missing base, rather than silently
+    /// starting the worker somewhere arbitrary.
+    #[tokio::test]
+    async fn a_base_with_nothing_to_fall_back_to_fails_clearly() {
+        let dir = repo().await;
+        let root = dir.path().to_string_lossy().to_string();
+        let head = {
+            let out = tokio::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["checkout", "--detach", &head], dir.path()).await;
+
+        let err = create(&root, "local-coder-0", Some("sub-agent/gone"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("sub-agent/gone"), "{err:#}");
     }
 
     /// A tree left behind by an earlier run — same name, its branch still
