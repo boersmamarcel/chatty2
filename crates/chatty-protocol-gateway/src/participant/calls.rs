@@ -53,8 +53,10 @@
 //! request that asked, and nowhere else. A worker that withdraws its
 //! request, or whose connection closes because its callee ended or was
 //! stopped, withdraws the root's card ([`CallEvent::InputWithdrawn`] under
-//! the broker's id); a root call that ends denies whatever is still pending
-//! under it. An approval with no root call to go to is denied.
+//! the broker's id). A root call that ends answers nothing still pending
+//! under it: the asker is in the subtree that goes with the call, and a
+//! verdict sent now would race its reaping and let it act on a call that
+//! is over. An approval with no root call to go to is denied.
 //!
 //! A caller metered on a model endpoint does not hold its permit while it
 //! waits (BI-6): an `invoke_agent` call releases the caller's
@@ -250,11 +252,15 @@ impl RaisedApproval {
         }
     }
 
-    /// The root's answer; `Denied` when there is nobody to ask or the root
-    /// call it went to has ended.
+    /// The root's answer; `Denied` when there was nobody to ask. Never,
+    /// once the root call it went to has ended: the asker is reaped with
+    /// that call's subtree, and must not act before it is.
     pub(crate) async fn verdict(&mut self) -> ApprovalVerdict {
         match self.pending.as_mut() {
-            Some((_, answer)) => answer.await.unwrap_or(ApprovalVerdict::Denied),
+            Some((_, answer)) => match answer.await {
+                Ok(verdict) => verdict,
+                Err(_) => std::future::pending().await,
+            },
             None => ApprovalVerdict::Denied,
         }
     }
@@ -357,7 +363,7 @@ struct Nested {
 }
 
 /// A root call's end of [`Swarm`]; stops listening when dropped, which
-/// denies every approval still waiting on it.
+/// drops every approval still waiting on it unanswered.
 struct Listening {
     swarm: Swarm,
     approvals: Approvals,
@@ -387,10 +393,10 @@ impl Drop for Listening {
             .filter(|(_, pending)| pending.root_task_id == self.root_task_id)
             .map(|(id, _)| id.clone())
             .collect();
+        // Unanswered: dropping the answer's sender leaves the asker
+        // waiting until its connection closes with the call's subtree.
         for id in orphaned {
-            if let Some(pending) = approvals.remove(&id) {
-                let _ = pending.answer.send(ApprovalVerdict::Denied);
-            }
+            approvals.remove(&id);
         }
     }
 }

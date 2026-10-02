@@ -521,3 +521,39 @@ async fn callee_hang_up_withdraws_root_approval() {
     );
     finish(&mut root).await;
 }
+
+/// A root call that ends sends no verdict to an approval still waiting
+/// under it: the asker goes with the call's subtree, and a `denied` sent
+/// now races its reaping and lets it act on a call that is over (the
+/// `approval_relays_up_the_chain` flake). Its request just stays pending.
+#[tokio::test]
+async fn ended_root_call_answers_no_pending_approval() {
+    let (calls, seen) = broker(
+        Behaviour::Delegate {
+            calls: 0,
+            forge: false,
+        },
+        Behaviour::Approve(exec("ls")),
+    );
+    let mut root = root_call(&calls, "leaf");
+    let (id, _) = next_approval(&mut root).await;
+    drop(root);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let answered = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(_, frame)| frame["id"] == 2 && frame.get("method").is_none());
+    assert!(
+        !answered,
+        "the waiting approval got a verdict: {:?}",
+        seen.lock().unwrap()
+    );
+    assert!(
+        calls
+            .answer_approval(&id, ApprovalVerdict::Approved)
+            .is_err(),
+        "nothing is left to answer under the ended call"
+    );
+}
