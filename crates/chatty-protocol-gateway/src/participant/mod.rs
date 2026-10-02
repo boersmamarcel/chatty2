@@ -19,6 +19,9 @@
 //!   and the way back down to a task parked on a question (AGE-306).
 //! * [`gate`] — the one pure decision every request passes before any
 //!   effect, over a typed caller (ADR-0023, GT-0).
+//! * [`hosted`] — the same core embedded by a host for one hosted root
+//!   conversation, over connections the host accepted, with the hosted
+//!   client as its root (HS-4a).
 //! * [`calls`] — the calls a worker makes over its connection, and the
 //!   root's direct handle, run as the node that made them (BI-4). A
 //!   caller's endpoint permit (`chatty_fabric::RunPermit`) is released while
@@ -38,6 +41,7 @@
 mod calls;
 mod codec;
 pub mod gate;
+pub mod hosted;
 pub mod limits;
 mod protocol;
 mod registry;
@@ -48,7 +52,10 @@ pub use calls::{BrokerCalls, DirectTransport, LocalPermissive, Peer};
 pub use codec::{
     BrokerCodec, BrokerSide, FrameCodec, FrameError, PROTOCOL_VERSION, WorkerCodec, WorkerSide,
 };
-pub use gate::{Caller, decide};
+pub use gate::{Binding, BrokerRoot, Caller, ConversationOp, HostedClient, decide};
+pub use hosted::{
+    DecisionLog, DecisionRecord, HostedBroker, HostedConfig, HostedEvent, HostedRoot, HostedStream,
+};
 pub use protocol::{
     BrokerFrame, CallStamp, DelegatedTask, ParticipantCard, ParticipantFrame, ParticipantSkill,
     TaskState,

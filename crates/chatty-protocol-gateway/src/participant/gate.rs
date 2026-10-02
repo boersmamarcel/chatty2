@@ -20,6 +20,7 @@
 //! | Caller | Who |
 //! |---|---|
 //! | [`Caller::Root`] | The local in-process root, through its direct handle |
+//! | [`Caller::HostedRoot`] | The hosted root: a session-authenticated web client with its verified `(tenant, user)`, through a hosted broker's [`HostedRoot`](super::HostedRoot) API (HS-4a) |
 //! | [`Caller::Node`] | A process on a broker-made connection with a run the broker opened |
 //! | [`Caller::Remote`] | An ADR-0022 stream peer (GT-2; refused until then) |
 //! | [`Caller::External`] | Carries its admitter: a hive key (GT-3), the local gateway's launch token (GT-1), or [`Admitter::Chainless`] |
@@ -37,6 +38,14 @@
 //! | `Node` | The named run must be its own open run; `may_call` from its admitted spec, chain, budget, then (spawning) roster and spawn context | Granted | Owner only | Raises one from the task it serves (its open run) | Refused |
 //! | `Remote` | Refused | Refused | Refused | Refused | Refused |
 //! | `External` | Refused | Refused | Refused | Refused | Refused |
+//! | hosted `Root` | As `Root` | Granted | Refused (`not_on_tree`) | Answers its pending ones, each with its nonce | Cancel, read, and conversation create, list and delete |
+//!
+//! On a typed-root broker the hosted client may only cancel and read
+//! (take its run messages); every other row refuses it.
+//! The hosted client is refused every row unless its `(tenant, user)`
+//! matches the broker's [`Binding`] (and, on an `External`-rooted broker,
+//! the key's owner). A local `Root` on a broker with a binding is refused:
+//! a hosted broker's only root is its hosted client (ADR-0023 § 3).
 //!
 //! The local root requests are its own: answering a question or an
 //! approval the broker delivered to it, stopping one run, and taking its
@@ -82,6 +91,9 @@ use super::spawn_context::{self, Target};
 pub enum Caller {
     /// The local in-process root, through its direct handle.
     Root,
+    /// The hosted root's client, as the hosted root's API authenticated
+    /// it (ADR-0023 § 2: `Root`, hosted). Its kind is [`CallerKind::Root`].
+    HostedRoot(HostedClient),
     /// A process on a broker-made connection with a broker-made chain.
     Node(NodeCaller),
     /// An ADR-0022 stream peer. Its claim result arrives with GT-2; until
@@ -95,7 +107,7 @@ impl Caller {
     /// The caller's kind, as a row names it.
     pub fn kind(&self) -> CallerKind {
         match self {
-            Self::Root => CallerKind::Root,
+            Self::Root | Self::HostedRoot(_) => CallerKind::Root,
             Self::Node(_) => CallerKind::Node,
             Self::Remote(_) => CallerKind::Remote,
             Self::External(_) => CallerKind::External,
@@ -107,10 +119,56 @@ impl fmt::Display for Caller {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Root => f.write_str(ROOT_NAME),
+            Self::HostedRoot(client) => write!(f, "{ROOT_NAME}:{}/{}", client.tenant, client.user),
             Self::Node(node) => write!(f, "node:{}", node.name),
             Self::Remote(remote) => write!(f, "remote:{}", remote.peer),
             Self::External(admitter) => write!(f, "external:{admitter}"),
         }
+    }
+}
+
+/// A session-authenticated web client of a hosted root: the `(tenant,
+/// user)` its session verified, set by the hosted root's API from what
+/// authenticated the request, never from the request (ADR-0023 § 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostedClient {
+    pub tenant: String,
+    pub user: String,
+}
+
+/// Who a hosted broker serves: the `(tenant, user)` of the hosted root
+/// conversation it was built for, and what kind of root its runs have
+/// (ADR-0021 § 3, ADR-0023 § 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    pub tenant: String,
+    pub user: String,
+    pub root: BrokerRoot,
+}
+
+/// The root a hosted broker's runs hang from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerRoot {
+    /// The user's own hosted root conversation: its client may start,
+    /// cancel, read and answer.
+    Hosted,
+    /// A typed root, for a run a `Remote` or `External` caller started
+    /// (ADR-0023 § 2): its client may only cancel and read. `key_owner` is
+    /// the admitting key's owner for an `External`-rooted run, who the
+    /// client must also be.
+    Typed { key_owner: Option<String> },
+}
+
+impl Binding {
+    /// Whether `client` is the one this broker serves.
+    fn admits(&self, client: &HostedClient) -> bool {
+        let owner = match &self.root {
+            BrokerRoot::Hosted | BrokerRoot::Typed { key_owner: None } => true,
+            BrokerRoot::Typed {
+                key_owner: Some(owner),
+            } => *owner == client.user,
+        };
+        self.tenant == client.tenant && self.user == client.user && owner
     }
 }
 
@@ -195,16 +253,30 @@ pub enum Request<'a> {
     Post(&'a SendMessageParams),
     /// `human.approve`, raised (EN-2a).
     Approve(&'a ApprovalRequest),
-    /// The local root answers the approval it was handed under `id`.
-    AnswerApproval { id: &'a str },
+    /// The root answers the approval it was handed under `id`. `nonce` is
+    /// the one the broker gave the hosted client with it; the local root's
+    /// answers carry none.
+    AnswerApproval { id: &'a str, nonce: Option<&'a str> },
     /// `human.ask`, raised (EN-2b).
     Ask(&'a AskRequest),
-    /// The local root answers the question it was handed under `id`.
-    Answer { id: &'a str },
+    /// The root answers the question it was handed under `id`; `nonce` as
+    /// for [`Request::AnswerApproval`].
+    Answer { id: &'a str, nonce: Option<&'a str> },
     /// The local root stops the run `node` names (TB-7).
     Cancel { node: &'a str },
     /// The local root takes the messages waiting for its next run (TM-2).
     TakeRunMessages,
+    /// A hosted root conversation's own lifecycle (ADR-0023 § 1: hosted
+    /// `Root` rows).
+    Conversation(ConversationOp),
+}
+
+/// What the hosted client does to a hosted root conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationOp {
+    Create,
+    List,
+    Delete,
 }
 
 impl Request<'_> {
@@ -220,6 +292,9 @@ impl Request<'_> {
             Self::Answer { .. } => Method::Answer,
             Self::Cancel { .. } => Method::Cancel,
             Self::TakeRunMessages => Method::TakeRunMessages,
+            Self::Conversation(ConversationOp::Create) => Method::ConversationCreate,
+            Self::Conversation(ConversationOp::List) => Method::ConversationList,
+            Self::Conversation(ConversationOp::Delete) => Method::ConversationDelete,
         }
     }
 }
@@ -236,6 +311,9 @@ pub enum Method {
     Answer,
     Cancel,
     TakeRunMessages,
+    ConversationCreate,
+    ConversationList,
+    ConversationDelete,
 }
 
 impl Method {
@@ -250,6 +328,9 @@ impl Method {
             Self::Answer => "root.answer",
             Self::Cancel => "root.cancel",
             Self::TakeRunMessages => "root.take_run_messages",
+            Self::ConversationCreate => "conversation.create",
+            Self::ConversationList => "conversation.list",
+            Self::ConversationDelete => "conversation.delete",
         }
     }
 }
@@ -280,6 +361,11 @@ pub struct Snapshot<'a> {
     pub callee: Callee,
     /// The sender's owner, for a `mailbox.post`.
     pub owner: Owner,
+    /// The hosted binding, on a hosted broker; `None` on a local one.
+    pub binding: Option<&'a Binding>,
+    /// For an answer: the nonce the broker gave the hosted client with
+    /// the pending id it names, if one is pending under it.
+    pub answer_nonce: Option<String>,
 }
 
 /// A snapshot that does not add up — the registry says one thing and the
@@ -362,6 +448,8 @@ pub enum Grant {
     Answer,
     Cancel,
     TakeRunMessages,
+    /// The hosted client's conversation request; hive performs it.
+    Conversation,
 }
 
 /// Where a granted `agent.invoke` runs.
@@ -444,7 +532,14 @@ fn decide_row(
     request: &Request<'_>,
     snapshot: &Snapshot<'_>,
 ) -> Result<Grant, Refused> {
+    if let (Caller::Root, Some(_)) = (caller, snapshot.binding) {
+        return Err(Refused::Caller(format!(
+            "{caller} may not {}: a hosted broker's only root is its hosted client",
+            request.method().as_str()
+        )));
+    }
     match (caller, request) {
+        (Caller::HostedRoot(client), request) => hosted(caller, client, request, snapshot),
         (Caller::Root | Caller::Node(_), Request::Invoke(params)) => {
             invoke(caller, params, snapshot)
         }
@@ -463,12 +558,17 @@ fn decide_row(
         (Caller::Root, Request::Answer { .. }) => Ok(Grant::Answer),
         (Caller::Root, Request::Cancel { .. }) => Ok(Grant::Cancel),
         (Caller::Root, Request::TakeRunMessages) => Ok(Grant::TakeRunMessages),
+        (Caller::Root, Request::Conversation(_)) => Err(Refused::Caller(format!(
+            "{caller} may not {}: conversations are the hosted root's rows",
+            request.method().as_str()
+        ))),
         (
             Caller::Node(_),
             Request::AnswerApproval { .. }
             | Request::Answer { .. }
             | Request::Cancel { .. }
-            | Request::TakeRunMessages,
+            | Request::TakeRunMessages
+            | Request::Conversation(_),
         ) => Err(Refused::Caller(format!(
             "{} is the local root's own request",
             request.method().as_str()
@@ -487,9 +587,95 @@ fn decide_row(
             | Request::Ask(_)
             | Request::Answer { .. }
             | Request::Cancel { .. }
-            | Request::TakeRunMessages,
+            | Request::TakeRunMessages
+            | Request::Conversation(_),
         ) => Err(Refused::Caller(outside(caller, request))),
     }
+}
+
+/// The hosted client's rows (ADR-0023 § 3, "Hosted client"): refused
+/// unless its `(tenant, user)` is the broker's binding; on a hosted-root
+/// broker it starts, cancels, reads and answers runs and keeps its
+/// conversations, and on a typed-root broker it only cancels and reads.
+/// An answer names its pending id and that id's nonce, never the session
+/// alone.
+fn hosted(
+    caller: &Caller,
+    client: &HostedClient,
+    request: &Request<'_>,
+    snapshot: &Snapshot<'_>,
+) -> Result<Grant, Refused> {
+    let method = request.method().as_str();
+    let Some(binding) = snapshot.binding else {
+        return Err(Refused::Caller(format!(
+            "{caller} may not {method}: this broker serves no hosted root"
+        )));
+    };
+    if !binding.admits(client) {
+        return Err(Refused::Caller(format!(
+            "{caller} may not {method}: this broker serves another tenant or user"
+        )));
+    }
+    let typed = match &binding.root {
+        BrokerRoot::Hosted => false,
+        BrokerRoot::Typed { .. } => true,
+    };
+    match request {
+        Request::Cancel { .. } => Ok(Grant::Cancel),
+        Request::TakeRunMessages => Ok(Grant::TakeRunMessages),
+        Request::Invoke(_)
+        | Request::List
+        | Request::AnswerApproval { .. }
+        | Request::Answer { .. }
+        | Request::Conversation(_)
+            if typed =>
+        {
+            Err(Refused::Caller(format!(
+                "{caller} may not {method}: on a typed-root broker the hosted client only \
+                 cancels and reads runs"
+            )))
+        }
+        Request::Invoke(params) => invoke(caller, params, snapshot),
+        Request::List => Ok(Grant::List),
+        Request::Post(_) => Err(Refused::Message(RefusalReason::NotOnTree)),
+        Request::Approve(_) | Request::Ask(_) => Err(Refused::Caller(format!(
+            "{caller} may not {method}: the root answers, it raises none through its broker"
+        ))),
+        Request::AnswerApproval { id, nonce } => {
+            nonce_matches(caller, id, *nonce, snapshot).map(|()| Grant::AnswerApproval)
+        }
+        Request::Answer { id, nonce } => {
+            nonce_matches(caller, id, *nonce, snapshot).map(|()| Grant::Answer)
+        }
+        Request::Conversation(_) => Ok(Grant::Conversation),
+    }
+}
+
+/// A hosted answer names a pending id and the nonce the broker handed out
+/// with it (ADR-0021 § 2): no nonce, no pending id, or another nonce
+/// refuses.
+fn nonce_matches(
+    caller: &Caller,
+    id: &str,
+    nonce: Option<&str>,
+    snapshot: &Snapshot<'_>,
+) -> Result<(), Refused> {
+    let Some(nonce) = nonce else {
+        return Err(Refused::Caller(format!(
+            "{caller} may not answer '{id}' without its nonce: an answer is never session-only"
+        )));
+    };
+    match snapshot.answer_nonce.as_deref() {
+        Some(expected) if constant_time_eq(expected.as_bytes(), nonce.as_bytes()) => Ok(()),
+        Some(_) | None => Err(Refused::Caller(format!(
+            "{caller} may not answer '{id}': no pending request has that id and nonce"
+        ))),
+    }
+}
+
+/// Byte equality whose time does not depend on where the inputs differ.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Why a `Remote` or `External` caller is refused `request`.
@@ -499,7 +685,7 @@ fn outside(caller: &Caller, request: &Request<'_>) -> String {
         Caller::External(Admitter::Key { .. }) => "edge rows arrive with GT-3",
         Caller::External(Admitter::LaunchToken) => "gateway rows arrive with GT-1",
         Caller::Remote(_) => "stream rows arrive with GT-2",
-        Caller::Root | Caller::Node(_) => "no row grants it",
+        Caller::Root | Caller::HostedRoot(_) | Caller::Node(_) => "no row grants it",
     };
     format!("{caller} may not {}: {why}", request.method().as_str())
 }
@@ -514,7 +700,9 @@ fn invoke(
     snapshot: &Snapshot<'_>,
 ) -> Result<Grant, Refused> {
     let (chain, from_run, node) = match caller {
-        Caller::Root => (CallChain::root(snapshot.root_task_id.clone()), None, None),
+        Caller::Root | Caller::HostedRoot(_) => {
+            (CallChain::root(snapshot.root_task_id.clone()), None, None)
+        }
         Caller::Node(node) => {
             let run = named_run(node, params.run.as_deref())?;
             (run.chain.clone(), Some(run.id), Some(node))
@@ -590,7 +778,9 @@ fn spawn_from(
     if !spawn.own.roster.contains(&spawn.target.name) {
         let name = match caller {
             Caller::Node(node) => node.name.clone(),
-            Caller::Root | Caller::Remote(_) | Caller::External(_) => caller.to_string(),
+            Caller::Root | Caller::HostedRoot(_) | Caller::Remote(_) | Caller::External(_) => {
+                caller.to_string()
+            }
         };
         return Err(Refused::Roster(format!(
             "'{}' is not on {name}'s roster",

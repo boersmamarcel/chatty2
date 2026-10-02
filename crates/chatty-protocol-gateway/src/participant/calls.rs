@@ -163,6 +163,7 @@ use super::gate::{
     self, Admitter, Callee, Caller, Decision, Grant, InvokeTarget, NodeCaller, Owner, PostTo,
     Refused, Request, Snapshot, SpawnView, Unreadable,
 };
+use super::hosted::Hosted;
 use super::protocol::{CallStamp, DelegatedTask, TaskState};
 use super::registry::{ParticipantRegistry, ROOT_SCOPE, TaskUpdate};
 use super::spawn_context::{self, Target};
@@ -236,6 +237,9 @@ pub struct BrokerCalls {
     /// Who called each node a call is running, by the node's name: where
     /// its questions go (EN-2b).
     routes: Routes,
+    /// The binding, decision log and answer nonces of a hosted broker
+    /// (HS-4a); `None` on a local one.
+    hosted: Option<Hosted>,
 }
 
 /// Approvals waiting on the root, by broker id.
@@ -782,7 +786,31 @@ impl BrokerCalls {
             questions: Arc::default(),
             next_question: AtomicU64::new(0),
             routes: Arc::default(),
+            hosted: None,
         }
+    }
+
+    /// A hosted broker's call path (HS-4a): `policy` is required, so the
+    /// local default is never inherited, every decision is written to
+    /// `hosted`'s log before its effect, and the only root is the hosted
+    /// client its binding names.
+    pub(crate) fn new_hosted(
+        registry: ParticipantRegistry,
+        runners: Arc<BTreeMap<String, Arc<dyn VirtualAgent>>>,
+        edges: Option<Arc<Mutex<EdgeLog>>>,
+        policy: Arc<dyn CallPolicy>,
+        hosted: Hosted,
+    ) -> Self {
+        Self {
+            policy: Policy::Configured(policy),
+            hosted: Some(hosted),
+            ..Self::new(registry, runners, edges)
+        }
+    }
+
+    /// The hosted state, on a hosted broker.
+    pub(crate) fn hosted_state(&self) -> Option<&Hosted> {
+        self.hosted.as_ref()
     }
 
     /// Raise `node`'s `human.ask` (EN-2b): stamp it with the name `node` was
@@ -1012,7 +1040,17 @@ impl BrokerCalls {
     /// Decide one of the local root's own requests (ADR-0023 § 3's local
     /// root row) before its effect.
     fn root_request(&self, request: &Request<'_>) -> Result<(), CallError> {
-        self.gate(&Peer::Root, &Caller::Root, request)
+        self.root_request_as(&Caller::Root, request)
+    }
+
+    /// Decide one of the root's own requests as `caller`: the local root,
+    /// or a hosted broker's client (HS-4a).
+    pub(crate) fn root_request_as(
+        &self,
+        caller: &Caller,
+        request: &Request<'_>,
+    ) -> Result<(), CallError> {
+        self.gate(&Peer::Root, caller, request)
             .outcome
             .map(|_| ())
             .map_err(|refused| refused.to_call_error())
@@ -1032,6 +1070,13 @@ impl BrokerCalls {
     /// the caller's permit either (PL-S2).
     pub fn call(&self, peer: Peer, request: CallRequest) -> CallStream {
         let caller = self.resolve(&peer);
+        self.call_as(peer, caller, request)
+    }
+
+    /// Run `request` as `caller`, whom `peer`'s transport authenticated:
+    /// [`call`](Self::call) for a peer the broker resolves itself, and a
+    /// hosted broker's client (HS-4a), which its API resolved.
+    pub(crate) fn call_as(&self, peer: Peer, caller: Caller, request: CallRequest) -> CallStream {
         match request {
             CallRequest::InvokeAgent(params) => {
                 let decision = self.gate(&peer, &caller, &Request::Invoke(&params));
@@ -1120,12 +1165,20 @@ impl BrokerCalls {
             },
             _ => Owner::None,
         };
+        let answer_nonce = match (request, self.hosted.as_ref()) {
+            (Request::Answer { id, .. } | Request::AnswerApproval { id, .. }, Some(hosted)) => {
+                hosted.nonce_of(id)
+            }
+            _ => None,
+        };
         Ok(Snapshot {
             policy: self.policy.get(),
             now: std::time::SystemTime::now(),
             root_task_id: uuid::Uuid::new_v4().to_string(),
             callee,
             owner,
+            binding: self.hosted.as_ref().map(|hosted| &hosted.binding),
+            answer_nonce,
         })
     }
 
@@ -1175,7 +1228,18 @@ impl BrokerCalls {
     /// outcome with the typed caller and the row it matched, before any
     /// effect. An internal error is alarmed.
     fn gate(&self, peer: &Peer, caller: &Caller, request: &Request<'_>) -> Decision {
-        let decision = gate::decide(caller, request, &self.snapshot(peer, request));
+        let mut decision = gate::decide(caller, request, &self.snapshot(peer, request));
+        // A hosted broker writes every decision before its effect, and a
+        // write that fails refuses (ADR-0023 § 7): an unlogged grant on a
+        // hosted broker is an internal error. A local broker's log is the
+        // tracing line below, which cannot fail.
+        if let Some(hosted) = self.hosted.as_ref()
+            && let Err(why) = hosted.record(caller, &decision)
+        {
+            decision.outcome = Err(Refused::Internal(format!(
+                "the decision log write failed: {why}"
+            )));
+        }
         match &decision.outcome {
             Ok(_) => debug!(target: "chatty::gate", %caller, row = %decision.row, "granted"),
             Err(Refused::Internal(why)) => {
@@ -1400,7 +1464,10 @@ impl BrokerCalls {
         let task = DelegatedTask::new(params.prompt)
             .with_call(Some(stamp))
             .with_spawn_context(spawn)
-            .with_swarm_events(reports_to.is_some());
+            .with_swarm_events(reports_to.is_some())
+            // A hosted broker's tasks carry its binding, and no other
+            // (ADR-0021 § 3).
+            .with_identity(self.hosted.as_ref().map(Hosted::identity));
         let agent = params.agent;
         // The caller's messages ride on this call's result (delivery point
         // a), taken when the result is made.
@@ -1691,7 +1758,7 @@ fn refusal_row(refused: &Refused) -> String {
 /// caller's.
 fn calling_chain(caller: &Caller, params: &InvokeAgentParams) -> Vec<String> {
     match caller {
-        Caller::Root => vec![ROOT_NAME.to_string()],
+        Caller::Root | Caller::HostedRoot(_) => vec![ROOT_NAME.to_string()],
         Caller::Node(node) => node
             .runs
             .iter()
@@ -1816,13 +1883,15 @@ impl Transport for DirectTransport {
 
     /// The root's answers to a question the broker delivered (EN-2b).
     async fn answer(&self, id: &str, answers: Vec<Answer>) -> Result<(), CallError> {
-        self.calls.root_request(&Request::Answer { id })?;
+        self.calls
+            .root_request(&Request::Answer { id, nonce: None })?;
         self.calls.answer_question(id, answers)
     }
 
     /// The root's answer to an approval the broker delivered (EN-2a).
     async fn approve(&self, id: &str, verdict: ApprovalVerdict) -> Result<(), CallError> {
-        self.calls.root_request(&Request::AnswerApproval { id })?;
+        self.calls
+            .root_request(&Request::AnswerApproval { id, nonce: None })?;
         self.calls.answer_approval(id, verdict)
     }
 
@@ -2391,6 +2460,8 @@ mod tests {
                 spec: agent.to_string(),
             },
             owner: Owner::None,
+            binding: None,
+            answer_nonce: None,
         });
         match gate::decide(&caller, &Request::Invoke(&params), &snapshot).outcome {
             Ok(Grant::Invoke { stamp, .. }) => Ok(stamp),

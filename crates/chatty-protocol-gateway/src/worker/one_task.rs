@@ -564,6 +564,88 @@ mod tests {
         panic!("call to {agent} ended without a result");
     }
 
+    /// HS-4a: worker mode over any connected stream. The broker serves one
+    /// end of a `UnixStream` pair it did not make — standing in for the
+    /// vsock stream a hosted broker accepts — and the worker connects
+    /// first: `session.hello` carries this build's schema hash, `welcome`
+    /// names the node before the worker builds anything, and only then is
+    /// the agent built around the connection's transport. A task and a
+    /// call then round-trip over the same connection.
+    #[tokio::test]
+    async fn worker_mode_v2_over_any_stream() {
+        let registry = ParticipantRegistry::new();
+        let calls = Arc::new(BrokerCalls::new(
+            registry.clone(),
+            Arc::new(BTreeMap::new()),
+            None,
+        ));
+        registry.install_calls(&calls);
+        let mut wire = registry.tap_wire();
+
+        let node = registry
+            .admit("analyst", chatty_fabric::AgentOrigin::Fleet, None)
+            .unwrap();
+        let admitted = node.name().to_string();
+        let (broker_end, worker_end) = UnixStream::pair().unwrap();
+        tokio::spawn(crate::participant::serve_connection(
+            broker_end,
+            registry.clone(),
+            node,
+        ));
+
+        // Connect first: the welcome names the node; nothing is built yet.
+        let worker = WorkerConnection::connect(worker_end, worker_card("test"))
+            .await
+            .expect("the broker welcomes the worker");
+        assert_eq!(worker.name(), admitted);
+        assert_eq!(worker.owner(), chatty_fabric::ROOT_NAME);
+        let hello = wire.recv().await.expect("the hello was on the wire");
+        assert!(hello.contains("session.hello"), "{hello}");
+        assert!(
+            hello.contains(chatty_fabric::wire::schema::hash()),
+            "the hello carries the schema hash: {hello}"
+        );
+        // Then build: the agent gets the connection's transport.
+        let transport = worker.transport();
+
+        let (_task, mut updates) = registry
+            .submit_task(&admitted, DelegatedTask::from_root("list your peers"))
+            .await
+            .expect("the worker is registered");
+        let me = admitted.clone();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            worker.serve_one_task(move |task, sink, _inputs| async move {
+                assert_eq!(task.text, "list your peers");
+                let mut stream = transport.call(CallRequest::ListAgents).await?;
+                let Some(Ok(CallEvent::Result(CallResult::Agents(agents)))) = stream.next().await
+                else {
+                    anyhow::bail!("agent.list answers with the directory");
+                };
+                assert!(agents.iter().any(|agent| agent.name == me), "{agents:?}");
+                sink(&SessionEvent::Text(format!("{} agents", agents.len())));
+                Ok(())
+            }),
+        )
+        .await
+        .expect("the task finishes")
+        .expect("the task ran");
+
+        let mut text = String::new();
+        let mut state = None;
+        while let Some(update) = updates.recv().await {
+            match update {
+                crate::participant::TaskUpdate::Artifact { text: chunk, .. } => {
+                    text.push_str(&chunk)
+                }
+                crate::participant::TaskUpdate::Status { state: s, .. } => state = Some(s),
+                crate::participant::TaskUpdate::Event(_) => {}
+            }
+        }
+        assert_eq!(text, "1 agents");
+        assert_eq!(state, Some(TaskState::Completed));
+    }
+
     /// BI-4: three calls in flight in one task, over one connection, finish
     /// out of order, and each result reaches the call that asked for it. A
     /// fourth, to nobody, fails on its own without disturbing the rest.
