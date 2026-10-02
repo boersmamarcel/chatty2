@@ -1887,6 +1887,19 @@ async fn grandchild_branches_from_its_subleader() {
     );
 }
 
+/// A task the root hands the node of `spec` directly, stamped as the
+/// root's granted call would be (ADR-0023 § 1), so it opens the node's run.
+fn root_task(text: &str, spec: &str) -> chatty_protocol_gateway::participant::DelegatedTask {
+    use chatty_protocol_gateway::participant::{CallStamp, DelegatedTask};
+    DelegatedTask::new(text).with_call(Some(CallStamp {
+        caller: None,
+        from_run: None,
+        chain: chatty_fabric::CallChain::root("t-fixture")
+            .extend(spec)
+            .expect("a chain of one"),
+    }))
+}
+
 /// Invariant 6: a spawn context that reaches outside the calling node's own
 /// is refused, naming the field, and nothing is spawned. The caller is a
 /// node on a connection the root broker made, whose own context is the
@@ -1895,7 +1908,7 @@ async fn grandchild_branches_from_its_subleader() {
 #[tokio::test]
 async fn spawn_context_is_clamped() {
     use chatty_fabric::{CallError, CallEvent, CallRequest, InvokeAgentParams, SpawnContext};
-    use chatty_protocol_gateway::participant::{DelegatedTask, open_connection};
+    use chatty_protocol_gateway::participant::open_connection;
     use chatty_protocol_gateway::worker::{WorkerConnection, worker_card};
     use futures::StreamExt;
 
@@ -1959,7 +1972,7 @@ async fn spawn_context_is_clamped() {
     };
 
     let (_task, _updates) = registry
-        .submit_task(&name, DelegatedTask::new("widen your context"))
+        .submit_task(&name, root_task("widen your context", LEAD))
         .await
         .expect("the rogue node is connected");
     let refusals = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -1974,8 +1987,9 @@ async fn spawn_context_is_clamped() {
                         prompt: "hi".to_string(),
                         handle: None,
                         include_trace: false,
-                        spawn_context: Some(context),
+                        spawn_context: Some(Box::new(context)),
                         remaining: Default::default(),
+                        run: None,
                     }))
                     .await
                     .expect("the call goes out");
@@ -2421,7 +2435,7 @@ async fn owner_receives_message_once() {
 #[tokio::test]
 async fn no_mid_run_delivery() {
     use chatty_fabric::{CallEvent, CallRequest, MessageStatus, SendMessageParams};
-    use chatty_protocol_gateway::participant::{DelegatedTask, open_connection};
+    use chatty_protocol_gateway::participant::open_connection;
     use chatty_protocol_gateway::worker::{WorkerConnection, worker_card};
     use futures::StreamExt;
 
@@ -2463,7 +2477,7 @@ async fn no_mid_run_delivery() {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let (_task, _updates) = registry
-        .submit_task(&courier, DelegatedTask::new("tell the root"))
+        .submit_task(&courier, root_task("tell the root", "courier"))
         .await
         .expect("the courier is connected");
     let status = std::sync::Arc::new(parking_lot::Mutex::new(None));

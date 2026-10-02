@@ -48,6 +48,9 @@
 //! (connect-then-build). The read half routes each `call_*` reply to the
 //! call it names; the write half interleaves `call` frames with the task's
 //! progress.
+//! Every `agent.invoke` it writes names the task's run — the `taskId` of
+//! the `task.run` it serves — which is the run the broker decides the call
+//! under (ADR-0023 § 1, GT-0b).
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -56,7 +59,7 @@ use anyhow::{Context, Result};
 use chatty_core::services::fabric_transport::{CallReplies, Outbound, SocketTransport};
 use chatty_core::services::{StreamError, StreamErrorKind};
 use chatty_core::session::SessionEvent;
-use chatty_fabric::{AskReply, Transport};
+use chatty_fabric::{AskReply, CallRequest, InvokeAgentParams, Transport};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -216,6 +219,9 @@ impl WorkerConnection {
         };
 
         let (reader, mut writer_half) = connection.into_split();
+        // Every call this worker makes is made from the one task it serves,
+        // and names that task's run (ADR-0023 § 1, GT-0b).
+        let task_run = task_id.clone();
         // The turn's progress and its calls share the write half, until the
         // turn is over; then whatever progress is still queued goes out, and
         // the socket is free for the terminal status.
@@ -233,7 +239,10 @@ impl WorkerConnection {
                         }
                     },
                     Some(outbound) = calls.recv() => match outbound {
-                        Outbound::Call { id, request } => ParticipantFrame::Call { id, request },
+                        Outbound::Call { id, request } => ParticipantFrame::Call {
+                            id,
+                            request: from_run(request, &task_run),
+                        },
                         Outbound::Ask { id, request } => ParticipantFrame::Ask { id, request },
                         Outbound::CancelAsk { id } => ParticipantFrame::CancelAsk { id },
                     },
@@ -318,6 +327,17 @@ where
         .await?
         .serve_one_task(run)
         .await
+}
+
+/// `request`, made from the run named `run`: an `agent.invoke` names it.
+fn from_run(request: CallRequest, run: &str) -> CallRequest {
+    match request {
+        CallRequest::InvokeAgent(params) => CallRequest::InvokeAgent(InvokeAgentParams {
+            run: Some(run.to_string()),
+            ..params
+        }),
+        other @ (CallRequest::ListAgents | CallRequest::SendMessage(_)) => other,
+    }
 }
 
 /// Hand a `call_*` frame to the call it names. `false` for any other frame.
@@ -519,6 +539,7 @@ mod tests {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         })
     }
 
@@ -576,7 +597,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         let (_task, _updates) = registry
-            .submit_task(&name, DelegatedTask::new("call three agents"))
+            .submit_task(&name, DelegatedTask::from_root("call three agents"))
             .await
             .expect("the caller is connected");
 

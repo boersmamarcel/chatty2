@@ -477,6 +477,7 @@ fn calls_map_to_requests_and_back() {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         }),
     };
     let line = worker.encode(&invoke).unwrap().unwrap();

@@ -51,10 +51,12 @@
 //! worker that withdraws its question, or whose connection closes because
 //! its callee ended or was stopped, withdraws it from wherever it waits: a
 //! `req.cancel` to the node it was relayed to, or the root's popover
-//! ([`CallEvent::InputWithdrawn`] under the broker's id). A root call that
-//! ends leaves every question still waiting on it unanswered, and a node no
-//! call is running has nobody to ask. A call that ends withdraws whatever
-//! its callee still asks.
+//! ([`CallEvent::InputWithdrawn`] under the broker's id). A call that ends
+//! withdraws whatever its callee still asks. Like an approval, a question
+//! whose root call or asker's call ends gets no result at all: the asker
+//! waits until it is reaped with that call's subtree, and never acts on a
+//! reply in between. The gate decides first: a node asks only from the one
+//! open run it serves, and only the root answers.
 //!
 //! An approval does not climb: only the root answers one (ADR-0021 § 2,
 //! EN-2a). A node's `human.approve` reaches [`BrokerCalls::raise_approval`],
@@ -66,8 +68,10 @@
 //! request that asked, and nowhere else. A worker that withdraws its
 //! request, or whose connection closes because its callee ended or was
 //! stopped, withdraws the root's card ([`CallEvent::InputWithdrawn`] under
-//! the broker's id); a root call that ends denies whatever is still pending
-//! under it. An approval with no root call to go to is denied.
+//! the broker's id). A root call that ends answers nothing still pending
+//! under it: the asker is in the subtree that goes with the call, and a
+//! verdict sent now would race its reaping and let it act on a call that
+//! is over. An approval with no root call to go to is denied.
 //!
 //! A caller metered on a model endpoint does not hold its permit while it
 //! waits (BI-6): an `invoke_agent` call releases the caller's
@@ -78,11 +82,22 @@
 //! budget-1 endpoint. A call dropped while it waits takes nothing and
 //! delivers nothing.
 //!
+//! Every request — a call over a worker's connection, or the root's over
+//! its direct handle — passes the broker gate before any effect
+//! ([`super::gate`], ADR-0023, GT-0): the broker resolves the typed
+//! [`Caller`] from the [`Peer`] that authenticated the request and the task
+//! table, copies what the decision needs into a [`Snapshot`], and acts only
+//! on the [`Grant`] [`decide`] returns, on the target it names. Every
+//! decision is logged with the typed caller and the row it matched before
+//! anything happens. A node calls from a run it serves, and its
+//! `agent.invoke` names that run (GT-0b); a node with no open run is a
+//! chainless `External`, refused everywhere.
+//!
 //! Before an `invoke_agent` call spawns, submits or permits anything, the
-//! broker checks it (PL-S2): a node's call against the specs'
+//! gate checks it (PL-S2): a node's call against the specs'
 //! [`CallPolicy`] (`delegates_to`, `exposed`, `callers`; DP-1's
 //! `may_call`), then every call against its [`CallChain`] (DP-2). The chain
-//! is the calling run's own, from the broker's task table, plus the callee:
+//! is the named run's own, from the broker's task table, plus the callee:
 //! a call frame says nothing about where its caller is, and anything extra
 //! it carries is dropped when it is parsed. A call that would close a cycle
 //! or go deeper than [`MAX_DEPTH`](chatty_fabric::MAX_DEPTH) ends with
@@ -136,30 +151,37 @@ use chatty_fabric::{
     CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallStream,
     ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL, InvokeAgentOutcome,
     InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal,
-    RefusalReason, Remaining, SendMessageParams, SpawnContext, SwarmBatcher, SwarmItem, Transport,
-    UsagePricer, deadline_grace,
+    RefusalReason, SendMessageParams, SwarmBatcher, SwarmItem, Transport, UsagePricer,
+    deadline_grace,
 };
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
+use super::gate::{
+    self, Admitter, Callee, Caller, Decision, Grant, InvokeTarget, NodeCaller, Owner, PostTo,
+    Refused, Request, Snapshot, SpawnView, Unreadable,
+};
 use super::protocol::{CallStamp, DelegatedTask, TaskState};
 use super::registry::{ParticipantRegistry, ROOT_SCOPE, TaskUpdate};
-use super::spawn_context;
+use super::spawn_context::{self, Target};
 use super::virtual_agent::VirtualAgent;
 use crate::handlers::a2a_participant;
 
-/// Who a call is made as.
+/// Who is on the other end of a request, as its transport authenticated
+/// it: the root's direct handle, or the connection the broker made for a
+/// node. The gate resolves the typed [`Caller`] from it and the task table,
+/// per request (ADR-0023 § 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Caller {
+pub enum Peer {
     /// The in-process root, through its [`DirectTransport`].
     Root,
     /// A node, by the name its connection was admitted under.
     Node(String),
 }
 
-impl Caller {
+impl Peer {
     fn name(&self) -> &str {
         match self {
             Self::Root => ROOT_NAME,
@@ -253,11 +275,15 @@ impl RaisedApproval {
         }
     }
 
-    /// The root's answer; `Denied` when there is nobody to ask or the root
-    /// call it went to has ended.
+    /// The root's answer; `Denied` when there was nobody to ask. Never,
+    /// once the root call it went to has ended: the asker is reaped with
+    /// that call's subtree, and must not act before it is.
     pub(crate) async fn verdict(&mut self) -> ApprovalVerdict {
         match self.pending.as_mut() {
-            Some((_, answer)) => answer.await.unwrap_or(ApprovalVerdict::Denied),
+            Some((_, answer)) => match answer.await {
+                Ok(verdict) => verdict,
+                Err(_) => std::future::pending().await,
+            },
             None => ApprovalVerdict::Denied,
         }
     }
@@ -285,7 +311,7 @@ type Routes = Arc<Mutex<HashMap<String, Route>>>;
 struct Route {
     /// Which call: the entry is its own to take off again.
     call: u64,
-    caller: Caller,
+    caller: Peer,
     /// The chain the broker stamped on the call: its root call's id, and
     /// the specs from the root to the callee.
     chain: CallChain,
@@ -399,8 +425,9 @@ pub(crate) struct RaisedQuestion {
 
 impl RaisedQuestion {
     /// The answers, from the first caller up the chain that gave any.
-    /// `Err` when nobody is left to ask, or the root call it reached ended
-    /// without an answer.
+    /// `Err` when nobody is left to ask. Never, once the call it waited on
+    /// or the asker's own call has ended: the asker is reaped with that
+    /// call's subtree, and must not act before it is.
     pub(crate) async fn answers(&mut self) -> Result<Vec<Answer>, CallError> {
         let unanswered = || CallError::Failed("the question went unanswered".to_string());
         loop {
@@ -412,14 +439,14 @@ impl RaisedQuestion {
             // The root call this hop's call is nested under.
             let root_task_id = route.chain.root_task_id;
             let hop = match route.caller {
-                Caller::Root => {
+                Peer::Root => {
                     let Some(root) = lock_swarm(&self.swarm).get(&root_task_id).cloned() else {
                         warn!(question = %self.id, "A question with no root call to ask");
                         return Err(unanswered());
                     };
                     Hop::Root(root)
                 }
-                Caller::Node(caller) => Hop::Node(caller),
+                Peer::Node(caller) => Hop::Node(caller),
             };
             // In the table before it is sent, so an answer — or a root call
             // that ends — in between finds it.
@@ -462,7 +489,11 @@ impl RaisedQuestion {
                     // The root has nobody to escalate to.
                     Hop::Root(_) => return Err(unanswered()),
                 },
-                Err(_) => return Err(unanswered()),
+                // The call the question waited on ended, or the asker's
+                // own did: like an approval (EN-2a), it is never answered
+                // then, and the asker is reaped with the call's subtree
+                // before it can act on a reply.
+                Err(_) => std::future::pending::<()>().await,
             }
         }
     }
@@ -516,7 +547,7 @@ static NEXT_STOPPABLE: AtomicU64 = AtomicU64::new(0);
 /// it off again.
 fn stoppable(
     stops: &Stops,
-    caller: &Caller,
+    caller: &Peer,
     agent: &str,
     node: &str,
 ) -> (oneshot::Receiver<()>, StopGuard) {
@@ -526,7 +557,7 @@ fn stoppable(
         id,
         node: node.to_string(),
         agent: agent.to_string(),
-        by_root: *caller == Caller::Root,
+        by_root: *caller == Peer::Root,
         stop,
     });
     (
@@ -565,8 +596,8 @@ struct Nested {
 }
 
 /// A root call's end of [`Swarm`]; stops listening when dropped, which
-/// denies every approval still waiting on it and leaves every question
-/// waiting on it unanswered.
+/// drops every approval and every question still waiting on it
+/// unanswered.
 struct Listening {
     swarm: Swarm,
     approvals: Approvals,
@@ -603,10 +634,10 @@ impl Drop for Listening {
             .filter(|(_, pending)| pending.root_task_id == self.root_task_id)
             .map(|(id, _)| id.clone())
             .collect();
+        // Unanswered: dropping the answer's sender leaves the asker
+        // waiting until its connection closes with the call's subtree.
         for id in orphaned {
-            if let Some(pending) = approvals.remove(&id) {
-                let _ = pending.answer.send(ApprovalVerdict::Denied);
-            }
+            approvals.remove(&id);
         }
         drop(approvals);
         // Dropping a question's reply leaves it unanswered.
@@ -770,12 +801,14 @@ impl BrokerCalls {
         node: &str,
         mut request: AskRequest,
     ) -> Result<RaisedQuestion, CallError> {
-        let Some(chain) = lock_routes(&self.routes)
-            .get(node)
-            .map(|route| route.chain.clone())
-        else {
-            warn!(participant = %node, "A question from a node no call is running");
-            return Err(nobody_above());
+        // The gate first (ADR-0023 § 3): a node asks only from the task it
+        // serves, whose run's chain stamps the asker.
+        let peer = Peer::Node(node.to_string());
+        let caller = self.resolve(&peer);
+        let chain = match self.gate(&peer, &caller, &Request::Ask(&request)).outcome {
+            Ok(Grant::Ask { chain }) => chain,
+            Ok(other) => unreachable!("human.ask granted as {other:?}"),
+            Err(refused) => return Err(refused.to_call_error()),
         };
         request.asker = Some(Asker {
             agent: node.to_string(),
@@ -846,9 +879,17 @@ impl BrokerCalls {
         node: &str,
         mut request: ApprovalRequest,
     ) -> RaisedApproval {
-        let Some(chain) = self.registry.run_chain(node) else {
-            warn!(participant = %node, "Denying an approval from a node serving no run");
-            return RaisedApproval::denied(&self.approvals);
+        // The gate first (ADR-0023 § 3): a refused approval is denied
+        // without asking.
+        let peer = Peer::Node(node.to_string());
+        let caller = self.resolve(&peer);
+        let chain = match self
+            .gate(&peer, &caller, &Request::Approve(&request))
+            .outcome
+        {
+            Ok(Grant::Approve { chain }) => chain,
+            Ok(other) => unreachable!("human.approve granted as {other:?}"),
+            Err(_) => return RaisedApproval::denied(&self.approvals),
         };
         let Some(root) = lock_swarm(&self.swarm).get(&chain.root_task_id).cloned() else {
             warn!(participant = %node, "Denying an approval with no root call to ask");
@@ -968,61 +1009,218 @@ impl BrokerCalls {
         self
     }
 
+    /// Decide one of the local root's own requests (ADR-0023 § 3's local
+    /// root row) before its effect.
+    fn root_request(&self, request: &Request<'_>) -> Result<(), CallError> {
+        self.gate(&Peer::Root, &Caller::Root, request)
+            .outcome
+            .map(|_| ())
+            .map_err(|refused| refused.to_call_error())
+    }
+
     /// Price each callee's reported usage on its task row with `pricer`.
     pub fn with_pricer(mut self, pricer: Option<Arc<dyn UsagePricer>>) -> Self {
         self.pricer = pricer;
         self
     }
 
-    /// Run `request` as `caller`. The stream is the call: progress, then one
+    /// Run `request` as `peer`. The stream is the call: progress, then one
     /// result or error. Dropping it cancels whatever the call started.
-    pub fn call(&self, caller: Caller, request: CallRequest) -> CallStream {
+    ///
+    /// Decided first, here and before anything else (ADR-0023 § 1): a
+    /// refused call spawns, submits and queues nothing, and does not touch
+    /// the caller's permit either (PL-S2).
+    pub fn call(&self, peer: Peer, request: CallRequest) -> CallStream {
+        let caller = self.resolve(&peer);
         match request {
             CallRequest::InvokeAgent(params) => {
-                // Checked first: a refused call spawns nothing and does not
-                // touch the caller's permit either (PL-S2).
-                let (edge, stamp) = match self.admit(&caller, &params) {
-                    Ok(admitted) => admitted,
-                    Err(refused) => return refused,
+                let decision = self.gate(&peer, &caller, &Request::Invoke(&params));
+                let mut edge = EdgeGuard {
+                    log: self.edges.clone(),
+                    from: peer.name().to_string(),
+                    to: params.agent.clone(),
+                    chain: calling_chain(&caller, &params),
+                    bytes: params.prompt.len() as u64,
+                    outcome: None,
+                    usd: None,
+                };
+                let (target, stamp) = match decision.outcome {
+                    Ok(Grant::Invoke { target, stamp }) => (target, stamp),
+                    Ok(other) => unreachable!("agent.invoke granted as {other:?}"),
+                    Err(refused) => {
+                        edge.refused(&refusal_row(&refused));
+                        return refusal_stream(refused.to_call_error());
+                    }
                 };
                 // Released now, before the callee queues for a slot that
                 // may be this very one.
-                let child = match &caller {
-                    Caller::Node(name) => self.registry.node_permit(name).map(|p| p.child_call()),
-                    Caller::Root => None,
+                let child = match &peer {
+                    Peer::Node(name) => self.registry.node_permit(name).map(|p| p.child_call()),
+                    Peer::Root => None,
                 };
-                let call = self.invoke(caller, params, edge, stamp);
+                let call = self.invoke(peer, params, edge, stamp, target);
                 match child {
                     Some(child) => gated(child, call),
                     None => call,
                 }
             }
-            CallRequest::ListAgents => {
-                futures::stream::iter([Ok(CallEvent::Result(self.directory()))]).boxed()
-            }
+            CallRequest::ListAgents => match self.gate(&peer, &caller, &Request::List).outcome {
+                Ok(_) => futures::stream::iter([Ok(CallEvent::Result(self.directory()))]).boxed(),
+                Err(refused) => {
+                    let error = refused.to_call_error();
+                    self.log_refusal(&peer, "agent.list", &error.to_string());
+                    refusal_stream(error)
+                }
+            },
             CallRequest::SendMessage(params) => {
-                let status = self.send_message(&caller, params);
+                let status = self.send_message(&peer, &caller, params);
                 futures::stream::iter([Ok(CallEvent::Result(json!(status)))]).boxed()
             }
         }
     }
 
+    /// The typed caller `peer` is for this request (ADR-0023 § 2): the
+    /// root, or the node with the runs it serves — a node with none, or a
+    /// name no node was admitted under, is a chainless `External`.
+    fn resolve(&self, peer: &Peer) -> Caller {
+        let Peer::Node(name) = peer else {
+            return Caller::Root;
+        };
+        match self.registry.open_runs_of(name) {
+            Some((spec, runs)) if !runs.is_empty() => Caller::Node(NodeCaller {
+                name: name.clone(),
+                spec,
+                runs,
+            }),
+            _ => Caller::External(Admitter::Chainless),
+        }
+    }
+
+    /// What [`decide`](gate::decide) reads for `request` from `peer`: the
+    /// policy, the clock, the callee and the sender's owner, copied out of
+    /// the registry and the runners. [`Unreadable`] when the registry does
+    /// not add up.
+    fn snapshot(&self, peer: &Peer, request: &Request<'_>) -> Result<Snapshot<'_>, Unreadable> {
+        let callee = match request {
+            Request::Invoke(params) => self.callee(peer, params)?,
+            _ => Callee::None,
+        };
+        let owner = match (request, peer) {
+            (Request::Post(_), Peer::Node(name)) => match self.registry.node_and_owner(name) {
+                None => Owner::None,
+                Some((_, None)) => Owner::Root,
+                Some((_, Some(owner))) => Owner::Node {
+                    id: owner.id(),
+                    name: owner.name().as_str().to_string(),
+                    ended: owner.state() == NodeState::Ended,
+                },
+            },
+            _ => Owner::None,
+        };
+        Ok(Snapshot {
+            policy: self.policy.get(),
+            now: std::time::SystemTime::now(),
+            root_task_id: uuid::Uuid::new_v4().to_string(),
+            callee,
+            owner,
+        })
+    }
+
+    /// Who `params.agent` names: a registered participant (by its node
+    /// name), a virtual agent, or nobody. A registered name wins.
+    fn callee(&self, peer: &Peer, params: &InvokeAgentParams) -> Result<Callee, Unreadable> {
+        if let Some(spec) = self.registry.registered_spec(&params.agent) {
+            let spec = spec.ok_or_else(|| {
+                Unreadable(format!(
+                    "participant '{}' is registered with no admitted node",
+                    params.agent
+                ))
+            })?;
+            return Ok(Callee::Node {
+                name: params.agent.clone(),
+                spec,
+            });
+        }
+        let Some(runner) = self.runners.get(&params.agent) else {
+            return Ok(Callee::Unknown);
+        };
+        let target = Target::of(runner.as_ref());
+        // A node no runner recorded a context for is the root's.
+        let own = match peer {
+            Peer::Node(name) => self.registry.node_context(name),
+            Peer::Root => None,
+        }
+        .unwrap_or_else(|| spawn_context::root(&self.runners, &target));
+        let inside_own_tree = match (
+            params
+                .spawn_context
+                .as_ref()
+                .and_then(|context| context.workspace_root.as_deref()),
+            own.workspace_root.as_deref(),
+        ) {
+            (Some(root), Some(tree)) => spawn_context::lies_inside(root, tree),
+            _ => false,
+        };
+        Ok(Callee::Runner(SpawnView {
+            target,
+            own,
+            inside_own_tree,
+        }))
+    }
+
+    /// Decide `request` from `caller` (who `peer` resolved to), and log the
+    /// outcome with the typed caller and the row it matched, before any
+    /// effect. An internal error is alarmed.
+    fn gate(&self, peer: &Peer, caller: &Caller, request: &Request<'_>) -> Decision {
+        let decision = gate::decide(caller, request, &self.snapshot(peer, request));
+        match &decision.outcome {
+            Ok(_) => debug!(target: "chatty::gate", %caller, row = %decision.row, "granted"),
+            Err(Refused::Internal(why)) => {
+                error!(target: "chatty::gate", %caller, row = %decision.row, %why, "refused: internal")
+            }
+            Err(refused) => {
+                warn!(target: "chatty::gate", %caller, row = %decision.row, refused = %refused.to_call_error(), "refused")
+            }
+        }
+        decision
+    }
+
+    /// Log one refusal row for a request that is not an edge between two
+    /// nodes: `what` names what it asked for.
+    fn log_refusal(&self, peer: &Peer, what: &str, outcome: &str) {
+        EdgeGuard {
+            log: self.edges.clone(),
+            from: peer.name().to_string(),
+            to: what.to_string(),
+            chain: Vec::new(),
+            bytes: 0,
+            outcome: None,
+            usd: None,
+        }
+        .refused(outcome);
+    }
+
     /// Queue `params` for its recipient as `caller`, or refuse it, and log
     /// one message row either way.
-    fn send_message(&self, caller: &Caller, params: SendMessageParams) -> MessageStatus {
+    fn send_message(
+        &self,
+        peer: &Peer,
+        caller: &Caller,
+        params: SendMessageParams,
+    ) -> MessageStatus {
         let bytes = params.text.len() as u64;
         let to = params.to.clone();
-        let status = self.accept_message(caller, params);
+        let status = self.accept_message(peer, caller, params);
         let outcome = match &status {
             MessageStatus::Pending { .. } => "pending".to_string(),
             MessageStatus::Refused { reason } => format!("refused: {reason}"),
         };
-        debug!(from = %caller.name(), %to, %outcome, "send_message");
+        debug!(from = %peer.name(), %to, %outcome, "send_message");
         EdgeGuard {
             log: self.edges.clone(),
-            from: caller.name().to_string(),
+            from: peer.name().to_string(),
             to,
-            chain: vec![caller.name().to_string()],
+            chain: vec![peer.name().to_string()],
             bytes,
             outcome: None,
             usd: None,
@@ -1031,35 +1229,33 @@ impl BrokerCalls {
         status
     }
 
-    /// The recipient check and the pending list's bounds. The sender is who
-    /// its connection says, and its owner is who the directory says: the
-    /// message names only the recipient, and a name that is not the
+    /// The gate's recipient check, then the pending list's bounds, which
+    /// are the effect's quota: taken with the push, or refused. The sender
+    /// is who its connection says, and its owner is who the directory says:
+    /// the message names only the recipient, and a name that is not the
     /// sender's owner — a sibling, the sender itself, a name nobody has, a
     /// node of another conversation — is not on the tree.
-    fn accept_message(&self, caller: &Caller, params: SendMessageParams) -> MessageStatus {
+    fn accept_message(
+        &self,
+        peer: &Peer,
+        caller: &Caller,
+        params: SendMessageParams,
+    ) -> MessageStatus {
         let refused = |reason| MessageStatus::Refused { reason };
-        // The root has no owner, and its handles come with resumable
-        // conversations (RC-3).
-        let Caller::Node(name) = caller else {
+        let recipient = match self.gate(peer, caller, &Request::Post(&params)).outcome {
+            Ok(Grant::Post { to: PostTo::Root }) => Recipient::Root,
+            Ok(Grant::Post {
+                to: PostTo::Node(id),
+            }) => Recipient::Node(id),
+            Ok(other) => unreachable!("mailbox.post granted as {other:?}"),
+            Err(Refused::Message(reason)) => return refused(reason),
+            // Nothing else refuses a post; were it to, it is not on the
+            // tree.
+            Err(_) => return refused(RefusalReason::NotOnTree),
+        };
+        let Some((sender, _)) = self.registry.node_and_owner(peer.name()) else {
             return refused(RefusalReason::NotOnTree);
         };
-        let Some((sender, owner)) = self.registry.node_and_owner(name) else {
-            return refused(RefusalReason::NotOnTree);
-        };
-        let (recipient, owner_name, ended) = match &owner {
-            None => (Recipient::Root, ROOT_NAME, false),
-            Some(owner) => (
-                Recipient::Node(owner.id()),
-                owner.name().as_str(),
-                owner.state() == NodeState::Ended,
-            ),
-        };
-        if params.to != owner_name {
-            return refused(RefusalReason::NotOnTree);
-        }
-        if ended {
-            return refused(RefusalReason::RecipientEnded);
-        }
 
         let id = format!(
             "msg-{}",
@@ -1080,10 +1276,10 @@ impl BrokerCalls {
 
     /// Whose pending list `caller` reads: the root's, or its node's. `None`
     /// for a name no node was admitted under, which has nothing waiting.
-    fn inbox(&self, caller: &Caller) -> Option<Recipient> {
+    fn inbox(&self, caller: &Peer) -> Option<Recipient> {
         match caller {
-            Caller::Root => Some(Recipient::Root),
-            Caller::Node(name) => self
+            Peer::Root => Some(Recipient::Root),
+            Peer::Node(name) => self
                 .registry
                 .node_and_owner(name)
                 .map(|(node, _)| Recipient::Node(node.id())),
@@ -1093,7 +1289,7 @@ impl BrokerCalls {
     /// `caller` is starting a new run — the root's next user turn, a node's
     /// next task: take what is waiting for it, wrapped and oldest first,
     /// and give each sender its allowance back (delivery point b).
-    pub fn start_run(&self, caller: &Caller) -> Vec<String> {
+    pub fn start_run(&self, caller: &Peer) -> Vec<String> {
         let Some(inbox) = self.inbox(caller) else {
             return Vec::new();
         };
@@ -1146,66 +1342,35 @@ impl BrokerCalls {
         Value::Array(participants.chain(runners).collect())
     }
 
-    /// Who may call whom, and how far, before anything is spawned,
-    /// submitted or permitted (PL-S2): the call's edge-log row and the stamp
-    /// for the run it starts, or its refusal, already logged. An agent
-    /// nobody serves is unknown, which [`invoke`](Self::invoke) says.
-    fn admit(
-        &self,
-        caller: &Caller,
-        params: &InvokeAgentParams,
-    ) -> Result<(EdgeGuard, Option<CallStamp>), CallStream> {
-        let caller_chain = self.caller_chain(caller);
-        let mut edge = EdgeGuard {
-            log: self.edges.clone(),
-            from: caller.name().to_string(),
-            to: params.agent.clone(),
-            chain: caller_chain.chain.clone(),
-            bytes: params.prompt.len() as u64,
-            outcome: None,
-            usd: None,
-        };
-        if !self.runners.contains_key(&params.agent) && !self.registry.is_registered(&params.agent)
-        {
-            return Ok((edge, None));
-        }
-        match self.check(caller, caller_chain, &params.agent, &params.remaining) {
-            Ok(stamp) => Ok((edge, Some(stamp))),
-            Err(refusal) => {
-                warn!(caller = %caller.name(), agent = %params.agent, %refusal, "Refused a call");
-                edge.refused(&refusal.to_string());
-                Err(futures::stream::iter([Err(CallError::Delegation(refusal))]).boxed())
-            }
-        }
-    }
-
+    /// Run a granted `agent.invoke` on the target its grant names — never
+    /// a second lookup of the name it addressed (ADR-0023 § 1).
     fn invoke(
         &self,
-        caller: Caller,
+        caller: Peer,
         params: InvokeAgentParams,
         mut edge: EdgeGuard,
-        stamp: Option<CallStamp>,
+        stamp: CallStamp,
+        target: InvokeTarget,
     ) -> CallStream {
         let registry = self.registry.clone();
-        let runner = self.runners.get(&params.agent).cloned();
-        // A worker the call starts gets its context from the caller's own
-        // (BI-5); a context that reaches outside it ends the call here.
-        let spawn = match runner.as_ref() {
-            Some(runner) if !registry.is_registered(&params.agent) => {
-                self.spawn_context(&caller, runner.as_ref(), params.spawn_context)
-            }
-            _ => Ok(None),
+        // A worker the call starts gets the context the gate derived or
+        // clamped from the caller's own (BI-5).
+        let (effect, spawn) = match target {
+            InvokeTarget::Submit { node } => (Effect::Submit(node), None),
+            InvokeTarget::Spawn { runner, context } => match self.runners.get(&runner) {
+                Some(runner) => (Effect::Spawn(runner.clone()), Some(context)),
+                None => {
+                    unreachable!("the gate granted a spawn of '{runner}', which no runner serves")
+                }
+            },
         };
         // When the broker stops a callee that outran its deadline (DP-3).
-        let cut = stamp
-            .as_ref()
-            .and_then(|stamp| stamp.chain.deadline)
-            .map(|deadline| {
-                let left = deadline
-                    .duration_since(std::time::SystemTime::now())
-                    .unwrap_or_default();
-                tokio::time::Instant::now() + left + deadline_grace(left)
-            });
+        let cut = stamp.chain.deadline.map(|deadline| {
+            let left = deadline
+                .duration_since(std::time::SystemTime::now())
+                .unwrap_or_default();
+            tokio::time::Instant::now() + left + deadline_grace(left)
+        });
         let pricer = self.pricer.clone();
         let stops = self.stops.clone();
         let routes = self.routes.clone();
@@ -1213,26 +1378,27 @@ impl BrokerCalls {
         // A root call listens for the runs nested under it; a run a node's
         // call starts reports to its root call, if that is listening
         // (TB-1). Both are keyed by the chain the broker stamped.
-        let chain = stamp.as_ref().map(|stamp| stamp.chain.clone());
+        let chain = stamp.chain.clone();
         let route_chain = chain.clone();
-        let mut listening = match (&caller, &chain) {
-            (Caller::Root, Some(chain)) => Some(Listening::open(
+        let mut listening = match &caller {
+            Peer::Root => Some(Listening::open(
                 &self.swarm,
                 &self.approvals,
                 &self.questions,
                 &chain.root_task_id,
             )),
-            _ => None,
+            Peer::Node(_) => None,
         };
-        let reports_to = match (&caller, chain) {
-            (Caller::Node(_), Some(chain)) => lock_swarm(&self.swarm)
+        let reports_to = match &caller {
+            Peer::Node(_) => lock_swarm(&self.swarm)
                 .get(&chain.root_task_id)
                 .cloned()
                 .map(|to| (to, chain)),
-            _ => None,
+            Peer::Root => None,
         };
         let task = DelegatedTask::new(params.prompt)
-            .with_call(stamp)
+            .with_call(Some(stamp))
+            .with_spawn_context(spawn)
             .with_swarm_events(reports_to.is_some());
         let agent = params.agent;
         // The caller's messages ride on this call's result (delivery point
@@ -1249,25 +1415,13 @@ impl BrokerCalls {
         };
 
         async_stream::stream! {
-            let task = match spawn {
-                Ok(context) => task.with_spawn_context(context),
-                Err(error) => {
-                    warn!(caller = %caller.name(), agent = %agent, %error, "Refused a spawn context");
-                    edge.refused(&error.to_string());
-                    yield Err(error);
-                    return;
+            let running = match effect {
+                Effect::Submit(node) => a2a_participant::submit(&registry, &node, task).await
+                    .ok_or_else(|| format!("participant '{agent}' is no longer connected")),
+                Effect::Spawn(runner) => {
+                    info!(caller = %caller.name(), agent = %agent, "Starting a worker for a call");
+                    a2a_participant::spawn(runner.as_ref(), task).await
                 }
-            };
-            let running = if registry.is_registered(&agent) {
-                a2a_participant::submit(&registry, &agent, task).await
-                    .ok_or_else(|| format!("participant '{agent}' is no longer connected"))
-            } else if let Some(runner) = runner {
-                info!(caller = %caller.name(), agent = %agent, "Starting a worker for a call");
-                a2a_participant::spawn(runner.as_ref(), task).await
-            } else {
-                edge.refused("unknown agent");
-                yield Err(CallError::UnknownAgent(agent));
-                return;
             };
             let mut running = match running {
                 Ok(running) => running,
@@ -1282,20 +1436,18 @@ impl BrokerCalls {
             // Where the callee's questions go while this call runs it
             // (EN-2b): before anything is yielded, so a question the worker
             // asks at once finds it.
-            let _route = route_chain.map(|chain| {
-                let call = NEXT_STOPPABLE.fetch_add(1, Ordering::Relaxed);
-                lock_routes(&routes).insert(
-                    running.participant().to_string(),
-                    Route { call, caller: caller.clone(), chain },
-                );
-                RouteGuard {
-                    routes: routes.clone(),
-                    questions: questions.clone(),
-                    registry: registry.clone(),
-                    node: running.participant().to_string(),
-                    call,
-                }
-            });
+            let call = NEXT_STOPPABLE.fetch_add(1, Ordering::Relaxed);
+            lock_routes(&routes).insert(
+                running.participant().to_string(),
+                Route { call, caller: caller.clone(), chain: route_chain },
+            );
+            let _route = RouteGuard {
+                routes: routes.clone(),
+                questions: questions.clone(),
+                registry: registry.clone(),
+                node: running.participant().to_string(),
+                call,
+            };
             // As soon as admitted, before anything else: a caller that
             // only knew this callee by its spec can now name this one
             // call precisely (AGE-762), which two parallel calls to the
@@ -1478,97 +1630,6 @@ impl BrokerCalls {
         }
         .boxed()
     }
-
-    /// The chain `caller` calls from: the root's own, fresh, or the chain
-    /// of the run the node serves in the broker's task table. A node no
-    /// broker call started (one an A2A request over HTTP spawned) is the
-    /// root's callee.
-    fn caller_chain(&self, caller: &Caller) -> CallChain {
-        let root = || CallChain::root(uuid::Uuid::new_v4().to_string());
-        match caller {
-            Caller::Root => root(),
-            Caller::Node(name) => self.registry.run_chain(name).unwrap_or_else(|| {
-                let spec = self.caller_spec(name);
-                root().extend(&spec).unwrap_or_else(|_| root())
-            }),
-        }
-    }
-
-    /// The spec a node was admitted as; its name when it was never admitted.
-    fn caller_spec(&self, name: &str) -> String {
-        self.registry
-            .node_spec(name)
-            .unwrap_or_else(|| name.to_string())
-    }
-
-    /// Whether `caller`, at `chain`, may call `agent`: the specs first (a
-    /// node's as the spec it was admitted as, the root's as the spec the
-    /// policy says it runs as), then the chain's cycle and depth, then its budget
-    /// narrowed by `caller_left`, what the caller says it has left (DP-3).
-    /// The run the call starts is stamped with the chain it runs under,
-    /// budget included.
-    fn check(
-        &self,
-        caller: &Caller,
-        chain: CallChain,
-        agent: &str,
-        caller_left: &Remaining,
-    ) -> Result<CallStamp, Refusal> {
-        // A registered participant is addressed by its node name; the chain
-        // and the policy speak in specs.
-        let callee = self
-            .registry
-            .node_spec(agent)
-            .unwrap_or_else(|| agent.to_string());
-        let policy = self.policy.get();
-        let caller = match caller {
-            Caller::Root => {
-                policy.root_may_call(&callee)?;
-                None
-            }
-            Caller::Node(name) => {
-                policy.may_call(&self.caller_spec(name), &callee)?;
-                Some(name.clone())
-            }
-        };
-        let own = policy.budget(&callee);
-        let chain =
-            chain
-                .extend(&callee)?
-                .budget(caller_left, &own, std::time::SystemTime::now())?;
-        Ok(CallStamp { caller, chain })
-    }
-
-    /// The context a worker spawned for `caller` as `target` starts from:
-    /// derived from the caller's own when the call brings none, clamped to
-    /// it when it does (invariant 6). A node no runner recorded a context
-    /// for is the root's.
-    ///
-    /// A virtual agent outside the caller's roster is refused: a sub-leader
-    /// reaches only what it was given.
-    fn spawn_context(
-        &self,
-        caller: &Caller,
-        target: &dyn VirtualAgent,
-        requested: Option<SpawnContext>,
-    ) -> Result<Option<SpawnContext>, CallError> {
-        let own = match caller {
-            Caller::Node(name) => self.registry.node_context(name),
-            Caller::Root => None,
-        }
-        .unwrap_or_else(|| spawn_context::root(&self.runners, target));
-        if !own.roster.iter().any(|name| name == target.agent_name()) {
-            return Err(CallError::Refused(format!(
-                "'{}' is not on {}'s roster",
-                target.agent_name(),
-                caller.name()
-            )));
-        }
-        match requested {
-            None => Ok(Some(spawn_context::derive(&own, target))),
-            Some(requested) => spawn_context::clamp(requested, &own, target).map(Some),
-        }
-    }
 }
 
 /// `call` with its caller's permit re-acquired before its result (or error)
@@ -1594,6 +1655,48 @@ fn gated(child: ChildCall, mut call: CallStream) -> CallStream {
         child.finish().await;
     }
     .boxed()
+}
+
+/// What a granted `agent.invoke` does: hand its task to the registered
+/// participant it names, or spawn a worker of the runner it names.
+enum Effect {
+    Submit(String),
+    Spawn(Arc<dyn VirtualAgent>),
+}
+
+/// A call that ends, refused, with `error`.
+fn refusal_stream(error: CallError) -> CallStream {
+    futures::stream::iter([Err(error)]).boxed()
+}
+
+/// The outcome a refused `agent.invoke`'s row records, as it did before the
+/// gate: `unknown agent`, the delegation refusal, or the call's error.
+fn refusal_row(refused: &Refused) -> String {
+    match refused {
+        Refused::UnknownAgent(_) => "unknown agent".to_string(),
+        Refused::Delegation(refusal) => refusal.to_string(),
+        Refused::Roster(_)
+        | Refused::SpawnContext(_)
+        | Refused::Message(_)
+        | Refused::Caller(_)
+        | Refused::Internal(_) => refused.to_call_error().to_string(),
+    }
+}
+
+/// The chain an `agent.invoke` is made from, as its row records it: the
+/// root's, or the named run's. Empty for a call from no run of the
+/// caller's.
+fn calling_chain(caller: &Caller, params: &InvokeAgentParams) -> Vec<String> {
+    match caller {
+        Caller::Root => vec![ROOT_NAME.to_string()],
+        Caller::Node(node) => node
+            .runs
+            .iter()
+            .find(|run| Some(run.name.as_str()) == params.run.as_deref())
+            .map(|run| run.chain.chain.clone())
+            .unwrap_or_default(),
+        Caller::Remote(_) | Caller::External(_) => Vec::new(),
+    }
 }
 
 /// The result of an `agent.invoke` request whose task ended in `state`,
@@ -1713,27 +1816,33 @@ impl DirectTransport {
 #[async_trait::async_trait]
 impl Transport for DirectTransport {
     async fn call(&self, req: CallRequest) -> Result<CallStream, CallError> {
-        Ok(self.calls.call(Caller::Root, req))
+        Ok(self.calls.call(Peer::Root, req))
     }
 
     /// The root's answers to a question the broker delivered (EN-2b).
     async fn answer(&self, id: &str, answers: Vec<Answer>) -> Result<(), CallError> {
+        self.calls.root_request(&Request::Answer { id })?;
         self.calls.answer_question(id, answers)
     }
 
     /// The root's answer to an approval the broker delivered (EN-2a).
     async fn approve(&self, id: &str, verdict: ApprovalVerdict) -> Result<(), CallError> {
+        self.calls.root_request(&Request::AnswerApproval { id })?;
         self.calls.answer_approval(id, verdict)
     }
 
     /// The root's next user turn is starting: its messages, for the turn
     /// to open with (delivery point b).
     fn take_run_messages(&self) -> Vec<String> {
-        self.calls.start_run(&Caller::Root)
+        match self.calls.root_request(&Request::TakeRunMessages) {
+            Ok(()) => self.calls.start_run(&Peer::Root),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// The root stops one run of its swarm (TB-7).
     fn cancel(&self, node: &str) -> Result<(), CallError> {
+        self.calls.root_request(&Request::Cancel { node })?;
         self.calls.cancel(node)
     }
 }
@@ -1741,7 +1850,7 @@ impl Transport for DirectTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chatty_fabric::{PENDING_LIST_BYTES, SENDER_ALLOWANCE_BYTES};
+    use chatty_fabric::{PENDING_LIST_BYTES, Remaining, SENDER_ALLOWANCE_BYTES};
 
     fn broker(edges: Option<Arc<Mutex<EdgeLog>>>) -> (Arc<BrokerCalls>, ParticipantRegistry) {
         let registry = ParticipantRegistry::new();
@@ -1764,7 +1873,7 @@ mod tests {
             .collect()
     }
 
-    async fn send(calls: &BrokerCalls, caller: Caller, to: &str, text: &str) -> MessageStatus {
+    async fn send(calls: &BrokerCalls, caller: Peer, to: &str, text: &str) -> MessageStatus {
         let mut stream = calls.call(
             caller,
             CallRequest::SendMessage(SendMessageParams {
@@ -1779,8 +1888,8 @@ mod tests {
         serde_json::from_value(value).expect("a MessageStatus")
     }
 
-    fn node(name: &str) -> Caller {
-        Caller::Node(name.to_string())
+    fn node(name: &str) -> Peer {
+        Peer::Node(name.to_string())
     }
 
     fn refused(reason: RefusalReason) -> MessageStatus {
@@ -1793,9 +1902,9 @@ mod tests {
     #[tokio::test]
     async fn only_the_owner_is_on_the_tree() {
         let (calls, registry) = broker(None);
-        let lead = registry.admit_under("lead", None);
-        let coder = registry.admit_under("coder", Some(&lead));
-        let other = registry.admit_under("coder", Some(&lead));
+        let lead = registry.admit_running("lead", None);
+        let coder = registry.admit_running("coder", Some(&lead));
+        let other = registry.admit_running("coder", Some(&lead));
 
         assert_eq!(
             send(&calls, node(&lead), ROOT_NAME, "up").await,
@@ -1820,7 +1929,7 @@ mod tests {
             );
         }
         assert_eq!(
-            send(&calls, Caller::Root, &lead, "x").await,
+            send(&calls, Peer::Root, &lead, "x").await,
             refused(RefusalReason::NotOnTree),
             "the root's handles come with RC-3"
         );
@@ -1829,8 +1938,8 @@ mod tests {
     #[tokio::test]
     async fn a_message_to_an_ended_owner_is_refused() {
         let (calls, registry) = broker(None);
-        let lead = registry.admit_under("lead", None);
-        let coder = registry.admit_under("coder", Some(&lead));
+        let lead = registry.admit_running("lead", None);
+        let coder = registry.admit_running("coder", Some(&lead));
         registry.end_node(&lead);
         assert_eq!(
             send(&calls, node(&coder), &lead, "too late").await,
@@ -1843,9 +1952,9 @@ mod tests {
     #[tokio::test]
     async fn the_broker_enforces_the_pending_list_bounds() {
         let (calls, registry) = broker(None);
-        let lead = registry.admit_under("lead", None);
+        let lead = registry.admit_running("lead", None);
         let coders: Vec<String> = (0..9)
-            .map(|_| registry.admit_under("coder", Some(&lead)))
+            .map(|_| registry.admit_running("coder", Some(&lead)))
             .collect();
         let allowance = "x".repeat(SENDER_ALLOWANCE_BYTES);
 
@@ -1887,9 +1996,9 @@ mod tests {
         let log = EdgeLog::open(data.path()).unwrap();
         let path = log.path();
         let (calls, registry) = broker(Some(Arc::new(Mutex::new(log))));
-        let lead = registry.admit_under("lead", None);
-        let coder = registry.admit_under("coder", Some(&lead));
-        let other = registry.admit_under("coder", Some(&lead));
+        let lead = registry.admit_running("lead", None);
+        let coder = registry.admit_running("coder", Some(&lead));
+        let other = registry.admit_running("coder", Some(&lead));
 
         send(&calls, node(&coder), &lead, "first").await;
         send(&calls, node(&other), &lead, "second one").await;
@@ -1928,7 +2037,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            calls.start_run(&Caller::Root),
+            calls.start_run(&Peer::Root),
             [format!(
                 "<message from=\"{lead}\" untrusted=\"true\">for the root</message>"
             )],
@@ -1942,7 +2051,7 @@ mod tests {
     #[tokio::test]
     async fn the_roots_next_run_takes_its_messages() {
         let (calls, registry) = broker(None);
-        let lead = registry.admit_under("lead", None);
+        let lead = registry.admit_running("lead", None);
         let root = DirectTransport::new(calls.clone());
         let allowance = "x".repeat(SENDER_ALLOWANCE_BYTES - 3);
 
@@ -1975,11 +2084,11 @@ mod tests {
         let admitted = registry.admit("lead", AgentOrigin::Local, None).unwrap();
         let (tx, mut outbound) = tokio::sync::mpsc::channel(8);
         let lead = registry.register(admitted, ParticipantCard::default(), tx);
-        let coder = registry.admit_under("coder", Some(&lead));
+        let coder = registry.admit_running("coder", Some(&lead));
         send(&calls, node(&coder), &lead, "<b>tests pass</b>").await;
 
         registry
-            .submit_task(&lead, DelegatedTask::new("next task"))
+            .submit_task(&lead, DelegatedTask::from_root("next task"))
             .await
             .expect("the lead is registered");
         let Some(BrokerFrame::Task { text, .. }) = outbound.recv().await else {
@@ -1992,7 +2101,7 @@ mod tests {
             )
         );
         registry
-            .submit_task(&lead, DelegatedTask::new("and another"))
+            .submit_task(&lead, DelegatedTask::from_root("and another"))
             .await
             .unwrap();
         let Some(BrokerFrame::Task { text, .. }) = outbound.recv().await else {
@@ -2008,7 +2117,7 @@ mod tests {
         let log = EdgeLog::open(data.path()).unwrap();
         let path = log.path();
         let (calls, registry) = broker(Some(Arc::new(Mutex::new(log))));
-        let lead = registry.admit_under("lead", None);
+        let lead = registry.admit_running("lead", None);
 
         send(&calls, node(&lead), ROOT_NAME, "hello").await;
         send(&calls, node(&lead), "nobody-0", "hi").await;
@@ -2180,7 +2289,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         let events: Vec<_> = calls
             .call(
-                Caller::Root,
+                Peer::Root,
                 CallRequest::InvokeAgent(InvokeAgentParams {
                     agent: "kit-slow".to_string(),
                     prompt: "Take your time.".to_string(),
@@ -2191,6 +2300,7 @@ mod tests {
                         seconds: Some(30),
                         ..Remaining::default()
                     },
+                    run: None,
                 }),
             )
             .collect()
@@ -2242,11 +2352,58 @@ mod tests {
         );
     }
 
-    /// EN-0a (AGE-765): a broker built with no policy consults the named
-    /// [`LocalPermissive`], and delegation behaves as it did when the check
-    /// was skipped: the root and every node may call any spec, no spec
-    /// brings a budget, and the chain still refuses a cycle or a call too
-    /// deep.
+    /// What the gate decides for an `agent.invoke` of the registered spec
+    /// `agent` over `calls`'s policy: from the root when `node` is `None`,
+    /// else from the node `node`, calling from its one run at `chain`.
+    fn decide_invoke(
+        calls: &BrokerCalls,
+        node: Option<&str>,
+        chain: CallChain,
+        agent: &str,
+    ) -> Result<CallStamp, Refused> {
+        let caller = match node {
+            None => Caller::Root,
+            Some(name) => Caller::Node(NodeCaller {
+                name: name.to_string(),
+                spec: chain.chain.last().cloned().expect("a chain"),
+                runs: vec![super::super::gate::OpenRun {
+                    name: "task-1".to_string(),
+                    id: serde_json::from_value(json!(1)).expect("a run id"),
+                    chain: chain.clone(),
+                }],
+            }),
+        };
+        let params = InvokeAgentParams {
+            agent: agent.to_string(),
+            prompt: "go".to_string(),
+            handle: None,
+            include_trace: false,
+            spawn_context: None,
+            remaining: Remaining::default(),
+            run: node.map(|_| "task-1".to_string()),
+        };
+        let snapshot = Ok(Snapshot {
+            policy: calls.policy.get(),
+            now: std::time::SystemTime::now(),
+            root_task_id: chain.root_task_id.clone(),
+            callee: Callee::Node {
+                name: format!("{agent}-0"),
+                spec: agent.to_string(),
+            },
+            owner: Owner::None,
+        });
+        match gate::decide(&caller, &Request::Invoke(&params), &snapshot).outcome {
+            Ok(Grant::Invoke { stamp, .. }) => Ok(stamp),
+            Ok(other) => panic!("agent.invoke granted as {other:?}"),
+            Err(refused) => Err(refused),
+        }
+    }
+
+    /// EN-0a (AGE-765), ported to the gate (GT-0): a broker built with no
+    /// policy consults the named [`LocalPermissive`], and delegation
+    /// behaves as it did when the check was skipped: the root and every
+    /// node may call any spec, no spec brings a budget, and the chain still
+    /// refuses a cycle or a call too deep.
     #[test]
     fn absent_policy_is_local_permissive() {
         let (calls, registry) = broker(None);
@@ -2261,33 +2418,30 @@ mod tests {
             "`with_policy(None)` is LocalPermissive too"
         );
 
-        let left = Remaining::default();
         let root = CallChain::root("t-permissive");
-        let stamp = calls
-            .check(&Caller::Root, root.clone(), "anyone", &left)
+        let stamp = decide_invoke(&calls, None, root.clone(), "anyone")
             .expect("a plain root may call any spec");
         assert_eq!(stamp.caller, None);
         assert_eq!(stamp.chain.chain, ["root", "anyone"]);
         assert_eq!(stamp.chain.remaining, Remaining::default(), "no own budget");
 
         let at_one = root.extend("kit-1").unwrap();
-        let stamp = calls
-            .check(&node("kit-1-0"), at_one.clone(), "kit-2", &left)
+        let stamp = decide_invoke(&calls, Some("kit-1-0"), at_one.clone(), "kit-2")
             .expect("a node may call any spec");
         assert_eq!(stamp.caller.as_deref(), Some("kit-1-0"));
         assert_eq!(stamp.chain.chain, ["root", "kit-1", "kit-2"]);
 
         assert!(matches!(
-            calls.check(&node("kit-1-0"), at_one, "kit-1", &left),
-            Err(Refusal::Cycle { .. })
+            decide_invoke(&calls, Some("kit-1-0"), at_one, "kit-1"),
+            Err(Refused::Delegation(Refusal::Cycle { .. }))
         ));
         let mut deepest = CallChain::root("t-deep");
         for spec in ["a", "b", "c", "d"] {
             deepest = deepest.extend(spec).unwrap();
         }
         assert_eq!(
-            calls.check(&node("d-0"), deepest, "e", &left).err(),
-            Some(Refusal::TooDeep { depth: 5, max: 4 })
+            decide_invoke(&calls, Some("d-0"), deepest, "e").err(),
+            Some(Refused::Delegation(Refusal::TooDeep { depth: 5, max: 4 }))
         );
     }
 
@@ -2329,7 +2483,7 @@ mod tests {
             chain = chain.extend(spec).unwrap();
             runs.push(
                 registry
-                    .open_run(&node, owner.as_deref(), chain.clone())
+                    .open_run(&node, owner.as_deref(), None, chain.clone())
                     .expect("the node was admitted"),
             );
             owner = Some(node);
@@ -2353,6 +2507,7 @@ mod tests {
                 "v": 3, "id": 1, "method": "agent.invoke",
                 "params": {
                     "agent": agent, "prompt": "go on",
+                    "run": runs.last().expect("four runs").name(),
                     "metadata": {"chatty": {"call": {
                         "root_task_id": "forged", "chain": [], "depth": 0
                     }}}
@@ -2400,3 +2555,7 @@ mod root_approval_tests;
 #[cfg(all(test, unix))]
 #[path = "question_relay_tests.rs"]
 mod question_relay_tests;
+
+#[cfg(all(test, unix))]
+#[path = "gate_broker_tests.rs"]
+mod gate_broker_tests;

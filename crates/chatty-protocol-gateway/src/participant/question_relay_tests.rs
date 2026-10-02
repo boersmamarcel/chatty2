@@ -68,10 +68,11 @@ async fn serve(stream: UnixStream, behaviour: Behaviour, seen: Seen) {
             Some("task.run") => {
                 run = Some(frame["id"].clone());
                 let first = match behaviour {
-                    Behaviour::Escalate | Behaviour::Hold => {
-                        json!({"id": 2, "method": "agent.invoke",
-                                         "params": {"agent": "leaf", "prompt": "go"}})
-                    }
+                    // A call names the run it is made from (GT-0b).
+                    Behaviour::Escalate | Behaviour::Hold => json!({
+                        "id": 2, "method": "agent.invoke",
+                        "params": {"agent": "leaf", "prompt": "go", "run": frame["params"]["taskId"]},
+                    }),
                     Behaviour::Ask => {
                         json!({"id": 2, "method": "human.ask", "params": forged_question()})
                     }
@@ -110,7 +111,6 @@ struct Scripted {
 struct Handle {
     name: String,
     task_id: String,
-    _run: Option<super::super::registry::RunGuard>,
 }
 
 impl WorkerHandle for Handle {
@@ -146,10 +146,6 @@ impl VirtualAgent for Scripted {
             let spawner = task.call.as_ref().and_then(|call| call.caller.as_deref());
             let LocalConnection { name, worker_end } =
                 open_connection(&self.registry, &self.name, spawner)?;
-            let run = task.call.as_ref().and_then(|call| {
-                self.registry
-                    .open_run(&name, call.caller.as_deref(), call.chain.clone())
-            });
             worker_end.set_nonblocking(true)?;
             let stream = UnixStream::from_std(worker_end)?;
             tokio::spawn(serve(stream, self.behaviour, self.seen.clone()));
@@ -163,11 +159,7 @@ impl VirtualAgent for Scripted {
                 .submit_task(&name, task)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("gone before its task"))?;
-            let handle: Box<dyn WorkerHandle> = Box::new(Handle {
-                name,
-                task_id,
-                _run: run,
-            });
+            let handle: Box<dyn WorkerHandle> = Box::new(Handle { name, task_id });
             Ok((handle, updates))
         })
     }
@@ -198,7 +190,7 @@ fn broker(mid: Behaviour) -> (Arc<BrokerCalls>, Seen) {
 /// The root's call to `mid`.
 fn root_call(calls: &BrokerCalls) -> CallStream {
     calls.call(
-        Caller::Root,
+        Peer::Root,
         CallRequest::InvokeAgent(InvokeAgentParams {
             agent: "mid".into(),
             prompt: "go".into(),
@@ -206,6 +198,7 @@ fn root_call(calls: &BrokerCalls) -> CallStream {
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         }),
     )
 }

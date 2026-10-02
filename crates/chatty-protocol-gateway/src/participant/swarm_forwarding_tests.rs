@@ -53,8 +53,10 @@ async fn serve(stream: UnixStream, behaviour: Behaviour, asked: Asked) {
         let run = frame["id"].clone();
         match behaviour {
             Behaviour::Delegate => {
+                // A call names the run it is made from (GT-0b).
                 let call = json!({"id": 2, "method": "agent.invoke",
-                                  "params": {"agent": "leaf", "prompt": "go"}});
+                                  "params": {"agent": "leaf", "prompt": "go",
+                                             "run": frame["params"]["taskId"]}});
                 write.write_all(line(call).as_bytes()).await.unwrap();
                 while let Ok(Some(text)) = lines.next_line().await {
                     let reply: Value = serde_json::from_str(&text).unwrap();
@@ -108,7 +110,6 @@ struct Scripted {
 struct Handle {
     name: String,
     task_id: String,
-    _run: Option<super::super::registry::RunGuard>,
 }
 
 impl WorkerHandle for Handle {
@@ -145,10 +146,6 @@ impl VirtualAgent for Scripted {
             let spawner = task.call.as_ref().and_then(|call| call.caller.as_deref());
             let LocalConnection { name, worker_end } =
                 open_connection(&self.registry, &self.name, spawner)?;
-            let run = task.call.as_ref().and_then(|call| {
-                self.registry
-                    .open_run(&name, call.caller.as_deref(), call.chain.clone())
-            });
             worker_end.set_nonblocking(true)?;
             let stream = UnixStream::from_std(worker_end)?;
             tokio::spawn(serve(stream, self.behaviour, self.asked.clone()));
@@ -165,11 +162,7 @@ impl VirtualAgent for Scripted {
                 .submit_task(&name, task)
                 .await
                 .ok_or_else(|| anyhow::anyhow!("gone before its task"))?;
-            let handle: Box<dyn WorkerHandle> = Box::new(Handle {
-                name,
-                task_id,
-                _run: run,
-            });
+            let handle: Box<dyn WorkerHandle> = Box::new(Handle { name, task_id });
             Ok((handle, updates))
         })
     }
@@ -205,7 +198,7 @@ fn broker(leaf: Behaviour) -> (Arc<BrokerCalls>, [Asked; 2]) {
 async fn root_call(calls: &BrokerCalls) -> (Vec<chatty_fabric::SwarmEvent>, Duration) {
     let started = Instant::now();
     let mut stream = calls.call(
-        Caller::Root,
+        Peer::Root,
         CallRequest::InvokeAgent(InvokeAgentParams {
             agent: "mid".into(),
             prompt: "delegate".into(),
@@ -213,6 +206,7 @@ async fn root_call(calls: &BrokerCalls) -> (Vec<chatty_fabric::SwarmEvent>, Dura
             include_trace: false,
             spawn_context: None,
             remaining: Default::default(),
+            run: None,
         }),
     );
     let mut batches = Vec::new();
