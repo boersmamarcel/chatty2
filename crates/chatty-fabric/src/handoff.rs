@@ -7,14 +7,17 @@
 //! both ends of the socket agree on.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+
+use crate::wire::Opaque;
 
 /// The role a worker answers as and the JSON Schema its handoff must match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandoffContract {
     /// The role's agent spec name, as the team file lists it.
     pub role: String,
     /// The schema, already read from the team directory and checked to
-    /// compile when the team loaded.
-    pub schema: Value,
+    /// compile when the team loaded. Opaque to the broker: only the worker's
+    /// validator reads it.
+    pub schema: Opaque,
 }

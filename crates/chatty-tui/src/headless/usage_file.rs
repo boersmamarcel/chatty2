@@ -431,11 +431,14 @@ mod tests {
         let recorder = UsageRecorder::new(Some(path.clone()), "m".to_string());
         let coder = HandoffContract {
             role: "coder".to_string(),
-            schema: serde_json::json!({}),
+            schema: chatty_fabric::wire::Opaque::from_value(&serde_json::json!({})).unwrap(),
         };
         let reviewer = HandoffContract {
             role: "reviewer".to_string(),
-            schema: serde_json::json!({ "x-must-be-read": { "coder": ["files_changed"] } }),
+            schema: chatty_fabric::wire::Opaque::from_value(
+                &serde_json::json!({ "x-must-be-read": { "coder": ["files_changed"] } }),
+            )
+            .unwrap(),
         };
         let ledger = HandoffLedger::new([&coder, &reviewer]);
         recorder.set_handoff_ledger(Some(ledger.clone()));

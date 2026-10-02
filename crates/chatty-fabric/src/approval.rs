@@ -25,6 +25,7 @@ pub enum ApprovalKind {
 /// broker-assigned name and the chain of spec names it runs under, root
 /// first. The broker's stamp, on both `human.*` methods.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Asker {
     pub agent: String,
     pub chain: Vec<String>,
@@ -37,6 +38,7 @@ pub struct Asker {
 /// connection was admitted under, so the root's card names the agent that
 /// actually asked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalRequest {
     pub kind: ApprovalKind,
     pub command_or_path: String,

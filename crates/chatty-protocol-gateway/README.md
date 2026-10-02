@@ -167,8 +167,19 @@ public wire format, and a child process is not a public endpoint. This is
 **version 3**, ADR-0021's one envelope (`participant::FrameCodec`, one per
 connection): every line is a request `{"v":3,"id":…,"method":…,"params":…}`,
 a result `{"v":3,"id":…,"result":…}`, an error
-`{"v":3,"id":…,"error":{"kind":…,"message":…}}` or a notification
+`{"v":3,"id":…,"error":{"kind":…,…,"message":…}}` or a notification
 `{"v":3,"method":…,"params":…}`. There is no fallback to an older version.
+What rides in `params`, `result` and `error` is typed in
+`chatty_fabric::wire`, split by direction (ADR-0021 § 1, EN-3a): every type
+denies unknown fields, nothing is `untagged` or `flatten`ed, and a payload
+decodes straight into its struct, so an unknown field, a duplicate key or an
+error `kind` outside `WireError` is a decode error that closes the
+connection. A task's terminal `metadata` is a `TaskMetadata` (usage, trace,
+conversation, handoff keys, evidence); the captured conversation, the
+handoff answer and schema and the runner's evidence cross as capped opaque
+JSON the broker never reads. `task.run` carries whose task it is as
+`identity: {tenant, user}` (absent for a desktop root's task), never a
+credential.
 (hive's worker moves to v3 with HS-4a, after ADR-0021 step 3.)
 
 ```
@@ -256,7 +267,9 @@ broker      → {"v":3,"method":"req.progress","params":{"id":2,"event":{"Step":
 broker      → {"v":3,"id":2,"result":{"success":true,"response":"Looks good.","metadata":{…}}}
 ```
 
-A call that cannot run ends with an `error` (`{"kind":"unknown_agent","message":…}`);
+A call that cannot run ends with an `error`
+(`{"kind":"unknown_agent","agent":…,"message":…}`: the variant's fields beside
+`kind`, `message` display text only);
 a callee whose task failed ends with a result whose `success` is false.
 The in-process root uses `ProtocolGateway::transport()`, the same calls with no
 socket.
@@ -269,7 +282,7 @@ calling node's own (its tree, its branch, its roster; the root's verification
 command and endpoint for the agent), so a sub-leader's worker branches from the
 sub-leader's branch. A call may bring one as `params.spawn_context`; it is
 clamped to the caller's own and refused otherwise with an `error`
-`{"kind":"spawn_context_refused","message":{"field":…,"reason":…}}`
+`{"kind":"spawn_context_refused","field":…,"reason":…,"message":…}`
 (`participant::spawn_context`).
 
 At the root, `invoke_agent` asks a question the broker delivers on its own

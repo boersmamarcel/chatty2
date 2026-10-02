@@ -905,17 +905,14 @@ mod tests {
             .expect("the root's direct handle answers list_agents");
         let directory = loop {
             match stream.next().await.expect("a result event") {
-                Ok(CallEvent::Result(directory)) => break directory,
+                Ok(CallEvent::Result(chatty_fabric::CallResult::Agents(directory))) => {
+                    break directory;
+                }
                 Ok(_) => continue,
                 Err(error) => panic!("list_agents failed: {error}"),
             }
         };
-        let names: Vec<&str> = directory
-            .as_array()
-            .expect("the directory is a JSON array")
-            .iter()
-            .filter_map(|agent| agent["name"].as_str())
-            .collect();
+        let names: Vec<&str> = directory.iter().map(|agent| agent.name.as_str()).collect();
         assert!(
             names.contains(&LOCAL_AGENT_NAME),
             "local-agent is not in the directory: {names:?}"

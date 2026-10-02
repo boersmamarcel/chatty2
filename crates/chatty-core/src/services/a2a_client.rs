@@ -25,6 +25,7 @@ use crate::services::ssrf_guard::{
     check_a2a_url_without_lookup,
 };
 use crate::settings::models::a2a_store::A2aAgentConfig;
+use chatty_fabric::wire::{WireModelRef, WireUsage, WireUsageLine};
 
 /// The key under a status's `metadata` that carries what an
 /// `input-required` task is waiting for, and under an answering message's
@@ -57,41 +58,30 @@ impl A2aClarificationRequest {
 /// this is the one place it rides (ADR-0011).
 pub const USAGE_METADATA_KEY: &str = "usage";
 
-/// One usage line as it rides the wire (AGE-682): tokens, the model they
-/// were spent on, and when — never a price. The reader prices it.
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WireUsageLine {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<ModelRef>,
-    #[serde(default)]
-    input_tokens: u32,
-    #[serde(default)]
-    output_tokens: u32,
-    #[serde(default)]
-    cache_read_tokens: u32,
-    #[serde(default)]
-    cache_write_tokens: u32,
-    /// Unix milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    at: Option<u64>,
-    #[serde(default)]
-    duration_ms: u64,
+/// `metadata.usage` for a terminal status, as the wire carries it
+/// ([`WireUsage`]): the four token totals, and `lines`, one per model
+/// (AGE-682). Nothing on it is a price.
+pub fn wire_usage(lines: &[TokenUsage]) -> WireUsage {
+    WireUsage::from_lines(lines.iter().map(WireUsageLine::from).collect())
 }
 
-/// `metadata.usage` for a terminal status: the four token totals, and
-/// `lines`, one per model (AGE-682). The totals are the lines summed, for a
-/// reader that only wants the number; nothing on it is a price.
-pub fn usage_metadata(lines: &[TokenUsage]) -> Value {
-    let sum = |bucket: fn(&TokenUsage) -> u32| {
-        lines
-            .iter()
-            .fold(0u32, |total, line| total.saturating_add(bucket(line)))
-    };
-    let wire: Vec<WireUsageLine> = lines
-        .iter()
-        .map(|line| WireUsageLine {
-            model: line.model.clone(),
+/// The lines of a usage report off the wire, one [`TokenUsage`] each. A
+/// line naming a provider this build does not know is logged and skipped,
+/// not the whole report.
+pub fn usage_from_wire(usage: &WireUsage) -> Vec<TokenUsage> {
+    usage.lines.iter().cloned().filter_map(usage_line).collect()
+}
+
+fn usage_line(line: WireUsageLine) -> Option<TokenUsage> {
+    TokenUsage::try_from(line)
+        .map_err(|e| warn!(error = %e, "Skipping a usage line that does not parse"))
+        .ok()
+}
+
+impl From<&TokenUsage> for WireUsageLine {
+    fn from(line: &TokenUsage) -> Self {
+        Self {
+            model: line.model.as_ref().map(WireModelRef::from),
             input_tokens: line.input_tokens,
             output_tokens: line.output_tokens,
             cache_read_tokens: line.cache_read_tokens,
@@ -101,15 +91,26 @@ pub fn usage_metadata(lines: &[TokenUsage]) -> Value {
                 .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
                 .map(|since| since.as_millis() as u64),
             duration_ms: line.duration_ms,
+        }
+    }
+}
+
+/// An error for a line whose provider this build does not know.
+impl TryFrom<WireUsageLine> for TokenUsage {
+    type Error = serde_json::Error;
+
+    fn try_from(line: WireUsageLine) -> Result<Self, Self::Error> {
+        Ok(Self {
+            input_tokens: line.input_tokens,
+            output_tokens: line.output_tokens,
+            cache_read_tokens: line.cache_read_tokens,
+            cache_write_tokens: line.cache_write_tokens,
+            model: line.model.as_ref().map(ModelRef::from_wire).transpose()?,
+            at: line.at.map(|ms| UNIX_EPOCH + Duration::from_millis(ms)),
+            duration_ms: line.duration_ms,
+            ..TokenUsage::default()
         })
-        .collect();
-    json!({
-        "inputTokens": sum(|l| l.input_tokens),
-        "outputTokens": sum(|l| l.output_tokens),
-        "cacheReadTokens": sum(|l| l.cache_read_tokens),
-        "cacheWriteTokens": sum(|l| l.cache_write_tokens),
-        "lines": wire,
-    })
+    }
 }
 
 /// The usage a delegated task reports on its terminal status:
@@ -145,16 +146,7 @@ pub fn usage_from_status_metadata(metadata: Option<&Value>) -> Vec<TokenUsage> {
                 .map_err(|e| warn!(error = %e, "Skipping a usage line that does not parse"))
                 .ok()
         })
-        .map(|line| TokenUsage {
-            input_tokens: line.input_tokens,
-            output_tokens: line.output_tokens,
-            cache_read_tokens: line.cache_read_tokens,
-            cache_write_tokens: line.cache_write_tokens,
-            model: line.model,
-            at: line.at.map(|ms| UNIX_EPOCH + Duration::from_millis(ms)),
-            duration_ms: line.duration_ms,
-            ..TokenUsage::default()
-        })
+        .filter_map(usage_line)
         .collect()
 }
 
@@ -1093,7 +1085,7 @@ mod tests {
             cache_write_tokens: 3,
             ..TokenUsage::new(100, 20)
         };
-        let metadata = json!({ "usage": usage_metadata(std::slice::from_ref(&line)) });
+        let metadata = json!({ "usage": wire_usage(std::slice::from_ref(&line)) });
         let back = usage_from_status_metadata(Some(&metadata));
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].model, line.model);
@@ -1160,7 +1152,7 @@ mod tests {
     fn usage_and_trace_round_trip_from_the_same_metadata() {
         let trace = "### read_file (ok)\ninput: {}\noutput: # Chatty";
         let metadata = json!({
-            "usage": usage_metadata(&[TokenUsage::new(120, 34)]),
+            "usage": wire_usage(&[TokenUsage::new(120, 34)]),
             "trace": trace,
         });
 

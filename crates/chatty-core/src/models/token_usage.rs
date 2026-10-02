@@ -14,6 +14,30 @@ pub struct ModelRef {
     pub model_id: String,
 }
 
+impl ModelRef {
+    /// A usage line's model as the wire names it; an error for a provider
+    /// this build does not know.
+    pub fn from_wire(model: &chatty_fabric::wire::WireModelRef) -> serde_json::Result<Self> {
+        Ok(Self {
+            provider: serde_json::from_value(serde_json::Value::String(model.provider.clone()))?,
+            model_id: model.model_id.clone(),
+        })
+    }
+}
+
+impl From<&ModelRef> for chatty_fabric::wire::WireModelRef {
+    fn from(model: &ModelRef) -> Self {
+        Self {
+            // A unit variant serialises as its snake_case name.
+            provider: serde_json::to_value(&model.provider)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default(),
+            model_id: model.model_id.clone(),
+        }
+    }
+}
+
 /// Token usage reported by the provider for **one** completion request.
 ///
 /// A single user turn is usually several requests: the first one answers or

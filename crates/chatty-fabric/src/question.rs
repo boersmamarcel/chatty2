@@ -19,6 +19,7 @@ use crate::{AgentOrigin, Asker};
 /// One clarifying question with its pre-made answers: field for field
 /// chatty-core's `ClarifyingQuestion`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Question {
     pub id: String,
     pub question: String,
@@ -29,6 +30,7 @@ pub struct Question {
 /// The answer to one [`Question`]: field for field chatty-core's
 /// `ClarificationAnswer`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Answer {
     pub id: String,
     pub answer: String,
@@ -40,6 +42,7 @@ pub struct Answer {
 /// relays it: the A2A agent its `invoke_agent` called, by the name it is
 /// configured under, and where that agent runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QuestionOrigin {
     pub agent: String,
     pub origin: AgentOrigin,
@@ -54,6 +57,7 @@ pub struct QuestionOrigin {
 /// question, never from an `ask_user` call's arguments; a question the
 /// worker's own model asked has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AskRequest {
     pub questions: Vec<Question>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -23,7 +23,7 @@ fn task() -> BrokerFrame {
     BrokerFrame::Task {
         task_id: "task-0b6f1c2e-5d7a-4c1e-9a53-2f4e8b1d6c90".into(),
         text: "Summarise src/lib.rs and list its public functions.".into(),
-        bearer: None,
+        identity: None,
         capture_conversation: false,
         spawn_context: None,
         handoff: None,

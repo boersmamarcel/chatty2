@@ -50,6 +50,29 @@ median's 95 % interval.
 
 Both ratios are well under 2, so kill criterion 3 holds for step 1.
 
+## Re-run for step 3 (EN-3a, AGE-772)
+
+Measured on 2026-10-02 on the same machine, the same way (interleaved, `nice
+-n 19`, release builds in one target directory, the v2 side again a local
+branch from `1ea4bb0b`), after the payloads became typed: `task.event`
+statuses carry no metadata, the terminal one a `TaskMetadata`, and every
+struct denies unknown fields.
+
+| Run | Load average (1/5/15 min) | encode | decode |
+|---|---|---|---|
+| v2, 1st | 5.76 / 9.31 / 9.62 | 524.19 [522.29, 526.83] | 659.09 [657.93, 660.86] |
+| v3, 1st | 4.76 / 8.86 / 9.46 | 207.21 [206.68, 208.07] | 566.95 [565.27, 568.44] |
+| v2, 2nd | 3.84 / 8.38 / 9.29 | 523.31 [520.79, 524.72] | 657.42 [655.31, 659.39] |
+| v3, 2nd | 3.11 / 7.92 / 9.11 | 208.12 [206.90, 209.02] | 571.54 [569.19, 574.00] |
+
+| | v2 median | v3 median | v3/v2 |
+|---|---|---|---|
+| encode (mean of the two runs) | 523.8 µs | 207.7 µs | **0.40** |
+| decode (mean of the two runs) | 658.3 µs | 569.2 µs | **0.86** |
+
+Both ratios are within a few hundredths of step 1's, well under 2:
+kill criterion 3 holds for step 3.
+
 ## Why v3 is not slower
 
 v2's `encode_frame` serialised each frame to a `serde_json::Value`, inserted

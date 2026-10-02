@@ -28,21 +28,22 @@
 //! The gateway's worker loop (`chatty_protocol_gateway::worker`) owns both
 //! ends of the socket and does the framing.
 //!
-//! [`InvokeAgentProgress`] travels as JSON inside a call's progress events
-//! (`chatty-fabric` cannot name this crate's types); [`progress_to_value`]
-//! and [`progress_from_value`] are the conversion at this edge.
+//! A call's progress and result arrive typed by the wire
+//! ([`chatty_fabric::wire::WireProgress`], [`CallResult`]); the
+//! `invoke_agent` tool converts the progress to its `InvokeAgentProgress`
+//! (`From<WireProgress>`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use chatty_fabric::{Answer, AskRequest, CallError, CallEvent, CallRequest, CallStream, Transport};
+use chatty_fabric::wire::WireProgress;
+use chatty_fabric::{
+    Answer, AskRequest, CallError, CallEvent, CallRequest, CallResult, CallStream, Transport,
+};
 use futures::StreamExt;
 use parking_lot::Mutex;
-use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
-
-use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// What the worker sends the broker about its calls.
 #[derive(Debug, Clone, PartialEq)]
@@ -198,7 +199,7 @@ impl Transport for SocketTransport {
 
 impl CallReplies {
     /// `req.progress` for call `id`.
-    pub fn progress(&self, id: u64, event: Value) {
+    pub fn progress(&self, id: u64, event: WireProgress) {
         self.deliver(id, Ok(CallEvent::Progress(event)), false);
     }
 
@@ -213,7 +214,7 @@ impl CallReplies {
     }
 
     /// A result: call `id` is over.
-    pub fn result(&self, id: u64, result: Value) {
+    pub fn result(&self, id: u64, result: CallResult) {
         self.deliver(id, Ok(CallEvent::Result(result)), true);
     }
 
@@ -252,21 +253,10 @@ impl CallReplies {
     }
 }
 
-/// An [`InvokeAgentProgress`] as a call's progress event.
-pub fn progress_to_value(progress: &InvokeAgentProgress) -> Value {
-    serde_json::to_value(progress).unwrap_or(Value::Null)
-}
-
-/// A call's progress event as an [`InvokeAgentProgress`], if it is one.
-pub fn progress_from_value(value: Value) -> Option<InvokeAgentProgress> {
-    serde_json::from_value(value).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chatty_fabric::InvokeAgentParams;
-    use serde_json::json;
+    use chatty_fabric::{InvokeAgentParams, MessageStatus};
 
     fn invoke(agent: &str) -> CallRequest {
         CallRequest::InvokeAgent(InvokeAgentParams {
@@ -295,18 +285,19 @@ mod tests {
         assert_eq!(request, invoke("a"));
 
         // b finishes first; a gets a progress event, then its result.
-        replies.result(second, json!("b done"));
-        replies.progress(first, json!({"Text": "working"}));
-        replies.result(first, json!("a done"));
+        let posted = |id: &str| CallResult::Posted(MessageStatus::Pending { id: id.to_string() });
+        replies.result(second, posted("b done"));
+        replies.progress(first, WireProgress::Text("working".into()));
+        replies.result(first, posted("a done"));
 
         let b: Vec<_> = b.collect().await;
-        assert_eq!(b, vec![Ok(CallEvent::Result(json!("b done")))]);
+        assert_eq!(b, vec![Ok(CallEvent::Result(posted("b done")))]);
         let a: Vec<_> = a.collect().await;
         assert_eq!(
             a,
             vec![
-                Ok(CallEvent::Progress(json!({"Text": "working"}))),
-                Ok(CallEvent::Result(json!("a done"))),
+                Ok(CallEvent::Progress(WireProgress::Text("working".into()))),
+                Ok(CallEvent::Result(posted("a done"))),
             ]
         );
     }
@@ -332,7 +323,7 @@ mod tests {
         };
         assert!(replies.pending.lock().is_empty());
         // Harmless: nobody is waiting.
-        replies.result(id, json!([]));
+        replies.result(id, CallResult::Agents(Vec::new()));
     }
 
     /// EN-2b: a peer's question goes up as a numbered `human.ask`, its
@@ -378,19 +369,5 @@ mod tests {
         ));
         gave_up.abort();
         assert_eq!(calls.recv().await, Some(Outbound::CancelAsk { id: 3 }));
-    }
-
-    #[test]
-    fn progress_round_trips_through_json() {
-        let step = InvokeAgentProgress::Step("\u{2713} read_file".to_string());
-        assert_eq!(
-            progress_to_value(&step),
-            json!({"Step": "\u{2713} read_file"})
-        );
-        assert!(matches!(
-            progress_from_value(json!({"Text": "hi"})),
-            Some(InvokeAgentProgress::Text(t)) if t == "hi"
-        ));
-        assert!(progress_from_value(json!({"Nope": 1})).is_none());
     }
 }

@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use serde_json::Value;
+use chatty_fabric::wire::TaskMetadata;
 
 use super::calls::{BrokerCalls, Peer};
 use super::codec::BrokerCodec;
@@ -54,9 +54,9 @@ pub enum TaskUpdate {
     Status {
         state: TaskState,
         message: Option<String>,
-        /// Opaque, forwarded to the A2A status's `metadata` (see
+        /// A terminal status's (see
         /// [`ParticipantFrame::Status`](super::protocol::ParticipantFrame)).
-        metadata: Option<Value>,
+        metadata: Option<TaskMetadata>,
     },
     Artifact {
         text: String,
@@ -566,7 +566,7 @@ impl ParticipantRegistry {
             task_id: task_id.clone(),
             budget: Box::new(task.frame_budget()),
             text: task.text,
-            bearer: task.bearer,
+            identity: task.identity,
             capture_conversation: task.capture_conversation,
             spawn_context: task.spawn_context,
             handoff: task.handoff,
@@ -767,7 +767,7 @@ impl ParticipantRegistry {
                 last_chunk,
             } => (task_id, TaskUpdate::Artifact { text, last_chunk }, false),
             ParticipantFrame::Event { task_id, event } => {
-                (task_id, TaskUpdate::Event(event), false)
+                (task_id, TaskUpdate::Event(event.into()), false)
             }
             // Calls are run by the connection loop, which owns their
             // lifetime; one reaching here was not routed and is dropped.
@@ -899,9 +899,9 @@ impl ParticipantRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::super::protocol::TaskBearer;
     use super::*;
     use crate::participant::limits::OUTBOUND_QUEUE_FRAMES;
+    use chatty_fabric::wire::TaskIdentity;
 
     fn card(name: &str) -> ParticipantCard {
         ParticipantCard {
@@ -999,7 +999,7 @@ mod tests {
             .submit_task(
                 &w,
                 DelegatedTask::from_root("summarise foo.rs")
-                    .with_bearer(Some(TaskBearer::new("tok"))),
+                    .with_identity(Some(TaskIdentity::new("acme", "ada"))),
             )
             .await
             .expect("the participant is registered");
@@ -1007,7 +1007,7 @@ mod tests {
         let BrokerFrame::Task {
             task_id: sent,
             text,
-            bearer,
+            identity,
             capture_conversation,
             ..
         } = outbound.recv().await.unwrap()
@@ -1016,8 +1016,8 @@ mod tests {
         };
         assert_eq!(sent, task_id);
         assert_eq!(text, "summarise foo.rs");
-        // The caller's bearer rides the frame to the worker (AGE-371).
-        assert_eq!(bearer, Some(TaskBearer::new("tok")));
+        // Whose task it is rides the frame to the worker (ADR-0021 § 2).
+        assert_eq!(identity, Some(TaskIdentity::new("acme", "ada")));
         assert!(!capture_conversation, "not asked for, so off by default");
         assert_eq!(reg.open_task_count(&w), 1);
 

@@ -239,7 +239,9 @@ reports on it with `task.event` (`kind` `status`, `artifact` or `swarm`) and
 ends it with the `task.run`'s result, and the broker stops it with
 `req.cancel`. A method the peer may not send, a reused in-flight id or a line
 that does not decode closes the connection without a reply; a response
-naming nothing in flight is dropped. There is no older version to fall back
+naming nothing in flight is dropped. Every payload is typed
+(`chatty_fabric::wire`): an unknown field, a duplicate key or an unknown
+error `kind` does not decode either. There is no older version to fall back
 to. The gateway maps a task's messages onto A2A status and artifact updates.
 
 **Workers call over the same connection (ADR-0020, BI-4, AGE-636).** A
@@ -250,9 +252,9 @@ loopback HTTP:
 | Direction | Message | Fields |
 |---|---|---|
 | worker → broker | `agent.invoke`, `agent.list`, `mailbox.post` requests | `id` (the worker's, never reused on the connection), `params` (none for `agent.list`) |
-| broker → worker | `req.progress` notification | `id`, `event` — an `InvokeAgentProgress` as JSON: `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
+| broker → worker | `req.progress` notification | `id`, `event` — `{"Admitted": "…"}` once the callee's node is admitted, `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
 | broker → worker | result | `id`, `result` — for `agent.invoke` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `agent.list` the aggregated card's `agents` array; for `mailbox.post` `{"status":"pending","id":"msg-1"}` or `{"status":"refused","reason":"not_on_tree"}` (see [`send_message`](#send_message)) |
-| broker → worker | error | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
+| broker → worker | error | `id`, `error: {kind, …, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, `delegation`, …); the kind's fields ride beside it and `message` is display text only |
 | worker → broker | `req.cancel` notification | `id` — the worker withdraws its call, its approval or its question |
 | worker → broker | `human.approve` request | `id`, `params: {kind: exec\|write, command_or_path, diff_stat?}` — an approval only the root answers (EN-2a); the result is `"approved"` or `"denied"`. The broker stamps the asker itself and never sends this to a worker |
 | worker → broker | `human.ask` request | `id`, `params: {questions: [{id, question, options}], origin?}` — a question (EN-2b); the result is the answers, `[{id, answer, custom}]`, or an error when nobody up the chain answered. The broker stamps the asker itself |

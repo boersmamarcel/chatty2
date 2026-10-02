@@ -253,19 +253,10 @@ mod tests {
             serde_json::to_value(SwarmItem::Text { bytes: 5 }).unwrap(),
             serde_json::json!({"kind": "text", "bytes": 5})
         );
-        // Whatever else a worker puts in an item is not part of it.
-        let item: SwarmItem = serde_json::from_value(serde_json::json!({
-            "kind": "tool_call_started", "id": "c1", "name": "shell",
-            "root_task_id": "forged", "node": "root", "chain": ["root"]
-        }))
-        .unwrap();
-        assert_eq!(
-            item,
-            SwarmItem::ToolCallStarted {
-                id: "c1".into(),
-                name: "shell".into()
-            }
-        );
+        let item = SwarmItem::ToolCallStarted {
+            id: "c1".into(),
+            name: "shell".into(),
+        };
         assert!(item.is_workers_to_report());
         assert!(!SwarmItem::Usage { usage: Value::Null }.is_workers_to_report());
     }

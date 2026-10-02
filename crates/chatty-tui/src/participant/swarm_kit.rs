@@ -381,9 +381,10 @@ impl SwarmKit {
         );
         // What `Broker::start` does with a team's `handoffs` (TD-2).
         for (spec, agent) in specs.iter_mut().zip(&roster) {
-            spec.handoff = agent.handoff.clone().map(|schema| HandoffContract {
+            spec.handoff = agent.handoff.as_ref().map(|schema| HandoffContract {
                 role: agent.name.clone(),
-                schema,
+                schema: chatty_fabric::wire::Opaque::from_value(schema)
+                    .expect("a kit schema fits the wire"),
             });
         }
         let broker = Broker::start_priced_at(
@@ -1997,7 +1998,7 @@ async fn spawn_context_is_clamped() {
                     Some(Err(CallError::SpawnContextRefused { field, .. })) => {
                         seen.lock().push(field)
                     }
-                    Some(Ok(CallEvent::Result(result))) => panic!("accepted: {result}"),
+                    Some(Ok(CallEvent::Result(result))) => panic!("accepted: {result:?}"),
                     other => panic!("expected a refusal naming the field, got {other:?}"),
                 }
             }
@@ -2492,10 +2493,12 @@ async fn no_mid_run_delivery() {
                 }))
                 .await
                 .expect("the call goes out");
-            let Some(Ok(CallEvent::Result(result))) = call.next().await else {
-                panic!("send_message answers with a result");
+            let Some(Ok(CallEvent::Result(chatty_fabric::CallResult::Posted(status)))) =
+                call.next().await
+            else {
+                panic!("send_message answers with a status");
             };
-            *seen.lock() = Some(serde_json::from_value::<MessageStatus>(result).unwrap());
+            *seen.lock() = Some(status);
             Ok(())
         }),
     )

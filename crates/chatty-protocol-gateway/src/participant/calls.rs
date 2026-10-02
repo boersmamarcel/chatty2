@@ -146,16 +146,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use chatty_fabric::wire::{AgentEntry, TaskMetadata, WireProgress};
 use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, Asker,
-    CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallStream,
-    ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL, InvokeAgentOutcome,
-    InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal,
-    RefusalReason, SendMessageParams, SwarmBatcher, SwarmItem, Transport, UsagePricer,
-    deadline_grace,
+    CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallResult,
+    CallStream, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL,
+    InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList,
+    ROOT_NAME, Refusal, RefusalReason, SendMessageParams, SwarmBatcher, SwarmItem, Transport,
+    UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
-use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
@@ -1065,7 +1065,10 @@ impl BrokerCalls {
                 }
             }
             CallRequest::ListAgents => match self.gate(&peer, &caller, &Request::List).outcome {
-                Ok(_) => futures::stream::iter([Ok(CallEvent::Result(self.directory()))]).boxed(),
+                Ok(_) => futures::stream::iter([Ok(CallEvent::Result(CallResult::Agents(
+                    self.directory(),
+                )))])
+                .boxed(),
                 Err(refused) => {
                     let error = refused.to_call_error();
                     self.log_refusal(&peer, "agent.list", &error.to_string());
@@ -1074,7 +1077,7 @@ impl BrokerCalls {
             },
             CallRequest::SendMessage(params) => {
                 let status = self.send_message(&peer, &caller, params);
-                futures::stream::iter([Ok(CallEvent::Result(json!(status)))]).boxed()
+                futures::stream::iter([Ok(CallEvent::Result(CallResult::Posted(status)))]).boxed()
             }
         }
     }
@@ -1327,19 +1330,17 @@ impl BrokerCalls {
     /// Every agent a call can address, as the aggregated agent card lists
     /// them: connected participants, then virtual agents, each with its
     /// origin (ADR-0011 C5).
-    fn directory(&self) -> Value {
+    fn directory(&self) -> Vec<AgentEntry> {
         let participants = self
             .registry
             .agents()
             .into_iter()
-            .map(|agent| with_origin(a2a_participant::card_to_json(&agent.card), agent.origin));
-        let runners = self.runners.values().map(|runner| {
-            with_origin(
-                a2a_participant::card_to_json(&runner.agent_card()),
-                AgentOrigin::Local,
-            )
-        });
-        Value::Array(participants.chain(runners).collect())
+            .map(|agent| AgentEntry::from_card(&agent.card, agent.origin));
+        let runners = self
+            .runners
+            .values()
+            .map(|runner| AgentEntry::from_card(&runner.agent_card(), AgentOrigin::Local));
+        participants.chain(runners).collect()
     }
 
     /// Run a granted `agent.invoke` on the target its grant names — never
@@ -1452,7 +1453,7 @@ impl BrokerCalls {
             // only knew this callee by its spec can now name this one
             // call precisely (AGE-762), which two parallel calls to the
             // same spec need to be stoppable one at a time.
-            yield Ok(CallEvent::Progress(json!({ "Admitted": running.participant() })));
+            yield Ok(CallEvent::Progress(WireProgress::Admitted(running.participant().to_string())));
             let (mut stopped, _stoppable) = stoppable(&stops, &caller, &agent, running.participant());
             let mut stopped_by_user = false;
             let reporting = reports_to.map(|(to, chain)| Reporting {
@@ -1529,7 +1530,7 @@ impl BrokerCalls {
                         if !text.is_empty() {
                             report(SwarmItem::Text { bytes: text.len() as u64 });
                             response.push_str(&text);
-                            yield Ok(CallEvent::Progress(json!({ "Text": text })));
+                            yield Ok(CallEvent::Progress(WireProgress::Text(text)));
                         }
                     }
                     TaskUpdate::Event(item) => {
@@ -1539,8 +1540,10 @@ impl BrokerCalls {
                     }
                     TaskUpdate::Status { state, message, metadata } => {
                         if state.is_terminal() {
-                            if let Some(usage) = metadata.as_ref().and_then(|m| m.get("usage")) {
-                                report(SwarmItem::Usage { usage: usage.clone() });
+                            if let Some(usage) = metadata.as_ref().and_then(|m| m.usage.as_ref())
+                                && let Ok(usage) = serde_json::to_value(usage)
+                            {
+                                report(SwarmItem::Usage { usage });
                             }
                             // Finished before the result, as the A2A path
                             // does before its terminal event: that commits
@@ -1551,7 +1554,7 @@ impl BrokerCalls {
                                 .await;
                             if let Some(evidence) = evidence.as_ref() {
                                 response.push_str(&evidence.text);
-                                yield Ok(CallEvent::Progress(json!({ "Text": evidence.text })));
+                                yield Ok(CallEvent::Progress(WireProgress::Text(evidence.text.clone())));
                             }
                             end = Some((
                                 state,
@@ -1563,7 +1566,7 @@ impl BrokerCalls {
                         if state == TaskState::Working
                             && let Some(step) = message
                         {
-                            yield Ok(CallEvent::Progress(json!({ "Step": step })));
+                            yield Ok(CallEvent::Progress(WireProgress::Step(step)));
                         }
                     }
                 }
@@ -1576,7 +1579,7 @@ impl BrokerCalls {
                 drop(running);
                 report(SwarmItem::Ended { state: TaskState::Canceled.to_string() });
                 edge.write(EdgeKind::Task, "cancelled".to_string());
-                yield Ok(CallEvent::Result(json!(InvokeAgentOutcome {
+                yield Ok(CallEvent::Result(CallResult::Invoked(InvokeAgentOutcome {
                     success: false,
                     response,
                     error: Some(CANCELLED_BY_USER.to_string()),
@@ -1596,8 +1599,8 @@ impl BrokerCalls {
             });
             edge.usd = pricer
                 .as_ref()
-                .zip(metadata.as_ref())
-                .and_then(|(pricer, metadata)| pricer.usd(metadata));
+                .zip(metadata.as_ref().and_then(|m| m.usage.as_ref()))
+                .and_then(|(pricer, usage)| pricer.usd(usage));
             report(SwarmItem::Ended { state: state.to_string() });
             // Every nested run ended before the callee did, so what they
             // reported is all here: it goes out, on the next flush, before
@@ -1707,15 +1710,15 @@ fn outcome(
     state: TaskState,
     response: String,
     message: Option<String>,
-    metadata: Option<Value>,
+    metadata: Option<TaskMetadata>,
     messages: Vec<String>,
-) -> Value {
+) -> CallResult {
     let success = state != TaskState::Failed;
-    json!(InvokeAgentOutcome {
+    CallResult::Invoked(InvokeAgentOutcome {
         success,
         response,
         error: if success { None } else { message },
-        metadata,
+        metadata: metadata.map(Box::new),
         messages,
         cancelled_by_user: false,
     })
@@ -1732,14 +1735,6 @@ fn lock(
     pending: &Mutex<HashMap<Recipient, PendingList>>,
 ) -> std::sync::MutexGuard<'_, HashMap<Recipient, PendingList>> {
     pending.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Tag one agent card with its origin, as the aggregated card does.
-fn with_origin(mut card: Value, origin: AgentOrigin) -> Value {
-    if let Some(object) = card.as_object_mut() {
-        object.insert("origin".to_string(), json!(origin.as_str()));
-    }
-    card
 }
 
 /// Writes a call's edge-log row when the call ends, however it ends: a call
@@ -1851,6 +1846,7 @@ impl Transport for DirectTransport {
 mod tests {
     use super::*;
     use chatty_fabric::{PENDING_LIST_BYTES, Remaining, SENDER_ALLOWANCE_BYTES};
+    use serde_json::json;
 
     fn broker(edges: Option<Arc<Mutex<EdgeLog>>>) -> (Arc<BrokerCalls>, ParticipantRegistry) {
         let registry = ParticipantRegistry::new();
@@ -1881,11 +1877,11 @@ mod tests {
                 text: text.to_string(),
             }),
         );
-        let Some(Ok(CallEvent::Result(value))) = stream.next().await else {
-            panic!("a send_message call answers with one result");
+        let Some(Ok(CallEvent::Result(CallResult::Posted(status)))) = stream.next().await else {
+            panic!("a send_message call answers with one status");
         };
         assert!(stream.next().await.is_none());
-        serde_json::from_value(value).expect("a MessageStatus")
+        status
     }
 
     fn node(name: &str) -> Peer {
@@ -2210,7 +2206,12 @@ mod tests {
             Some("task-slow")
         }
 
-        fn finish(&mut self, _succeeded: bool, _metadata: Option<&Value>) {}
+        fn finish(
+            &mut self,
+            _succeeded: bool,
+            _metadata: Option<&chatty_fabric::wire::TaskMetadata>,
+        ) {
+        }
     }
 
     impl Drop for SlowWorker {
@@ -2307,10 +2308,9 @@ mod tests {
             .await;
         let ended = start.elapsed();
 
-        let Some(Ok(CallEvent::Result(result))) = events.last() else {
+        let Some(Ok(CallEvent::Result(CallResult::Invoked(outcome)))) = events.last() else {
             panic!("the call ends with a result: {events:?}");
         };
-        let outcome: InvokeAgentOutcome = serde_json::from_value(result.clone()).unwrap();
         assert!(!outcome.success, "{outcome:?}");
         assert!(
             outcome
@@ -2445,11 +2445,12 @@ mod tests {
         );
     }
 
-    /// Invariant 4 (DP-2): a worker at depth 4 sends a call frame whose
-    /// `params.metadata.chatty.call` claims depth 0 and an empty chain. The
-    /// broker parses the frame as the wire gives it, reads the caller's
-    /// chain from its own task table, and refuses the call at its real
-    /// depth — and a cycle as a cycle — with nothing spawned.
+    /// Invariant 4 (DP-2): a worker at depth 4 calls on. The broker reads
+    /// the caller's chain from its own task table, never from the frame,
+    /// and refuses the call at its real depth — and a cycle as a cycle —
+    /// with nothing spawned. (A frame that smuggles a chain in, as
+    /// `metadata.chatty.call`, does not decode at all: the codec's
+    /// `smuggled_chatty_call_metadata_refused_at_decode`.)
     #[tokio::test]
     async fn forged_chain_is_ignored() {
         let data = tempfile::tempdir().unwrap();
@@ -2508,9 +2509,6 @@ mod tests {
                 "params": {
                     "agent": agent, "prompt": "go on",
                     "run": runs.last().expect("four runs").name(),
-                    "metadata": {"chatty": {"call": {
-                        "root_task_id": "forged", "chain": [], "depth": 0
-                    }}}
                 }
             })
             .to_string();

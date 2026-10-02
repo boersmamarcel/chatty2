@@ -18,7 +18,7 @@ use chatty_fabric::UsagePricer;
 use serde::Serialize;
 
 use crate::models::token_usage::{Cost, PriceBook, TokenUsage, price};
-use crate::services::a2a_client::usage_from_status_metadata;
+use crate::services::a2a_client::usage_from_wire;
 
 /// The cap is already spent: a delegation must not start.
 ///
@@ -157,8 +157,8 @@ impl SpendGate for LocalSpendGate {
 /// The broker's pricing of a callee's reported usage for its edge-log row
 /// (DP-3): the dollars, or `unpriced` when any line's model has no price.
 impl UsagePricer for PriceBook {
-    fn usd(&self, metadata: &serde_json::Value) -> Option<String> {
-        let lines = usage_from_status_metadata(Some(metadata));
+    fn usd(&self, usage: &chatty_fabric::wire::WireUsage) -> Option<String> {
+        let lines = usage_from_wire(usage);
         if lines.is_empty() {
             return None;
         }
@@ -272,15 +272,14 @@ mod tests {
 
     #[test]
     fn the_broker_prices_reported_usage_or_says_unpriced() {
-        let report = |model_id: &str| {
-            serde_json::json!({
-                crate::services::a2a_client::USAGE_METADATA_KEY:
-                    crate::services::a2a_client::usage_metadata(&[line(model_id, 80)])
-            })
-        };
+        let report =
+            |model_id: &str| crate::services::a2a_client::wire_usage(&[line(model_id, 80)]);
         assert_eq!(book().usd(&report("priced")).as_deref(), Some("0.080000"));
         assert_eq!(book().usd(&report("unknown")).as_deref(), Some("unpriced"));
-        assert_eq!(book().usd(&serde_json::json!({})), None);
+        assert_eq!(
+            book().usd(&crate::services::a2a_client::wire_usage(&[])),
+            None
+        );
     }
 
     #[test]

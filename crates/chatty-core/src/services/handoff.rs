@@ -28,6 +28,7 @@ use serde_json::Value;
 use tracing::warn;
 
 pub use chatty_fabric::HandoffContract;
+use chatty_fabric::wire::TaskMetadata;
 
 /// The terminal-status metadata key a valid handoff rides under.
 pub const HANDOFF_METADATA_KEY: &str = "handoff";
@@ -155,7 +156,11 @@ pub fn check(contract: &HandoffContract, answer: &str) -> HandoffOutcome {
         Ok(value) => value,
         Err(e) => return invalid(format!("the ```json block is not JSON: {e}")),
     };
-    let validator = match compile(&contract.schema) {
+    let schema = match contract.schema.to_value() {
+        Ok(schema) => schema,
+        Err(e) => return invalid(format!("the role's schema is not JSON: {e}")),
+    };
+    let validator = match compile(&schema) {
         Ok(validator) => validator,
         Err(e) => return invalid(format!("the role's schema does not compile: {e}")),
     };
@@ -238,6 +243,25 @@ impl HandoffReport {
                 .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)),
         }
     }
+
+    /// Read the handoff off a fabric callee's terminal metadata. A handoff
+    /// that is not JSON reads as none.
+    pub fn from_task_metadata(metadata: Option<&TaskMetadata>) -> Self {
+        let Some(metadata) = metadata else {
+            return Self::default();
+        };
+        Self {
+            handoff: metadata
+                .handoff
+                .as_ref()
+                .and_then(|handoff| handoff.to_value().ok()),
+            invalid: metadata
+                .handoff_invalid
+                .as_ref()
+                .map(|invalid| (invalid.role.clone(), invalid.errors.clone())),
+            invalid_count: metadata.handoff_invalid_count.unwrap_or(0),
+        }
+    }
 }
 
 /// The leader's record of its roles' handoffs over one run: the invalid
@@ -267,7 +291,7 @@ impl HandoffLedger {
         let rules = contracts
             .into_iter()
             .filter_map(|c| {
-                let rules = read_rules(&c.schema).ok()?;
+                let rules = read_rules(&c.schema.to_value().ok()?).ok()?;
                 (!rules.is_empty()).then(|| (c.role.clone(), rules))
             })
             .collect();
@@ -352,16 +376,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn opaque(schema: Value) -> chatty_fabric::wire::Opaque {
+        chatty_fabric::wire::Opaque::from_value(&schema).unwrap()
+    }
+
     fn contract() -> HandoffContract {
         HandoffContract {
             role: "coder".to_string(),
-            schema: json!({
+            schema: opaque(json!({
                 "type": "object",
                 "required": ["files_changed"],
                 "properties": {
                     "files_changed": { "type": "array", "items": { "type": "string" } }
                 }
-            }),
+            })),
         }
     }
 
@@ -402,7 +430,7 @@ mod tests {
     fn the_ledger_tags_a_misread_and_counts_invalid_handoffs() {
         let reviewer = HandoffContract {
             role: "reviewer".to_string(),
-            schema: json!({ "x-must-be-read": { "coder": ["files_changed"] } }),
+            schema: opaque(json!({ "x-must-be-read": { "coder": ["files_changed"] } })),
         };
         let ledger = HandoffLedger::new([&contract(), &reviewer]);
         ledger.record(

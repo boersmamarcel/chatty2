@@ -9,12 +9,13 @@
 
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::Remaining;
+use crate::wire::{AgentEntry, TaskMetadata, WireProgress};
 
 /// `invoke_agent`'s arguments as they cross the fabric.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvokeAgentParams {
     pub agent: String,
     pub prompt: String,
@@ -57,6 +58,7 @@ pub struct InvokeAgentParams {
 /// travels on the spawn request instead. The broker sets it from the
 /// calling node's own context; a worker cannot widen it (invariant 6).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SpawnContext {
     /// The tree the worker's own tree is made under: the caller's own tree.
     /// `None` when there is no workspace to isolate in.
@@ -82,6 +84,7 @@ pub struct SpawnContext {
 
 /// `send_message`'s arguments as they cross the fabric (tree messages).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendMessageParams {
     pub to: String,
     pub text: String,
@@ -94,7 +97,7 @@ pub struct SendMessageParams {
 /// A refusal is an answer, not a [`CallError`]: the sender's model reads it
 /// as the tool's result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MessageStatus {
     /// Accepted; it waits for the recipient's next delivery point.
     Pending {
@@ -137,9 +140,9 @@ impl std::fmt::Display for RefusalReason {
 }
 
 /// One call. On a worker's connection each variant is its own request
-/// method (`agent.invoke`, `agent.list`, `mailbox.post`) with these params.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+/// method (`agent.invoke`, `agent.list`, `mailbox.post`) with these params
+/// ([`wire::WorkerRequest`](crate::wire::WorkerRequest)).
+#[derive(Debug, Clone, PartialEq)]
 pub enum CallRequest {
     InvokeAgent(InvokeAgentParams),
     ListAgents,
@@ -149,9 +152,9 @@ pub enum CallRequest {
 /// One item of a [`CallStream`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallEvent {
-    /// A progress event; for `invoke_agent` an `InvokeAgentProgress`, as
-    /// JSON, which chatty-core converts back at its edge.
-    Progress(Value),
+    /// Progress on an `invoke_agent`, which chatty-core converts to its
+    /// `InvokeAgentProgress` at its edge.
+    Progress(WireProgress),
     /// A node anywhere under this call asked a human a question
     /// (`human.ask`, ADR-0021 § 2, EN-2b), and every caller between it and
     /// this one escalated it. Only a root call receives these: the broker
@@ -185,7 +188,30 @@ pub enum CallEvent {
     /// are nested runs themselves, whose events go to the root directly.
     Swarm(crate::swarm::SwarmEvent),
     /// The call's result. The last item of a successful stream.
-    Result(Value),
+    Result(CallResult),
+}
+
+/// What a call returns, typed by its method.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallResult {
+    /// `invoke_agent` (`agent.invoke`): how the callee's task ended.
+    Invoked(InvokeAgentOutcome),
+    /// `list_agents` (`agent.list`): the agents the caller may address.
+    Agents(Vec<AgentEntry>),
+    /// `send_message` (`mailbox.post`): whether the message was taken.
+    Posted(MessageStatus),
+}
+
+/// A result is written as its method's result type: which one it is, the
+/// reader knows from the request it answers, so nothing tags it.
+impl Serialize for CallResult {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Invoked(outcome) => outcome.serialize(serializer),
+            Self::Agents(agents) => agents.serialize(serializer),
+            Self::Posted(status) => status.serialize(serializer),
+        }
+    }
 }
 
 /// What `invoke_agent` returns when the callee's task ended, whether it
@@ -197,6 +223,7 @@ pub enum CallEvent {
 /// usage, trace, conversation and the runner's evidence ride there, as
 /// they do on A2A.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InvokeAgentOutcome {
     pub success: bool,
     /// Everything the callee streamed as its answer, in order.
@@ -206,7 +233,9 @@ pub struct InvokeAgentOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Value>,
+    /// Boxed: it is the largest part of a call's result, and most results
+    /// carry none.
+    pub metadata: Option<Box<TaskMetadata>>,
     /// Messages that were waiting for the caller when this result was made
     /// (tree messages, TM-2): each one [`wrap_message`](crate::wrap_message)ped,
     /// oldest first. This result is their delivery point, so they are gone
@@ -225,10 +254,9 @@ pub struct InvokeAgentOutcome {
 /// `error` and in the tool error its model sees (TB-7, AGE-749).
 pub const CANCELLED_BY_USER: &str = "cancelled_by_user";
 
-/// Why a call failed. Serialises as `{"kind": …, "message": …}`, the
-/// `error` of a v3 error response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "kind", content = "message", rename_all = "snake_case")]
+/// Why a call failed. On the wire it is a [`WireError`](crate::wire::WireError),
+/// the `error` of a v3 error response; the two convert both ways.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CallError {
     #[error("unknown agent: {0}")]
     UnknownAgent(String),
@@ -251,6 +279,9 @@ pub enum CallError {
     Disconnected(String),
     #[error("{0}")]
     Failed(String),
+    /// The peer broke the protocol (a hello whose schema does not match).
+    #[error("protocol: {0}")]
+    Protocol(String),
 }
 
 /// Progress, then one result. An `Err` item ends the stream.
@@ -330,37 +361,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn requests_and_errors_have_the_v2_frame_shape() {
-        let invoke = CallRequest::InvokeAgent(InvokeAgentParams {
-            agent: "local-coder".into(),
-            prompt: "fix it".into(),
-            handle: None,
-            include_trace: false,
-            spawn_context: None,
-            remaining: Default::default(),
-            run: None,
-        });
-        assert_eq!(
-            serde_json::to_value(&invoke).unwrap(),
-            json!({"method": "invoke_agent", "params": {
-                "agent": "local-coder", "prompt": "fix it", "handle": null, "include_trace": false
-            }})
-        );
-        assert_eq!(
-            serde_json::to_value(CallRequest::ListAgents).unwrap(),
-            json!({"method": "list_agents"})
-        );
-        let parsed: CallRequest = serde_json::from_value(json!({
-            "method": "send_message", "params": {"to": "leader-0", "text": "done"}
-        }))
-        .unwrap();
-        assert_eq!(
-            parsed,
-            CallRequest::SendMessage(SendMessageParams {
-                to: "leader-0".into(),
-                text: "done".into()
-            })
-        );
+    fn message_statuses_have_the_wire_shape() {
         assert_eq!(
             serde_json::to_value(MessageStatus::Pending { id: "msg-1".into() }).unwrap(),
             json!({"status": "pending", "id": "msg-1"})
@@ -375,23 +376,11 @@ mod tests {
                 json!({"status": "refused", "reason": reason.as_str()})
             );
         }
-        assert_eq!(
-            serde_json::to_value(CallError::SpawnContextRefused {
-                field: "roster".into(),
-                reason: "wider than the caller's".into()
-            })
-            .unwrap(),
-            json!({"kind": "spawn_context_refused",
-                   "message": {"field": "roster", "reason": "wider than the caller's"}})
+        assert!(
+            serde_json::from_str::<MessageStatus>(r#"{"status":"pending","id":"m","x":1}"#)
+                .is_err()
         );
         let refused = CallError::Delegation(crate::Refusal::TooDeep { depth: 5, max: 4 });
-        let json = serde_json::to_value(&refused).unwrap();
-        assert_eq!(
-            json,
-            json!({"kind": "delegation",
-                   "message": {"reason": "too_deep", "depth": 5, "max": 4}})
-        );
-        assert_eq!(serde_json::from_value::<CallError>(json).unwrap(), refused);
         assert_eq!(refused.to_string(), "too_deep: depth 5 > max 4");
     }
 
@@ -402,8 +391,10 @@ mod tests {
         async fn call(&self, req: CallRequest) -> Result<CallStream, CallError> {
             match req {
                 CallRequest::InvokeAgent(p) => Ok(futures::stream::iter([
-                    Ok(CallEvent::Progress(json!({"started": p.agent}))),
-                    Ok(CallEvent::Result(json!(p.prompt))),
+                    Ok(CallEvent::Progress(WireProgress::Admitted(p.agent))),
+                    Ok(CallEvent::Result(CallResult::Posted(
+                        MessageStatus::Pending { id: p.prompt },
+                    ))),
                 ])
                 .boxed()),
                 _ => Err(CallError::UnknownAgent("echo".into())),
@@ -433,8 +424,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Ok(CallEvent::Progress(json!({"started": "echo"}))),
-                Ok(CallEvent::Result(json!("hi"))),
+                Ok(CallEvent::Progress(WireProgress::Admitted("echo".into()))),
+                Ok(CallEvent::Result(CallResult::Posted(
+                    MessageStatus::Pending { id: "hi".into() }
+                ))),
             ]
         );
     }

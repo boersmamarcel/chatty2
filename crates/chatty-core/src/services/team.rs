@@ -591,7 +591,8 @@ fn load_handoffs(
             role.clone(),
             HandoffContract {
                 role: role.clone(),
-                schema,
+                schema: chatty_fabric::wire::Opaque::from_value(&schema)
+                    .with_context(|| format!("{role}'s schema {}", path.display()))?,
             },
         );
     }
@@ -1626,7 +1627,7 @@ mod tests {
         let team = load_team("t", Some(workspace.path()), None).unwrap();
         assert_eq!(team.handoffs["data-analyst"].role, "data-analyst");
         assert_eq!(
-            team.handoffs["data-analyst"].schema["required"][0],
+            team.handoffs["data-analyst"].schema.to_value().unwrap()["required"][0],
             "files_changed"
         );
         assert!(team.handoff_ledger().is_some());
