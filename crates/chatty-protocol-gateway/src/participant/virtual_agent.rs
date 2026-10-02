@@ -49,7 +49,7 @@ pub trait WorkerHandle: Send {
     ///
     /// What that buys depends on the worker: a committed worktree locally, a
     /// billed lease hosted.
-    fn finish(&mut self, succeeded: bool, metadata: Option<&Value>);
+    fn finish(&mut self, succeeded: bool, metadata: Option<&chatty_fabric::wire::TaskMetadata>);
 
     /// What the *runner* — not the worker — can say about the finished
     /// task: the branch, the diff stat, the commit count and the team's

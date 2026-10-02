@@ -15,8 +15,8 @@
 //! concrete type regardless of what it is speaking over.
 
 use anyhow::{Context, Result, bail};
+use chatty_fabric::wire::TaskMetadata;
 use chatty_fabric::{ConversationScope, NodeName};
-use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tracing::debug;
 
@@ -148,7 +148,7 @@ impl ParticipantConnection {
         task_id: &str,
         state: TaskState,
         message: Option<String>,
-        metadata: Option<Value>,
+        metadata: Option<TaskMetadata>,
     ) -> Result<()> {
         self.send(ParticipantFrame::Status {
             task_id: task_id.to_string(),

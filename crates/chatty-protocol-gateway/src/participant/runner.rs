@@ -35,7 +35,6 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chatty_fabric::{EndpointBudget, HandoffContract, RunPermit, SpawnContext};
-use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
@@ -637,7 +636,7 @@ impl WorkerHandle for Worker {
     /// A local worker has no second line item: the tokens in `metadata` are
     /// the whole cost of a child process, and the ledger that would record
     /// them is the hosted one (AGE-307).
-    fn finish(&mut self, succeeded: bool, _metadata: Option<&Value>) {
+    fn finish(&mut self, succeeded: bool, _metadata: Option<&chatty_fabric::wire::TaskMetadata>) {
         Worker::set_succeeded(self, succeeded)
     }
 

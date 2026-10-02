@@ -13,6 +13,7 @@ use tokio::net::UnixStream;
 
 use super::*;
 use crate::participant::{LocalConnection, WorkerFuture, WorkerHandle, open_connection};
+use serde_json::{Value, json};
 
 /// Whether a scripted worker's task asked for `swarm` task events, once it came.
 type Asked = Arc<Mutex<Option<bool>>>;
@@ -22,7 +23,8 @@ type Asked = Arc<Mutex<Option<bool>>>;
 enum Behaviour {
     /// Call `leaf` over its connection, wait for the result, complete.
     Delegate,
-    /// Send one tool event carrying a forged tag, then complete.
+    /// Send one tool event carrying a forged tag, which does not decode:
+    /// the broker closes the connection.
     Forge,
     /// Send `n` tool starts and `n` answer chunks back to back, then
     /// complete.
@@ -71,13 +73,10 @@ async fn serve(stream: UnixStream, behaviour: Behaviour, asked: Asked) {
                     "event": {"kind": "tool_call_started", "id": "c1", "name": "shell",
                               "root_task_id": "forged", "node": "root",
                               "chain": {"root_task_id": "forged", "chain": ["root"], "depth": 0}}}});
-                // Not the worker's to report: the broker reads usage off
-                // the terminal status.
-                let usage = json!({"method": "task.event", "params": {"kind": "swarm", "id": run,
-                    "event": {"kind": "usage", "usage": {"inputTokens": 1_000_000}}}});
-                for frame in [forged, usage] {
-                    write.write_all(line(frame).as_bytes()).await.unwrap();
-                }
+                write.write_all(line(forged).as_bytes()).await.unwrap();
+                // The broker hangs up; there is no result to send.
+                while let Ok(Some(_)) = lines.next_line().await {}
+                return;
             }
             Behaviour::Burst(n) => {
                 let mut out = String::new();
@@ -121,7 +120,7 @@ impl WorkerHandle for Handle {
         Some(&self.task_id)
     }
 
-    fn finish(&mut self, _succeeded: bool, _metadata: Option<&Value>) {}
+    fn finish(&mut self, _succeeded: bool, _metadata: Option<&chatty_fabric::wire::TaskMetadata>) {}
 }
 
 impl VirtualAgent for Scripted {
@@ -214,7 +213,7 @@ async fn root_call(calls: &BrokerCalls) -> (Vec<chatty_fabric::SwarmEvent>, Dura
         while let Some(event) = stream.next().await {
             match event {
                 Ok(CallEvent::Swarm(batch)) => batches.push(batch),
-                Ok(CallEvent::Result(result)) => return result,
+                Ok(CallEvent::Result(CallResult::Invoked(result))) => return result,
                 Ok(_) => {}
                 Err(e) => panic!("the call failed: {e}"),
             }
@@ -223,7 +222,7 @@ async fn root_call(calls: &BrokerCalls) -> (Vec<chatty_fabric::SwarmEvent>, Dura
     })
     .await
     .expect("the root call ends");
-    assert_eq!(result["success"], true, "{result}");
+    assert!(result.success, "{result:?}");
     (batches, started.elapsed())
 }
 
@@ -232,9 +231,12 @@ fn items(batches: &[chatty_fabric::SwarmEvent]) -> Vec<SwarmItem> {
     batches.iter().flat_map(|b| b.inner.clone()).collect()
 }
 
-/// A worker that sends a tag in its event payload gets it overwritten: the
-/// root hears the event under the node and chain the broker stamped, and
-/// an item that is not the worker's to report is dropped.
+/// A worker that sends a tag in its event payload is cut off (EN-3a): the
+/// frame does not decode, the broker closes its connection, and the root
+/// hears only that the run ended, under the node and chain the broker
+/// stamped. Nothing forged reaches it. (That an item which is not the
+/// worker's to report, such as usage, does not decode either is the codec's
+/// `a_swarm_event_with_a_forged_tag_does_not_decode`.)
 #[tokio::test]
 async fn worker_cannot_forge_tags() {
     let (calls, [mid_asked, leaf_asked]) = broker(Behaviour::Forge);
@@ -260,16 +262,10 @@ async fn worker_cannot_forge_tags() {
     }
     assert_eq!(
         items(&batches),
-        [
-            SwarmItem::ToolCallStarted {
-                id: "c1".into(),
-                name: "shell".into()
-            },
-            SwarmItem::Ended {
-                state: "completed".into()
-            },
-        ],
-        "the forged usage item was dropped"
+        [SwarmItem::Ended {
+            state: "failed".into()
+        }],
+        "the forged event was refused and its run ended with the connection"
     );
     let json = serde_json::to_string(&batches).unwrap();
     assert!(!json.contains("forged"), "{json}");

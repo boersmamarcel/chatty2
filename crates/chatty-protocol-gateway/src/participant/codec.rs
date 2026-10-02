@@ -21,8 +21,10 @@
 //!
 //! What a worker may send ([`WorkerRequest`], [`WorkerNotification`]) and
 //! what the broker may send ([`BrokerRequest`], [`BrokerNotification`]) are
-//! separate enums. A method the peer may not send does not decode, and a
-//! decode error closes the connection.
+//! separate enums, defined with every param, result and error type in
+//! [`chatty_fabric::wire`]. A method the peer may not send does not decode;
+//! neither does a field a type does not have, a duplicate key, or an error
+//! `kind` outside [`WireError`]. A decode error closes the connection.
 //!
 //! | Sender | Requests | Notifications |
 //! |---|---|---|
@@ -61,21 +63,23 @@ use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
+use chatty_fabric::wire::{
+    AgentEntry, BrokerNotification, BrokerRequest, DecodeError, HelloParams, IdParams,
+    ProgressParams, RelayedAskParams, TaskEvent, TaskOutcome, TaskRunParams, Welcome, WireError,
+    WorkerNotification, WorkerRequest,
+};
 use chatty_fabric::{
-    Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, CallError, CallRequest,
-    ConversationScope, HandoffContract, InvokeAgentParams, NodeName, Remaining, SendMessageParams,
-    SpawnContext, SwarmItem,
+    Answer, ApprovalVerdict, AskReply, CallError, CallRequest, CallResult, InvokeAgentOutcome,
+    MessageStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 use serde_json::value::RawValue;
 use tracing::{debug, warn};
 
-use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskBearer, TaskState};
+use super::protocol::{BrokerFrame, ParticipantCard, ParticipantFrame, TaskState};
 
-/// The participant protocol's version. Every line carries it as `v`.
-pub const PROTOCOL_VERSION: u64 = 3;
+pub use chatty_fabric::wire::PROTOCOL_VERSION;
 
 /// Why a line off the socket is not one this connection accepts. Every one
 /// closes the connection.
@@ -93,6 +97,15 @@ pub enum FrameError {
     /// A request id the peer already has in flight.
     #[error("request id {0} is already in flight")]
     ReusedId(u64),
+}
+
+impl From<DecodeError> for FrameError {
+    fn from(error: DecodeError) -> Self {
+        match error {
+            DecodeError::Malformed(reason) => Self::Malformed(reason),
+            DecodeError::WrongDirection(method) => Self::WrongDirection(method),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,18 +188,9 @@ fn malformed(e: impl std::fmt::Display) -> FrameError {
     FrameError::Malformed(e.to_string())
 }
 
-/// A method's params, typed.
-fn params<T: DeserializeOwned>(method: &str, raw: Option<&RawValue>) -> Result<T, FrameError> {
-    let raw = raw.ok_or_else(|| FrameError::Malformed(format!("'{method}' needs params")))?;
-    serde_json::from_str(raw.get()).map_err(|e| FrameError::Malformed(format!("{method}: {e}")))
-}
-
-/// A method that takes no params has none.
-fn no_params(method: &str, raw: Option<&RawValue>) -> Result<(), FrameError> {
-    match raw {
-        None => Ok(()),
-        Some(_) => Err(FrameError::Malformed(format!("'{method}' takes no params"))),
-    }
+/// A result or an error, typed: decoded straight from its JSON text.
+fn typed<T: DeserializeOwned>(what: &str, raw: &RawValue) -> Result<T, FrameError> {
+    serde_json::from_str(raw.get()).map_err(|e| FrameError::Malformed(format!("{what}: {e}")))
 }
 
 #[derive(Serialize)]
@@ -216,7 +220,7 @@ struct OutResult<R> {
 struct OutError<'a> {
     v: u64,
     id: u64,
-    error: &'a CallError,
+    error: &'a WireError,
 }
 
 /// A line, or only its length when a producer is measuring one.
@@ -296,201 +300,36 @@ fn error(measure: bool, id: u64, error: &CallError) -> Result<Line, FrameError> 
     let out = OutError {
         v: PROTOCOL_VERSION,
         id,
-        error,
+        error: &WireError::from(error.clone()),
     };
     emit(measure, &out)
 }
 
-// ---------------------------------------------------------------------------
-// Methods, by direction
-// ---------------------------------------------------------------------------
-
-/// A request a worker may make.
-#[derive(Debug)]
-pub enum WorkerRequest {
-    /// `session.hello`: the first message on a connection, and only then.
-    SessionHello(HelloParams),
-    /// `agent.invoke`
-    AgentInvoke(InvokeAgentParams),
-    /// `agent.list`
-    AgentList,
-    /// `mailbox.post`
-    MailboxPost(SendMessageParams),
-    /// `human.approve` (EN-2a): an approval only the root answers.
-    HumanApprove(ApprovalRequest),
-    /// `human.ask` (EN-2b): a question, relayed up the caller chain.
-    HumanAsk(AskRequest),
+/// Which method a worker's call is, so its result decodes as that
+/// method's result type.
+#[derive(Debug, Clone, Copy)]
+enum CallMethod {
+    Invoke,
+    List,
+    Post,
 }
 
-/// A notification a worker may send.
-#[derive(Debug)]
-pub enum WorkerNotification {
-    /// `task.event`: progress on a `task.run`, named by its id.
-    TaskEvent(TaskEvent<'static>),
-    /// `req.cancel`: the worker withdraws one of its own requests.
-    ReqCancel(IdParams),
-}
+impl CallMethod {
+    fn of(request: &CallRequest) -> Self {
+        match request {
+            CallRequest::InvokeAgent(_) => Self::Invoke,
+            CallRequest::ListAgents => Self::List,
+            CallRequest::SendMessage(_) => Self::Post,
+        }
+    }
 
-/// A request the broker may make.
-#[derive(Debug)]
-pub enum BrokerRequest {
-    /// `task.run`: work.
-    TaskRun(Box<TaskRunParams<'static>>),
-    /// `human.ask` (EN-2b): a callee's question, relayed to its caller.
-    HumanAsk(RelayedAskParams<'static>),
-}
-
-/// A notification the broker may send.
-#[derive(Debug)]
-pub enum BrokerNotification {
-    /// `req.progress`: progress on one of the worker's requests.
-    ReqProgress(ProgressParams<'static>),
-    /// `req.cancel`: the broker withdraws one of its `task.run`s or relayed
-    /// `human.ask`s.
-    ReqCancel(IdParams),
-}
-
-impl WorkerRequest {
-    fn decode(method: &str, raw: Option<&RawValue>) -> Result<Self, FrameError> {
-        Ok(match method {
-            "session.hello" => Self::SessionHello(params(method, raw)?),
-            "agent.invoke" => Self::AgentInvoke(params(method, raw)?),
-            "agent.list" => {
-                no_params(method, raw)?;
-                Self::AgentList
-            }
-            "mailbox.post" => Self::MailboxPost(params(method, raw)?),
-            "human.approve" => Self::HumanApprove(params(method, raw)?),
-            "human.ask" => Self::HumanAsk(params(method, raw)?),
-            other => return Err(FrameError::WrongDirection(other.to_string())),
+    fn result(self, raw: &RawValue) -> Result<CallResult, FrameError> {
+        Ok(match self {
+            Self::Invoke => CallResult::Invoked(typed::<InvokeAgentOutcome>("agent.invoke", raw)?),
+            Self::List => CallResult::Agents(typed::<Vec<AgentEntry>>("agent.list", raw)?),
+            Self::Post => CallResult::Posted(typed::<MessageStatus>("mailbox.post", raw)?),
         })
     }
-}
-
-impl WorkerNotification {
-    fn decode(method: &str, raw: Option<&RawValue>) -> Result<Self, FrameError> {
-        Ok(match method {
-            "task.event" => Self::TaskEvent(params(method, raw)?),
-            "req.cancel" => Self::ReqCancel(params(method, raw)?),
-            other => return Err(FrameError::WrongDirection(other.to_string())),
-        })
-    }
-}
-
-impl BrokerRequest {
-    fn decode(method: &str, raw: Option<&RawValue>) -> Result<Self, FrameError> {
-        Ok(match method {
-            "task.run" => Self::TaskRun(Box::new(params(method, raw)?)),
-            "human.ask" => Self::HumanAsk(params(method, raw)?),
-            other => return Err(FrameError::WrongDirection(other.to_string())),
-        })
-    }
-}
-
-impl BrokerNotification {
-    fn decode(method: &str, raw: Option<&RawValue>) -> Result<Self, FrameError> {
-        Ok(match method {
-            "req.progress" => Self::ReqProgress(params(method, raw)?),
-            "req.cancel" => Self::ReqCancel(params(method, raw)?),
-            other => return Err(FrameError::WrongDirection(other.to_string())),
-        })
-    }
-}
-
-/// `session.hello`'s params.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct HelloParams {
-    #[serde(default)]
-    pub card: ParticipantCard,
-}
-
-/// `session.hello`'s result: who this connection is.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Welcome<'a> {
-    pub name: Cow<'a, NodeName>,
-    pub scope: Cow<'a, ConversationScope>,
-    pub owner: Option<Cow<'a, NodeName>>,
-}
-
-/// A request id, for `req.cancel`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IdParams {
-    pub id: u64,
-}
-
-/// `task.event`: one update on a `task.run`, named by that request's id.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TaskEvent<'a> {
-    /// A non-terminal status. A terminal one is the `task.run`'s result.
-    Status {
-        id: u64,
-        state: TaskState,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<Cow<'a, str>>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        metadata: Option<Cow<'a, Value>>,
-    },
-    /// A chunk of the task's output.
-    #[serde(rename_all = "camelCase")]
-    Artifact {
-        id: u64,
-        text: Cow<'a, str>,
-        #[serde(default)]
-        last_chunk: bool,
-    },
-    /// One of the worker's turns or tool events (TB-1).
-    Swarm { id: u64, event: Cow<'a, SwarmItem> },
-}
-
-/// `task.run`'s result: how the task ended.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TaskOutcome<'a> {
-    pub state: TaskState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<Cow<'a, str>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Cow<'a, Value>>,
-}
-
-/// `task.run`'s params: today's task fields.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskRunParams<'a> {
-    pub task_id: Cow<'a, str>,
-    pub text: Cow<'a, str>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bearer: Option<Cow<'a, TaskBearer>>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub capture_conversation: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spawn_context: Option<Cow<'a, SpawnContext>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handoff: Option<Cow<'a, HandoffContract>>,
-    #[serde(default, skip_serializing_if = "is_unlimited")]
-    pub budget: Cow<'a, Remaining>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub swarm_events: bool,
-}
-
-fn is_unlimited<B: std::ops::Deref<Target = Remaining>>(budget: &B) -> bool {
-    budget.is_unlimited()
-}
-
-/// `req.progress`'s params.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ProgressParams<'a> {
-    pub id: u64,
-    pub event: Cow<'a, Value>,
-}
-
-/// A broker→worker `human.ask`'s params: the broker's id for the question
-/// and the question as its asker sent it, asker stamped.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RelayedAskParams<'a> {
-    pub question: Cow<'a, str>,
-    pub request: Cow<'a, AskRequest>,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,8 +398,9 @@ struct State {
     runs: HashMap<u64, String>,
     /// The reverse of `runs`.
     run_ids: HashMap<String, u64>,
-    /// A worker's requests: request id → the call id its transport gave it.
-    calls: HashMap<u64, u64>,
+    /// A worker's requests: request id → the call id its transport gave it,
+    /// and which method it is.
+    calls: HashMap<u64, (u64, CallMethod)>,
     /// The reverse of `calls`.
     call_ids: HashMap<u64, u64>,
     /// A worker's `human.approve` requests: request id → the approval
@@ -685,7 +525,7 @@ impl FrameCodec<BrokerSide> {
             BrokerFrame::Task {
                 task_id,
                 text,
-                bearer,
+                identity,
                 capture_conversation,
                 spawn_context,
                 handoff,
@@ -697,7 +537,7 @@ impl FrameCodec<BrokerSide> {
                 let params = TaskRunParams {
                     task_id: Cow::Borrowed(task_id),
                     text: Cow::Borrowed(text),
-                    bearer: bearer.as_ref().map(Cow::Borrowed),
+                    identity: identity.as_ref().map(Cow::Borrowed),
                     capture_conversation: *capture_conversation,
                     spawn_context: spawn_context.as_ref().map(Cow::Borrowed),
                     handoff: handoff.as_ref().map(Cow::Borrowed),
@@ -836,7 +676,6 @@ impl FrameCodec<BrokerSide> {
                             TaskEvent::Status {
                                 state: task_state,
                                 message,
-                                metadata,
                                 ..
                             } => {
                                 if task_state.is_terminal()
@@ -850,7 +689,7 @@ impl FrameCodec<BrokerSide> {
                                     task_id,
                                     state: task_state,
                                     message: message.map(Cow::into_owned),
-                                    metadata: metadata.map(Cow::into_owned),
+                                    metadata: None,
                                 }
                             }
                             TaskEvent::Artifact {
@@ -883,15 +722,14 @@ impl FrameCodec<BrokerSide> {
             }
             Message::Result { id, result } => {
                 if let Some(question) = state.close_relay(id) {
-                    let reply: AskReply = serde_json::from_str(result.get()).map_err(malformed)?;
+                    let reply: AskReply = typed("human.ask result", &result)?;
                     return Ok(Some(ParticipantFrame::AskReply { question, reply }));
                 }
                 let Some(task_id) = state.close_run(id) else {
                     state.drop_message("result", id);
                     return Ok(None);
                 };
-                let outcome: TaskOutcome<'_> =
-                    serde_json::from_str(result.get()).map_err(malformed)?;
+                let outcome: TaskOutcome<'_> = typed("task.run result", &result)?;
                 if !outcome.state.is_terminal() {
                     return Err(FrameError::Malformed(format!(
                         "a task.run result is terminal, not '{}'",
@@ -906,7 +744,7 @@ impl FrameCodec<BrokerSide> {
                 }
             }
             Message::Error { id, error } => {
-                let error: CallError = serde_json::from_str(error.get()).map_err(malformed)?;
+                let error = CallError::from(typed::<WireError>("error", &error)?);
                 if let Some(question) = state.close_relay(id) {
                     // A caller that could not answer passes it on.
                     debug!(%question, %error, "A caller failed a relayed question; escalating it");
@@ -995,8 +833,8 @@ impl FrameCodec<WorkerSide> {
                     return Ok(None);
                 };
                 let message = message.as_deref().map(Cow::Borrowed);
-                let metadata = metadata.as_ref().map(Cow::Borrowed);
                 if task_state.is_terminal() {
+                    let metadata = metadata.as_ref().map(Cow::Borrowed);
                     state.close_run(id);
                     state.theirs.remove(&id);
                     let outcome = TaskOutcome {
@@ -1011,12 +849,15 @@ impl FrameCodec<WorkerSide> {
                         "a task waits on a human with human.ask, not an input-required status"
                             .to_string(),
                     ));
+                } else if metadata.is_some() {
+                    return Err(FrameError::Malformed(format!(
+                        "a '{task_state}' status carries no metadata; only a terminal one does"
+                    )));
                 } else {
                     let event = TaskEvent::Status {
                         id,
                         state: *task_state,
                         message,
-                        metadata,
                     };
                     notification(m, "task.event", event)?
                 }
@@ -1053,7 +894,9 @@ impl FrameCodec<WorkerSide> {
                 request: call_request,
             } => {
                 let id = state.next_id();
-                state.calls.insert(id, *call);
+                state
+                    .calls
+                    .insert(id, (*call, CallMethod::of(call_request)));
                 state.call_ids.insert(*call, id);
                 match call_request {
                     CallRequest::InvokeAgent(params) => {
@@ -1137,7 +980,7 @@ impl FrameCodec<WorkerSide> {
                         let TaskRunParams {
                             task_id,
                             text,
-                            bearer,
+                            identity,
                             capture_conversation,
                             spawn_context,
                             handoff,
@@ -1149,7 +992,7 @@ impl FrameCodec<WorkerSide> {
                         BrokerFrame::Task {
                             task_id,
                             text: text.into_owned(),
-                            bearer: bearer.map(Cow::into_owned),
+                            identity: identity.map(Cow::into_owned),
                             capture_conversation,
                             spawn_context: spawn_context.map(Cow::into_owned),
                             handoff: handoff.map(Cow::into_owned),
@@ -1171,7 +1014,7 @@ impl FrameCodec<WorkerSide> {
             Message::Notification { method, params } => {
                 match BrokerNotification::decode(&method, params.as_deref())? {
                     BrokerNotification::ReqProgress(params) => {
-                        let Some(&call) = state.calls.get(&params.id) else {
+                        let Some(&(call, _)) = state.calls.get(&params.id) else {
                             state.drop_message("req.progress", params.id);
                             return Ok(None);
                         };
@@ -1198,29 +1041,28 @@ impl FrameCodec<WorkerSide> {
             Message::Result { id, result } => {
                 if state.hello == Some(id) {
                     state.hello = None;
-                    let welcome: Welcome<'_> =
-                        serde_json::from_str(result.get()).map_err(malformed)?;
+                    let welcome: Welcome<'_> = typed("session.hello result", &result)?;
                     BrokerFrame::Welcome {
                         name: welcome.name.into_owned(),
                         scope: welcome.scope.into_owned(),
                         owner: welcome.owner.map(Cow::into_owned),
                     }
-                } else if let Some(call) = state.calls.remove(&id) {
+                } else if let Some((call, method)) = state.calls.remove(&id) {
                     state.call_ids.remove(&call);
-                    let result: Value = serde_json::from_str(result.get()).map_err(malformed)?;
-                    BrokerFrame::CallResult { id: call, result }
+                    BrokerFrame::CallResult {
+                        id: call,
+                        result: method.result(&result)?,
+                    }
                 } else if let Some(approval) = state.approvals.remove(&id) {
                     state.approval_ids.remove(&approval);
-                    let verdict: ApprovalVerdict =
-                        serde_json::from_str(result.get()).map_err(malformed)?;
+                    let verdict: ApprovalVerdict = typed("human.approve result", &result)?;
                     BrokerFrame::Approval {
                         id: approval,
                         verdict,
                     }
                 } else if let Some(question) = state.asks.remove(&id) {
                     state.ask_ids.remove(&question);
-                    let answers: Vec<Answer> =
-                        serde_json::from_str(result.get()).map_err(malformed)?;
+                    let answers: Vec<Answer> = typed("human.ask result", &result)?;
                     BrokerFrame::Answer {
                         id: question,
                         answers: Ok(answers),
@@ -1231,7 +1073,7 @@ impl FrameCodec<WorkerSide> {
                 }
             }
             Message::Error { id, error } => {
-                let error: CallError = serde_json::from_str(error.get()).map_err(malformed)?;
+                let error = CallError::from(typed::<WireError>("error", &error)?);
                 if state.hello == Some(id) {
                     state.hello = None;
                     let reason = match error {
@@ -1239,7 +1081,7 @@ impl FrameCodec<WorkerSide> {
                         other => other.to_string(),
                     };
                     BrokerFrame::Error { reason }
-                } else if let Some(call) = state.calls.remove(&id) {
+                } else if let Some((call, _)) = state.calls.remove(&id) {
                     state.call_ids.remove(&call);
                     BrokerFrame::CallError { id: call, error }
                 } else if let Some(approval) = state.approvals.remove(&id) {

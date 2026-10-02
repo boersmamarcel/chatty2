@@ -126,21 +126,14 @@ use chatty_core::models::execution_approval_store::{
 };
 use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
-use chatty_core::services::a2a_client::{
-    CONVERSATION_METADATA_KEY, CONVERSATION_TOO_LARGE_METADATA_KEY, TRACE_METADATA_KEY,
-    USAGE_METADATA_KEY, usage_metadata,
-};
-use chatty_core::services::handoff::{
-    self, HANDOFF_INVALID_COUNT_METADATA_KEY, HANDOFF_INVALID_METADATA_KEY, HANDOFF_METADATA_KEY,
-    HandoffContract, HandoffOutcome,
-};
+use chatty_core::services::a2a_client::wire_usage;
+use chatty_core::services::handoff::{self, HandoffContract, HandoffOutcome};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
-use chatty_fabric::{
-    Answer, ApprovalKind, ApprovalRequest, ApprovalVerdict, AskRequest, Question, SwarmItem,
-};
-use serde_json::{Value, json};
+use chatty_fabric::wire::{HandoffInvalid, Opaque, TaskMetadata, WorkerSwarmItem};
+use chatty_fabric::{Answer, ApprovalKind, ApprovalRequest, ApprovalVerdict, AskRequest, Question};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -299,13 +292,6 @@ const TRACE_TAIL_STEPS: usize = TRACE_MAX_STEPS - TRACE_HEAD_STEPS;
 /// The whole trace is cut to this many characters, dropping steps from the
 /// middle when the step-count cap alone still leaves it too big.
 const TRACE_MAX_CHARS: usize = 12_000;
-
-// ── RC-0 (AGE-649): the worker's captured conversation ──────────────────────
-
-/// The cap on a captured conversation's serialized size, per
-/// `fabric-resumable-conversations` §4.1. Above it the terminal status
-/// carries [`CONVERSATION_TOO_LARGE_METADATA_KEY`] instead of the data.
-const CAPTURE_CAP_BYTES: usize = 32 * 1024 * 1024;
 
 /// Cut `s` to `limit` characters, noting how much was removed. A cut always
 /// gets its own line, so the marker never runs into the content it follows.
@@ -503,16 +489,16 @@ impl TaskMapper {
             return None;
         }
         let item = match event {
-            SessionEvent::TurnStarted => SwarmItem::TurnStarted,
-            SessionEvent::ToolCallStarted { id, name } => SwarmItem::ToolCallStarted {
+            SessionEvent::TurnStarted => WorkerSwarmItem::TurnStarted,
+            SessionEvent::ToolCallStarted { id, name } => WorkerSwarmItem::ToolCallStarted {
                 id: id.clone(),
                 name: name.clone(),
             },
-            SessionEvent::ToolCallResult { id, result } => SwarmItem::ToolCallResult {
+            SessionEvent::ToolCallResult { id, result } => WorkerSwarmItem::ToolCallResult {
                 id: id.clone(),
                 result: result.clone(),
             },
-            SessionEvent::ToolCallError { id, error } => SwarmItem::ToolCallError {
+            SessionEvent::ToolCallError { id, error } => WorkerSwarmItem::ToolCallError {
                 id: id.clone(),
                 error: error.clone(),
             },
@@ -727,79 +713,63 @@ impl TaskMapper {
 
     /// The handoff keys for the terminal status: the valid handoff, or the
     /// role and errors of an invalid one, and how many answers failed.
-    fn handoff_metadata(&self, outcome: Option<HandoffOutcome>) -> Vec<(&'static str, Value)> {
+    fn handoff_metadata(&self, outcome: Option<HandoffOutcome>, metadata: &mut TaskMetadata) {
         let Some(contract) = self.handoff.as_ref() else {
-            return Vec::new();
+            return;
         };
         let mut invalid = self.handoff_follow_ups;
-        let mut keys = Vec::new();
         match outcome {
-            Some(HandoffOutcome::Valid(value)) => keys.push((HANDOFF_METADATA_KEY, value)),
+            Some(HandoffOutcome::Valid(value)) => {
+                metadata.handoff = Opaque::from_value(&value)
+                    .map_err(|e| warn!(error = %e, "The handoff does not fit the terminal status"))
+                    .ok();
+            }
             Some(HandoffOutcome::Invalid { errors }) => {
                 invalid += 1;
-                keys.push((
-                    HANDOFF_INVALID_METADATA_KEY,
-                    json!({ "role": contract.role, "errors": errors }),
-                ));
+                metadata.handoff_invalid = Some(HandoffInvalid {
+                    role: contract.role.clone(),
+                    errors,
+                });
             }
             None => {}
         }
         if invalid > 0 {
-            keys.push((HANDOFF_INVALID_COUNT_METADATA_KEY, json!(invalid)));
+            metadata.handoff_invalid_count = Some(invalid);
         }
-        keys
     }
 
     /// Everything that rides on the terminal status's `metadata`: usage
-    /// under `USAGE_METADATA_KEY` (ADR-0011) and, when this task made any
-    /// tool calls, the compacted trace under [`TRACE_METADATA_KEY`]
-    /// (AGE-467), and the handoff keys (TD-2). `None` when none has
-    /// anything to report.
-    fn terminal_metadata(&self, handoff: Option<HandoffOutcome>) -> Option<Value> {
-        let trace = compact_trace(&self.trace);
-        let conversation = self.conversation_metadata();
-        let handoff = self.handoff_metadata(handoff);
-        if self.usage.is_empty() && trace.is_none() && conversation.is_none() && handoff.is_empty()
-        {
-            return None;
-        }
-
-        let mut metadata = serde_json::Map::new();
-        if !self.usage.is_empty() {
-            metadata.insert(USAGE_METADATA_KEY.to_string(), usage_metadata(&self.usage));
-        }
-        if let Some(trace) = trace {
-            metadata.insert(TRACE_METADATA_KEY.to_string(), Value::String(trace));
-        }
-        if let Some((key, value)) = conversation {
-            metadata.insert(key, value);
-        }
-        for (key, value) in handoff {
-            metadata.insert(key.to_string(), value);
-        }
-        Some(Value::Object(metadata))
+    /// (ADR-0011) and, when this task made any tool calls, the compacted
+    /// trace (AGE-467), the captured conversation (RC-0) and the handoff
+    /// keys (TD-2). `None` when none has anything to report.
+    fn terminal_metadata(&self, handoff: Option<HandoffOutcome>) -> Option<TaskMetadata> {
+        let mut metadata = TaskMetadata {
+            usage: (!self.usage.is_empty()).then(|| wire_usage(&self.usage)),
+            trace: compact_trace(&self.trace),
+            ..TaskMetadata::default()
+        };
+        self.conversation_metadata(&mut metadata);
+        self.handoff_metadata(handoff, &mut metadata);
+        (!metadata.is_empty()).then_some(metadata)
     }
 
     /// The captured conversation for [`terminal_metadata`](Self::terminal_metadata)
-    /// to insert (RC-0, AGE-649): `None` when capture was never turned on for
-    /// this task. Above [`CAPTURE_CAP_BYTES`] the messages are replaced with
-    /// their byte count under [`CONVERSATION_TOO_LARGE_METADATA_KEY`], never
-    /// silently truncated.
-    fn conversation_metadata(&self) -> Option<(String, Value)> {
+    /// (RC-0, AGE-649): nothing when capture was never turned on for this
+    /// task. Above [`chatty_fabric::wire::OPAQUE_CAP_BYTES`] (the cap per
+    /// `fabric-resumable-conversations` §4.1) the messages are replaced with
+    /// their byte count, never silently truncated.
+    fn conversation_metadata(&self, metadata: &mut TaskMetadata) {
         if !self.capture_conversation {
-            return None;
+            return;
         }
-        let messages = Value::Array(self.captured_messages.clone());
-        let bytes = serde_json::to_vec(&messages)
-            .map(|v| v.len())
-            .unwrap_or(usize::MAX);
-        if bytes > CAPTURE_CAP_BYTES {
-            Some((
-                CONVERSATION_TOO_LARGE_METADATA_KEY.to_string(),
-                json!(bytes as u64),
-            ))
-        } else {
-            Some((CONVERSATION_METADATA_KEY.to_string(), messages))
+        let messages = serde_json::to_string(&self.captured_messages);
+        match messages.map(Opaque::from_json) {
+            Ok(Ok(conversation)) => metadata.conversation = Some(conversation),
+            Ok(Err(chatty_fabric::wire::OpaqueError::TooLarge(bytes))) => {
+                metadata.conversation_too_large = Some(bytes as u64);
+            }
+            Ok(Err(e)) => warn!(error = %e, "The captured conversation is not JSON"),
+            Err(e) => warn!(error = %e, "The captured conversation does not serialise"),
         }
     }
 
@@ -1013,7 +983,12 @@ mod tests {
         let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
             panic!("expected a status frame");
         };
-        metadata.expect("usage is attached to the terminal status")
+        wire(metadata.expect("usage is attached to the terminal status"))
+    }
+
+    /// Terminal metadata as it is on the wire.
+    fn wire(metadata: TaskMetadata) -> Value {
+        serde_json::to_value(metadata).expect("metadata serialises")
     }
 
     #[test]
@@ -1397,7 +1372,7 @@ mod tests {
         let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
             panic!("expected a status frame");
         };
-        metadata.and_then(|m| m["trace"].as_str().map(str::to_string))
+        metadata.and_then(|m| m.trace)
     }
 
     #[test]
@@ -1601,7 +1576,7 @@ mod tests {
         let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
             panic!("expected a status frame");
         };
-        let metadata = metadata.expect("the captured conversation is attached");
+        let metadata = wire(metadata.expect("the captured conversation is attached"));
         let expected = serde_json::to_value(&history).unwrap();
         assert_eq!(
             metadata["conversation"], expected,
@@ -1614,7 +1589,7 @@ mod tests {
     /// conversation.
     #[test]
     fn capture_cap_enforced() {
-        let huge = Message::assistant("x".repeat(CAPTURE_CAP_BYTES + 1024));
+        let huge = Message::assistant("x".repeat(chatty_fabric::wire::OPAQUE_CAP_BYTES + 1024));
         let mut mapper = TaskMapper::new("task-1").with_capture_conversation(true);
         assert!(
             mapper
@@ -1625,7 +1600,7 @@ mod tests {
         let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
             panic!("expected a status frame");
         };
-        let metadata = metadata.expect("the cap being hit is itself reported");
+        let metadata = wire(metadata.expect("the cap being hit is itself reported"));
         assert!(
             metadata.get("conversation").is_none(),
             "an oversized conversation is never sent: {metadata}"
@@ -1634,7 +1609,7 @@ mod tests {
             .as_u64()
             .expect("the byte count is reported instead of the data");
         assert!(
-            bytes as usize > CAPTURE_CAP_BYTES,
+            bytes as usize > chatty_fabric::wire::OPAQUE_CAP_BYTES,
             "the reported size should be what the data actually was: {bytes}"
         );
     }
@@ -1662,7 +1637,7 @@ mod tests {
         let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
             panic!("expected a status frame");
         };
-        let metadata = metadata.expect("the tool call still produces a trace");
+        let metadata = wire(metadata.expect("the tool call still produces a trace"));
         assert!(
             metadata.get("conversation").is_none(),
             "capture is off: no conversation on the wire: {metadata}"

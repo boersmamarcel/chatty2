@@ -450,7 +450,7 @@ async fn next_task(
             BrokerFrame::Task {
                 task_id,
                 text,
-                bearer,
+                identity,
                 capture_conversation,
                 spawn_context,
                 handoff,
@@ -460,7 +460,7 @@ async fn next_task(
                 return Ok(Some((
                     task_id,
                     DelegatedTask::new(text)
-                        .with_bearer(bearer)
+                        .with_identity(identity)
                         .with_capture_conversation(capture_conversation)
                         .with_spawn_context(spawn_context)
                         .with_handoff(handoff)
@@ -491,7 +491,8 @@ mod tests {
     use std::time::Duration;
 
     use chatty_fabric::{
-        CallError, CallEvent, CallRequest, InvokeAgentOutcome, InvokeAgentParams, Transport,
+        CallError, CallEvent, CallRequest, CallResult, InvokeAgentOutcome, InvokeAgentParams,
+        Transport,
     };
     use futures::StreamExt;
     use tokio::net::UnixStream;
@@ -551,7 +552,8 @@ mod tests {
         let mut stream = transport.call(invoke(agent)).await?;
         while let Some(event) = stream.next().await {
             match event? {
-                CallEvent::Result(result) => return Ok(serde_json::from_value(result).unwrap()),
+                CallEvent::Result(CallResult::Invoked(outcome)) => return Ok(outcome),
+                CallEvent::Result(other) => panic!("not an invoke_agent result: {other:?}"),
                 CallEvent::Progress(_)
                 | CallEvent::Ask { .. }
                 | CallEvent::InputWithdrawn { .. }

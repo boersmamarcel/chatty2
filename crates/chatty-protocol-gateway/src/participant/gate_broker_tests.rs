@@ -15,6 +15,7 @@ use crate::participant::{
     open_connection,
 };
 use chatty_fabric::SpawnContext;
+use serde_json::{Value, json};
 
 /// The stamp each spawn was asked for, in order.
 type Stamps = Arc<Mutex<Vec<Option<CallStamp>>>>;
@@ -202,11 +203,11 @@ async fn chainless_node_is_external() {
             )
             .collect()
             .await;
-        let [Ok(CallEvent::Result(status))] = &posted[..] else {
+        let [Ok(CallEvent::Result(CallResult::Posted(status)))] = &posted[..] else {
             panic!("a post answers with a status: {posted:?}");
         };
         assert_eq!(
-            serde_json::from_value::<MessageStatus>(status.clone()).unwrap(),
+            *status,
             MessageStatus::Refused {
                 reason: RefusalReason::NotOnTree
             }
@@ -737,7 +738,7 @@ impl WorkerHandle for Answered {
         Some(&self.task_id)
     }
 
-    fn finish(&mut self, _succeeded: bool, _metadata: Option<&Value>) {}
+    fn finish(&mut self, _succeeded: bool, _metadata: Option<&chatty_fabric::wire::TaskMetadata>) {}
 }
 
 impl VirtualAgent for Answering {

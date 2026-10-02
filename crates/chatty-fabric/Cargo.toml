@@ -10,7 +10,7 @@ description = "The broker's pure state: node directory, task table, edge log and
 # gpui or reqwest. `tests/no_heavy_deps.rs` enforces the list.
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 async-trait = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }

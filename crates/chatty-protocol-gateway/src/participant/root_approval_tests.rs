@@ -13,6 +13,7 @@ use tokio::net::UnixStream;
 use super::*;
 use crate::participant::limits::MAX_PENDING_APPROVALS;
 use crate::participant::{LocalConnection, WorkerFuture, WorkerHandle, open_connection};
+use serde_json::{Value, json};
 
 /// Generous for CI: only a failure waits this long.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -166,7 +167,7 @@ impl WorkerHandle for Handle {
         Some(&self.task_id)
     }
 
-    fn finish(&mut self, _succeeded: bool, _metadata: Option<&Value>) {}
+    fn finish(&mut self, _succeeded: bool, _metadata: Option<&chatty_fabric::wire::TaskMetadata>) {}
 }
 
 impl VirtualAgent for Scripted {
@@ -272,9 +273,9 @@ async fn next_approval(stream: &mut CallStream) -> (String, ApprovalRequest) {
 }
 
 /// Drive the root's call to its result.
-async fn finish(stream: &mut CallStream) -> Value {
+async fn finish(stream: &mut CallStream) -> InvokeAgentOutcome {
     match next_event(stream).await {
-        CallEvent::Result(result) => result,
+        CallEvent::Result(CallResult::Invoked(result)) => result,
         other => panic!("the call's result, not {other:?}"),
     }
 }
@@ -334,7 +335,7 @@ async fn two_workers_same_worker_side_id_get_only_their_own_answer() {
         calls.answer_approval(id, verdict).unwrap();
     }
     let result = finish(&mut root).await;
-    assert_eq!(result["success"], true, "{result}");
+    assert!(result.success, "{result:?}");
 
     assert_eq!(verdicts(&seen, "leaf-0"), [(2, json!("approved"))]);
     assert_eq!(verdicts(&seen, "leaf-1"), [(2, json!("denied"))]);

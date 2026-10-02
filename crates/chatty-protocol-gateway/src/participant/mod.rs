@@ -46,13 +46,12 @@ mod virtual_agent;
 
 pub use calls::{BrokerCalls, DirectTransport, LocalPermissive, Peer};
 pub use codec::{
-    BrokerCodec, BrokerNotification, BrokerRequest, BrokerSide, FrameCodec, FrameError,
-    PROTOCOL_VERSION, WorkerCodec, WorkerNotification, WorkerRequest, WorkerSide,
+    BrokerCodec, BrokerSide, FrameCodec, FrameError, PROTOCOL_VERSION, WorkerCodec, WorkerSide,
 };
 pub use gate::{Caller, decide};
 pub use protocol::{
     BrokerFrame, CallStamp, DelegatedTask, ParticipantCard, ParticipantFrame, ParticipantSkill,
-    TaskBearer, TaskState,
+    TaskState,
 };
 pub use registry::{
     AdmittedNode, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, TaskStream, TaskUpdate,

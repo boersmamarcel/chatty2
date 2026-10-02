@@ -13,6 +13,7 @@ use tokio::net::UnixStream;
 
 use super::*;
 use crate::participant::{LocalConnection, WorkerFuture, WorkerHandle, open_connection};
+use serde_json::{Value, json};
 
 /// Generous for CI: only a failure waits this long.
 const DEADLINE: Duration = Duration::from_secs(30);
@@ -122,7 +123,7 @@ impl WorkerHandle for Handle {
         Some(&self.task_id)
     }
 
-    fn finish(&mut self, _succeeded: bool, _metadata: Option<&Value>) {}
+    fn finish(&mut self, _succeeded: bool, _metadata: Option<&chatty_fabric::wire::TaskMetadata>) {}
 }
 
 impl VirtualAgent for Scripted {
@@ -287,7 +288,7 @@ async fn depth2_question_reaches_root_with_depth2_asker() {
         "an answered question is over"
     );
     match next_event(&mut root).await {
-        CallEvent::Result(result) => assert_eq!(result["success"], true),
+        CallEvent::Result(CallResult::Invoked(result)) => assert!(result.success),
         other => panic!("the call's result, not {other:?}"),
     }
 }

@@ -23,7 +23,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolError;
 use chatty_fabric::{
-    CallEvent, CallRequest, MessageStatus, SENDER_ALLOWANCE_BYTES, SendMessageParams, Transport,
+    CallEvent, CallRequest, CallResult, MessageStatus, SENDER_ALLOWANCE_BYTES, SendMessageParams,
+    Transport,
 };
 
 /// The tool's description, as the model reads it.
@@ -123,13 +124,16 @@ impl Tool for SendMessageTool {
             .map_err(|e| failed(e.to_string()))?;
         while let Some(event) = stream.next().await {
             match event.map_err(|e| failed(e.to_string()))? {
-                CallEvent::Result(value) => {
-                    let status: MessageStatus = serde_json::from_value(value)
-                        .map_err(|e| failed(format!("the broker's answer did not parse: {e}")))?;
+                CallEvent::Result(CallResult::Posted(status)) => {
                     if let MessageStatus::Refused { reason } = &status {
                         tracing::info!(reason = %reason, "send_message refused");
                     }
                     return Ok(SendMessageOutput { status });
+                }
+                CallEvent::Result(other) => {
+                    return Err(failed(format!(
+                        "the broker's answer is not a send_message result: {other:?}"
+                    )));
                 }
                 CallEvent::Progress(_)
                 | CallEvent::Ask { .. }
@@ -159,10 +163,12 @@ mod tests {
     impl Transport for Answers {
         async fn call(&self, req: CallRequest) -> Result<CallStream, CallError> {
             self.seen.lock().push(req);
-            Ok(futures::stream::iter([Ok(CallEvent::Result(
-                serde_json::to_value(&self.status).unwrap(),
-            ))])
-            .boxed())
+            Ok(
+                futures::stream::iter([Ok(CallEvent::Result(CallResult::Posted(
+                    self.status.clone(),
+                )))])
+                .boxed(),
+            )
         }
     }
 

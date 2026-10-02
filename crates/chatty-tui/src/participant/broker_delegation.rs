@@ -18,7 +18,6 @@
 //! `invoke_agent` hands back to the model — the "worker's answer" the
 //! issue's acceptance criterion asks for.
 
-use chatty_core::services::a2a_client::trace_from_status_metadata;
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::services::{StreamSurface, install_progress_channel, scenarios};
 use chatty_core::session::{SessionEvent, TurnPolicy, replay_scenario};
@@ -213,7 +212,7 @@ fn expected_trace(events: &[SessionEvent]) -> Option<String> {
     let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
         panic!("expected a status frame");
     };
-    trace_from_status_metadata(metadata.as_ref())
+    metadata.and_then(|metadata| metadata.trace)
 }
 
 /// A scripted worker that makes a tool call, for the tests below.

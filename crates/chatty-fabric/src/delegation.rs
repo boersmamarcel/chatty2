@@ -40,6 +40,7 @@ pub fn deadline_grace(budget: Duration) -> Duration {
 /// What is left of a budget where a call is made (DP-3). `None` is no
 /// limit.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Remaining {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turns: Option<u32>,
@@ -197,7 +198,7 @@ impl CallChain {
 /// `{"reason": "cycle", …}`; its display is what the calling model reads
 /// after `Error: invoke_agent: `.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-#[serde(tag = "reason", rename_all = "snake_case")]
+#[serde(tag = "reason", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Refusal {
     /// The caller's `delegates_to` has no entry matching the callee.
     #[error("not_listed: {caller} may not call {callee}")]

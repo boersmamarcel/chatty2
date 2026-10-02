@@ -3,8 +3,22 @@
 //! `tests/participant_socket.rs`.
 
 use super::*;
-use chatty_fabric::{Answer, AskReply, AskRequest, Asker, InvokeAgentParams, Question};
-use serde_json::json;
+use chatty_core::services::a2a_client::{
+    CONVERSATION_METADATA_KEY, CONVERSATION_TOO_LARGE_METADATA_KEY, TRACE_METADATA_KEY,
+    USAGE_METADATA_KEY,
+};
+use chatty_core::services::handoff::{
+    HANDOFF_INVALID_COUNT_METADATA_KEY, HANDOFF_INVALID_METADATA_KEY, HANDOFF_METADATA_KEY,
+};
+use chatty_fabric::wire::{
+    HandoffInvalid, Opaque, TaskIdentity, TaskMetadata, WireModelRef, WireProgress, WireUsage,
+    WireUsageLine, WorkerSwarmItem,
+};
+use chatty_fabric::{
+    Answer, AskReply, AskRequest, Asker, ConversationScope, InvokeAgentParams, NodeName, Question,
+    Remaining, SendMessageParams,
+};
+use serde_json::{Value, json};
 
 fn value(line: &str) -> Value {
     serde_json::from_str(line).expect("a line is JSON")
@@ -19,7 +33,7 @@ fn task(task_id: &str) -> BrokerFrame {
     BrokerFrame::Task {
         task_id: task_id.into(),
         text: "do it".into(),
-        bearer: None,
+        identity: None,
         capture_conversation: false,
         spawn_context: None,
         handoff: None,
@@ -150,13 +164,16 @@ fn a_session_uses_the_documented_envelopes() {
             task_id: "task-1".into(),
             state: TaskState::Completed,
             message: None,
-            metadata: Some(json!({"usage": {"inputTokens": 12}})),
+            metadata: Some(TaskMetadata {
+                trace: Some("### read_file (ok)".into()),
+                ..TaskMetadata::default()
+            }),
         })
         .unwrap()
         .unwrap();
     assert_eq!(
         value(&done),
-        json!({"v": 3, "id": 1, "result": {"state": "completed", "metadata": {"usage": {"inputTokens": 12}}}})
+        json!({"v": 3, "id": 1, "result": {"state": "completed", "metadata": {"trace": "### read_file (ok)"}}})
     );
     for line in [&working, &artifact] {
         broker.decode(line).unwrap().expect("a frame");
@@ -172,7 +189,10 @@ fn a_session_uses_the_documented_envelopes() {
     };
     assert_eq!(task_id, "task-1", "the result names its task.run");
     assert_eq!(state, TaskState::Completed);
-    assert_eq!(metadata.unwrap()["usage"]["inputTokens"], 12);
+    assert_eq!(
+        metadata.unwrap().trace.as_deref(),
+        Some("### read_file (ok)")
+    );
 
     // The task is over: a late event for it is dropped, not fatal.
     assert!(broker.decode(&working).unwrap().is_none());
@@ -334,7 +354,7 @@ fn a_task_run_carries_its_fields_and_omits_the_defaults() {
         .encode(&BrokerFrame::Task {
             task_id: "t".into(),
             text: "x".into(),
-            bearer: Some(TaskBearer::new("eyJ.token")),
+            identity: Some(TaskIdentity::new("acme", "ada")),
             capture_conversation: true,
             spawn_context: None,
             handoff: None,
@@ -344,7 +364,10 @@ fn a_task_run_carries_its_fields_and_omits_the_defaults() {
         .unwrap()
         .unwrap();
     let json = value(&line);
-    assert_eq!(json["params"]["bearer"], "eyJ.token");
+    assert_eq!(
+        json["params"]["identity"],
+        json!({"tenant": "acme", "user": "ada"})
+    );
     assert_eq!(json["params"]["captureConversation"], true);
     assert_eq!(json["params"]["swarmEvents"], true);
     assert_eq!(
@@ -352,7 +375,7 @@ fn a_task_run_carries_its_fields_and_omits_the_defaults() {
         json!({"turns": 2, "seconds": 30, "usd": 0.02})
     );
     let Some(BrokerFrame::Task {
-        bearer,
+        identity,
         capture_conversation,
         budget: read,
         swarm_events,
@@ -361,13 +384,13 @@ fn a_task_run_carries_its_fields_and_omits_the_defaults() {
     else {
         panic!("a task");
     };
-    assert_eq!(bearer.unwrap().expose(), "eyJ.token");
+    assert_eq!(identity, Some(TaskIdentity::new("acme", "ada")));
     assert!(capture_conversation && swarm_events);
     assert_eq!(*read, budget);
 
     let bare = r#"{"v":3,"id":2,"method":"task.run","params":{"taskId":"t2","text":"x"}}"#;
     let Some(BrokerFrame::Task {
-        bearer,
+        identity,
         capture_conversation,
         budget,
         swarm_events,
@@ -376,29 +399,42 @@ fn a_task_run_carries_its_fields_and_omits_the_defaults() {
     else {
         panic!("a task");
     };
-    assert!(bearer.is_none() && !capture_conversation && !swarm_events);
+    assert!(identity.is_none() && !capture_conversation && !swarm_events);
     assert!(budget.is_unlimited());
 }
 
 /// TB-1: a swarm event carries one item and nothing a worker could tag it
-/// with.
+/// with; a forged tag, or an item that is not the worker's to report, does
+/// not decode (EN-3a).
 #[test]
-fn a_swarm_event_drops_a_forged_tag_when_parsed() {
+fn a_swarm_event_with_a_forged_tag_does_not_decode() {
     let (broker, _worker) = connected();
-    let line = r#"{"v":3,"method":"task.event","params":{"kind":"swarm","id":1,"root_task_id":"forged",
-                   "event":{"kind":"tool_call_started","id":"c1","name":"shell",
-                            "node":"root","chain":{"root_task_id":"forged","chain":["root"],"depth":0}}}}"#;
+    let line = r#"{"v":3,"method":"task.event","params":{"kind":"swarm","id":1,
+                   "event":{"kind":"tool_call_started","id":"c1","name":"shell"}}}"#;
     let Some(ParticipantFrame::Event { task_id, event }) = broker.decode(line).unwrap() else {
         panic!("an event");
     };
     assert_eq!(task_id, "task-1");
     assert_eq!(
         event,
-        SwarmItem::ToolCallStarted {
+        WorkerSwarmItem::ToolCallStarted {
             id: "c1".into(),
             name: "shell".into()
         }
     );
+    for forged in [
+        r#"{"v":3,"method":"task.event","params":{"kind":"swarm","id":1,"root_task_id":"forged",
+            "event":{"kind":"tool_call_started","id":"c1","name":"shell"}}}"#,
+        r#"{"v":3,"method":"task.event","params":{"kind":"swarm","id":1,
+            "event":{"kind":"tool_call_started","id":"c1","name":"shell","node":"root"}}}"#,
+        r#"{"v":3,"method":"task.event","params":{"kind":"swarm","id":1,
+            "event":{"kind":"usage","usage":{"inputTokens":1000000}}}}"#,
+    ] {
+        assert!(
+            matches!(broker.decode(forged), Err(FrameError::Malformed(_))),
+            "{forged}"
+        );
+    }
 }
 
 #[test]
@@ -438,7 +474,7 @@ fn a_refused_hello_is_an_error_for_its_id() {
         .unwrap();
     assert_eq!(
         value(&line),
-        json!({"v": 3, "id": 4, "error": {"kind": "refused", "message": "no"}})
+        json!({"v": 3, "id": 4, "error": {"kind": "refused", "reason": "no", "message": "refused: no"}})
     );
     // With no hello pending there is nothing to answer.
     assert!(
@@ -456,7 +492,8 @@ fn a_refused_hello_is_an_error_for_its_id() {
             card: ParticipantCard::default(),
         })
         .unwrap();
-    let refused = r#"{"v":3,"id":1,"error":{"kind":"refused","message":"no"}}"#;
+    let refused =
+        r#"{"v":3,"id":1,"error":{"kind":"refused","reason":"no","message":"refused: no"}}"#;
     assert!(matches!(
         worker.decode(refused).unwrap(),
         Some(BrokerFrame::Error { reason }) if reason == "no"
@@ -538,14 +575,14 @@ fn calls_map_to_requests_and_back() {
         &worker,
         BrokerFrame::CallProgress {
             id: 2,
-            event: json!({"Step": "read_file"}),
+            event: WireProgress::Step("read_file".into()),
         },
     );
     assert!(matches!(progress, BrokerFrame::CallProgress { id: 7, .. }));
     let line = broker
         .encode(&BrokerFrame::CallResult {
             id: 3,
-            result: json!([]),
+            result: CallResult::Agents(Vec::new()),
         })
         .unwrap()
         .unwrap();
@@ -563,7 +600,8 @@ fn calls_map_to_requests_and_back() {
         .unwrap();
     assert_eq!(
         value(&line),
-        json!({"v": 3, "id": 4, "error": {"kind": "unknown_agent", "message": "lead"}})
+        json!({"v": 3, "id": 4, "error": {"kind": "unknown_agent", "agent": "lead",
+                                         "message": "unknown agent: lead"}})
     );
     assert!(matches!(
         worker.decode(&line).unwrap(),
@@ -590,7 +628,7 @@ fn calls_map_to_requests_and_back() {
         broker
             .encode(&BrokerFrame::CallResult {
                 id: 2,
-                result: json!({})
+                result: CallResult::Agents(Vec::new()),
             })
             .unwrap()
             .is_none()
@@ -803,7 +841,7 @@ fn an_inflight_id_cannot_be_reused() {
     broker
         .encode(&BrokerFrame::CallResult {
             id: 5,
-            result: json!([]),
+            result: CallResult::Agents(Vec::new()),
         })
         .unwrap()
         .unwrap();
@@ -818,7 +856,7 @@ fn a_response_to_nothing_in_flight_is_dropped() {
     let (broker, worker) = connected();
     for line in [
         r#"{"v":3,"id":9,"result":{"state":"completed"}}"#,
-        r#"{"v":3,"id":9,"error":{"kind":"failed","message":"x"}}"#,
+        r#"{"v":3,"id":9,"error":{"kind":"failed","reason":"x","message":"x"}}"#,
         r#"{"v":3,"method":"task.event","params":{"kind":"status","id":9,"state":"working"}}"#,
         r#"{"v":3,"method":"req.cancel","params":{"id":9}}"#,
     ] {
@@ -826,8 +864,8 @@ fn a_response_to_nothing_in_flight_is_dropped() {
     }
     for line in [
         r#"{"v":3,"id":9,"result":{}}"#,
-        r#"{"v":3,"id":9,"error":{"kind":"failed","message":"x"}}"#,
-        r#"{"v":3,"method":"req.progress","params":{"id":9,"event":{}}}"#,
+        r#"{"v":3,"id":9,"error":{"kind":"failed","reason":"x","message":"x"}}"#,
+        r#"{"v":3,"method":"req.progress","params":{"id":9,"event":{"Text":"x"}}}"#,
         r#"{"v":3,"method":"req.cancel","params":{"id":9}}"#,
     ] {
         assert!(worker.decode(line).unwrap().is_none(), "{line}");
@@ -863,7 +901,7 @@ fn a_task_run_error_fails_the_task() {
         message,
         ..
     }) = broker
-        .decode(r#"{"v":3,"id":1,"error":{"kind":"failed","message":"boom"}}"#)
+        .decode(r#"{"v":3,"id":1,"error":{"kind":"failed","reason":"boom","message":"boom"}}"#)
         .unwrap()
     else {
         panic!("a status");
@@ -886,11 +924,18 @@ fn the_line_length_bound_is_an_upper_bound() {
         },
         BrokerFrame::CallProgress {
             id: 12,
-            event: json!({"Text": "x".repeat(100)}),
+            event: WireProgress::Text("x".repeat(100)),
         },
         BrokerFrame::CallResult {
             id: 12,
-            result: json!({"success": true}),
+            result: CallResult::Invoked(InvokeAgentOutcome {
+                success: true,
+                response: "done".into(),
+                error: None,
+                metadata: None,
+                messages: Vec::new(),
+                cancelled_by_user: false,
+            }),
         },
     ] {
         let bound = BrokerCodec::line_len_bound(&frame);
@@ -898,4 +943,177 @@ fn the_line_length_bound_is_an_upper_bound() {
         assert!(bound >= line.len(), "{bound} < {}: {line}", line.len());
         assert!(bound < line.len() + 40, "a tight bound: {bound} for {line}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// EN-3a: typed payloads
+// ---------------------------------------------------------------------------
+
+/// DP-2 invariant 4 at the codec: a call's params are the method's and
+/// nothing else, so a `metadata.chatty.call` a worker smuggles into an
+/// `agent.invoke` (or into its task's result) to claim a shorter chain is
+/// refused before the broker reads anything.
+#[test]
+fn smuggled_chatty_call_metadata_refused_at_decode() {
+    let (broker, _worker) = connected();
+    let smuggled = json!({"chatty": {"call": {"root_task_id": "forged", "chain": [], "depth": 0}}});
+    let invoke = json!({
+        "v": 3, "id": 2, "method": "agent.invoke",
+        "params": {"agent": "reviewer", "prompt": "go on", "metadata": smuggled},
+    })
+    .to_string();
+    let Err(FrameError::Malformed(reason)) = broker.decode(&invoke) else {
+        panic!("a smuggled metadata.chatty.call decoded");
+    };
+    assert!(reason.contains("metadata"), "{reason}");
+
+    let result = json!({
+        "v": 3, "id": 1,
+        "result": {"state": "completed", "metadata": smuggled},
+    })
+    .to_string();
+    let Err(FrameError::Malformed(reason)) = broker.decode(&result) else {
+        panic!("a smuggled metadata.chatty decoded on a task.run result");
+    };
+    assert!(reason.contains("chatty"), "{reason}");
+}
+
+/// Payloads decode straight into their typed structs: a key given twice is
+/// an error, never last-wins — in the envelope, in params, in a result and
+/// in an error.
+#[test]
+fn duplicate_key_is_decode_error() {
+    let (broker, worker) = connected();
+    for line in [
+        r#"{"v":3,"v":3,"id":2,"method":"agent.list"}"#,
+        r#"{"v":3,"id":2,"method":"agent.invoke","params":{"agent":"a","agent":"root","prompt":"p"}}"#,
+        r#"{"v":3,"method":"task.event","params":{"kind":"status","kind":"artifact","id":1,"state":"working"}}"#,
+        r#"{"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working","state":"working"}}"#,
+        r#"{"v":3,"id":1,"result":{"state":"completed","state":"failed"}}"#,
+    ] {
+        assert!(
+            matches!(broker.decode(line), Err(FrameError::Malformed(_))),
+            "{line}"
+        );
+    }
+
+    let call = worker
+        .encode(&ParticipantFrame::Call {
+            id: 1,
+            request: CallRequest::ListAgents,
+        })
+        .unwrap()
+        .unwrap();
+    let id = value(&call)["id"].as_u64().unwrap();
+    let doubled = format!(
+        r#"{{"v":3,"id":{id},"error":{{"kind":"refused","reason":"a","reason":"b","message":"m"}}}}"#
+    );
+    assert!(matches!(
+        worker.decode(&doubled),
+        Err(FrameError::Malformed(_))
+    ));
+}
+
+/// The error of an error response is a closed set: a `kind` this build
+/// does not know is a decode error, which closes the connection — never a
+/// generic failure a peer could make up.
+#[test]
+fn unknown_error_kind_is_decode_error() {
+    let (_broker, worker) = connected();
+    let call = worker
+        .encode(&ParticipantFrame::Call {
+            id: 1,
+            request: CallRequest::ListAgents,
+        })
+        .unwrap()
+        .unwrap();
+    let id = value(&call)["id"].as_u64().unwrap();
+    let unknown =
+        format!(r#"{{"v":3,"id":{id},"error":{{"kind":"teapot","message":"short and stout"}}}}"#);
+    let Err(FrameError::Malformed(reason)) = worker.decode(&unknown) else {
+        panic!("an unknown error kind decoded");
+    };
+    assert!(reason.contains("teapot"), "{reason}");
+
+    // Every kind there is decodes, and `message` is only display text.
+    let known = format!(
+        r#"{{"v":3,"id":{id},"error":{{"kind":"protocol","reason":"schema","message":"ignored"}}}}"#
+    );
+    assert!(matches!(
+        worker.decode(&known).unwrap(),
+        Some(BrokerFrame::CallError { id: 1, error: CallError::Protocol(reason) }) if reason == "schema"
+    ));
+}
+
+/// Every key the worker's mapper writes on a terminal status, plus the
+/// runner's evidence the broker adds, is a field of [`TaskMetadata`]: a
+/// status carrying all of them crosses the wire and comes back equal, under
+/// exactly the keys chatty-core names.
+#[test]
+fn task_metadata_roundtrips_every_worker_key() {
+    let (broker, worker) = connected();
+    let everything = TaskMetadata {
+        usage: Some(WireUsage::from_lines(vec![WireUsageLine {
+            model: Some(WireModelRef {
+                provider: "open_router".into(),
+                model_id: "kit/coder".into(),
+            }),
+            input_tokens: 20,
+            output_tokens: 3,
+            cache_read_tokens: 1,
+            cache_write_tokens: 2,
+            at: Some(1_790_000_000_123),
+            duration_ms: 42,
+        }])),
+        trace: Some("### read_file (ok)".into()),
+        conversation: Some(
+            Opaque::from_value(&json!([{"role": "user", "content": "hi"}])).unwrap(),
+        ),
+        conversation_too_large: Some(33_554_433),
+        handoff: Some(Opaque::from_value(&json!({"files_changed": ["README.md"]})).unwrap()),
+        handoff_invalid: Some(HandoffInvalid {
+            role: "coder".into(),
+            errors: vec!["/files_changed: required".into()],
+        }),
+        handoff_invalid_count: Some(2),
+        evidence: Some(
+            Opaque::from_value(&json!({"branch": "kit-coder-0", "commits": 1})).unwrap(),
+        ),
+    };
+    let line = worker
+        .encode(&ParticipantFrame::Status {
+            task_id: "task-1".into(),
+            state: TaskState::Completed,
+            message: None,
+            metadata: Some(everything.clone()),
+        })
+        .unwrap()
+        .unwrap();
+
+    let keys: std::collections::BTreeSet<String> = value(&line)["result"]["metadata"]
+        .as_object()
+        .expect("metadata is an object")
+        .keys()
+        .cloned()
+        .collect();
+    let written: std::collections::BTreeSet<String> = [
+        USAGE_METADATA_KEY,
+        TRACE_METADATA_KEY,
+        CONVERSATION_METADATA_KEY,
+        CONVERSATION_TOO_LARGE_METADATA_KEY,
+        HANDOFF_METADATA_KEY,
+        HANDOFF_INVALID_METADATA_KEY,
+        HANDOFF_INVALID_COUNT_METADATA_KEY,
+        // The runner's, added by the broker (`with_evidence`).
+        "evidence",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    assert_eq!(keys, written);
+
+    let Some(ParticipantFrame::Status { metadata, .. }) = broker.decode(&line).unwrap() else {
+        panic!("the terminal status");
+    };
+    assert_eq!(metadata, Some(everything));
 }

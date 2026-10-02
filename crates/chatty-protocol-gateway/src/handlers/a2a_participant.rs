@@ -17,16 +17,9 @@ use crate::participant::{
     DelegatedTask, ParticipantCard, ParticipantRegistry, TaskEvidence, TaskStream, VirtualAgent,
     WorkerHandle,
 };
+use chatty_fabric::wire::{Opaque, TaskMetadata};
 use serde_json::{Value, json};
-use tracing::debug;
-
-/// The key under an A2A terminal status's `metadata` that carries the
-/// runner's evidence envelope (ADR-0011 C12, AGE-406): the branch, the
-/// commit count, the diff stat and the team's verification result. The same
-/// facts are appended to the answer as a fenced block, for the leader's
-/// model; this is the copy a trace or Harbor's ATIF reads without parsing
-/// prose.
-pub const EVIDENCE_METADATA_KEY: &str = "evidence";
+use tracing::{debug, warn};
 
 // ---------------------------------------------------------------------------
 // Agent card
@@ -94,7 +87,7 @@ impl RunningTask {
     pub(crate) async fn finish(
         &mut self,
         succeeded: bool,
-        metadata: Option<&Value>,
+        metadata: Option<&chatty_fabric::wire::TaskMetadata>,
     ) -> Option<TaskEvidence> {
         self.guard.finished();
         let worker = self.worker.as_mut()?;
@@ -104,21 +97,24 @@ impl RunningTask {
 }
 
 /// Fold the evidence envelope into the terminal status's `metadata`, next
-/// to whatever else rides there.
+/// to whatever else rides there. Evidence over the opaque-payload cap is
+/// dropped from the metadata (its text is in the answer already).
 pub(crate) fn with_evidence(
-    metadata: Option<Value>,
+    metadata: Option<TaskMetadata>,
     evidence: Option<&TaskEvidence>,
-) -> Option<Value> {
+) -> Option<TaskMetadata> {
     let Some(evidence) = evidence else {
         return metadata;
     };
-    let mut metadata = match metadata {
-        Some(Value::Object(map)) => Value::Object(map),
-        // A non-object metadata cannot be extended. Nothing writes one
-        // today, and the runner's own facts outrank a shape it cannot read.
-        _ => json!({}),
+    let data = match Opaque::from_value(&evidence.data) {
+        Ok(data) => data,
+        Err(error) => {
+            warn!(%error, "The runner's evidence does not fit the task's metadata");
+            return metadata;
+        }
     };
-    metadata[EVIDENCE_METADATA_KEY] = evidence.data.clone();
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.evidence = Some(data);
     Some(metadata)
 }
 

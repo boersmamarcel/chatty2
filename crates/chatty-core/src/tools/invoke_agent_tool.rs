@@ -16,19 +16,19 @@ use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::a2a_client::{
     A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
-    trace_from_status_metadata, usage_from_status_metadata,
+    trace_from_status_metadata, usage_from_status_metadata, usage_from_wire,
 };
-use crate::services::fabric_transport::progress_from_value;
 use crate::services::handoff::{HandoffLedger, HandoffReport};
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::run_budget::RunBudget;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::filesystem_write_tool::request_relayed_write_approval;
+use chatty_fabric::wire::WireProgress;
 use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskRequest, CallError, CallEvent,
-    CallRequest, InvokeAgentOutcome, InvokeAgentParams, Question, QuestionOrigin, Refusal,
-    Remaining, Transport,
+    CallRequest, CallResult, InvokeAgentOutcome, InvokeAgentParams, Question, QuestionOrigin,
+    Refusal, Remaining, Transport,
 };
 
 /// The agent name the broker publishes for "a chatty agent in its own
@@ -84,6 +84,17 @@ pub enum InvokeAgentProgress {
     /// carries this: without it, a swarm tree can only name both callees
     /// by the shared spec, so a stop by that name would hit both.
     Admitted(String),
+}
+
+/// A callee's progress as the broker sends it over a call.
+impl From<WireProgress> for InvokeAgentProgress {
+    fn from(progress: WireProgress) -> Self {
+        match progress {
+            WireProgress::Admitted(node) => Self::Admitted(node),
+            WireProgress::Step(step) => Self::Step(step),
+            WireProgress::Text(text) => Self::Text(text),
+        }
+    }
 }
 
 /// Shared slot for sending progress events from the tool to the stream loop.
@@ -784,10 +795,8 @@ impl InvokeAgentTool {
                 },
             };
             match event {
-                Ok(CallEvent::Progress(value)) => {
-                    if let Some(progress) = progress_from_value(value) {
-                        self.send_progress(progress);
-                    }
+                Ok(CallEvent::Progress(progress)) => {
+                    self.send_progress(progress.into());
                 }
                 Ok(CallEvent::Swarm(event)) => {
                     self.send_progress(InvokeAgentProgress::Swarm(event));
@@ -810,10 +819,14 @@ impl InvokeAgentTool {
                 Ok(CallEvent::InputWithdrawn { id }) => {
                     withdraw.remove(&id);
                 }
-                Ok(CallEvent::Result(value)) => {
-                    outcome = Some(serde_json::from_value::<InvokeAgentOutcome>(value).map_err(
-                        |e| format!("the broker's result for '{agent}' did not parse: {e}"),
-                    ));
+                Ok(CallEvent::Result(CallResult::Invoked(invoked))) => {
+                    outcome = Some(Ok(invoked));
+                    break;
+                }
+                Ok(CallEvent::Result(other)) => {
+                    outcome = Some(Err(format!(
+                        "the broker's result for '{agent}' is not an invoke_agent result: {other:?}"
+                    )));
                     break;
                 }
                 Err(CallError::Delegation(refusal)) => {
@@ -873,11 +886,14 @@ impl InvokeAgentTool {
             });
         }
 
-        let metadata = outcome.metadata.as_ref();
-        let handoff = HandoffReport::from_status_metadata(metadata);
+        let metadata = outcome.metadata.as_deref();
+        let handoff = HandoffReport::from_task_metadata(metadata);
         // The worker's spend rides on its terminal status; a failed task
         // spent its tokens too (AGE-415).
-        let usage = usage_from_status_metadata(metadata)
+        let usage = metadata
+            .and_then(|metadata| metadata.usage.as_ref())
+            .map(usage_from_wire)
+            .unwrap_or_default()
             .into_iter()
             .map(|line| TokenUsage {
                 delegated_to: Some(agent.to_string()),
@@ -887,9 +903,11 @@ impl InvokeAgentTool {
         let (trace, conversation) = if outcome.success {
             (
                 include_trace
-                    .then(|| trace_from_status_metadata(metadata))
+                    .then(|| metadata.and_then(|metadata| metadata.trace.clone()))
                     .flatten(),
-                conversation_from_status_metadata(metadata),
+                metadata
+                    .and_then(|metadata| metadata.conversation.as_ref())
+                    .and_then(|conversation| conversation.to_value().ok()),
             )
         } else {
             (None, None)
@@ -1752,7 +1770,7 @@ mod tests {
                 yield Ok(approve);
                 // The call stays open until the root has answered.
                 answered.notified().await;
-                yield Ok(CallEvent::Result(serde_json::json!(InvokeAgentOutcome {
+                yield Ok(CallEvent::Result(CallResult::Invoked(InvokeAgentOutcome {
                     success: true,
                     response: "done".into(),
                     error: None,

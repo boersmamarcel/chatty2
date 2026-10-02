@@ -11,9 +11,12 @@
 //!
 //! This crate is pure: both `chatty-protocol-gateway` and `chatty-core`
 //! depend on it, so it depends on neither, and never on axum, wasmtime,
-//! hive-client, gpui or reqwest (`tests/no_heavy_deps.rs`). Payloads that are
-//! chatty-core types (`InvokeAgentProgress`, conversations, usage) travel as
-//! [`serde_json::Value`]; chatty-core converts them at its edge.
+//! hive-client, gpui or reqwest (`tests/no_heavy_deps.rs`). The worker
+//! socket's types live in [`wire`]: payloads that are chatty-core types
+//! (progress, usage, a task's terminal metadata) cross as wire-owned mirrors
+//! chatty-core converts at its edge, and the four it owns by contract
+//! (conversations, handoff answers and schemas, evidence data) as
+//! [`wire::Opaque`] values the broker never reads.
 
 mod approval;
 mod delegation;
@@ -27,6 +30,7 @@ mod question;
 mod swarm;
 mod task_table;
 mod transport;
+pub mod wire;
 
 pub use approval::{ApprovalKind, ApprovalRequest, ApprovalVerdict, Asker};
 pub use delegation::{CallChain, CallPolicy, MAX_DEPTH, Refusal, Remaining, deadline_grace};
@@ -45,6 +49,7 @@ pub use question::{Answer, AskReply, AskRequest, Question, QuestionOrigin};
 pub use swarm::{FORWARD_INTERVAL, SwarmBatcher, SwarmEvent, SwarmItem};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
-    CANCELLED_BY_USER, CallError, CallEvent, CallRequest, CallStream, InvokeAgentOutcome,
-    InvokeAgentParams, MessageStatus, RefusalReason, SendMessageParams, SpawnContext, Transport,
+    CANCELLED_BY_USER, CallError, CallEvent, CallRequest, CallResult, CallStream,
+    InvokeAgentOutcome, InvokeAgentParams, MessageStatus, RefusalReason, SendMessageParams,
+    SpawnContext, Transport,
 };

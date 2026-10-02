@@ -111,97 +111,24 @@
 //! then reports its turns and tool events as `task.event`s of kind `swarm`
 //! beside the usual ones, and the broker forwards them to the root tagged
 //! with the node and chain from its own task table (see
-//! [`chatty_fabric::SwarmEvent`]). Such an event names no node or chain:
-//! whatever else it carries is dropped when it is parsed, and an item that
-//! is not the worker's to report (text, usage, the end) is ignored. A task
-//! without the flag gets none of them.
+//! [`chatty_fabric::SwarmEvent`]). Such an event names no node or chain,
+//! and carries only what is the worker's to report
+//! ([`WorkerSwarmItem`]): a forged tag, or text, usage or the end, does not
+//! decode. A task without the flag gets none of them.
 //!
 //! ```text
 //! broker      → {"v":3,"id":2,"method":"task.run","params":{"taskId":"task-…","text":"read it","swarmEvents":true}}
 //! participant → {"v":3,"method":"task.event","params":{"kind":"swarm","id":2,"event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}}
 //! ```
 
+use chatty_fabric::wire::{TaskIdentity, TaskMetadata, WorkerSwarmItem};
 use chatty_fabric::{
     Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, CallChain, CallError,
-    CallRequest, ConversationScope, HandoffContract, NodeName, Remaining, RunId, SpawnContext,
-    SwarmItem,
+    CallRequest, CallResult, ConversationScope, HandoffContract, NodeName, Remaining, RunId,
+    SpawnContext,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-/// The state of one task, in A2A's vocabulary.
-///
-/// A2A's own spelling is kebab-case (`input-required`), and these values are
-/// copied verbatim into the `status.state` field the broker serves, so the
-/// serde renaming here is part of the public contract rather than a style
-/// choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TaskState {
-    Submitted,
-    Working,
-    /// The participant is blocked on a human. On a worker's connection that
-    /// is a `human.ask` request, never a status (EN-2b); the state is A2A's,
-    /// for an A2A peer's task.
-    InputRequired,
-    Completed,
-    Failed,
-    Canceled,
-}
-
-impl TaskState {
-    /// Whether this state ends the task. A terminal status is the last
-    /// update a caller sees, and the broker drops the task when it arrives.
-    ///
-    /// `InputRequired` is *not* terminal: the task is parked, not over.
-    pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Canceled)
-    }
-}
-
-impl std::fmt::Display for TaskState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Via serde so the wire spelling can only be defined once.
-        let s = serde_json::to_value(self)
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string))
-            .unwrap_or_else(|| "unknown".to_string());
-        f.write_str(&s)
-    }
-}
-
-/// The caller's bearer token, carried to the worker that runs their task
-/// (AGE-371).
-///
-/// A hosted worker validates it exactly as an HTTP request's bearer is
-/// validated and runs the task as that user; a local worker has no use for
-/// it and ignores it. It rides the task frame, never the worker's
-/// environment: a microVM may serve successive users, and the identity
-/// belongs to the turn, not the machine.
-///
-/// `Debug` prints nothing of it, and `serde` sees straight through to the
-/// string — the socket between broker and worker is the one place it is
-/// meant to be in the clear.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TaskBearer(String);
-
-impl TaskBearer {
-    pub fn new(token: impl Into<String>) -> Self {
-        Self(token.into())
-    }
-
-    /// The token itself. Named so the read is visible at the call site.
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for TaskBearer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TaskBearer([redacted])")
-    }
-}
+pub use chatty_fabric::wire::{ParticipantCard, ParticipantSkill, TaskState};
 
 /// Work for a worker: the prompt, and whose task it is.
 ///
@@ -211,9 +138,10 @@ impl std::fmt::Debug for TaskBearer {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DelegatedTask {
     pub text: String,
-    /// `None` for a caller that presented no bearer — a desktop parent
-    /// delegating to a local worker. A hosted worker refuses such a task.
-    pub bearer: Option<TaskBearer>,
+    /// Whose task it is, as the host edge stamped it (ADR-0021 § 2); `None`
+    /// for a desktop root's task. A hosted worker refuses a task without
+    /// one.
+    pub identity: Option<TaskIdentity>,
     /// Whether the worker should capture its conversation at this task's
     /// terminal status (RC-0, AGE-649). Opt-in and off by default, so an
     /// ordinary task's frames are unchanged.
@@ -279,7 +207,7 @@ impl DelegatedTask {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            bearer: None,
+            identity: None,
             capture_conversation: false,
             spawn_context: None,
             handoff: None,
@@ -329,8 +257,9 @@ impl DelegatedTask {
         self
     }
 
-    pub fn with_bearer(mut self, bearer: Option<TaskBearer>) -> Self {
-        self.bearer = bearer;
+    /// Whose task it is (ADR-0021 § 2).
+    pub fn with_identity(mut self, identity: Option<TaskIdentity>) -> Self {
+        self.identity = identity;
         self
     }
 
@@ -340,36 +269,6 @@ impl DelegatedTask {
         self.capture_conversation = capture;
         self
     }
-}
-
-/// One skill on a participant's agent card.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ParticipantSkill {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub examples: Vec<String>,
-}
-
-/// What a participant publishes about itself in its `hello`.
-///
-/// `name` is the address callers reach it at (`/a2a/{name}`), and it is the
-/// broker's to give: whatever a worker puts here is replaced by the name
-/// the broker admitted its connection under (ADR-0020). A worker leaves it
-/// empty.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ParticipantCard {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub version: String,
-    #[serde(default)]
-    pub skills: Vec<ParticipantSkill>,
 }
 
 /// A frame from a participant to the broker.
@@ -384,16 +283,15 @@ pub enum ParticipantFrame {
     /// the `task.run`'s result and any other a `task.event` of kind
     /// `status`; a task waiting on a human sends [`Self::Ask`] instead.
     ///
-    /// `metadata` is copied verbatim into the A2A status's `metadata` field.
-    /// It is where a turn's token usage rides back: A2A has no usage concept
-    /// — usage belongs to the ledger, not to the task protocol — and
-    /// inventing a frame for it would put accounting in the wire format.
-    /// The broker's ledger (AGE-307) reads it from there.
+    /// `metadata` is a terminal status's only (the `task.run` result's): a
+    /// turn's token usage, its trace and whatever else the task reports
+    /// ([`TaskMetadata`]). The broker's ledger (AGE-307) reads the usage
+    /// from there. A non-terminal status with metadata does not encode.
     Status {
         task_id: String,
         state: TaskState,
         message: Option<String>,
-        metadata: Option<Value>,
+        metadata: Option<TaskMetadata>,
     },
     /// A chunk of the task's output, in stream order. The broker turns this
     /// into an A2A `TaskArtifactUpdateEvent`.
@@ -409,7 +307,10 @@ pub enum ParticipantFrame {
     Call { id: u64, request: CallRequest },
     /// One of the worker's own turns or tool events on a task sent with
     /// `swarmEvents` (TB-1). The broker tags it; the frame cannot.
-    Event { task_id: String, event: SwarmItem },
+    Event {
+        task_id: String,
+        event: WorkerSwarmItem,
+    },
     /// The worker withdraws call `id` (`req.cancel`): the broker stops it,
     /// and sends nothing more for it.
     CancelCall { id: u64 },
@@ -450,15 +351,15 @@ pub enum BrokerFrame {
     /// connection. Without a pending hello nothing is sent.
     Error { reason: String },
     /// Work: a `task.run` request. Answer with `Status` / `Artifact` frames
-    /// carrying this `taskId` and end with a terminal state. `bearer` is the
-    /// caller's token when they presented one (AGE-371), absent on the wire
-    /// otherwise. `captureConversation` asks the worker to attach its
+    /// carrying this `taskId` and end with a terminal state. `identity` is
+    /// whose task it is, absent on the wire for a desktop root's task.
+    /// `captureConversation` asks the worker to attach its
     /// conversation to the terminal status (RC-0, AGE-649); absent on the
     /// wire when `false`.
     Task {
         task_id: String,
         text: String,
-        bearer: Option<TaskBearer>,
+        identity: Option<TaskIdentity>,
         capture_conversation: bool,
         /// The context this worker was spawned with (BI-5): its workspace
         /// root, base branch, roster, verification command and endpoint.
@@ -481,10 +382,13 @@ pub enum BrokerFrame {
     /// The caller went away: `req.cancel` of the task's `task.run`. Stop
     /// working on `taskId`.
     Cancel { task_id: String },
-    /// Progress on call `id`: an `InvokeAgentProgress`, as JSON.
-    CallProgress { id: u64, event: Value },
+    /// Progress on call `id`.
+    CallProgress {
+        id: u64,
+        event: chatty_fabric::wire::WireProgress,
+    },
     /// Call `id` is over, and this is what it returned.
-    CallResult { id: u64, result: Value },
+    CallResult { id: u64, result: CallResult },
     /// Call `id` could not be carried out, and is over.
     CallError { id: u64, error: CallError },
     /// The root's answer to the worker's approval `id`: the `human.approve`
@@ -507,45 +411,4 @@ pub enum BrokerFrame {
     /// The broker withdraws the question it relayed as `question`
     /// (`req.cancel`): its asker is gone or stopped waiting.
     CancelAsk { question: String },
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_bearer_does_not_debug_print() {
-        let frame = BrokerFrame::Task {
-            task_id: "t".into(),
-            text: "x".into(),
-            bearer: Some(TaskBearer::new("secret-token")),
-            capture_conversation: false,
-            spawn_context: None,
-            handoff: None,
-            budget: Box::default(),
-            swarm_events: false,
-        };
-        let printed = format!("{frame:?}");
-        assert!(!printed.contains("secret-token"), "{printed}");
-        assert!(printed.contains("[redacted]"));
-    }
-
-    #[test]
-    fn only_completed_failed_and_canceled_end_a_task() {
-        assert!(TaskState::Completed.is_terminal());
-        assert!(TaskState::Failed.is_terminal());
-        assert!(TaskState::Canceled.is_terminal());
-        assert!(!TaskState::Working.is_terminal());
-        assert!(!TaskState::Submitted.is_terminal());
-        assert!(
-            !TaskState::InputRequired.is_terminal(),
-            "a task waiting on a human is parked, not over (AGE-306)"
-        );
-    }
-
-    #[test]
-    fn task_state_displays_its_wire_spelling() {
-        assert_eq!(TaskState::InputRequired.to_string(), "input-required");
-        assert_eq!(TaskState::Working.to_string(), "working");
-    }
 }

@@ -59,9 +59,9 @@ pub struct EdgeRow {
 /// The fabric knows no prices: chatty-core implements this over its price
 /// book, with the same `price` the display uses.
 pub trait UsagePricer: Send + Sync {
-    /// The `usd` of a call whose callee ended with status `metadata`; `None`
-    /// when it reported no usage.
-    fn usd(&self, metadata: &serde_json::Value) -> Option<String>;
+    /// The `usd` of a call whose callee reported spending `usage` on its
+    /// terminal status; `None` when it has no lines.
+    fn usd(&self, usage: &crate::wire::WireUsage) -> Option<String>;
 }
 
 impl EdgeRow {

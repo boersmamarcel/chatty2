@@ -128,7 +128,7 @@ impl WorkerHandle for Worker {
         Some(&self.0)
     }
 
-    fn finish(&mut self, _succeeded: bool, _metadata: Option<&Value>) {}
+    fn finish(&mut self, _succeeded: bool, _metadata: Option<&chatty_fabric::wire::TaskMetadata>) {}
 }
 
 impl VirtualAgent for Answering {
@@ -441,7 +441,7 @@ async fn late_or_unknown_response_is_dropped_not_fatal() {
     let mut worker = Raw::serving(&registry, "worker").await;
     for line in [
         json!({"id": 99, "result": {"state": "completed"}}),
-        json!({"id": 99, "error": {"kind": "failed", "message": "x"}}),
+        json!({"id": 99, "error": {"kind": "failed", "reason": "x", "message": "x"}}),
         json!({"method": "task.event", "params": {"kind": "status", "id": 99, "state": "working"}}),
         json!({"method": "req.cancel", "params": {"id": 99}}),
     ] {

@@ -125,7 +125,7 @@ fn change_schema() -> Value {
 fn contract() -> HandoffContract {
     HandoffContract {
         role: CODER.to_string(),
-        schema: change_schema(),
+        schema: chatty_fabric::wire::Opaque::from_value(&change_schema()).unwrap(),
     }
 }
 

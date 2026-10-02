@@ -23,7 +23,8 @@ use crate::agent_spec::{AgentSpec, Grant, load_agent_spec_from};
 use crate::services::lazy_broker::LazyBroker;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::ToolError;
-use chatty_fabric::{AgentOrigin, CallEvent, CallRequest, Transport};
+use chatty_fabric::wire::AgentEntry;
+use chatty_fabric::{AgentOrigin, CallEvent, CallRequest, CallResult, Transport};
 
 /// Arguments for listing A2A agents (no arguments needed)
 #[derive(Deserialize, Serialize)]
@@ -398,11 +399,12 @@ async fn directory_over(transport: &dyn Transport) -> Vec<AgentListing> {
     };
     while let Some(event) = stream.next().await {
         match event {
-            Ok(CallEvent::Result(agents)) => {
-                return agents
-                    .as_array()
-                    .map(|agents| agents.iter().filter_map(listing_from_card).collect())
-                    .unwrap_or_default();
+            Ok(CallEvent::Result(CallResult::Agents(agents))) => {
+                return agents.into_iter().filter_map(listing_from_entry).collect();
+            }
+            Ok(CallEvent::Result(other)) => {
+                tracing::debug!(?other, "the broker's directory is not a list_agents result");
+                return Vec::new();
             }
             Ok(_) => {}
             Err(error) => {
@@ -414,48 +416,22 @@ async fn directory_over(transport: &dyn Transport) -> Vec<AgentListing> {
     Vec::new()
 }
 
-/// One entry of the broker's aggregated card as a listing.
+/// One entry of the broker's directory as a listing.
 ///
 /// An entry with no name is skipped: it cannot be addressed, so telling the
 /// model about it would only invite a call that fails.
-fn listing_from_card(card: &serde_json::Value) -> Option<AgentListing> {
-    let name = card.get("name")?.as_str()?.to_string();
-    // An origin the broker did not state, or one this build does not know, is
-    // not treated as trusted — see `AgentOrigin::from_wire`.
-    let origin = card
-        .get("origin")
-        .and_then(|origin| origin.as_str())
-        .and_then(AgentOrigin::from_wire)
-        .unwrap_or(AgentOrigin::Discovered);
-    let description = card
-        .get("description")
-        .and_then(|text| text.as_str())
-        .unwrap_or_default()
-        .to_string();
-    let skills = card
-        .get("skills")
-        .and_then(|skills| skills.as_array())
-        .map(|skills| {
-            skills
-                .iter()
-                .filter_map(|skill| {
-                    skill
-                        .get("name")
-                        .and_then(|name| name.as_str())
-                        .map(str::to_string)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
+fn listing_from_entry(entry: AgentEntry) -> Option<AgentListing> {
+    if entry.name.is_empty() {
+        return None;
+    }
     Some(AgentListing {
-        name,
-        origin,
+        name: entry.name,
+        origin: entry.origin,
         kind: "worker",
-        description,
+        description: entry.description,
         url: None,
         enabled: true,
-        skills,
+        skills: entry.skills.into_iter().map(|skill| skill.name).collect(),
         has_api_key: false,
         plugins: Vec::new(),
     })
@@ -466,6 +442,7 @@ mod tests {
     use super::*;
     use crate::services::lazy_broker::LazyBroker;
     use crate::settings::models::a2a_store::A2aAgentConfig;
+    use chatty_fabric::wire::{ParticipantCard, ParticipantSkill};
 
     /// A broker that is configured but never manages to bind its socket —
     /// standing in for the AGE-746 collision case.
@@ -675,29 +652,43 @@ mod tests {
 
     // ── The live half ────────────────────────────────────────────────────────
 
-    /// A card the broker would serve, with the origins it would put on it.
-    fn broker_card() -> serde_json::Value {
-        serde_json::json!({
-            "schema_version": "0.1",
-            "gateway": true,
-            "agents": [
-                {
-                    "name": "local-agent-0",
-                    "description": "A chatty agent in its own process",
-                    "skills": [{"name": "delegate"}],
-                    "origin": "local",
-                },
-                {
-                    "name": "leased-vm",
-                    "description": "A worker in a leased microVM",
-                    "origin": "fleet",
-                },
-                {
-                    "name": "mystery",
-                    "description": "No origin stated",
-                },
-            ],
-        })
+    /// A directory entry the broker would list.
+    fn entry(name: &str, description: &str, origin: AgentOrigin, skills: &[&str]) -> AgentEntry {
+        AgentEntry::from_card(
+            &ParticipantCard {
+                name: name.to_string(),
+                description: description.to_string(),
+                skills: skills
+                    .iter()
+                    .map(|skill| ParticipantSkill {
+                        name: skill.to_string(),
+                        ..ParticipantSkill::default()
+                    })
+                    .collect(),
+                ..ParticipantCard::default()
+            },
+            origin,
+        )
+    }
+
+    /// The directory the broker would serve, with the origins it would put
+    /// on it.
+    fn broker_card() -> Vec<AgentEntry> {
+        vec![
+            entry(
+                "local-agent-0",
+                "A chatty agent in its own process",
+                AgentOrigin::Local,
+                &["delegate"],
+            ),
+            entry(
+                "leased-vm",
+                "A worker in a leased microVM",
+                AgentOrigin::Fleet,
+                &[],
+            ),
+            entry("", "No name: not addressable", AgentOrigin::Local, &[]),
+        ]
     }
 
     /// The issue's "Verify", live half: a worker that registered after the
@@ -709,7 +700,7 @@ mod tests {
         let tool = ListAgentsTool::new(vec![]).with_transport(directory);
 
         let output = list(&tool).await;
-        assert_eq!(output.total, 3);
+        assert_eq!(output.total, 2, "an entry with no name is skipped");
         assert_eq!(find(&output, "local-agent-0").origin, AgentOrigin::Local);
         assert_eq!(
             find(&output, "local-agent-0").skills,
@@ -717,24 +708,26 @@ mod tests {
         );
         assert_eq!(find(&output, "leased-vm").origin, AgentOrigin::Fleet);
         assert!(find(&output, "leased-vm").origin.is_own_fleet());
-
-        // A card with no origin is not treated as trusted.
-        assert_eq!(find(&output, "mystery").origin, AgentOrigin::Discovered);
-        assert!(!find(&output, "mystery").origin.is_own_fleet());
     }
 
     /// ADR-0011 C10: the broker's card says what a worker runs, so for a
     /// local worker the live description beats the static stand-in text.
     #[tokio::test]
     async fn a_local_workers_live_card_beats_the_static_stand_in() {
-        let card = serde_json::json!({
-            "agents": [
-                {"name": "local-coder", "origin": "local",
-                 "description": "Model: qwen. Tools: the full set."},
-                {"name": "local-reviewer", "origin": "local",
-                 "description": "Model: gemma. Tool groups disabled: fs-write, shell, git."},
-            ],
-        });
+        let card = vec![
+            entry(
+                "local-coder",
+                "Model: qwen. Tools: the full set.",
+                AgentOrigin::Local,
+                &[],
+            ),
+            entry(
+                "local-reviewer",
+                "Model: gemma. Tool groups disabled: fs-write, shell, git.",
+                AgentOrigin::Local,
+                &[],
+            ),
+        ];
         let directory = directory(card);
         let tool = ListAgentsTool::new(vec![])
             .with_local_workers(["local-coder", "local-reviewer"])
@@ -769,9 +762,7 @@ mod tests {
     /// both: what the user configured is the more informative answer.
     #[tokio::test]
     async fn a_configured_agent_keeps_its_label_when_the_broker_also_serves_it() {
-        let card = serde_json::json!({
-            "agents": [{"name": "voucher-agent", "origin": "local"}],
-        });
+        let card = vec![entry("voucher-agent", "", AgentOrigin::Local, &[])];
         let directory = directory(card);
         let tool = ListAgentsTool::new(vec![make_agent(
             "voucher-agent",
@@ -805,11 +796,11 @@ mod tests {
 
     /// A broker whose directory is `card`'s agents, as the gateway's
     /// aggregated card lists them.
-    fn directory(card: serde_json::Value) -> Arc<dyn Transport> {
-        Arc::new(Directory(card["agents"].clone()))
+    fn directory(agents: Vec<AgentEntry>) -> Arc<dyn Transport> {
+        Arc::new(Directory(agents))
     }
 
-    struct Directory(serde_json::Value);
+    struct Directory(Vec<AgentEntry>);
 
     #[async_trait::async_trait]
     impl Transport for Directory {
@@ -818,7 +809,10 @@ mod tests {
             _req: CallRequest,
         ) -> Result<chatty_fabric::CallStream, chatty_fabric::CallError> {
             use futures::StreamExt;
-            Ok(futures::stream::iter([Ok(CallEvent::Result(self.0.clone()))]).boxed())
+            Ok(
+                futures::stream::iter([Ok(CallEvent::Result(CallResult::Agents(self.0.clone())))])
+                    .boxed(),
+            )
         }
     }
 
