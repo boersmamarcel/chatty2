@@ -233,12 +233,14 @@ fn swarm_bench_dry_run() {
         assert_eq!(r["pass"], pass, "{task}/{arm}: {r:#}\n{log}");
         assert_eq!(r["exit_code"], 0, "{task}/{arm}: {r:#}");
     }
-    // The team really ran: its workers' branches exist, and the research
-    // brief the writer committed on its own branch is what was judged.
+    // The team really ran: fix-and-verify opts into worktrees, so its
+    // workers' branches exist; research-brief does not (AGE-822), so its
+    // writer writes straight into the shared workspace, which is what was
+    // judged.
     let fix = result_json(&run_dir, "c01-pagination", "swarm");
     assert_eq!(fix["worker_branches"], json!(["sub-agent/fix-coder-0"]));
     let research = result_json(&run_dir, "r01-vendor-initech", "swarm");
-    assert_ne!(research["check"]["found_in"], "workspace", "{research:#}");
+    assert_eq!(research["check"]["found_in"], "workspace", "{research:#}");
     let data = result_json(&run_dir, "d01-region-drop", "swarm");
     assert_eq!(data["check"]["verdict"], "EU");
 
