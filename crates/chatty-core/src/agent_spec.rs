@@ -65,6 +65,27 @@ pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 /// names it, or a spec of yours that delegates to it (AGE-760).
 pub const PRESETS: &[(&str, &str)] = &[
     (
+        "arch-devils-advocate",
+        include_str!("../agents/arch-devils-advocate.toml"),
+    ),
+    ("arch-lead", include_str!("../agents/arch-lead.toml")),
+    (
+        "arch-maint-reviewer",
+        include_str!("../agents/arch-maint-reviewer.toml"),
+    ),
+    (
+        "arch-proposer",
+        include_str!("../agents/arch-proposer.toml"),
+    ),
+    (
+        "arch-sec-reviewer",
+        include_str!("../agents/arch-sec-reviewer.toml"),
+    ),
+    (
+        "arch-verifier",
+        include_str!("../agents/arch-verifier.toml"),
+    ),
+    (
         "code-reviewer",
         include_str!("../agents/code-reviewer.toml"),
     ),
@@ -1372,8 +1393,10 @@ cap_usd = 2.0
 
     /// AGE-752: what ships reads well in Settings → Agents and `list_agents`:
     /// every preset has a one-line description and a preamble, names no
-    /// model (the roster's default runs it), and has a budget: a turn cap or
-    /// a deadline.
+    /// model (the roster's default runs it) unless it is one of the
+    /// `architecture-review` team's, the one preset team that pins its
+    /// models (AGE-808, checked in `services::team`), and has a budget: a
+    /// turn cap or a deadline.
     #[test]
     fn every_preset_is_described_and_budgeted() {
         for (name, _) in PRESETS {
@@ -1390,7 +1413,11 @@ cap_usd = 2.0
                     .is_some_and(|p| !p.is_empty()),
                 "{name} has a preamble"
             );
-            assert!(spec.agent.model.is_none(), "{name} names no model");
+            assert_eq!(
+                spec.agent.model.is_some(),
+                name.starts_with("arch-"),
+                "{name}: only the architecture-review specs pin a model"
+            );
             assert!(
                 spec.budget.max_agent_turns.is_some() || spec.budget.max_duration.is_some(),
                 "{name} has a budget"

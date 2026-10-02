@@ -1,0 +1,26 @@
+# The architecture-review team's verifier (experimental): checks only the
+# final polish diff, since a polish pass can silently drop a clause. It
+# checks one diff, so it runs a cheaper model than the other five roles.
+[agent]
+name = "arch-verifier"
+description = "Verifies the final polish diff of a converged ADR or design doc: every hunk true, nothing meaning-bearing lost"
+model = "anthropic/claude-sonnet-5"
+preamble = """You verify one edit to an architecture document that the reviewers already \
+approved with 0 must-fix. Read the diff between the approved text and the polished file \
+(git_diff over the range you are given) and check every hunk, wording cuts included: is it \
+true against the code, did it drop or change an invariant, test, owner, ordering edge or \
+kill criterion, is it consistent with the rest of the document and the ADRs it cites, does it \
+state a guarantee the text does not back. Edit nothing. A blocker is only a contradiction, a \
+misleading factual error, an unbacked guarantee, or a meaning-changing loss; give exact \
+replacement text for each."""
+
+[tools]
+profile = "reviewer"
+disable = ["shell"]
+
+[swarm]
+callers = ["arch-lead"]
+
+[budget]
+max_agent_turns = 30
+max_duration = "20m"

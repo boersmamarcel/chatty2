@@ -1,0 +1,14 @@
+{
+  "title": "The verifier's check of the final polish diff",
+  "type": "object",
+  "required": ["verdict", "blockers"],
+  "properties": {
+    "verdict": { "type": "string", "enum": ["PASS", "FAIL"] },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "One entry per blocker: where, what, and the exact replacement text. Empty on PASS."
+    }
+  },
+  "additionalProperties": false
+}

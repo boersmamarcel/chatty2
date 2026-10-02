@@ -25,6 +25,7 @@ pub mod a2a_client;
 pub mod agent_command;
 pub mod agent_loop_guard;
 pub mod agent_task_controller;
+pub mod architecture_doc;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod chart_svg_renderer;
