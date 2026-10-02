@@ -156,7 +156,21 @@ pub enum CallEvent {
     /// own store, which un-parks its own task toward its caller in turn, so
     /// the withdrawal climbs every hop to the root's human. A caller that
     /// already answered has nothing left to withdraw.
+    ///
+    /// For an approval (EN-2a) `task` is the broker's approval id: the
+    /// worker that asked withdrew it, or its callee ended or was cancelled,
+    /// and the root's card goes.
     InputWithdrawn { task: String },
+    /// A node anywhere under this call is waiting on an execution or write
+    /// approval (`human.approve`, ADR-0021 § 2). Only a root call receives
+    /// these: the broker delivers every approval straight to the root,
+    /// never to a worker. `id` is the broker's, unique within it; the root
+    /// answers with [`Transport::approve`]. `request.asker` is the broker's
+    /// stamp of the agent that asked.
+    Approve {
+        id: String,
+        request: crate::ApprovalRequest,
+    },
     /// A batch of what one run nested under this call did, tagged by the
     /// broker (TB-1). Only a root call receives these: a worker's calls
     /// are nested runs themselves, whose events go to the root directly.
@@ -247,6 +261,17 @@ pub trait Transport: Send + Sync {
         let _ = input;
         Err(CallError::Failed(format!(
             "task '{task}' cannot be answered over this transport"
+        )))
+    }
+
+    /// Answer the approval the broker delivered as
+    /// [`CallEvent::Approve`] `id` (EN-2a). Only the root's direct handle
+    /// can: a worker is never sent an approval, so it has none to answer.
+    /// The default refuses.
+    async fn approve(&self, id: &str, verdict: crate::ApprovalVerdict) -> Result<(), CallError> {
+        let _ = verdict;
+        Err(CallError::Failed(format!(
+            "approval '{id}' cannot be answered over this transport"
         )))
     }
 

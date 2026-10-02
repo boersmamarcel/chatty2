@@ -10,8 +10,9 @@
 //! start, the worker exits without answering — ends the call with its error
 //! and says so as the turn's text, so the row never hangs.
 //!
-//! What the delegated agent asks of the human while it runs — a relayed
-//! command or write approval (AGE-646), a clarifying question — lands on
+//! What the delegated agent asks of the human while it runs — a command or
+//! write approval the broker forwards to the root (EN-2a), a clarifying
+//! question — lands on
 //! this conversation's stores, like a model-issued call's; the stream
 //! forwards their notifications as they arrive, so the card shows while the
 //! call is still in flight (AGE-752).

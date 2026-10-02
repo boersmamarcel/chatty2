@@ -35,6 +35,11 @@
 //! the task's messages. A callee's question comes down as
 //! `call.input_required` and the worker's answer goes up as `call.input`
 //! (BI-5), so a question from any depth reaches the root's human.
+//! An approval does not climb (EN-2a): the turn's command or write asks
+//! the root with a `human.approve` request on this connection, and the
+//! root's verdict comes back as its result, onto the same
+//! [`InputReceiver`].
+//!
 //! [`WorkerConnection`] is a welcomed connection with a [`SocketTransport`]
 //! over it, so the worker connects first and
 //! builds its agent second, handing the agent [`WorkerConnection::transport`]
@@ -54,7 +59,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use super::{InputReceiver, TaskMapper};
+use super::{InputReceiver, TaskMapper, WorkerInput};
 use crate::participant::{
     BrokerFrame, DelegatedTask, ParticipantCard, ParticipantConnection, ParticipantFrame,
     ParticipantReader, ParticipantSkill,
@@ -192,6 +197,9 @@ impl WorkerConnection {
             let mapper = mapper.clone();
             Arc::new(move |event: &SessionEvent| {
                 let mut mapper = lock(&mapper);
+                if let Some(frame) = mapper.withdrawn_approval(event) {
+                    let _ = frames_tx.send(frame);
+                }
                 if let Some(frame) = mapper.map(event) {
                     let _ = frames_tx.send(frame);
                 }
@@ -257,6 +265,7 @@ impl WorkerConnection {
             task_id.clone(),
             inputs_tx,
             replies.clone(),
+            mapper.clone(),
         ));
 
         let outcome = run(task, sink, inputs_rx).await;
@@ -331,8 +340,9 @@ fn route_reply(replies: &CallReplies, frame: &BrokerFrame) -> bool {
 async fn forward_inputs(
     mut reader: ParticipantReader,
     task_id: String,
-    inputs: mpsc::UnboundedSender<crate::participant::TaskInput>,
+    inputs: mpsc::UnboundedSender<WorkerInput>,
     replies: CallReplies,
+    mapper: Arc<Mutex<TaskMapper>>,
 ) {
     loop {
         match reader.next_frame().await {
@@ -341,8 +351,25 @@ async fn forward_inputs(
                 task_id: for_task,
                 input,
             })) if for_task == task_id => {
-                if inputs.send(input).is_err() {
+                if inputs.send(WorkerInput::Answer(input)).is_err() {
                     debug!(task = %task_id, "An answer arrived after the turn stopped listening");
+                    break;
+                }
+            }
+            // The root's verdict on one of this task's approvals (EN-2a),
+            // for the store it was raised on.
+            Ok(Some(BrokerFrame::Approval { id, verdict })) => {
+                let Some((approval, kind)) = lock(&mapper).take_approval(id) else {
+                    debug!(approval = id, "A verdict for an approval nobody waits on");
+                    continue;
+                };
+                let input = WorkerInput::Approval {
+                    id: approval,
+                    kind,
+                    verdict,
+                };
+                if inputs.send(input).is_err() {
+                    debug!(task = %task_id, "A verdict arrived after the turn stopped listening");
                     break;
                 }
             }
@@ -485,6 +512,7 @@ mod tests {
                 CallEvent::Progress(_)
                 | CallEvent::InputRequired { .. }
                 | CallEvent::InputWithdrawn { .. }
+                | CallEvent::Approve { .. }
                 | CallEvent::Swarm(_) => {}
             }
         }

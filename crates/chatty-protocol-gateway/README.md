@@ -192,11 +192,27 @@ closes the connection, as does a line that does not decode at all; an
 
 | Sender | Requests | Notifications |
 |---|---|---|
-| worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post` | `task.event`, `req.cancel`; interim `task.input_required`, `call.input` |
+| worker | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `human.approve` | `task.event`, `req.cancel`; interim `task.input_required`, `call.input` |
 | broker | `task.run` | `req.progress`, `req.cancel`; interim `task.input`, `call.input_required`, `call.input_withdrawn` |
 
-The interim notifications carry the question and approval traffic until
-ADR-0021 step 2 turns it into `human.ask` / `human.approve` requests.
+The interim notifications carry the question traffic until ADR-0021 step 2
+(EN-2b) turns it into `human.ask` requests.
+
+**Only the root answers an approval** (ADR-0021 § 2, EN-2a). A worker whose
+command or write needs a human sends `human.approve` (`kind: exec | write`,
+`command_or_path`, `diff_stat`) and waits for its result, `"approved"` or
+`"denied"`. The broker overwrites any `asker` with the connection's admitted
+name and chain, and delivers the request straight to the root's call under
+an id of its own; no caller in between sees it, and the broker never sends
+`human.approve` to a worker. The root's verdict is the request's result. A
+worker withdraws its own with `req.cancel`; a closed connection withdraws all
+of its own. At most four wait per connection; one more, or one with no root
+to ask, is denied.
+
+```
+participant → {"v":3,"id":4,"method":"human.approve","params":{"kind":"exec","command_or_path":"[shell] echo hi"}}
+broker      → {"v":3,"id":4,"result":"approved"}
+```
 
 `scope` is the conversation the node works for and `owner` the node that
 asked for it; for now every node is the root's, in scope `root`. `task.run`

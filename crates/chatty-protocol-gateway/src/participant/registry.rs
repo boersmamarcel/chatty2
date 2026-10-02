@@ -723,7 +723,9 @@ impl ParticipantRegistry {
             // lifetime; one reaching here was not routed and is dropped.
             ParticipantFrame::Call { id, .. }
             | ParticipantFrame::CallInput { id, .. }
-            | ParticipantFrame::CancelCall { id } => {
+            | ParticipantFrame::CancelCall { id }
+            | ParticipantFrame::Approve { id, .. }
+            | ParticipantFrame::CancelApproval { id } => {
                 warn!(participant = %name, call = id, "A call frame outside a connection loop");
                 return true;
             }
