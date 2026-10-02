@@ -19,7 +19,6 @@ use std::time::{Duration, UNIX_EPOCH};
 use crate::models::clarification_store::{
     CLARIFICATION_TIMEOUT, ClarificationAnswer, ClarifyingQuestion,
 };
-use crate::models::execution_approval_store::ApprovalDetail;
 use crate::models::token_usage::{ModelRef, TokenUsage};
 use crate::services::ssrf_guard::{
     AddressPolicy, GuardedResolver, HostLookup, SystemLookup, a2a_peer, a2a_peer_with_bypass,
@@ -52,31 +51,6 @@ impl A2aClarificationRequest {
         serde_json::from_value(value).ok()
     }
 }
-
-/// A task parked on an execution or write approval somewhere down the chain
-/// (AGE-646): the broker's `InputRequest` whose questions are all
-/// `InputQuestion::Approval`. `id` is the worker's approval id — the key its
-/// store resolves on — and rides back down unchanged.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct A2aApprovalRequest {
-    pub id: String,
-    pub questions: Vec<A2aApprovalQuestion>,
-}
-
-/// One approval a parked task waits on: the broker's
-/// `InputQuestion::Approval`, field for field.
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-pub struct A2aApprovalQuestion {
-    pub id: String,
-    #[serde(flatten)]
-    pub detail: ApprovalDetail,
-}
-
-/// The answer an approval question gets on the wire when granted
-/// (AGE-646); anything else denies it.
-pub const APPROVAL_GRANTED: &str = "approve";
-/// The answer an approval question gets on the wire when denied.
-pub const APPROVAL_DENIED: &str = "deny";
 
 /// The key under a terminal status's `metadata` that carries the worker's
 /// token usage, as the broker's worker mapper writes it

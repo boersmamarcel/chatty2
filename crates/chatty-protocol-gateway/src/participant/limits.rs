@@ -6,7 +6,8 @@
 //! [`MAX_FRAME_BYTES`], queues at most [`OUTBOUND_QUEUE_FRAMES`] frames for
 //! its writer, and runs at most [`MAX_IN_FLIGHT_CALLS`] calls at a time,
 //! started at no more than [`CALLS_PER_SECOND`] (with a burst of
-//! [`CALL_BURST`]).
+//! [`CALL_BURST`]), and keeps at most [`MAX_PENDING_APPROVALS`]
+//! `human.approve` requests waiting on the root.
 //!
 //! What happens at each limit follows one rule: only a peer's own frame
 //! closes its connection.
@@ -17,7 +18,7 @@
 //! - A full outbound queue makes whoever is queueing wait; the receiving
 //!   connection is never closed for being slow.
 //! - A call over the in-flight or rate cap is refused like any other
-//!   refused call.
+//!   refused call; an approval over its cap is denied without asking.
 
 // The socket that reads lines and counts calls is Unix-only (`mod.rs`).
 #![cfg_attr(not(unix), allow(dead_code))]
@@ -39,6 +40,12 @@ pub const OUTBOUND_QUEUE_FRAMES: usize = 64;
 
 /// Calls one connection may have running at once.
 pub const MAX_IN_FLIGHT_CALLS: usize = 32;
+
+/// `human.approve` requests one connection may have waiting on the root at
+/// once (EN-2a). A worker's turn waits on one approval at a time; the rest
+/// is headroom for parallel tool calls, not a queue to fill the root's
+/// screen with.
+pub const MAX_PENDING_APPROVALS: usize = 4;
 
 /// Calls one connection may start per second, sustained.
 pub const CALLS_PER_SECOND: u32 = 10;

@@ -658,7 +658,7 @@ fn a_method_of_the_other_direction_does_not_decode() {
         r#"{"v":3,"id":1,"method":"task.run","params":{"taskId":"t","text":"x"}}"#,
         r#"{"v":3,"method":"req.progress","params":{"id":1,"event":{}}}"#,
         r#"{"v":3,"method":"task.input","params":{"id":1,"input":{"requestId":"r","answers":[]}}}"#,
-        r#"{"v":3,"id":1,"method":"human.approve","params":{}}"#,
+        r#"{"v":3,"id":1,"method":"human.ask","params":{}}"#,
     ] {
         assert!(
             matches!(broker.decode(line), Err(FrameError::WrongDirection(_))),
@@ -670,12 +670,95 @@ fn a_method_of_the_other_direction_does_not_decode() {
         r#"{"v":3,"id":1,"method":"agent.list"}"#,
         r#"{"v":3,"method":"task.event","params":{"kind":"status","id":1,"state":"working"}}"#,
         r#"{"v":3,"method":"call.input","params":{"id":1,"task":"t","input":{"requestId":"r","answers":[]}}}"#,
+        // EN-2a: the broker never sends an approval to a worker.
+        r#"{"v":3,"id":1,"method":"human.approve","params":{"kind":"exec","command_or_path":"ls"}}"#,
     ] {
         assert!(
             matches!(worker.decode(line), Err(FrameError::WrongDirection(_))),
             "the worker refuses {line}"
         );
     }
+}
+
+/// EN-2a: `human.approve` is a worker's request with a typed verdict for
+/// its result. The worker's approval numbers map to request ids and back,
+/// a `req.cancel` of one is an approval's withdrawal, and a verdict for an
+/// approval already withdrawn or answered is not sent.
+#[test]
+fn an_approval_is_a_request_with_a_verdict() {
+    use chatty_fabric::{ApprovalKind, ApprovalRequest, ApprovalVerdict};
+    let (broker, worker) = connected();
+    let request = ApprovalRequest {
+        kind: ApprovalKind::Exec,
+        command_or_path: "[shell] echo hi".into(),
+        diff_stat: None,
+        asker: None,
+    };
+    let line = worker
+        .encode(&ParticipantFrame::Approve {
+            id: 7,
+            request: request.clone(),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&line),
+        json!({"v": 3, "id": 2, "method": "human.approve",
+               "params": {"kind": "exec", "command_or_path": "[shell] echo hi"}})
+    );
+    let Some(ParticipantFrame::Approve { id, request: read }) = broker.decode(&line).unwrap()
+    else {
+        panic!("an approval");
+    };
+    assert_eq!((id, read), (2, request.clone()));
+
+    let verdict = BrokerFrame::Approval {
+        id: 2,
+        verdict: ApprovalVerdict::Approved,
+    };
+    let line = broker.encode(&verdict).unwrap().unwrap();
+    assert_eq!(value(&line), json!({"v": 3, "id": 2, "result": "approved"}));
+    assert!(matches!(
+        worker.decode(&line).unwrap(),
+        Some(BrokerFrame::Approval {
+            id: 7,
+            verdict: ApprovalVerdict::Approved
+        })
+    ));
+    assert!(
+        broker.encode(&verdict).unwrap().is_none(),
+        "an answered approval is not answered twice"
+    );
+
+    // Withdrawn: a cancel of an approval, and no verdict after it.
+    assert!(matches!(
+        up(
+            &worker,
+            &broker,
+            ParticipantFrame::Approve { id: 8, request }
+        ),
+        ParticipantFrame::Approve { id: 3, .. }
+    ));
+    assert!(matches!(
+        up(&worker, &broker, ParticipantFrame::CancelApproval { id: 8 }),
+        ParticipantFrame::CancelApproval { id: 3 }
+    ));
+    assert!(
+        broker
+            .encode(&BrokerFrame::Approval {
+                id: 3,
+                verdict: ApprovalVerdict::Denied,
+            })
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        worker
+            .encode(&ParticipantFrame::CancelApproval { id: 8 })
+            .unwrap()
+            .is_none(),
+        "nothing left to withdraw"
+    );
 }
 
 #[test]

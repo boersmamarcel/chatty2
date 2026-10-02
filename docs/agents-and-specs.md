@@ -255,10 +255,11 @@ loopback HTTP:
 | broker → worker | error | `id`, `error: {kind, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, …) |
 | broker → worker | `call.input_required` notification (interim) | `id`, `task` (the callee's parked task), `request` — the question, `{id, questions}` as a parked task's `input` carries it (BI-5) |
 | worker → broker | `call.input` notification (interim) | `id`, `task`, `input` — the answer, `{requestId, answers}`, the same shape `task.input` carries (BI-5) |
-| worker → broker | `req.cancel` notification | `id` — the worker withdraws its call |
+| worker → broker | `req.cancel` notification | `id` — the worker withdraws its call, or its approval |
+| worker → broker | `human.approve` request | `id`, `params: {kind: exec\|write, command_or_path, diff_stat?}` — an approval only the root answers (EN-2a); the result is `"approved"` or `"denied"`. The broker stamps the asker itself and never sends this to a worker |
 
 The interim notifications carry the question traffic until ADR-0021 step 2
-replaces them with `human.ask` / `human.approve`.
+(EN-2b) replaces them with `human.ask`.
 
 ```text
 worker → {"v":3,"id":2,"method":"agent.invoke","params":{"agent":"local-reviewer","prompt":"review it","handle":null,"include_trace":false}}

@@ -1,14 +1,15 @@
-//! AGE-646 (DP-5): an execution approval raised at depth 2 relays up the
-//! call chain to the root's approval store, like `ask_user` does (AGE-306).
+//! AGE-646 (DP-5): an execution approval raised at depth 2 reaches the
+//! root's approval store — and since EN-2a (AGE-770) only the root's: the
+//! root answers it, not the intermediate.
 //!
 //! Every hop is the real thing: the root is a real agent in this process
 //! whose shell asks before every command ([`KitRoot`]), `kit-lead` and
 //! `kit-coder` are real `chatty-tui` workers that ask too (no
 //! `--auto-approve`), and the broker between them is the kit's. The coder's
-//! `shell_execute` parks it in `input-required`; the lead re-raises the
-//! approval on its own store, which parks the lead toward the root; the root
-//! re-raises it on its store, which is the human's card. The decision goes
-//! back down the same way.
+//! `shell_execute` sends `human.approve` on its connection; the broker
+//! delivers it straight to the root's call, past the lead, and the root
+//! raises it on its store, which is the human's card. The verdict goes
+//! back to the coder's request the same way.
 
 use chatty_core::models::execution_approval_store::ApprovalNotification;
 use chatty_core::testing::fake_model::{RecordedRequest, Reply, Script};

@@ -202,7 +202,7 @@ impl SwarmKit {
 
     /// As [`start`](Self::start), with every worker asking before each
     /// command and write — no `--auto-approve`, `AlwaysAsk` — so an
-    /// approval goes up the call chain to the root (AGE-646).
+    /// approval goes to the root (AGE-646, EN-2a).
     pub async fn start_asking(roster: Vec<AgentDef>, sse: Script, ndjson: Script) -> Self {
         Self::start_opts(
             None,
@@ -2213,6 +2213,12 @@ pub(crate) struct KitRoot {
 
 impl KitRoot {
     pub(crate) async fn build(kit: &SwarmKit) -> Self {
+        Self::build_with_mode(kit, ApprovalMode::AlwaysAsk).await
+    }
+
+    /// As [`build`](Self::build), with the root's own tools under
+    /// `approval_mode`.
+    pub(crate) async fn build_with_mode(kit: &SwarmKit, approval_mode: ApprovalMode) -> Self {
         use chatty_core::factories::{AgentBuildContext, AgentClient, AgentServices};
         use chatty_core::models::clarification_store::ClarificationStore;
         use chatty_core::models::execution_approval_store::ExecutionApprovalStore;
@@ -2228,7 +2234,7 @@ impl KitRoot {
             workspace_dir: Some(kit.workspace().to_string_lossy().into_owned()),
             fetch_enabled: false,
             memory_enabled: false,
-            approval_mode: ApprovalMode::AlwaysAsk,
+            approval_mode,
             ..ExecutionSettingsModel::default()
         };
         let ctx = AgentBuildContext {
