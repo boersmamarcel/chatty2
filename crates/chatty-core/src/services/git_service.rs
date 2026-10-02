@@ -330,6 +330,23 @@ impl GitService {
         Ok(listed.lines().any(|line| line.trim() == name))
     }
 
+    /// The branch actually checked out at this tree's root, or `None` on a
+    /// detached `HEAD` — a tree with no branch of its own to fall back to.
+    ///
+    /// What a nested worker's base falls back to when the branch it was
+    /// told to start from no longer exists (AGE-820): whatever this tree is
+    /// really on, read off `git` itself rather than trusted from a name a
+    /// caller reconstructed or cached earlier.
+    pub async fn current_branch(&self) -> Result<Option<String>> {
+        let name = self.run_git(&["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        let name = name.trim();
+        if name.is_empty() || name == "HEAD" {
+            Ok(None)
+        } else {
+            Ok(Some(name.to_string()))
+        }
+    }
+
     /// The repository's default branch: `main` or `master`, whichever
     /// exists locally. `None` when neither does.
     ///
@@ -990,6 +1007,28 @@ mod tests {
         assert!(
             log.contains("sub-agent w1"),
             "branch keeps the output: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn current_branch_is_none_on_a_detached_head() {
+        let (tmp, git) = create_test_repo().await;
+        fs::write(tmp.path().join("README"), "hi").unwrap();
+        git.add(&["README".to_string()]).await.unwrap();
+        git.commit("init").await.unwrap();
+        git.current_branch()
+            .await
+            .unwrap()
+            .expect("freshly initialized repo is on a branch");
+
+        let head = git.run_git(&["rev-parse", "HEAD"]).await.unwrap();
+        git.run_git(&["checkout", "--detach", head.trim()])
+            .await
+            .unwrap();
+        assert_eq!(
+            git.current_branch().await.unwrap(),
+            None,
+            "a detached HEAD is on no branch to report"
         );
     }
 
