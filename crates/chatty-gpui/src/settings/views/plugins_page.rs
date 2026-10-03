@@ -4,15 +4,18 @@
 //! own, so each row says which specs use it and what they grant.
 
 use crate::settings::controllers::module_settings_controller;
+use crate::settings::models::discovered_modules::DiscoveredModuleEntry;
 use crate::settings::models::extensions_store::ExtensionsModel;
 use crate::settings::models::{
     AgentSpecsModel, DiscoveredModulesModel, ModuleLoadStatus, ModuleSettingsModel,
 };
 use crate::settings::views::extensions_page::trust_badge;
 use chatty_core::agent_spec::SpecListing;
+use chatty_wasm_runtime::SPECLESS_DEFAULTS;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
+use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme, h_flex, v_flex};
 
 pub fn plugins_page() -> SettingPage {
@@ -110,12 +113,9 @@ fn plugins_group() -> SettingGroup {
                     }
                     // What it asks the host for; each spec below grants a
                     // subset (PL-U4).
-                    if let Some(requested) = &module.requested {
-                        facts.push(if requested.is_empty() {
-                            "Requests no capability".to_string()
-                        } else {
-                            format!("Requests: {}", requested.join(", "))
-                        });
+                    let requested = module.requested.clone().unwrap_or_default();
+                    if module.requested.is_some() && requested.is_empty() {
+                        facts.push("Requests no capability".to_string());
                     }
                     facts.push(if module.mcp {
                         format!(
@@ -157,6 +157,11 @@ fn plugins_group() -> SettingGroup {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(fact)
                         }))
+                        .children(
+                            requested
+                                .into_iter()
+                                .map(|capability| capability_row(&module, &capability, cx)),
+                        )
                         .when_some(load_error, |el, reason| {
                             el.child(
                                 div()
@@ -169,6 +174,42 @@ fn plugins_group() -> SettingGroup {
                 }))
                 .into_any_element()
         })])
+}
+
+/// One requested capability of a module served with no agent spec (SEC-11,
+/// AGE-815). `config` and `logging` are on by default; `llm`, `file` and
+/// `billing` are off until the user switches them on, which rescans so the
+/// gateway links the module against the new set.
+fn capability_row(module: &DiscoveredModuleEntry, capability: &str, cx: &App) -> AnyElement {
+    let gated =
+        !SPECLESS_DEFAULTS.iter().any(|c| c.name() == capability) && capability != "logging";
+    let on = !gated || module.granted.iter().any(|g| g == capability);
+    let label = format!("Allow {capability}");
+    let row = h_flex()
+        .pl_2()
+        .gap_2()
+        .items_center()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground);
+    if !gated {
+        return row
+            .child(format!("{capability}: on by default"))
+            .into_any_element();
+    }
+    let directory_name = module.directory_name.clone();
+    let name = capability.to_string();
+    row.child(
+        Switch::new(SharedString::from(format!(
+            "grant-{}-{capability}",
+            module.directory_name
+        )))
+        .checked(on)
+        .label(label)
+        .on_click(move |checked: &bool, _window, cx| {
+            module_settings_controller::set_module_grant(&directory_name, &name, *checked, cx);
+        }),
+    )
+    .into_any_element()
 }
 
 /// The specs that list `module`, each with the capabilities it grants:

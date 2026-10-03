@@ -80,7 +80,10 @@ async fn s3_10_disabled_protocol_is_404() {
 async fn s3_11_slow_module_does_not_block_another() {
     const A_DELAY: Duration = Duration::from_secs(2);
     let gw = Gateway::start(
-        vec![Module::fixture("slow-host"), Module::shipped("echo")],
+        vec![
+            Module::fixture("slow-host").granted("llm"),
+            Module::shipped("echo"),
+        ],
         vec![FakeResponse::Delay(A_DELAY, "a done".into())],
     )
     .await;
