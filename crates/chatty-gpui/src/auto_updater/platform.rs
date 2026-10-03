@@ -47,9 +47,55 @@ pub fn launch_macos_install_helper(
         &dmg_path.to_string_lossy(),
         &app_bundle.to_string_lossy(),
         relaunch,
+        expected_team_id().unwrap_or_default(),
     );
     spawn_macos_install_helper(script, dmg_path);
 }
+
+/// The Apple Team ID release builds are signed with, compiled in by
+/// `release.yml` from the `NOTARIZE_TEAM_ID` secret (AGE-817). Builds without
+/// it (local builds, or releases with Developer ID signing switched off) skip
+/// the Team-ID check, since their own releases carry no Team ID either.
+#[cfg(target_os = "macos")]
+fn expected_team_id() -> Option<&'static str> {
+    option_env!("CHATTY_MACOS_TEAM_ID")
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// Bash snippet that checks a downloaded update before it may replace the
+/// installed app (AGE-817, SEC-10): the DMG must be notarized (its stapled
+/// ticket, checked by Gatekeeper), the app inside must pass
+/// `codesign --verify --deep --strict`, and its `TeamIdentifier` must equal the
+/// Team ID compiled into the running app. Prints `ok`, `skipped: ...` or
+/// `refused: ...` and returns non-zero when refused.
+///
+/// Like the classifier below it is a constant so the unit tests can run the
+/// shipped logic against fixture `codesign`/`spctl` output.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+const MACOS_UPDATE_VERIFIER_SH: &str = r#"# Check the update before the swap: ok | skipped: ... | refused: ...
+verify_update_bundle() {
+    local dmg="$1" app="$2" expected_team="$3" out team
+    if [ -z "$expected_team" ]; then
+        echo "skipped: this build has no expected Team ID compiled in"
+        return 0
+    fi
+    if ! out=$(codesign --verify --deep --strict "$app" 2>&1); then
+        echo "refused: the new app's code signature is invalid: $(printf '%s\n' "$out" | head -1)"
+        return 1
+    fi
+    team=$(codesign -dv "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1)
+    if [ "$team" != "$expected_team" ]; then
+        echo "refused: Team ID mismatch (expected $expected_team, got ${team:-none})"
+        return 1
+    fi
+    if ! out=$(spctl --assess --type open --context context:primary-signature -vv "$dmg" 2>&1) \
+        || ! printf '%s\n' "$out" | grep -qx 'source=Notarized Developer ID'; then
+        echo "refused: the update image is not notarized"
+        return 1
+    fi
+    echo "ok"
+}"#;
 
 /// Bash snippet that classifies the code signature on an app bundle, printing
 /// `adhoc`, `signed` or `unsigned` on stdout.
@@ -86,7 +132,12 @@ classify_signature() {
 /// Render the macOS install helper script. Separated from
 /// [`launch_macos_install_helper`] so its step order can be asserted in tests.
 #[cfg(any(target_os = "macos", all(test, unix)))]
-fn render_macos_install_script(dmg: &str, bundle: &str, relaunch: bool) -> String {
+fn render_macos_install_script(
+    dmg: &str,
+    bundle: &str,
+    relaunch: bool,
+    expected_team_id: &str,
+) -> String {
     let relaunch_flag = if relaunch { "true" } else { "false" };
 
     format!(
@@ -96,6 +147,7 @@ set -e
 DMG_PATH="{dmg}"
 APP_BUNDLE="{bundle}"
 RELAUNCH="{relaunch_flag}"
+EXPECTED_TEAM_ID="{expected_team_id}"
 LOG_FILE="$HOME/Library/Logs/chatty_update.log"
 
 # Logging function
@@ -104,6 +156,8 @@ log() {{
 }}
 
 {classifier}
+
+{verifier}
 
 log "=== Chatty Update Installation Started ==="
 log "DMG: $DMG_PATH"
@@ -126,7 +180,8 @@ done
 
 log "App has exited, proceeding with installation"
 
-# Mount the DMG — skip verification since we already validated the SHA-256 checksum
+# Mount the DMG — skip hdiutil verification since we already validated the
+# signed SHA-256 checksum; the code signature is checked right after mounting
 log "Mounting DMG..."
 MOUNT_OUTPUT=$(hdiutil attach -nobrowse -noverify -plist "$DMG_PATH" 2>&1)
 HDIUTIL_EXIT=$?
@@ -179,6 +234,20 @@ if [ -z "$APP_IN_DMG" ]; then
 fi
 
 log "Found app bundle: $APP_IN_DMG"
+
+# Authenticate the update BEFORE anything from the DMG is copied out of it
+# (the pdfium seed below included): notarized image, strict code signature,
+# and the Team ID this app was built to expect (AGE-817).
+if ! VERIFY_RESULT=$(verify_update_bundle "$DMG_PATH" "$APP_IN_DMG" "$EXPECTED_TEAM_ID"); then
+    log "ERROR: Update refused: $VERIFY_RESULT"
+    hdiutil detach -force "$MOUNT_POINT" 2>&1 | tee -a "$LOG_FILE" || true
+    if [ "$RELAUNCH" = "true" ] && [ -d "$APP_BUNDLE" ]; then
+        log "Relaunching the current, unchanged app"
+        open -n "$APP_BUNDLE" >> "$LOG_FILE" 2>&1 || true
+    fi
+    exit 1
+fi
+log "Update signature check: $VERIFY_RESULT"
 
 # Seed the user-data-dir backup copy from the DMG mount FIRST, before any rsync.
 # This is the most robust seeding point because:
@@ -328,6 +397,7 @@ log "=== Update Installation Completed Successfully ==="
         dmg = dmg,
         bundle = bundle,
         classifier = MACOS_SIGNATURE_CLASSIFIER_SH,
+        verifier = MACOS_UPDATE_VERIFIER_SH,
     )
 }
 
@@ -428,6 +498,145 @@ mod macos_install_script_tests {
             .to_string()
     }
 
+    const TEAM: &str = "ABCDE12345";
+
+    fn stub(dir: &std::path::Path, name: &str, body: &str) {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/bash\n{body}\n")).expect("write stub");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub");
+    }
+
+    /// Run `verify_update_bundle` from [`MACOS_UPDATE_VERIFIER_SH`] with stub
+    /// `codesign` and `spctl` on `PATH`: `codesign --verify` exits
+    /// `verify_exit`, `codesign -dv` prints `team_line`, and `spctl` prints
+    /// `spctl_source`. Returns (succeeded, stdout).
+    fn verify(
+        expected_team: &str,
+        verify_exit: i32,
+        team_line: &str,
+        spctl_source: &str,
+    ) -> (bool, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        stub(
+            dir.path(),
+            "codesign",
+            &format!(
+                "if [ \"$1\" = \"--verify\" ]; then echo 'verify output' >&2; exit {verify_exit}; fi\n\
+                 printf 'Identifier=com.chatty.app\\nSignature size=9068\\n{team_line}\\n' >&2"
+            ),
+        );
+        stub(
+            dir.path(),
+            "spctl",
+            &format!("printf '/tmp/chatty.dmg: accepted\\n{spctl_source}\\n' >&2"),
+        );
+        let script = dir.path().join("verify.sh");
+        std::fs::write(
+            &script,
+            format!("{MACOS_UPDATE_VERIFIER_SH}\nverify_update_bundle \"$1\" \"$2\" \"$3\"\n"),
+        )
+        .expect("write script");
+        let path = format!(
+            "{}:{}",
+            dir.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("bash")
+            .arg(&script)
+            .args([
+                "/tmp/chatty.dmg",
+                "/Volumes/Chatty/chatty.app",
+                expected_team,
+            ])
+            .env("PATH", path)
+            .output()
+            .expect("run verifier");
+        (
+            out.status.success(),
+            String::from_utf8(out.stdout)
+                .expect("utf8")
+                .trim()
+                .to_string(),
+        )
+    }
+
+    #[test]
+    fn macos_team_id_mismatch_refuses_the_swap() {
+        let (ok, out) = verify(
+            TEAM,
+            0,
+            "TeamIdentifier=ZZZZZ99999",
+            "source=Notarized Developer ID",
+        );
+        assert!(!ok, "a foreign Team ID must refuse the update: {out}");
+        assert_eq!(
+            out,
+            "refused: Team ID mismatch (expected ABCDE12345, got ZZZZZ99999)"
+        );
+
+        // An ad-hoc bundle has no Team ID at all.
+        let (ok, out) = verify(
+            TEAM,
+            0,
+            "TeamIdentifier=not set",
+            "source=Notarized Developer ID",
+        );
+        assert!(!ok, "{out}");
+
+        // The refusal stops the script before the swap.
+        let script =
+            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", true, TEAM);
+        let check = script
+            .find("VERIFY_RESULT=$(verify_update_bundle")
+            .expect("script verifies the update");
+        let seed = script.find("USER_LIB_DIR=").expect("script seeds pdfium");
+        let swap = script
+            .find("rsync -a --delete")
+            .expect("script swaps the bundle");
+        assert!(
+            check < seed && check < swap,
+            "the check must precede every copy out of the DMG"
+        );
+    }
+
+    #[test]
+    fn a_notarized_bundle_from_the_expected_team_passes() {
+        let (ok, out) = verify(
+            TEAM,
+            0,
+            "TeamIdentifier=ABCDE12345",
+            "source=Notarized Developer ID",
+        );
+        assert!(ok, "{out}");
+        assert_eq!(out, "ok");
+    }
+
+    #[test]
+    fn a_broken_or_unnotarized_update_is_refused() {
+        let (ok, out) = verify(
+            TEAM,
+            1,
+            "TeamIdentifier=ABCDE12345",
+            "source=Notarized Developer ID",
+        );
+        assert!(
+            !ok && out.starts_with("refused: the new app's code signature is invalid"),
+            "{out}"
+        );
+
+        let (ok, out) = verify(TEAM, 0, "TeamIdentifier=ABCDE12345", "source=Developer ID");
+        assert!(!ok, "{out}");
+        assert_eq!(out, "refused: the update image is not notarized");
+    }
+
+    #[test]
+    fn a_build_without_a_team_id_skips_the_check() {
+        let (ok, out) = verify("", 1, "TeamIdentifier=not set", "");
+        assert!(ok, "{out}");
+        assert!(out.starts_with("skipped:"), "{out}");
+    }
+
     /// The regression: a Developer ID bundle prints `Signature size=NNNN`, never
     /// `Signature=`, and must be left alone. Re-signing it ad-hoc strips the Team ID
     /// off the bundled pdfium and breaks every PDF tool (AGE-337).
@@ -471,7 +680,7 @@ Sealed Resources version=2 rules=13 files=42";
     #[test]
     fn resign_happens_before_relaunch() {
         let script =
-            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", true);
+            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", true, TEAM);
         let resign = script
             .find(r#"SIGNATURE_STATE=$(classify_signature "$APP_BUNDLE")"#)
             .expect("script classifies the signature");
@@ -484,16 +693,19 @@ Sealed Resources version=2 rules=13 files=42";
         );
     }
 
-    /// `--deep` is deprecated and can leave the bundle and its dylibs on different
-    /// identities — the nested objects are signed one by one instead.
+    /// `--deep` signing is deprecated and can leave the bundle and its dylibs on
+    /// different identities — the nested objects are signed one by one instead.
+    /// (`--verify --deep` in the update check is fine: it only reads.)
     #[test]
     fn script_does_not_deep_sign() {
         let script =
-            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", true);
-        assert!(
-            !script.contains("--deep"),
-            "install helper must not use codesign --deep"
-        );
+            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", true, TEAM);
+        for line in script.lines().filter(|l| l.contains("--deep")) {
+            assert!(
+                !line.contains("--sign"),
+                "install helper must not use codesign --sign --deep: {line}"
+            );
+        }
     }
 
     /// The helper is generated, never linted — parse it here so a broken edit to
@@ -509,6 +721,7 @@ Sealed Resources version=2 rules=13 files=42";
                     "/tmp/chatty.dmg",
                     "/Applications/chatty.app",
                     relaunch,
+                    TEAM,
                 ),
             )
             .expect("write script");
@@ -528,9 +741,10 @@ Sealed Resources version=2 rules=13 files=42";
     #[test]
     fn script_interpolates_its_arguments() {
         let script =
-            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", false);
+            render_macos_install_script("/tmp/chatty.dmg", "/Applications/chatty.app", false, TEAM);
         assert!(script.contains(r#"DMG_PATH="/tmp/chatty.dmg""#));
         assert!(script.contains(r#"APP_BUNDLE="/Applications/chatty.app""#));
         assert!(script.contains(r#"RELAUNCH="false""#));
+        assert!(script.contains(r#"EXPECTED_TEAM_ID="ABCDE12345""#));
     }
 }

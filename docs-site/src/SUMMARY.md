@@ -38,6 +38,7 @@
   - [Debug](./dev/guides/debug.md)
   - [Build & package](./dev/guides/build-package.md)
   - [Release process](./dev/architecture/RELEASE_PROCESS.md)
+  - [Release signing](./dev/architecture/release-signing.md)
   - [Contribute to the docs](./dev/guides/contribute-docs.md)
   - [For AI agents](./dev/agents.md)
 - [Explanation](./dev/architecture/system-overview.md)
