@@ -163,11 +163,29 @@ a canonical manifest `{capabilities, name, sha256, version, wit_version}`, and t
 manifest's `sha256` must match the downloaded bytes and its `name`/`version` the module
 asked for. A download missing any of the four `X-Hive-*` chain headers, or failing any
 link, is refused; `module.toml` takes its tools from the signed capabilities. Which root
-key is trusted (`hive_client::trust`): the compiled production key
-(`PRODUCTION_ROOT_PUBLIC_KEY`, empty until pinned, so the production registry is refused
+keys are trusted (`hive_client::trust`): the compiled production list
+(`PRODUCTION_ROOT_PUBLIC_KEYS`, empty until pinned, so the production registry is refused
 until then), or `CHATTY_HIVE_ROOT_KEY` for a **local** (loopback) registry such as the
-compose stack; the override is ignored for any other host. A registry with no trusted
+compose stack — one key, which replaces the compiled list for that registry rather than
+adding to it; the override is ignored for any other host. A registry with no trusted
 root refuses every download before the request (no trust on first use).
+
+**Root key rotation (SEC-3, AGE-816).** `PRODUCTION_ROOT_PUBLIC_KEYS` is a list, not a
+single key, so a certificate verifies if *any* listed root signed it
+(`hive_client::verify::verify_download_any`). That is what lets a rotation happen without
+a flag day: for the length of the rotation window the list holds two keys, `current` and
+`next`.
+
+1. Add `next` to `PRODUCTION_ROOT_PUBLIC_KEYS` and release chatty. Both `current` and
+   `next` verify from this point on, so every chatty install can already accept
+   certificates signed by either one.
+2. Switch the registry to signing new publisher certificates with `next`.
+3. In the following chatty release, remove `current` from the list. Only `next` verifies
+   after that; any certificate still outstanding under `current` must have been
+   re-issued under `next` before this release ships.
+
+There is no third state: the list holds one key outside a rotation window, two only
+during one. Nothing falls back to an unlisted or expired root.
 
 ### Resource limits
 

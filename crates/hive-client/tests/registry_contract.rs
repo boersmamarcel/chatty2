@@ -315,7 +315,7 @@ async fn download_without_a_trusted_root_is_refused_before_any_request() {
         .mount(&server)
         .await;
     let client = signed_in(&server);
-    assert_eq!(client.root_key(), None, "CHATTY_HIVE_ROOT_KEY is set");
+    assert!(client.root_keys().is_empty(), "CHATTY_HIVE_ROOT_KEY is set");
     let err = client.download("echo", "0.1.0").await.unwrap_err();
     assert!(
         matches!(err, hive_client::ClientError::NoTrustedRoot { .. }),
