@@ -6,6 +6,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
 use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
+use chatty_core::hive::ModuleMeter;
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
@@ -27,7 +28,6 @@ use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
-use chatty_core::hive::ModuleMeter;
 use chatty_core::tools::plugin_tool::{PluginHost, borrowed_meter};
 
 use tokio::sync::mpsc;

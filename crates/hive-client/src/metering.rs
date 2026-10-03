@@ -101,7 +101,11 @@ impl ModuleMeter {
                  to Hive in chatty"
             ));
         };
-        guard.admit(module).await.map(Some).map_err(|e| e.to_string())
+        guard
+            .admit(module)
+            .await
+            .map(Some)
+            .map_err(|e| e.to_string())
     }
 
     /// Report one successful call to `module` at `version`, if a collector

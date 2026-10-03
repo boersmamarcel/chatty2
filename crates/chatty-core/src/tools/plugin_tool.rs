@@ -131,10 +131,7 @@ pub struct PluginHost {
 /// collector, both on a [borrowed](HiveSession::borrowed) session — this
 /// process must not rotate a refresh token the desktop holds. Each call's
 /// report is flushed at once: a worker may exit before a periodic flush.
-pub async fn borrowed_meter(
-    extensions: &ExtensionsModel,
-    hive: &HiveSettingsModel,
-) -> ModuleMeter {
+pub async fn borrowed_meter(extensions: &ExtensionsModel, hive: &HiveSettingsModel) -> ModuleMeter {
     let session = Arc::new(HiveSession::borrowed(
         hive.registry_url.clone(),
         hive.token_pair(),
@@ -1348,7 +1345,8 @@ mod tests {
             expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
         };
         let session = Arc::new(HiveSession::borrowed(server.uri(), Some(pair)));
-        let client = Arc::new(HiveRegistryClient::new(server.uri()).with_session(Arc::clone(&session)));
+        let client =
+            Arc::new(HiveRegistryClient::new(server.uri()).with_session(Arc::clone(&session)));
         let usage = Arc::new(UsageCollector::new(
             server.uri(),
             UsageCollectorConfig {
@@ -1428,7 +1426,10 @@ mod tests {
             "{result}"
         );
         assert!(!result.contains("olleh"), "the guest never ran: {result}");
-        assert!(reported(&server).await.is_empty(), "a refused call is not reported");
+        assert!(
+            reported(&server).await.is_empty(),
+            "a refused call is not reported"
+        );
 
         let unbilled = Arc::new(ModuleMeter::new(["echo".to_string()].into()));
         let err = tool_of(&load_metered(unbilled).await, "echo__reverse")
@@ -1473,7 +1474,11 @@ mod tests {
                 .await
                 .unwrap_or_else(|e| panic!("free call {n} runs: {e}"));
             assert_eq!(out, "olleh");
-            assert_eq!(reported(&server).await.len(), n, "free call {n} is reported");
+            assert_eq!(
+                reported(&server).await.len(),
+                n,
+                "free call {n} is reported"
+            );
         }
         let err = reverse
             .call(serde_json::json!({ "input": "hello" }))
