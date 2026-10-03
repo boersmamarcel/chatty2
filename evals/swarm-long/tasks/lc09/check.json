@@ -1,0 +1,47 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: pre-release identifier ordering and identifier validation",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_version",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: caret constraints on 0.x and 0.0.x versions",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: bump resets lower parts and releases pre-releases",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_bump",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: resolver: no pre-releases unless asked, skip junk, string constraints",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: lock file: trailing comments, case-insensitive duplicates, line-numbered errors",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue5"
+      ]
+    }
+  ],
+  "type": "parts"
+}

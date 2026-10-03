@@ -1,0 +1,6 @@
+{
+  "deliverable": "the fixed workspace (every issue in ISSUES.md resolved)",
+  "family": "code-fix",
+  "prompt": "This repository is a small Python package with a list of open issues in ISSUES.md. Resolve every issue listed there: each one is a bug or a small feature, and its acceptance criteria are stated precisely in ISSUES.md. Some issues have tests in tests/ already; the others are specified only in ISSUES.md, and your fix will be checked against that specification by further tests, so follow it to the letter (names, signatures, error types, formats, edge cases). Run the tests with: python3 -m unittest discover -s tests -t . Do not modify or delete the existing tests (you may add new test files). Only the Python standard library is available. When you are done, reply with a short summary of what you changed per issue.",
+  "title": "gradebook: five course grading issues (letter boundaries, drop-lowest, late penalties, marks import, class statistics)"
+}

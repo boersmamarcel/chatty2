@@ -18,8 +18,14 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "src-research"))
 import filler  # noqa: E402
 
-IDS = ["lr01", "lr02", "lr03", "lr04", "lr05", "lr06"]
+IDS = ["lr01", "lr02", "lr03", "lr04", "lr05", "lr06"]  # default run; short variants only on request
 TARGET_WORDS = 1300  # per document (hand docs are padded up to this)
+# Short-corpus variants: same facts/questions/checks, fact docs barely padded, few filler docs.
+SHORT = {"lr07": "lr01", "lr08": "lr02", "lr09": "lr03", "lr10": "lr04", "lr11": "lr05", "lr12": "lr06"}
+SHORT_FILLER_DOCS = 4
+SHORT_TARGET_WORDS = 380
+SHORT_PAD_MIN = 0
+SHORT_FILLER_WORDS = 500
 
 
 def load(tid):
@@ -48,20 +54,20 @@ def padded(tid, name, words, pats, extra):
         salt += 1
 
 
-def build_doc(tid, spec, pats, extra, is_filler=False):
+def build_doc(tid, spec, pats, extra, is_filler=False, target=TARGET_WORDS, pad_min=200):
     name, title = spec["name"], spec["title"]
     if is_filler:
-        return "# %s\n\n%s\n" % (title, padded(tid, name, TARGET_WORDS, pats, extra))
+        return "# %s\n\n%s\n" % (title, padded(tid, name, target, pats, extra))
     core = spec["core"].strip("\n")
     chunks = core.split("@@PAD@@")
     if len(chunks) == 1:
         chunks.append("")
-    need = max(TARGET_WORDS - len(core.split()), 200)
+    need = max(target - len(core.split()), pad_min)
     each = need // (len(chunks) - 1)
     out = ["# %s\n" % title]
     for i, c in enumerate(chunks):
         out.append(c.strip("\n"))
-        if i < len(chunks) - 1:
+        if i < len(chunks) - 1 and each > 0:
             out.append(padded(tid, "%s#%d" % (name, i), each, pats, extra))
     return "\n\n".join(x for x in out if x.strip()) + "\n"
 
@@ -69,7 +75,12 @@ def build_doc(tid, spec, pats, extra, is_filler=False):
 def main():
     only = sys.argv[1:] or IDS
     for tid in only:
-        m = load(tid)
+        short = tid in SHORT
+        src = SHORT[tid] if short else tid
+        m = load(src)
+        target, pad_min = (SHORT_TARGET_WORDS, SHORT_PAD_MIN) if short else (TARGET_WORDS, 200)
+        filler_docs = m.FILLER[:SHORT_FILLER_DOCS] if short else m.FILLER
+        title = m.TITLE + " (short corpus)" if short else m.TITLE
         root = os.path.join(HERE, "tasks", tid)
         if os.path.isdir(root):
             shutil.rmtree(root)
@@ -81,11 +92,12 @@ def main():
         for spec in m.DOCS:
             names.append(spec["name"])
             with open(os.path.join(docs_dir, spec["name"]), "w") as f:
-                f.write(build_doc(tid, spec, pats, m.EXTRA_TOPICS))
-        for name, title in m.FILLER:
+                f.write(build_doc(src, spec, pats, m.EXTRA_TOPICS, target=target, pad_min=pad_min))
+        for name, ftitle in filler_docs:
             names.append(name)
             with open(os.path.join(docs_dir, name), "w") as f:
-                f.write(build_doc(tid, dict(name=name, title=title), pats, m.EXTRA_TOPICS, True))
+                f.write(build_doc(src, dict(name=name, title=ftitle), pats, m.EXTRA_TOPICS, True,
+                                   target=SHORT_FILLER_WORDS if short else TARGET_WORDS))
         qs = "\n".join("%d. %s" % (i + 1, q) for i, q in enumerate(m.QUESTIONS))
         request = (
             "# Request\n\n%s\n\nWrite `brief.md` in the workspace root answering the %d numbered questions below, "
@@ -98,12 +110,13 @@ def main():
         ws = os.path.join(root, "workspace")
         with open(os.path.join(ws, "REQUEST.md"), "w") as f:
             f.write(request)
-        prompt = ("Read REQUEST.md and the documents in docs/ (there are many and they are long; search them, do not try to "
-                  "read everything at once). Write brief.md in the workspace root answering all %d numbered questions, "
+        hint = ("there are many and they are long; search them, do not try to read everything at once" if not short
+                else "search them for the facts you need")
+        prompt = ("Read REQUEST.md and the documents in docs/ (%s). Write brief.md in the workspace root answering all %d numbered questions, "
                   "each answer citing its source file in square brackets, e.g. [policy-v3.md]. Corpus only, no web. "
-                  "Finish by summarising the answers in your final chat message." % len(m.QUESTIONS))
+                  "Finish by summarising the answers in your final chat message." % (hint, len(m.QUESTIONS)))
         with open(os.path.join(root, "task.json"), "w") as f:
-            json.dump({"family": "research-write", "title": m.TITLE, "prompt": prompt,
+            json.dump({"family": "research-write", "title": title, "prompt": prompt,
                        "deliverable": "brief.md"}, f, indent=2)
             f.write("\n")
         parts = [{k: v for k, v in p.items()} for p in m.PARTS]
@@ -119,7 +132,7 @@ def main():
             if p["kind"] == "fact":
                 for x in p.get("all", []):
                     assert re.search(x, m.BRIEF, re.I), (tid, p["id"], x)
-        fillers = [n for n, _ in m.FILLER]
+        fillers = [n for n, _ in filler_docs]
         for n in fillers:
             t = open(os.path.join(docs_dir, n)).read()
             assert not any(p.search(t) for p in pats), (tid, n)

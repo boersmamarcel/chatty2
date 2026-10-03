@@ -1,0 +1,11 @@
+{
+  "title": "gradebook: five course grading issues (letter boundaries, drop-lowest, late penalties, marks import, class statistics)",
+  "package": "gradebook",
+  "issues": [
+    {"n": 1, "title": "letter grades: inclusive bounds on the one-decimal rounded percentage", "visible": ["tests.test_letters"]},
+    {"n": 2, "title": "drop-lowest by percentage, due-date tie-break, keep one, keep order", "visible": []},
+    {"n": 3, "title": "late penalty: started days, share of maximum, 50% cap, extensions", "visible": ["tests.test_late"]},
+    {"n": 4, "title": "marks import: blank, EX and comma-decimal points, file line numbers", "visible": []},
+    {"n": 5, "title": "class statistics: even median, sample stdev, empty class, tied ranks", "visible": []}
+  ]
+}

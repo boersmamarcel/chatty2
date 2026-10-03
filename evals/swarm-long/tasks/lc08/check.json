@@ -1,0 +1,47 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: even split: extra cents to the first people, negative totals mirrored",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_money",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: percent split: must add up to 100, largest-remainder shares",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: settle-up: largest debtor pays largest creditor, name ties, zero-sum check",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_settle",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: currency conversion direction, half-up rounding, codes, unknown currency",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: refunds: negative amounts in the importer and in the balances",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue5"
+      ]
+    }
+  ],
+  "type": "parts"
+}

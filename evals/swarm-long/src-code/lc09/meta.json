@@ -1,0 +1,11 @@
+{
+  "title": "verspec: five semantic-versioning issues (pre-release order, 0.x caret, bump, resolver, lock files)",
+  "package": "verspec",
+  "issues": [
+    {"n": 1, "title": "pre-release identifier ordering and identifier validation", "visible": ["tests.test_version"]},
+    {"n": 2, "title": "caret constraints on 0.x and 0.0.x versions", "visible": []},
+    {"n": 3, "title": "bump resets lower parts and releases pre-releases", "visible": ["tests.test_bump"]},
+    {"n": 4, "title": "resolver: no pre-releases unless asked, skip junk, string constraints", "visible": []},
+    {"n": 5, "title": "lock file: trailing comments, case-insensitive duplicates, line-numbered errors", "visible": []}
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: results parser: digits in team names, postponed P-P matches",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_results",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: tie-break: head-to-head mini-table for level groups",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: points deductions, rows for teams that have not played, validation",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_table",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: form guide in date order, n <= 0",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: text table: long names cut with a dot, signed goal difference",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue5"
+      ]
+    }
+  ],
+  "type": "parts"
+}

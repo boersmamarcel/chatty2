@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the code-fix family (lc01..lc06) of the long swarm benchmark (EV-7, AGE-826).
+"""Generate the code-fix family (lc01..lc10) of the long swarm benchmark (EV-7, AGE-826).
 
 Every task is built from a hand-written source directory
 `evals/swarm-long/src-code/<id>/`:
@@ -23,9 +23,10 @@ Output per task (`evals/swarm-long/tasks/<id>/`):
     check.json    {"type": "parts", "parts": [one `tests` part per issue]}
 
 There is no randomness: re-running reproduces the bytes exactly. The script
-deletes and rewrites only tasks/lc01..lc06.
+deletes and rewrites only tasks/lc01..lc10 (or only the ids given).
+lc07..lc10 are the second, smaller round (5-7 modules, 5 issues each).
 
-    python3 gen_code.py            # regenerate
+    python3 gen_code.py [id ...]   # regenerate
     python3 gen_code.py --check    # regenerate, then run the independence check:
                                    #   blank workspace: every part fails;
                                    #   original + fix n only: part n passes and
@@ -46,7 +47,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "src-code")
 OUT = os.path.join(HERE, "tasks")
-IDS = ["lc01", "lc02", "lc03", "lc04", "lc05", "lc06"]
+IDS = ["lc01", "lc02", "lc03", "lc04", "lc05", "lc06", "lc07", "lc08", "lc09", "lc10"]
 SKIP = {"__pycache__"}
 
 PROMPT = (

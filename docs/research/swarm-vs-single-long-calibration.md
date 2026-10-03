@@ -37,6 +37,32 @@ committed.
   shared throttle (at most 2 running + waiting requests on the server,
   serialised by a host-wide lock).
 
+## Amendments (each committed before the runs it governs)
+
+1. **Hold cap 150 s (2026-10-03 09:00, during round 1).** The first runs
+   used `--hold-max-s 1800`. A request the meter holds for a server slot
+   longer than 3 minutes trips Chatty's own stall watchdog ("the model
+   stopped responding"), which ended one run (`lr01`, `cal-k1`) early: a
+   harness artefact, not a model failure. Both streams were restarted with
+   `--hold-max-s 150`; that run was discarded and re-run, as were the two
+   runs in flight at the restart. The real run uses 150 s too.
+2. **Round 2 of candidates (2026-10-03 10:00, after round 1's first 14
+   single-arm runs).** Round 1 showed the single agent at 0 on every
+   multi-module code task so far (it reads the 1.3k–2.5k-line package
+   until the loop guard stops it, without editing) and at 0–0.33 on the
+   long research corpora, while two data tasks scored 1.00. Too few tasks
+   would survive, so new candidates are added, written without any
+   swarm-arm data and calibrated by the same rule (k = 2, single arm only,
+   run ids `cal2-k1`, `cal2-k2`):
+   - `lc07`–`lc10`: small packages (500–600 lines, 5 issues each);
+   - `lr07`–`lr12`: `lr01`–`lr06` with a short corpus (11k–14k words; same
+     facts, questions and checks). Because each shares its questions with
+     its long twin, at most one task of each twin pair enters the
+     pre-registration: the long one if both are kept;
+   - `ld07`–`ld09`: harder data tasks (longer data dictionary, rules
+     amended over time, joins through effective-dated mappings).
+   Round 1 runs to completion unchanged.
+
 ## Record
 
 Filled in after the calibration runs, before the pre-registration.

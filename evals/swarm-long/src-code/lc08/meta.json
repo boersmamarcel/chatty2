@@ -1,0 +1,11 @@
+{
+  "title": "splitbill: five shared-expense issues (even split, percent split, settle-up, currency conversion, refunds)",
+  "package": "splitbill",
+  "issues": [
+    {"n": 1, "title": "even split: extra cents to the first people, negative totals mirrored", "visible": ["tests.test_money"]},
+    {"n": 2, "title": "percent split: must add up to 100, largest-remainder shares", "visible": []},
+    {"n": 3, "title": "settle-up: largest debtor pays largest creditor, name ties, zero-sum check", "visible": ["tests.test_settle"]},
+    {"n": 4, "title": "currency conversion direction, half-up rounding, codes, unknown currency", "visible": []},
+    {"n": 5, "title": "refunds: negative amounts in the importer and in the balances", "visible": []}
+  ]
+}

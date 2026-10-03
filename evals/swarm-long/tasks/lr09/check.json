@@ -1,0 +1,98 @@
+{
+  "type": "parts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "annual-report-fy2024.md",
+    "annual-report-fy2025.md",
+    "board-minutes-2025-09.md",
+    "board-minutes-2026-02.md",
+    "board-minutes-2026-04.md",
+    "compliance-committee-notes-2026-01.md",
+    "compliance-committee-notes-2026-03.md",
+    "compliance-committee-notes-2026-05.md",
+    "compliance-wiki-authority.md",
+    "frr-2025-14-original.md",
+    "frr-amending-2026-03.md",
+    "frr-faq-regulator.md",
+    "incident-log-mc77.md",
+    "peer-company-note-fjordbank.md",
+    "pentest-history.md",
+    "records-policy-v3.md",
+    "records-policy-v4.md",
+    "tpp-register-2026-03.md",
+    "tpp-register-change-log.md",
+    "training-plan-frr.md"
+  ],
+  "parts": [
+    {
+      "id": "F1",
+      "kind": "fact",
+      "desc": "initial notification 4 hours (amended; not original 24)",
+      "all": [
+        "\\b(4|four)\\s*(\\(4\\)\\s*)?hours?"
+      ]
+    },
+    {
+      "id": "F2",
+      "kind": "fact",
+      "desc": "submit 2026-05-08 09:30 + 72h = 2026-05-11 09:30",
+      "all": [
+        "2026-05-11|11(th)?\\s+May\\s+2026|May\\s+11(th)?,?\\s+2026|11[./]05[./]2026"
+      ]
+    },
+    {
+      "id": "F3",
+      "kind": "fact",
+      "desc": "2% x FY2025 EUR 412m = 8.24m (not 1%, not FY2024 377m)",
+      "all": [
+        "8[.,]24\\s*(m\\b|mn|million)|8[,.\\s']?240[,.\\s']?000"
+      ]
+    },
+    {
+      "id": "F4",
+      "kind": "fact",
+      "desc": "ADF (board minutes override wiki's NFA)",
+      "all": [
+        "\\bADF\\b|Authority of Digital Finance"
+      ]
+    },
+    {
+      "id": "F5",
+      "kind": "fact",
+      "desc": "7 years (policy v4 longer than statutory 5)",
+      "all": [
+        "\\bseven\\b|\\b7[\\s-]*(\\(\\w+\\)\\s*)?years?"
+      ]
+    },
+    {
+      "id": "F6",
+      "kind": "fact",
+      "desc": "14 +3 added -2 removed = 15 (non-critical Verity ignored)",
+      "all": [
+        "(critical|provider|third)[^\\n]{0,250}\\b(15|fifteen)\\b"
+      ]
+    },
+    {
+      "id": "F7",
+      "kind": "fact",
+      "desc": "every 2 years from 2024-11-19 -> 2026-11-19 (not 2027)",
+      "all": [
+        "2026-11-19|19(th)?\\s+Nov(ember)?\\.?,?\\s+2026|Nov(ember)?\\.?\\s+19(th)?,?\\s+2026|19[./]11[./]2026"
+      ]
+    },
+    {
+      "id": "F8",
+      "kind": "fact",
+      "desc": "Ingrid Solheim (April 2026 board), not Tomas Wirth",
+      "all": [
+        "Solheim"
+      ]
+    },
+    {
+      "id": "C",
+      "kind": "citations",
+      "desc": "cites >=5 corpus files",
+      "min_files": 5
+    }
+  ]
+}

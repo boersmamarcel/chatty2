@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Vendor due diligence: Halvorsen Cloud Storage (short corpus)",
+  "prompt": "Read REQUEST.md and the documents in docs/ (search them for the facts you need). Write brief.md in the workspace root answering all 8 numbered questions, each answer citing its source file in square brackets, e.g. [policy-v3.md]. Corpus only, no web. Finish by summarising the answers in your final chat message.",
+  "deliverable": "brief.md"
+}

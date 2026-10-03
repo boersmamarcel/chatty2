@@ -1,0 +1,11 @@
+{
+  "title": "standings: five league-table issues (results parser, head-to-head, deductions, form guide, table layout)",
+  "package": "standings",
+  "issues": [
+    {"n": 1, "title": "results parser: digits in team names, postponed P-P matches", "visible": ["tests.test_results"]},
+    {"n": 2, "title": "tie-break: head-to-head mini-table for level groups", "visible": []},
+    {"n": 3, "title": "points deductions, rows for teams that have not played, validation", "visible": ["tests.test_table"]},
+    {"n": 4, "title": "form guide in date order, n <= 0", "visible": []},
+    {"n": 5, "title": "text table: long names cut with a dot, signed goal difference", "visible": []}
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: letter grades: inclusive bounds on the one-decimal rounded percentage",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_letters",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: drop-lowest by percentage, due-date tie-break, keep one, keep order",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: late penalty: started days, share of maximum, 50% cap, extensions",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_late",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: marks import: blank, EX and comma-decimal points, file line numbers",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: class statistics: even median, sample stdev, empty class, tied ranks",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue5"
+      ]
+    }
+  ],
+  "type": "parts"
+}

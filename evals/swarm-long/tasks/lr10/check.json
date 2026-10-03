@@ -1,0 +1,98 @@
+{
+  "type": "parts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "adr-014-minimum-os.md",
+    "budget-approval-2026-02.md",
+    "bug-report-2026-06-05.md",
+    "capacity-forecast.md",
+    "cfo-email-contingency.md",
+    "comms-plan.md",
+    "competitor-notes-lumenpad.md",
+    "engineering-standup-digest.md",
+    "launch-plan-v1.md",
+    "launch-plan-v2.md",
+    "launch-runbook-v2.md",
+    "launch-runbook-v3.md",
+    "marketing-sync-notes-2026-04.md",
+    "marketing-sync-notes-2026-05.md",
+    "prd-v4.md",
+    "pricing-council-v2.md",
+    "pricing-council-v3.md",
+    "qa-process-handbook.md",
+    "steering-minutes-2026-05-12.md",
+    "triage-note-2026-06-08.md"
+  ],
+  "parts": [
+    {
+      "id": "F1",
+      "kind": "fact",
+      "desc": "freeze 2026-06-09 + 14d soak -> launch 2026-06-23 (not 2026-06-02)",
+      "all": [
+        "2026-06-23|23(rd)?\\s+June\\s+2026|June\\s+23(rd)?,?\\s+2026|23[./]06[./]2026"
+      ]
+    },
+    {
+      "id": "F2",
+      "kind": "fact",
+      "desc": "1.2M + 150k released = 1.35M",
+      "all": [
+        "1[.,]35\\s*(m\\b|mn|million)|1[,.\\s']?350[,.\\s']?000"
+      ]
+    },
+    {
+      "id": "F3",
+      "kind": "fact",
+      "desc": "23 - 4 downgraded - 2 duplicates = 17",
+      "all": [
+        "P0[^\\n]{0,250}\\b(17|seventeen)\\b|\\b(17|seventeen)\\b\\s*(open\\s*)?(P0|bugs?|blockers?)"
+      ]
+    },
+    {
+      "id": "F4",
+      "kind": "fact",
+      "desc": "14 x 12 x 0.85 = 142.80 (not 122.40)",
+      "all": [
+        "142[.,]8"
+      ]
+    },
+    {
+      "id": "F5",
+      "kind": "fact",
+      "desc": "iOS 16 (ADR-014 beats PRD iOS 15)",
+      "all": [
+        "iOS\\s*16"
+      ]
+    },
+    {
+      "id": "F6",
+      "kind": "fact",
+      "desc": "09:00 PDT = 16:00 UTC (not 17:00)",
+      "all": [
+        "\\b16:00|\\b4\\s*pm\\s*UTC|\\b16\\.00"
+      ]
+    },
+    {
+      "id": "F7",
+      "kind": "fact",
+      "desc": "120,000 x 1.5 = 180,000",
+      "all": [
+        "180[,.\\s']?000|180\\s*k\\b"
+      ]
+    },
+    {
+      "id": "F8",
+      "kind": "fact",
+      "desc": "Dana Okafor (runbook v3 not Lee Marsh)",
+      "all": [
+        "Okafor"
+      ]
+    },
+    {
+      "id": "C",
+      "kind": "citations",
+      "desc": "cites >=5 corpus files",
+      "min_files": 5
+    }
+  ]
+}
