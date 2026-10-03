@@ -169,6 +169,9 @@ pub struct SearchWebTool {
     provider: Option<SearchProvider>,
     /// None means fallback mode (no API key configured)
     api_key: Option<String>,
+    /// Base URL replacing the provider's public API (`None` = public URL).
+    /// `api_key` is then the bearer token that endpoint takes.
+    endpoint: Option<String>,
     default_max_results: usize,
     /// Record/replay of raw backend responses for the retrieval eval
     /// (AGE-515); `None` in the product.
@@ -212,6 +215,7 @@ impl SearchWebTool {
             client,
             provider: Some(provider),
             api_key: Some(api_key),
+            endpoint: None,
             default_max_results,
             cache: None,
             reranker: None,
@@ -227,10 +231,36 @@ impl SearchWebTool {
             api_client: crate::services::http_client::default_client(SEARCH_TIMEOUT_SECS),
             provider: None,
             api_key: None,
+            endpoint: None,
             default_max_results,
             cache: None,
             reranker: None,
         }
+    }
+
+    /// Search through `endpoint` (a base URL) instead of the provider's
+    /// public API; the key given to [`Self::new`] is sent as the token. The
+    /// endpoint is checked before every call: link-local and cloud-metadata
+    /// targets are always refused, private ranges are allowed because the
+    /// hosted lease proxy lives on one.
+    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.endpoint = Some(endpoint.into().trim_end_matches('/').to_string());
+        self
+    }
+
+    /// `base` + `path`, where `base` is the configured endpoint or `public`.
+    async fn api_url(&self, public: &str, path: &str) -> Result<String, ToolError> {
+        let Some(endpoint) = &self.endpoint else {
+            return Ok(format!("{public}{path}"));
+        };
+        let check = endpoint.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::services::ssrf_guard::check_public_host_with_bypass(&check, true)
+        })
+        .await
+        .map_err(|e| ToolError::OperationFailed(format!("endpoint check failed: {e}")))?
+        .map_err(|e| ToolError::OperationFailed(format!("Search endpoint refused: {e}")))?;
+        Ok(format!("{endpoint}{path}"))
     }
 
     /// Order the keyless candidate pool with a cross-encoder served at `url`
@@ -372,9 +402,10 @@ impl SearchWebTool {
             "{}|{}|{}",
             request.search_depth, request.max_results, request.query
         );
+        let url = self.api_url("https://api.tavily.com", "/search").await?;
         let builder = self
             .client
-            .post("https://api.tavily.com/search")
+            .post(url)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&request);
         let response = self.send("tavily", key, "Tavily", builder).await?;
@@ -410,9 +441,12 @@ impl SearchWebTool {
         max_results: usize,
         api_key: &str,
     ) -> Result<Vec<SearchResult>, ToolError> {
+        let url = self
+            .api_url("https://api.search.brave.com", "/res/v1/web/search")
+            .await?;
         let builder = self
             .client
-            .get("https://api.search.brave.com/res/v1/web/search")
+            .get(url)
             .header("X-Subscription-Token", api_key)
             .header("Accept", "application/json")
             .query(&[("q", query), ("count", &max_results.to_string() as &str)]);
@@ -1382,6 +1416,102 @@ mod tests {
         let tool = SearchWebTool::new_fallback(5);
         let def = tool_definition(&tool);
         assert_eq!(def.name, "search_web");
+    }
+
+    /// Serve one HTTP request on loopback, answer `body`, and hand the raw
+    /// request text back through the channel.
+    async fn capturing_server(
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (format!("http://{addr}/api/egress/managed/x/"), rx)
+    }
+
+    #[tokio::test]
+    async fn search_web_uses_configured_endpoint_and_token() {
+        let (base, rx) =
+            capturing_server(r#"{"results":[{"title":"T","url":"https://e.com","content":"c"}]}"#)
+                .await;
+        let tool =
+            SearchWebTool::new(SearchProvider::Tavily, "lease-token".into(), 5).with_endpoint(base);
+        let results = tool.search_tavily("q", 5, "lease-token").await.unwrap();
+        assert_eq!(results[0].title, "T");
+        let request = rx.await.unwrap().to_lowercase();
+        assert!(
+            request.starts_with("post /api/egress/managed/x/search "),
+            "{request}"
+        );
+        assert!(
+            request.contains("authorization: bearer lease-token"),
+            "{request}"
+        );
+
+        let (base, rx) = capturing_server(
+            r#"{"web":{"results":[{"title":"B","url":"https://b.com","description":"d"}]}}"#,
+        )
+        .await;
+        let tool =
+            SearchWebTool::new(SearchProvider::Brave, "lease-token".into(), 5).with_endpoint(base);
+        let results = tool.search_brave("q", 5, "lease-token").await.unwrap();
+        assert_eq!(results[0].title, "B");
+        let request = rx.await.unwrap().to_lowercase();
+        assert!(
+            request.starts_with("get /api/egress/managed/x/res/v1/web/search?"),
+            "{request}"
+        );
+        assert!(
+            request.contains("x-subscription-token: lease-token"),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_web_without_endpoint_is_unchanged() {
+        let tool = SearchWebTool::new(SearchProvider::Tavily, "k".into(), 5);
+        assert_eq!(
+            tool.api_url("https://api.tavily.com", "/search")
+                .await
+                .unwrap(),
+            "https://api.tavily.com/search"
+        );
+        assert_eq!(
+            tool.api_url("https://api.search.brave.com", "/res/v1/web/search")
+                .await
+                .unwrap(),
+            "https://api.search.brave.com/res/v1/web/search"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_endpoint_still_passes_the_ssrf_guard() {
+        for endpoint in [
+            "http://169.254.169.254/latest",
+            "http://metadata.google.internal/x",
+            "http://localhost:1/x",
+        ] {
+            let tool =
+                SearchWebTool::new(SearchProvider::Tavily, "t".into(), 5).with_endpoint(endpoint);
+            let err = tool
+                .search_tavily("q", 5, "t")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("Search endpoint refused"), "{endpoint}: {err}");
+        }
     }
 
     /// Serve one HTTP request on a loopback port with `body` as a 200 JSON
