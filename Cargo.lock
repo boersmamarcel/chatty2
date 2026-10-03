@@ -5560,7 +5560,6 @@ dependencies = [
  "futures-util",
  "hex",
  "hive-client",
- "hmac 0.13.0",
  "percent-encoding",
  "reqwest 0.13.2",
  "serde_json",

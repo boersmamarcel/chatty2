@@ -21,7 +21,8 @@
 //! - [`proxy::TamperProxy`]: sits between chatty and the registry and
 //!   strips, swaps, corrupts or replays what a download returns, or renames a
 //!   module (plan §2 D).
-//! - [`mint_session_token`]: a session JWT with a chosen expiry (row 5.3).
+//! - [`Stack::step_up`]: a step-up assertion, approved the way a person does
+//!   on the registry's `/step-up` page (CX-0).
 //! - [`start_gateway`]: chatty's protocol gateway pointed at the stack's
 //!   runner (rows 5.4, 5.10).
 
@@ -31,26 +32,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chatty_core::install;
 use chatty_core::settings::models::extensions_store::{ExtensionsModel, InstalledExtension};
 use chatty_module_registry::ModuleRegistry;
 use chatty_protocol_gateway::ProtocolGateway;
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
-use chrono::{DateTime, Utc};
 use hive_client::models::ModuleMetadata;
 use hive_client::{HiveRegistryClient, HiveSession, TokenPair};
-use hmac::{KeyInit, Mac};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use tokio::sync::RwLock;
 
 /// The version `seed-e2e.sh` publishes every fixture at.
 pub const SEEDED_VERSION: &str = "0.1.0";
-
-/// The `JWT_SECRET` hive's compose file gives the registry and the runner.
-const DEV_JWT_SECRET: &str = "dev-secret-change-in-production";
 
 /// Where the stack is and what it was seeded with.
 ///
@@ -59,7 +53,6 @@ const DEV_JWT_SECRET: &str = "dev-secret-change-in-production";
 /// | `HIVE_E2E_BASE_URL` | `http://localhost:8080` (the registry) |
 /// | `HIVE_E2E_RUNNER_URL` | `http://localhost:8081` |
 /// | `HIVE_E2E_FIXTURES` | `<workspace>/target/wasm-fixtures` |
-/// | `HIVE_E2E_JWT_SECRET` | hive's compose default |
 /// | `CHATTY_HIVE_ROOT_KEY` | none: required (the stack's dev root public key) |
 ///
 /// `CHATTY_HIVE_ROOT_KEY` is the key chatty itself reads
@@ -74,7 +67,6 @@ pub struct Stack {
     pub root_key: String,
     pub runner: String,
     pub fixtures: PathBuf,
-    pub jwt_secret: String,
     http: reqwest::Client,
 }
 
@@ -112,7 +104,6 @@ impl Stack {
             fixtures: std::env::var_os("HIVE_E2E_FIXTURES")
                 .map(PathBuf::from)
                 .unwrap_or(workspace_fixtures),
-            jwt_secret: env("HIVE_E2E_JWT_SECRET", DEV_JWT_SECRET),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()
@@ -165,12 +156,24 @@ impl Stack {
         }
     }
 
-    /// A freshly registered user upgraded to publisher.
+    /// A freshly registered user upgraded to publisher, through the
+    /// `publisher_role` step-up (CX-0).
     pub async fn publisher(&self) -> User {
         let mut user = self.user().await;
+        let (status, me) = send(
+            self.request(reqwest::Method::GET, "/me")
+                .bearer_auth(&user.pair.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "/api/me: {me}");
+        let id = me["id"].as_str().expect("a user id").to_string();
+        let assertion = self
+            .step_up(&user, "publisher_role", &id, "publisher")
+            .await;
         let (status, body) = send(
             self.request(reqwest::Method::PUT, "/me/role/publisher")
-                .bearer_auth(&user.pair.token),
+                .bearer_auth(&user.pair.token)
+                .header(hive_client::client::STEP_UP_HEADER, assertion),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "publisher upgrade: {body}");
@@ -178,13 +181,95 @@ impl Stack {
         user
     }
 
-    /// `POST /api/modules` with `manifest` (TOML) and `wasm`.
+    /// A step-up assertion for `user`'s `action` over `target` and `value`,
+    /// got the way a person gets one (CX-0): file the request, open the
+    /// registry's `/step-up` page, sign in again with the password, approve
+    /// it, and collect the assertion.
+    pub async fn step_up(&self, user: &User, action: &str, target: &str, value: &str) -> String {
+        let (status, filed) = send(
+            self.request(reqwest::Method::POST, "/step-up/requests")
+                .bearer_auth(&user.pair.token)
+                .json(&json!({ "action": action, "target": target, "value": value })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "file a step-up: {filed}");
+        let id = filed["id"].as_str().expect("a request id");
+        self.approve_step_up(user, id).await
+    }
+
+    /// Approve `user`'s filed step-up request `id` on the registry's page,
+    /// as the person does (sign in again, approve), and collect its
+    /// assertion.
+    pub async fn approve_step_up(&self, user: &User, id: &str) -> String {
+        let page = format!("{}/step-up", self.registry);
+        let sign_in = self.page(self.http.get(&page)).await;
+        let signed_in = self
+            .page(form(
+                self.http.post(&page),
+                &[
+                    ("nonce", form_nonce(&sign_in).as_str()),
+                    ("email", user.email.as_str()),
+                    ("password", user.password.as_str()),
+                ],
+            ))
+            .await;
+        assert!(
+            signed_in.contains(id),
+            "the re-authenticated page lists request {id}: {signed_in}"
+        );
+        self.page(form(
+            self.http.post(format!("{page}/approve")),
+            &[
+                ("nonce", form_nonce(&signed_in).as_str()),
+                ("request_id", id),
+            ],
+        ))
+        .await;
+
+        let (status, approved) = send(
+            self.request(reqwest::Method::GET, &format!("/step-up/requests/{id}"))
+                .bearer_auth(&user.pair.token),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "collect the step-up: {approved}");
+        assert_eq!(approved["status"], "approved", "{approved}");
+        approved["assertion"]
+            .as_str()
+            .expect("an assertion")
+            .to_string()
+    }
+
+    /// One `/step-up` page load, as a top-level navigation (the page refuses
+    /// to be framed), insisting on a 200.
+    async fn page(&self, request: reqwest::RequestBuilder) -> String {
+        let response = request
+            .header("sec-fetch-dest", "document")
+            .header("x-forwarded-for", random_ip())
+            .send()
+            .await
+            .expect("the registry answers");
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        assert_eq!(status, StatusCode::OK, "step-up page: {text}");
+        text
+    }
+
+    /// `POST /api/modules` with `manifest` (TOML) and `wasm`, under a
+    /// `module_publish` step-up for the manifest's name and version.
     pub async fn publish(
         &self,
         publisher: &User,
         manifest: &str,
         wasm: Vec<u8>,
     ) -> (StatusCode, Value) {
+        let assertion = match manifest_name_version(manifest) {
+            Some((name, version)) => Some(
+                self.step_up(publisher, "module_publish", &name, &version)
+                    .await,
+            ),
+            // Not a manifest the registry can read: let it say so.
+            None => None,
+        };
         let form = reqwest::multipart::Form::new()
             .text("manifest", manifest.to_string())
             .part(
@@ -194,12 +279,14 @@ impl Stack {
                     .mime_str("application/wasm")
                     .expect("a mime type"),
             );
-        send(
-            self.request(reqwest::Method::POST, "/modules")
-                .bearer_auth(&publisher.pair.token)
-                .multipart(form),
-        )
-        .await
+        let mut request = self
+            .request(reqwest::Method::POST, "/modules")
+            .bearer_auth(&publisher.pair.token)
+            .multipart(form);
+        if let Some(assertion) = assertion {
+            request = request.header(hive_client::client::STEP_UP_HEADER, assertion);
+        }
+        send(request).await
     }
 
     /// Publish and insist it worked; returns the publish response.
@@ -232,10 +319,14 @@ impl Stack {
 
     /// `PUT /api/modules/{name}/pricing`.
     pub async fn set_pricing(&self, publisher: &User, name: &str, price_per_call: f64) {
+        let body = json!({ "price_per_call": price_per_call, "free_tier_calls": 0 }).to_string();
+        let assertion = self.step_up(publisher, "pricing_set", name, &body).await;
         let (status, body) = send(
             self.request(reqwest::Method::PUT, &format!("/modules/{name}/pricing"))
                 .bearer_auth(&publisher.pair.token)
-                .json(&json!({ "price_per_call": price_per_call, "free_tier_calls": 0 })),
+                .header(hive_client::client::STEP_UP_HEADER, assertion)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "set pricing on {name}: {body}");
@@ -386,26 +477,47 @@ pub async fn install_from_hive(
     }
 }
 
-// ── Tokens ────────────────────────────────────────────────────────────────
+// ── Step-up ───────────────────────────────────────────────────────────────
 
-/// A copy of session JWT `template` (its claims: user, role, scope,
-/// audience) re-signed with `secret` so that it expires at `expires_at`.
-/// Stands in for "wait an hour" in row 5.3.
-pub fn mint_session_token(template: &str, secret: &str, expires_at: DateTime<Utc>) -> String {
-    let payload = template.split('.').nth(1).expect("a JWT");
-    let mut claims: Value =
-        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).expect("base64url claims"))
-            .expect("JSON claims");
-    claims["exp"] = json!(expires_at.timestamp());
-    claims["iat"] = json!((expires_at - chrono::TimeDelta::hours(1)).timestamp());
-    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
-    let claims = URL_SAFE_NO_PAD.encode(claims.to_string());
-    let signing_input = format!("{header}.{claims}");
-    let mut mac =
-        hmac::Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).expect("any key length");
-    mac.update(signing_input.as_bytes());
-    let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-    format!("{signing_input}.{signature}")
+/// `request` with `fields` as an `application/x-www-form-urlencoded` body.
+fn form(request: reqwest::RequestBuilder, fields: &[(&str, &str)]) -> reqwest::RequestBuilder {
+    let encode = |s: &str| {
+        percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+    };
+    let body = fields
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode(k), encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    request
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(body)
+}
+
+/// The `nonce` hidden field of a `/step-up` page form.
+fn form_nonce(page: &str) -> String {
+    let marker = "name=\"nonce\" value=\"";
+    let at = page.find(marker).expect("a nonce field") + marker.len();
+    page[at..]
+        .split('"')
+        .next()
+        .expect("a nonce value")
+        .to_string()
+}
+
+/// A manifest's name and version, flat or under `[module]`: what a
+/// `module_publish` step-up binds.
+fn manifest_name_version(manifest: &str) -> Option<(String, String)> {
+    let top: toml::Table = manifest.parse().ok()?;
+    let listing = match top.get("module") {
+        Some(toml::Value::Table(module)) => module,
+        _ => &top,
+    };
+    let field = |key: &str| listing.get(key)?.as_str().map(str::to_string);
+    Some((field("name")?, field("version")?))
 }
 
 // ── The gateway ───────────────────────────────────────────────────────────
@@ -495,31 +607,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minted_token_keeps_the_claims_and_takes_the_new_expiry() {
-        let claims = json!({ "sub": "u1", "username": "alice", "scope": "modules:read", "aud": "chatty", "iat": 1, "exp": 2 });
-        let template = format!(
-            "{}.{}.sig",
-            URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#),
-            URL_SAFE_NO_PAD.encode(claims.to_string())
-        );
-        let expires_at = DateTime::from_timestamp(1_900_000_000, 0).unwrap();
-        let token = mint_session_token(&template, "secret", expires_at);
+    fn the_step_up_page_nonce_is_read_from_its_form() {
+        let page = "<form method=\"post\" action=\"/step-up\">\
+                    <input type=\"hidden\" name=\"nonce\" value=\"abc123\">";
+        assert_eq!(form_nonce(page), "abc123");
+    }
 
-        let parts: Vec<&str> = token.split('.').collect();
-        assert_eq!(parts.len(), 3);
-        let minted: Value =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
-        assert_eq!(minted["exp"], 1_900_000_000);
-        assert_eq!(minted["iat"], 1_900_000_000 - 3600);
-        assert_eq!(minted["username"], "alice");
-        assert_eq!(minted["aud"], "chatty");
-
-        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"secret").unwrap();
-        mac.update(format!("{}.{}", parts[0], parts[1]).as_bytes());
+    #[test]
+    fn a_publish_step_up_binds_the_manifests_name_and_version() {
         assert_eq!(
-            URL_SAFE_NO_PAD.decode(parts[2]).unwrap(),
-            mac.finalize().into_bytes().to_vec()
+            manifest_name_version(&flat_manifest("m-e2e", "1.2.3", "")),
+            Some(("m-e2e".to_string(), "1.2.3".to_string()))
         );
+        assert_eq!(
+            manifest_name_version("[module]\nname = \"m\"\nversion = \"2.0.0\"\n"),
+            Some(("m".to_string(), "2.0.0".to_string()))
+        );
+        assert_eq!(manifest_name_version("not toml ["), None);
     }
 
     #[test]

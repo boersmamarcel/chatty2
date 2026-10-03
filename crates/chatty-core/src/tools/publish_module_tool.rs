@@ -12,6 +12,87 @@ pub struct PublishModuleArgs {
     pub wasm_path: String,
     /// TOML manifest string with module metadata (name, display_name, description, version, etc.)
     pub manifest_toml: String,
+    /// The step-up request a first call filed (CX-0b): once the person has
+    /// approved it, the second call passes its id to publish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_up_request_id: Option<String>,
+}
+
+/// A module's name and version from its manifest, flat or under `[module]`,
+/// as hive-registry reads them: the target and value its `module_publish`
+/// step-up binds.
+fn manifest_name_version(manifest_toml: &str) -> Result<(String, String), anyhow::Error> {
+    let top: toml::Table = manifest_toml
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid manifest TOML: {e}"))?;
+    let listing = match top.get("module") {
+        Some(toml::Value::Table(module)) => module,
+        _ => &top,
+    };
+    let field = |key: &str| {
+        listing
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("The manifest has no `{key}`"))
+    };
+    Ok((field("name")?, field("version")?))
+}
+
+/// The JSON a registry MCP tool answered with, from its text content.
+fn tool_json(result: &rmcp::model::CallToolResult) -> Result<serde_json::Value, anyhow::Error> {
+    let text = result_text(result);
+    if result.is_error.unwrap_or(false) {
+        return Err(anyhow::anyhow!("{text}"));
+    }
+    serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("Unexpected registry answer: {e}"))
+}
+
+fn result_text(result: &rmcp::model::CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What the tool does with a step-up request's status: publish with the
+/// assertion, or tell the person what to do next.
+#[derive(Debug, PartialEq, Eq)]
+enum StepUpNext {
+    Publish(String),
+    Wait(String),
+}
+
+/// Read a `get_step_up_request` answer for `name`@`version`.
+fn step_up_next(status: &serde_json::Value, name: &str, version: &str) -> StepUpNext {
+    let field = |key: &str| status.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+    if field("action") != "module_publish" || field("target") != name || field("value") != version {
+        return StepUpNext::Wait(format!(
+            "That step-up request is not for publishing {name}@{version}. \
+             Call publish_wasm_module again without step_up_request_id to file a new one."
+        ));
+    }
+    match (
+        field("status"),
+        status.get("assertion").and_then(|v| v.as_str()),
+    ) {
+        ("approved", Some(assertion)) => StepUpNext::Publish(assertion.to_string()),
+        ("expired", _) => StepUpNext::Wait(format!(
+            "The approval for publishing {name}@{version} expired. \
+             Call publish_wasm_module again without step_up_request_id to file a new one."
+        )),
+        _ => StepUpNext::Wait(format!(
+            "Publishing {name}@{version} is still waiting for approval. Ask the user to open {} \
+             in their browser, sign in again and approve it, then call publish_wasm_module \
+             again with the same step_up_request_id.",
+            field("page")
+        )),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +117,22 @@ impl PublishModuleTool {
             server_sink: Arc::new(server_sink),
             workspace_dir,
         }
+    }
+
+    /// Call registry MCP tool `name` with `arguments` (a JSON object).
+    async fn call_registry(
+        &self,
+        name: &'static str,
+        arguments: serde_json::Value,
+    ) -> Result<rmcp::model::CallToolResult, anyhow::Error> {
+        let serde_json::Value::Object(arguments) = arguments else {
+            unreachable!("registry tool arguments are a JSON object");
+        };
+        let params = CallToolRequestParams::new(name).with_arguments(arguments);
+        self.server_sink
+            .call_tool(params)
+            .await
+            .map_err(|e| anyhow::anyhow!("MCP call_tool {name} failed: {e}"))
     }
 
     fn resolve_path(&self, path: &str) -> Result<std::path::PathBuf, anyhow::Error> {
@@ -81,6 +178,11 @@ impl Tool for PublishModuleTool {
         "Publish a WASM module to the hive registry. \
                          Reads the binary file from disk, base64-encodes it, \
                          and uploads it together with a TOML manifest via MCP. \
+                         Every publish needs the user's approval (a step-up): \
+                         the first call files the request and answers with a page \
+                         for the user to open, sign in again and approve on, and \
+                         a step_up_request_id; after they approve, call again with \
+                         the same arguments plus that step_up_request_id. \
                          The manifest should be a flat TOML string with fields: \
                          name, display_name, description, version (required), \
                          plus optional: license, tags, category, pricing_model.\n\
@@ -111,6 +213,10 @@ impl Tool for PublishModuleTool {
                 "manifest_toml": {
                     "type": "string",
                     "description": "Flat TOML string with module metadata (name, display_name, description, version required)"
+                },
+                "step_up_request_id": {
+                    "type": "string",
+                    "description": "The id the first call returned, once the user has approved the publish"
                 }
             },
             "required": ["wasm_path", "manifest_toml"]
@@ -151,45 +257,130 @@ impl Tool for PublishModuleTool {
             "Read WASM binary, encoding as base64 for MCP publish"
         );
 
+        // CX-0: a publish needs a `module_publish` step-up for exactly this
+        // name and version. The first call files it and hands the approval
+        // to the person; the second collects the assertion and publishes.
+        let (name, version) = manifest_name_version(&args.manifest_toml)?;
+        let Some(request_id) = args.step_up_request_id else {
+            let filed = self
+                .call_registry(
+                    "request_step_up",
+                    serde_json::json!({
+                        "action": "module_publish",
+                        "target": name,
+                        "value": version,
+                    }),
+                )
+                .await?;
+            let filed = tool_json(&filed)?;
+            let id = filed.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let page = filed
+                .get("page")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            return Ok(PublishModuleOutput {
+                success: false,
+                message: format!(
+                    "Publishing {name}@{version} needs the user's approval. Ask them to open \
+                     {page} in their browser, sign in again and approve it. Then call \
+                     publish_wasm_module again with the same arguments and \
+                     step_up_request_id = \"{id}\"."
+                ),
+            });
+        };
+        let status = self
+            .call_registry(
+                "get_step_up_request",
+                serde_json::json!({ "id": request_id }),
+            )
+            .await?;
+        let assertion = match step_up_next(&tool_json(&status)?, &name, &version) {
+            StepUpNext::Publish(assertion) => assertion,
+            StepUpNext::Wait(message) => {
+                return Ok(PublishModuleOutput {
+                    success: false,
+                    message,
+                });
+            }
+        };
+
         // Base64-encode (standard, with padding — hive server handles both)
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm_bytes);
 
-        // Build the MCP tool call arguments
-        let mut arguments = serde_json::Map::new();
-        arguments.insert(
-            "manifest_toml".to_string(),
-            serde_json::Value::String(args.manifest_toml),
-        );
-        arguments.insert(
-            "wasm_base64".to_string(),
-            serde_json::Value::String(wasm_b64),
-        );
-
-        let params = CallToolRequestParams::new("publish_module").with_arguments(arguments);
-
-        // Call publish_module via MCP ServerSink
         let result = self
-            .server_sink
-            .call_tool(params)
-            .await
-            .map_err(|e| anyhow::anyhow!("MCP call_tool failed: {}", e))?;
-
-        // Extract text from result
-        let text = result
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                rmcp::model::ContentBlock::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
+            .call_registry(
+                "publish_module",
+                serde_json::json!({
+                    "manifest_toml": args.manifest_toml,
+                    "wasm_base64": wasm_b64,
+                    "step_up_assertion": assertion,
+                }),
+            )
+            .await?;
+        let text = result_text(&result);
         let success = !result.is_error.unwrap_or(false);
 
         Ok(PublishModuleOutput {
             success,
             message: text,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_step_up_binds_the_manifests_name_and_version_flat_or_sectioned() {
+        let flat = "name = \"benford\"\nversion = \"1.2.0\"\ndescription = \"d\"";
+        assert_eq!(
+            manifest_name_version(flat).unwrap(),
+            ("benford".to_string(), "1.2.0".to_string())
+        );
+        let sectioned = "[module]\nname = \"benford\"\nversion = \"1.3.0\"";
+        assert_eq!(
+            manifest_name_version(sectioned).unwrap(),
+            ("benford".to_string(), "1.3.0".to_string())
+        );
+        assert!(manifest_name_version("name = \"x\"").is_err());
+    }
+
+    #[test]
+    fn only_an_approved_request_for_this_module_and_version_publishes() {
+        let status = |action: &str, target: &str, value: &str, state: &str| {
+            json!({
+                "id": "r", "action": action, "target": target, "value": value,
+                "status": state, "page": "http://localhost:8080/step-up",
+                "assertion": (state == "approved").then_some("a-1"),
+            })
+        };
+        assert_eq!(
+            step_up_next(
+                &status("module_publish", "m", "1.0.0", "approved"),
+                "m",
+                "1.0.0"
+            ),
+            StepUpNext::Publish("a-1".to_string())
+        );
+        for (other, why) in [
+            (status("module_publish", "m", "1.0.0", "pending"), "waiting"),
+            (status("module_publish", "m", "1.0.0", "expired"), "expired"),
+            (
+                status("module_publish", "m", "2.0.0", "approved"),
+                "not for",
+            ),
+            (
+                status("module_publish", "n", "1.0.0", "approved"),
+                "not for",
+            ),
+            (status("pricing_set", "m", "1.0.0", "approved"), "not for"),
+        ] {
+            match step_up_next(&other, "m", "1.0.0") {
+                StepUpNext::Wait(message) => assert!(message.contains(why), "{message}"),
+                StepUpNext::Publish(_) => panic!("published on {other}"),
+            }
+        }
     }
 }

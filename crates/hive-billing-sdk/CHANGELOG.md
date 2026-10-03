@@ -8,9 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Billing session tokens are now EdDSA (Ed25519) JWTs signed by
+  hive-registry's session key (CX-0b, AGE-823). The SDK verifies the token's
+  `skey_sig` under the trusted registry root public keys
+  (`PRODUCTION_ROOT_PUBLIC_KEYS`, or `configure_root_keys()` for a local
+  registry), then the token signature under `skey`, then expiry.
+- `verify_session_token(token, roots, now)` is public.
 - Targets `chatty:plugin@0.3.0` and calls `chatty-module-sdk`'s `billing`
   imports instead of generating its own bindings of the world, so a plugin
   can depend on both crates (two generated worlds collided at link time).
+
+### Removed
+- `configure_secret()` and HS256 verification. EdDSA verification under the
+  registry root key list replaced them.
 
 ## [0.1.0] - 2026-04-21
 

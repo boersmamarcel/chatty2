@@ -249,14 +249,15 @@ the work is done, so Hive can settle the reservation against actual usage.
 `hive-billing-sdk` calls these through `chatty-module-sdk`'s `billing` module
 (it generates no bindings of its own), so a plugin can depend on both crates.
 
-**`session-info.token`** is a Hive-signed JWT. The current `hive-billing-sdk`
-verifies it with **HS256 (HMAC-SHA256) against a shared secret embedded in the
-plugin at compile time**, not an embedded *public* key: there is no Ed25519
-verification today, only a documented future upgrade path
-(`crates/hive-billing-sdk/src/lib.rs`). HMAC-in-WASM is deterrence, not proof
-— a determined attacker can extract the secret from the compiled plugin — and
-the crate's own doc comment says so; high-trust billing should run on Hive's
-Firecracker infrastructure, where verification happens server-side instead.
+**`session-info.token`** is a Hive-signed EdDSA (Ed25519) JWT. It carries the
+public key that signed it (`skey`) and the registry root's signature over that
+key (`skey_sig`). `hive-billing-sdk` checks `skey_sig` against the registry
+root public keys the plugin trusts (the compiled production list, or
+`configure_root_keys` for a local registry), then the token's signature under
+`skey`, then its expiry and reservation. Only public keys are embedded, so
+there is nothing in the plugin worth extracting, and a host cannot forge a
+token: it holds no key the roots certify. HS256 tokens are refused
+(CX-0b, AGE-823).
 
 **Parameters** (`acquire-session`):
 - `estimated-tokens` — estimated token usage for this invocation.

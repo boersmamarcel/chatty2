@@ -85,6 +85,24 @@ pub fn is_local_registry(registry_url: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// `hive-billing-sdk` (outside the workspace, built for WASM) compiles
+    /// its own copy of the root list; a WASM module verifies billing tokens
+    /// under it (CX-0b). The two lists must be the same list.
+    #[test]
+    fn the_billing_sdk_compiles_the_same_root_list() {
+        let sdk = include_str!("../../hive-billing-sdk/src/lib.rs");
+        let list = |source: &str| -> String {
+            let start = source
+                .find("pub const PRODUCTION_ROOT_PUBLIC_KEYS: &[&str] = &[")
+                .expect("the root list");
+            let rest = &source[start..];
+            rest[..rest.find("];").expect("the list's end")]
+                .split_whitespace()
+                .collect()
+        };
+        assert_eq!(list(sdk), list(include_str!("trust.rs")));
+    }
+
     const KEY: &str = "43a72e714401762df66b68c26dfbdf2682aaec9f2474eca4613e424a0fbafd3c";
     const CURRENT: &str = "11111111111111111111111111111111111111111111111111111111111111";
     const NEXT: &str = "22222222222222222222222222222222222222222222222222222222222222";
