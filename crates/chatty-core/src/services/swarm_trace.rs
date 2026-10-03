@@ -53,7 +53,7 @@ use serde_json::Value;
 use crate::models::token_usage::{ModelRef, TokenUsage};
 use crate::services::a2a_client::{USAGE_METADATA_KEY, usage_from_status_metadata};
 use crate::session::SessionEvent;
-use crate::tools::invoke_agent_tool::{InvokeAgentProgress, STOPPED_BY_USER};
+use crate::tools::invoke_agent_tool::{InvokeAgentProgress, STOPPED_BY_USER, WaitingOn};
 use crate::tools::plugin_tool::PLUGIN_TOOL_SEPARATOR;
 
 /// A node's place in a [`Tree`].
@@ -489,6 +489,13 @@ pub struct SwarmTrace {
     /// The lines the root's delegations reported, as its conversation
     /// records them.
     delegated: Vec<UsageLine>,
+    /// When this trace first saw each node, by its index: what the
+    /// running-agents overview counts elapsed time from (TB-6).
+    seen: Vec<SystemTime>,
+    /// What waits on the human, by the broker's request id: the agent the
+    /// broker stamped on it and what it waits for (TB-6). Kept by name, not
+    /// node: an approval can arrive before the asker's first batch has.
+    waits: BTreeMap<String, (String, WaitingOn)>,
     revision: u64,
 }
 
@@ -510,6 +517,8 @@ impl SwarmTrace {
             callees: BTreeMap::new(),
             open: Vec::new(),
             delegated: Vec::new(),
+            seen: vec![SystemTime::now()],
+            waits: BTreeMap::new(),
             revision: 0,
         }
     }
@@ -542,6 +551,34 @@ impl SwarmTrace {
             .preorder()
             .into_iter()
             .find(|id| self.tree.get(*id).name == name)
+    }
+
+    /// When this trace first saw `id`'s run (TB-6).
+    pub fn first_seen(&self, id: NodeId) -> Option<SystemTime> {
+        self.seen.get(id.0).copied()
+    }
+
+    /// What `id`'s run is waiting on the human for, if anything: the
+    /// oldest of its requests still open (TB-6).
+    pub fn waiting_on(&self, id: NodeId) -> Option<WaitingOn> {
+        let name = &self.tree.get(id).name;
+        self.waits
+            .values()
+            .find(|(agent, _)| agent == name)
+            .map(|(_, on)| *on)
+    }
+
+    /// What `id` and everything under it have reported spending so far,
+    /// one line per model and plugin: a running node has not reported its
+    /// own yet, but its finished children have.
+    pub fn subtree_spend(&self, id: NodeId) -> Vec<UsageLine> {
+        let mut stack = vec![id];
+        let mut nodes = Vec::new();
+        while let Some(next) = stack.pop() {
+            nodes.push(next);
+            stack.extend(self.tree.children(next).iter().copied());
+        }
+        merge_lines(nodes.into_iter().flat_map(|n| self.tree.get(n).usage.iter()))
     }
 
     /// The root calls the turn made, in the order their runs first
@@ -622,6 +659,14 @@ impl SwarmTrace {
             }
             _ => return,
         }
+        self.bump();
+    }
+
+    /// The tree changed: move the revision, and note when any node it
+    /// gained was first seen.
+    fn bump(&mut self) {
+        let now = SystemTime::now();
+        self.seen.resize(self.tree.len(), now);
         self.revision += 1;
     }
 
@@ -684,8 +729,16 @@ impl SwarmTrace {
                     self.tree.get_mut(id).name = node.clone();
                 }
             }
+            InvokeAgentProgress::Waiting { id, agent, on } => {
+                self.waits.insert(id.clone(), (agent.clone(), *on));
+            }
+            InvokeAgentProgress::Resumed { id } => {
+                if self.waits.remove(id).is_none() {
+                    return;
+                }
+            }
         }
-        self.revision += 1;
+        self.bump();
     }
 
     /// The node for a delegation of the root's to `spec`: a stand-in its
@@ -755,7 +808,7 @@ impl SwarmTrace {
         if let Some(callee) = self.callee_above(id) {
             self.settle_steps(callee);
         }
-        self.revision += 1;
+        self.bump();
     }
 
     /// Fold in one row of the broker's edge log. A row about a run this
@@ -833,7 +886,7 @@ impl SwarmTrace {
             }
             EdgeKind::Refusal | EdgeKind::Message => return,
         }
-        self.revision += 1;
+        self.bump();
     }
 
     /// Give a node named by its spec the name the broker admitted it

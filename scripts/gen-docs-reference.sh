@@ -122,6 +122,7 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/agent [name] <prompt>` | Run an agent spec on the local roster or a named A2A agent, else a local sub-agent | Yes | Yes |
 | `/agents` | List the agents `/agent` and `invoke_agent` reach, and the spec files left out | — | Yes |
 | `/swarm` | Print this conversation's latest swarm tree: agent · model · status · spend (TB-5, AGE-667) | — | Yes |
+| `/agents running` | Every live agent of the conversation's swarm: agent · conversation · chain · running or waiting on you · elapsed · spend (TB-6, AGE-748) | — | Yes |
 | `/stop <agent>` | Stop one agent of the swarm and every agent it started; the rest keeps running (TB-7, AGE-749) | — | Yes |
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |

@@ -142,6 +142,9 @@ pub enum Command {
     Agent(Option<String>),
     /// /agents — list the agents /agent and invoke_agent can reach
     Agents,
+    /// /agents running — every live agent of this conversation's swarm,
+    /// with its status, elapsed time and spend (TB-6, AGE-748)
+    AgentsRunning,
     /// /swarm — print this conversation's latest swarm tree (TB-5, AGE-667)
     Swarm,
     /// /stop <agent> — stop one agent of the swarm and everything it
@@ -196,6 +199,7 @@ impl ChatEngine {
             "/modules" => Some(Command::Modules(arg)),
             "/add-dir" => Some(Command::AddDir(arg)),
             "/agent" => Some(Command::Agent(arg)),
+            "/agents" if arg.as_deref() == Some("running") => Some(Command::AgentsRunning),
             "/agents" => Some(Command::Agents),
             "/swarm" => Some(Command::Swarm),
             "/stop" => Some(Command::Stop(arg)),
@@ -240,6 +244,20 @@ impl ChatEngine {
     /// events (TB-5, AGE-667).
     pub fn swarm_summary(&self) -> String {
         crate::ui::swarm::render(&self.swarm_trace)
+    }
+
+    /// `/agents running`: the live agents of this conversation's swarm —
+    /// agent, chain, running or waiting on you, elapsed, spend — the same
+    /// rows as the desktop's overview (TB-6, AGE-748). `/stop <agent>`
+    /// takes the first column.
+    pub fn running_agents_summary(&self) -> String {
+        use chatty_core::services::running_agents::{render_text, rows_of};
+        let rows = rows_of("", &self.title, &self.swarm_trace);
+        render_text(
+            &rows,
+            std::time::SystemTime::now(),
+            Some(self.session.price_book()),
+        )
     }
 
     /// `/stop <agent>`: stop that agent — the name `/swarm` shows — and
@@ -1128,6 +1146,10 @@ mod tests {
     #[test]
     fn agents_lists_the_roster_and_what_it_leaves_out() {
         assert_eq!(ChatEngine::parse_command("/agents"), Some(Command::Agents));
+        assert_eq!(
+            ChatEngine::parse_command("/agents running"),
+            Some(Command::AgentsRunning)
+        );
 
         let workspace = tempfile::tempdir().unwrap();
         let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);

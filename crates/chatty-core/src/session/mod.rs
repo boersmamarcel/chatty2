@@ -248,6 +248,11 @@ impl AgentSession {
         self.price_book = book;
     }
 
+    /// The book this session prices its usage with.
+    pub fn price_book(&self) -> &PriceBook {
+        &self.price_book
+    }
+
     pub fn config(&self) -> &AgentSessionConfig {
         &self.config
     }
@@ -831,6 +836,9 @@ impl AgentSession {
             // has no per-call identity. `SwarmTrace` is what a stop
             // targets by name (AGE-762).
             InvokeAgentProgress::Admitted(_) => {}
+            // Who waits on the human: the running-agents overview's, read
+            // off `SwarmTrace` (TB-6); the cards are the approval's own.
+            InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => {}
         }
     }
 

@@ -40,6 +40,8 @@ mod one_kind_of_agent;
 #[cfg(test)]
 mod root_only_approvals;
 #[cfg(test)]
+mod running_agents;
+#[cfg(test)]
 mod slash_agent;
 #[cfg(test)]
 pub(crate) mod stand_in;
