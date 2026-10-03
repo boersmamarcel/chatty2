@@ -188,6 +188,7 @@ impl ConversationsStore {
             Some(ConversationMode::Hosted {
                 server_url,
                 remote_id,
+                ..
             }) => {
                 let client =
                     HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
@@ -251,6 +252,7 @@ impl ConversationsStore {
             ConversationMode::Hosted {
                 server_url,
                 remote_id,
+                ..
             } => {
                 let client =
                     HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
@@ -668,6 +670,7 @@ mod tests {
             ConversationMode::Hosted {
                 server_url: "http://localhost:8081/".to_string(),
                 remote_id: "r-1".to_string(),
+                model_id: None,
             },
         );
         let hosted = store
@@ -684,6 +687,7 @@ mod tests {
             ConversationMode::Hosted {
                 server_url: "http://localhost:8081".to_string(),
                 remote_id: "r-2".to_string(),
+                model_id: None,
             },
         );
         store.delete_conversation("a");

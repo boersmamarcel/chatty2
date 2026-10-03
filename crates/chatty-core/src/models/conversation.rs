@@ -52,6 +52,11 @@ pub enum ConversationMode {
         server_url: String,
         /// The conversation's id *on that server*, which is not the local id.
         remote_id: String,
+        /// The model the server reported for the conversation when it went
+        /// online (AGE-849), shown in the composer in place of the local
+        /// pick. `None` when the server named none, or the row predates this.
+        #[serde(default)]
+        model_id: Option<String>,
     },
 }
 
@@ -63,7 +68,25 @@ impl ConversationMode {
             ConversationMode::Hosted {
                 server_url,
                 remote_id,
+                ..
             } => Some((server_url.as_str(), remote_id.as_str())),
+        }
+    }
+
+    /// What the composer's model chip says while this conversation is hosted:
+    /// the server's model, or "Hosted model" when it reported none. `None`
+    /// for a local conversation, whose chip is the local picker (AGE-849).
+    pub fn hosted_model_label(&self) -> Option<String> {
+        match self {
+            ConversationMode::Local => None,
+            ConversationMode::Hosted { model_id, .. } => Some(
+                model_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty())
+                    .unwrap_or("Hosted model")
+                    .to_string(),
+            ),
         }
     }
 
@@ -1362,6 +1385,7 @@ mod tests {
             mode: ConversationMode::Hosted {
                 server_url: "http://localhost:8081".to_string(),
                 remote_id: "remote-1".to_string(),
+                model_id: None,
             },
         }
     }
@@ -1412,6 +1436,7 @@ mod tests {
             ConversationMode::Hosted {
                 server_url: "http://localhost:8081".to_string(),
                 remote_id: "remote-1".to_string(),
+                model_id: None,
             }
         );
     }

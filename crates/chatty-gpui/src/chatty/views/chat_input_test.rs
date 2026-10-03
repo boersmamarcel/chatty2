@@ -688,3 +688,81 @@ fn chat_input_tab_on_a_highlighted_non_first_row_inserts_that_row(cx: &mut gpui:
         "Tab on the highlighted second row must insert it, not the first"
     );
 }
+
+// -----------------------------------------------------------------------
+// Hosted conversations: the composer shows the server's model (AGE-849)
+// -----------------------------------------------------------------------
+
+#[cfg(test)]
+fn composer_in(
+    cx: &mut gpui::TestAppContext,
+    mode: chatty_core::models::conversation::ConversationMode,
+) -> (String, bool) {
+    use super::{ChatInputState, ModelOption};
+    use crate::settings::models::providers_store::ProviderType;
+    use gpui::AppContext as _;
+    use gpui_component::input::InputState;
+
+    cx.update(|cx| gpui_component::init(cx));
+    let window = cx.add_empty_window();
+    window.update(|window, cx| {
+        let input = cx.new(|cx| InputState::new(window, cx));
+        let state = cx.new(|_| ChatInputState::new(input));
+        state.update(cx, |state, cx| {
+            state.set_available_models(
+                vec![ModelOption::new(
+                    "local".into(),
+                    "Qwen3 4b".into(),
+                    ProviderType::Ollama,
+                )],
+                Some("local".into()),
+                cx,
+            );
+            state.set_conversation_mode(&mode);
+            (
+                state.get_selected_model_display_name(),
+                state.local_model_picker_offered(),
+            )
+        })
+    })
+}
+
+fn hosted(model_id: Option<&str>) -> chatty_core::models::conversation::ConversationMode {
+    chatty_core::models::conversation::ConversationMode::Hosted {
+        server_url: "http://localhost:8081".into(),
+        remote_id: "r-1".into(),
+        model_id: model_id.map(str::to_string),
+    }
+}
+
+#[gpui::test]
+fn hosted_conversation_chip_shows_server_model(cx: &mut gpui::TestAppContext) {
+    let (chip, _) = composer_in(cx, hosted(Some("platform-qwen3")));
+    assert_eq!(chip, "platform-qwen3");
+
+    // The server named no model: say so, never the local pick.
+    let (chip, _) = composer_in(cx, hosted(None));
+    assert_eq!(chip, "Hosted model");
+    let (chip, _) = composer_in(cx, hosted(Some("  ")));
+    assert_eq!(chip, "Hosted model");
+
+    // Back home, the local pick returns.
+    let (chip, _) = composer_in(
+        cx,
+        chatty_core::models::conversation::ConversationMode::Local,
+    );
+    assert!(chip.starts_with("Qwen3 4b"), "{chip}");
+}
+
+#[gpui::test]
+fn hosted_conversation_hides_local_model_picker(cx: &mut gpui::TestAppContext) {
+    assert!(!composer_in(cx, hosted(Some("platform-qwen3"))).1);
+    assert!(!composer_in(cx, hosted(None)).1);
+    assert!(
+        composer_in(
+            cx,
+            chatty_core::models::conversation::ConversationMode::Local
+        )
+        .1
+    );
+}

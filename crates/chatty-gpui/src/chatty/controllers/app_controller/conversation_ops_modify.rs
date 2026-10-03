@@ -427,6 +427,7 @@ impl ChattyApp {
                     ConversationMode::Hosted {
                         server_url: String::new(),
                         remote_id: String::new(),
+                        model_id: None,
                     }
                 } else {
                     ConversationMode::Local
