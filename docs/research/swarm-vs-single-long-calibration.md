@@ -63,6 +63,17 @@ committed.
      amended over time, joins through effective-dated mappings).
    Round 1 runs to completion unchanged.
 
+3. **Restart after a host reboot (2026-10-03 17:50).** The machine
+   rebooted during round 2 and every calibration result (kept on `/tmp`)
+   was lost. Calibration was re-run from scratch, rounds 1 and 2 together:
+   all 31 candidates, k = 2, single arm only, with `--hold-max-s 150` from
+   the start, results on the persistent disk
+   (`/media/marcel/data/rust/swarm-results/ev7-cal/`, run ids `cal-k1`,
+   `cal-k2`), on a build that also carries the newer `main` (chatty 0.5.10).
+   The rules above are unchanged, including the twin rule. The record below
+   is built only from these re-run results; the lost runs are not used.
+   Still no swarm-arm run of any candidate exists.
+
 ## Record
 
 Filled in after the calibration runs, before the pre-registration.

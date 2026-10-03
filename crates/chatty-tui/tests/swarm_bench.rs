@@ -71,6 +71,63 @@ fn prereg_exists_and_is_frozen() {
     );
 }
 
+/// SHA-256 of `docs/research/swarm-vs-single-long-prereg.md`, the long
+/// multi-part benchmark's pre-registration (EV-7, AGE-826). Frozen before its
+/// first swarm-arm run, like `PREREG_SHA256`.
+const LONG_PREREG_SHA256: &str = "__LONG_PREREG_SHA__";
+
+/// `bench.py`'s `sha256_tree` over `evals/swarm-long/tasks/`: the long task
+/// set, frozen with its pre-registration (which records the same hash).
+const LONG_TASKS_SHA256: &str = "936895859cb71707d595ec4477be1ff342650e945fd1b993ae1acc05a0d65e6b";
+
+#[test]
+fn long_prereg_exists_and_is_frozen() {
+    let bytes = std::fs::read(repo_root().join("docs/research/swarm-vs-single-long-prereg.md"))
+        .expect("the long pre-registration exists");
+    let hash: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hash, LONG_PREREG_SHA256,
+        "docs/research/swarm-vs-single-long-prereg.md changed. It is frozen: \
+         a run under a changed protocol is not pre-registered. Change it only \
+         on purpose, and update this pin in the same PR."
+    );
+}
+
+#[test]
+fn long_task_set_is_frozen() {
+    let out = Command::new("python3")
+        .current_dir(repo_root())
+        .args([
+            "-c",
+            "import sys; sys.path.insert(0, 'scripts/swarm-bench'); import bench; \
+             print(bench.sha256_tree('evals/swarm-long/tasks'))",
+        ])
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+        .expect("python3 runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        LONG_TASKS_SHA256,
+        "evals/swarm-long/tasks/ changed. The task set is frozen with \
+         docs/research/swarm-vs-single-long-prereg.md; regenerate it only on \
+         purpose, and update both pins in the same PR."
+    );
+}
+
+/// Every long task's reference solution scores 100 % and its untouched
+/// workspace at most 20 % (`evals/swarm-long/selfcheck.py`).
+#[test]
+fn long_task_set_selfcheck() {
+    run(Command::new("python3")
+        .current_dir(repo_root())
+        .arg("evals/swarm-long/selfcheck.py")
+        .env("PYTHONDONTWRITEBYTECODE", "1"));
+}
+
 /// One scripted answer: the usage it reports, then the reply.
 fn answer(replies: &mut Vec<Reply>, reply: Reply) {
     let (input, output, cache_read) = USAGE;
