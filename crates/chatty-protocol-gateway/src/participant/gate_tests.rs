@@ -97,6 +97,7 @@ fn reaching<'a>(policy: &'a dyn CallPolicy, spec: &str) -> Result<Snapshot<'a>, 
             spec: spec.to_string(),
         },
         owner: Owner::None,
+        addressee: Addressee::None,
         binding: None,
         answer_nonce: None,
     })
@@ -199,6 +200,7 @@ fn outsiders_are_refused_every_request() {
             },
             Request::Cancel { node: "n" },
             Request::TakeRunMessages,
+            Request::Take,
         ] {
             let decision = decide(&caller, &request, &reaching(&policy, "target"));
             assert!(decision.outcome.is_err(), "{caller} {request:?}");
@@ -291,7 +293,7 @@ fn only_the_root_answers_cancels_and_takes_its_messages() {
             Err(Refused::Caller(_))
         ));
     }
-    // And the root has no owner to post to.
+    // And a name no node goes by is not on the tree, for the root too.
     let post = SendMessageParams {
         to: "anyone".to_string(),
         text: "x".to_string(),
@@ -532,4 +534,93 @@ fn hosted_client_rows() {
     for request in [Request::List, answer, conversation] {
         assert!(!typed_granted(&request), "typed root {request:?}");
     }
+}
+
+fn node_id(n: u64) -> chatty_fabric::NodeId {
+    serde_json::from_value(json!(n)).expect("a node id")
+}
+
+/// TM-5's rows: the human (the root) may message any live node mid-run, a
+/// node its own live child mid-run and its owner at TM-2's points; a
+/// sibling is still not on the tree, an ended node is `recipient_ended`,
+/// and only a node takes mid-run messages.
+#[test]
+fn mid_run_message_rows() {
+    let policy = Watching::new([]);
+    let to = |name: &str| SendMessageParams {
+        to: name.to_string(),
+        text: "look at X instead".to_string(),
+    };
+    let with = |owner: Owner, addressee: Addressee| {
+        reaching(&policy, "target").map(|snapshot| Snapshot {
+            owner,
+            addressee,
+            ..snapshot
+        })
+    };
+    let child = |owner: Option<&str>, ended: bool| Addressee::Node {
+        id: node_id(7),
+        owner: owner.map(str::to_string),
+        ended,
+    };
+    let mid_run = Ok(Grant::Post {
+        to: PostTo::Node(node_id(7)),
+        at: Delivery::ToolRound,
+    });
+    let lead = node("lead-0", "lead", "task-1");
+
+    // The human, to any live node — its own child or a grandchild alike.
+    for addressee in [child(None, false), child(Some("lead-0"), false)] {
+        let snapshot = with(Owner::None, addressee);
+        assert_eq!(
+            decide(&Caller::Root, &Request::Post(&to("coder-1")), &snapshot).outcome,
+            mid_run
+        );
+    }
+    assert_eq!(
+        decide(
+            &Caller::Root,
+            &Request::Post(&to("coder-1")),
+            &with(Owner::None, child(None, true))
+        )
+        .outcome,
+        Err(Refused::Message(RefusalReason::RecipientEnded))
+    );
+
+    // A node, to its own child: mid-run.
+    let snapshot = with(Owner::Root, child(Some("lead-0"), false));
+    assert_eq!(
+        decide(&lead, &Request::Post(&to("coder-1")), &snapshot).outcome,
+        mid_run
+    );
+    // ... to its owner: TM-2's points, as before.
+    assert_eq!(
+        decide(&lead, &Request::Post(&to(ROOT_NAME)), &snapshot).outcome,
+        Ok(Grant::Post {
+            to: PostTo::Root,
+            at: Delivery::Run,
+        })
+    );
+    // ... to a node someone else owns (a sibling, a grandchild): refused.
+    let snapshot = with(Owner::Root, child(Some("lead-1"), false));
+    assert_eq!(
+        decide(&lead, &Request::Post(&to("coder-1")), &snapshot).outcome,
+        Err(Refused::Message(RefusalReason::NotOnTree))
+    );
+
+    // Only a node takes mid-run messages; the root reads its own at its
+    // next run.
+    let snapshot = reaching(&policy, "target");
+    assert_eq!(
+        decide(&lead, &Request::Take, &snapshot).outcome,
+        Ok(Grant::Take)
+    );
+    assert!(matches!(
+        decide(&Caller::Root, &Request::Take, &snapshot).outcome,
+        Err(Refused::Caller(_))
+    ));
+    assert!(
+        policy.consulted().is_empty(),
+        "no spec rule decides a message"
+    );
 }

@@ -17,12 +17,18 @@
 //! A running agent's line and its sheet stop that agent and its subtree
 //! through the desktop's broker (TB-7, AGE-749); the broker's report of the
 //! stop is what turns its line to Canceled.
+//!
+//! A running agent's sheet also has a message box (TM-5, AGE-750): what the
+//! human types there reaches that agent at its next tool call, wrapped as
+//! untrusted data, through the same broker.
 
 use std::sync::Arc;
 
 use chatty_core::models::token_usage::PriceBook;
 use chatty_core::services::swarm_trace::{NodeStatus, SwarmTrace};
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, WindowExt as _};
 
 use super::ChatView;
@@ -45,6 +51,12 @@ pub(super) fn stop_swarm_node(name: &str, cx: &mut App) {
         Ok(()) => tracing::info!(agent = %name, "Stopped an agent of the swarm"),
         Err(error) => tracing::warn!(agent = %name, %error, "Could not stop an agent"),
     }
+}
+
+/// The desktop's broker, if one is configured.
+fn swarm_broker(cx: &App) -> Option<Arc<dyn chatty_core::services::lazy_broker::LazyBroker>> {
+    cx.try_global::<crate::settings::models::DiscoveredModulesModel>()
+        .and_then(|modules| modules.lazy_broker.clone())
 }
 
 /// Wide enough for a tool row's headline and its result preview.
@@ -189,7 +201,8 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         let chat_view = cx.entity();
-        let transcript = cx.new(|cx| SwarmNodeTranscript::new(chat_view, msg_idx, name, cx));
+        let transcript =
+            cx.new(|cx| SwarmNodeTranscript::new(chat_view, msg_idx, name, window, cx));
         window.open_sheet(cx, move |sheet, _window, _cx| {
             sheet
                 .title("Agent transcript")
@@ -206,7 +219,12 @@ struct SwarmNodeTranscript {
     chat_view: WeakEntity<ChatView>,
     msg_idx: usize,
     name: String,
+    /// The message box (TM-5).
+    message: Entity<InputState>,
+    /// What became of the last message sent from the box.
+    sent: Option<SharedString>,
     _observe: Subscription,
+    _message: Subscription,
 }
 
 impl SwarmNodeTranscript {
@@ -214,15 +232,79 @@ impl SwarmNodeTranscript {
         chat_view: Entity<ChatView>,
         msg_idx: usize,
         name: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let _observe = cx.observe(&chat_view, |_, _, cx| cx.notify());
+        let message = cx.new(|cx| InputState::new(window, cx).placeholder("Message this agent…"));
+        let _message = cx.subscribe_in(&message, window, |this, input, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                let text = input.read(cx).value().trim().to_string();
+                if !text.is_empty() {
+                    input.update(cx, |input, cx| input.set_value("", window, cx));
+                    this.send(text, cx);
+                }
+            }
+        });
         Self {
             chat_view: chat_view.downgrade(),
             msg_idx,
             name,
+            message,
+            sent: None,
             _observe,
+            _message,
         }
+    }
+
+    /// Send `text` from the human to the agent this sheet shows: it reads
+    /// it at its next tool call (TM-5).
+    fn send(&mut self, text: String, cx: &mut Context<Self>) {
+        let name = self.name.clone();
+        let Some(broker) = swarm_broker(cx) else {
+            self.sent = Some("No broker is running.".into());
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let sent = match broker.post_message(&name, text).await {
+                Ok(chatty_fabric::MessageStatus::Pending { .. }) => {
+                    format!("Sent: {name} reads it at its next tool call.")
+                }
+                Ok(chatty_fabric::MessageStatus::Refused { reason }) => {
+                    format!("{name} did not take the message: {reason}.")
+                }
+                Err(error) => format!("Could not message {name}: {error}"),
+            };
+            this.update(cx, |this, cx| {
+                this.sent = Some(sent.into());
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The message box, under a running agent's transcript.
+    fn message_box(&self, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .pt_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(Input::new(&self.message))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        self.sent.clone().unwrap_or_else(|| {
+                            "It reads your message at its next tool call.".into()
+                        }),
+                    ),
+            )
     }
 }
 
@@ -236,7 +318,8 @@ impl Render for SwarmNodeTranscript {
         match found {
             Some((tree, ix)) => {
                 let this = cx.entity().downgrade();
-                AgentTranscript::new(tree, ix)
+                let running = matches!(tree.nodes[ix].status, NodeStatus::Running);
+                let transcript = AgentTranscript::new(tree, ix)
                     .on_stop(std::rc::Rc::new(|name, cx| stop_swarm_node(&name, cx)))
                     .on_navigate(std::rc::Rc::new(move |name, _window, cx| {
                         this.update(cx, |this, cx| {
@@ -244,7 +327,13 @@ impl Render for SwarmNodeTranscript {
                             cx.notify();
                         })
                         .ok();
-                    }))
+                    }));
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(transcript)
+                    .when(running, |this| this.child(self.message_box(cx)))
                     .into_any_element()
             }
             None => div()

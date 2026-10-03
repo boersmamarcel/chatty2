@@ -36,6 +36,8 @@ mod human_ask;
 #[cfg(test)]
 mod input_required_chain;
 #[cfg(test)]
+mod midrun_messages;
+#[cfg(test)]
 mod one_kind_of_agent;
 #[cfg(test)]
 mod root_only_approvals;

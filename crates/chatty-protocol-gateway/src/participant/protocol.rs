@@ -61,6 +61,17 @@
 //! A2A task. When the worker's connection closes, the broker cancels every
 //! call still in flight on it, which reaps the workers those calls started.
 //!
+//! # Mid-run messages (TM-5, AGE-750)
+//!
+//! Between two of its tool rounds a worker takes what the human or its
+//! owner sent it while it ran, with a `mailbox.take` request; the result is
+//! the messages, each already wrapped as untrusted data, oldest first.
+//!
+//! ```text
+//! participant → {"v":3,"id":4,"method":"mailbox.take"}
+//! broker      → {"v":3,"id":4,"result":["<message from=\"root\" untrusted=\"true\">look at X instead</message>"]}
+//! ```
+//!
 //! # A question (EN-2b, AGE-771)
 //!
 //! A worker whose `ask_user` waits on someone parks its task on a

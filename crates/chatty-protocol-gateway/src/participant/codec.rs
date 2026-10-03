@@ -312,6 +312,7 @@ enum CallMethod {
     Invoke,
     List,
     Post,
+    Take,
 }
 
 impl CallMethod {
@@ -320,6 +321,7 @@ impl CallMethod {
             CallRequest::InvokeAgent(_) => Self::Invoke,
             CallRequest::ListAgents => Self::List,
             CallRequest::SendMessage(_) => Self::Post,
+            CallRequest::TakeMessages => Self::Take,
         }
     }
 
@@ -328,6 +330,7 @@ impl CallMethod {
             Self::Invoke => CallResult::Invoked(typed::<InvokeAgentOutcome>("agent.invoke", raw)?),
             Self::List => CallResult::Agents(typed::<Vec<AgentEntry>>("agent.list", raw)?),
             Self::Post => CallResult::Posted(typed::<MessageStatus>("mailbox.post", raw)?),
+            Self::Take => CallResult::Messages(typed::<Vec<String>>("mailbox.take", raw)?),
         })
     }
 }
@@ -657,6 +660,10 @@ impl FrameCodec<BrokerSide> {
                         id,
                         request: CallRequest::SendMessage(params),
                     },
+                    WorkerRequest::MailboxTake => ParticipantFrame::Call {
+                        id,
+                        request: CallRequest::TakeMessages,
+                    },
                     WorkerRequest::HumanApprove(request) => {
                         state.their_approvals.insert(id);
                         ParticipantFrame::Approve { id, request }
@@ -919,6 +926,7 @@ impl FrameCodec<WorkerSide> {
                     CallRequest::SendMessage(params) => {
                         request(m, id, "mailbox.post", Some(params))?
                     }
+                    CallRequest::TakeMessages => request::<()>(m, id, "mailbox.take", None)?,
                 }
             }
             ParticipantFrame::CancelCall { id: call } => {

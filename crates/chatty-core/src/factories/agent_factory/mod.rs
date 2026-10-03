@@ -323,6 +323,8 @@ impl AgentClient {
             plugin_host,
         } = ctx;
         let run_inbox = lazy_broker.clone();
+        // A worker's mid-run messages (TM-5) come over its connection.
+        let mid_run_inbox = fabric_transport.clone();
 
         // The spec's plugins (PL-U2): one instance each for this agent, on
         // this agent's model. A plugin that does not load fails the build —
@@ -1596,6 +1598,9 @@ impl AgentClient {
         )
         .await?;
         agent.run_inbox = run_inbox;
+        if let Some(transport) = mid_run_inbox {
+            agent.context_shaper.deliver_mid_run_messages(transport);
+        }
         agent.delegator = delegator;
         agent.plugin_usage = plugins
             .iter()

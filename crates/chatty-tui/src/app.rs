@@ -165,6 +165,10 @@ async fn run_loop(
                                     engine.add_system_message(e.to_string());
                                 }
                             }
+                            KeyAction::MessageAgent(arg) => {
+                                let outcome = engine.message_agent(&arg).await;
+                                engine.add_system_message(outcome);
+                            }
                             KeyAction::ShowContext => {
                                 engine.add_system_message(engine.context_summary());
                             }
@@ -315,6 +319,8 @@ fn drain_and_coalesce_events(
 enum KeyAction {
     None,
     Quit,
+    /// `/msg <agent> <text>` (TM-5).
+    MessageAgent(String),
     SwitchModel(String),
     OpenModelPicker,
     OpenToolPicker,
@@ -717,6 +723,11 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Stop(Some(agent)) => {
             let outcome = engine.stop_agent(&agent);
             engine.add_system_message(outcome);
+            None
+        }
+        Command::Msg(Some(arg)) => Some(KeyAction::MessageAgent(arg)),
+        Command::Msg(None) => {
+            engine.add_system_message(crate::engine::MSG_USAGE.to_string());
             None
         }
         Command::Stop(None) => {
