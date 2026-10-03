@@ -107,7 +107,7 @@ The bar follows **Enable Git Integration** in Settings → Code Execution. Priva
 
 ## Taking a conversation online
 
-**Take online…** in a conversation's **⋯** menu uploads its history to a `chatty-server` you name and continues it there — useful for a long-running task you want to keep going after you close the laptop. A globe icon badges the conversation in the sidebar while it runs remotely, and the same menu offers **Bring back here** to return it. The confirmation dialog lists exactly what moves (message history, traces, the model id) and what never does (workspace files, attachments, MCP servers, memory, skills, and provider API keys — those stay on this machine). The conversation's local copy is kept either way, so bringing it back does not lose anything, and a move mid-turn is refused until the turn finishes.
+**Take online…** in a conversation's **⋯** menu uploads its history to a `chatty-server` you name and continues it there — useful for a long-running task you want to keep going after you close the laptop. A globe icon badges the conversation in the sidebar while it runs remotely, and the same menu offers **Bring back here** to return it. The confirmation dialog lists exactly what moves (message history, traces, the model id) and what never does (workspace files, attachments, MCP servers, memory, skills, and provider API keys — those stay on this machine). The conversation's local copy is kept either way, so bringing it back does not lose anything, and a move mid-turn is refused until the turn finishes. The server only accepts requests from a signed-in Hive session, so sign in first (**Settings → Extensions → Hive**); without it, the move or the hosted turn fails with a message telling you to sign in.
 
 ## Themes and text
 
