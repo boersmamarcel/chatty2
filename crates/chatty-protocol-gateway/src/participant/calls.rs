@@ -18,17 +18,23 @@
 //! call that started it, and its own calls die with its connection.
 //!
 //! A `send_message` call (tree messages, TM-1) never starts a run: the
-//! broker checks the recipient against the caller's connection — the
-//! sender's owner is the only recipient there is until live handles exist
-//! (RC-3) — and queues the message on the recipient's [`PendingList`], or
+//! gate checks the recipient against the caller — a node's owner, a node's
+//! own child, or (from the human, through the root) any node — and the
+//! broker queues the message on the recipient's [`PendingList`], or
 //! refuses it. Either way the call's result is a [`MessageStatus`].
 //!
-//! A waiting message is delivered at exactly two points (TM-2): on the next
-//! `invoke_agent` result its recipient receives, as that result's
+//! A message to an owner is delivered at exactly two points (TM-2): on the
+//! next `invoke_agent` result its recipient receives, as that result's
 //! `messages`, or at the start of the recipient's next run — the root's
 //! next user turn ([`Transport::take_run_messages`]), a node's next task
-//! ([`BrokerCalls::start_run`]). Never mid-run: nothing else reads a
-//! pending list. It is delivered wrapped as untrusted data
+//! ([`BrokerCalls::start_run`]). Never mid-run.
+//!
+//! A message from the human or from a node's owner goes on the node's
+//! mid-run list instead (TM-5), which the node takes between two tool
+//! rounds with `mailbox.take` — one `delivered_mid_run` edge-log row per
+//! message — or, if no tool round took it, at its next run's start.
+//!
+//! Every message is delivered wrapped as untrusted data
 //! ([`chatty_fabric::wrap_message`]) and grants nothing. A recipient that
 //! ends drops what is still waiting for it, one edge-log row per message
 //! ([`BrokerCalls::recipient_ended`]).
@@ -152,16 +158,16 @@ use chatty_fabric::{
     CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallResult,
     CallStream, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL,
     InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList,
-    ROOT_NAME, Refusal, RefusalReason, SendMessageParams, SwarmBatcher, SwarmItem, Transport,
-    UsagePricer, deadline_grace,
+    ROOT_NAME, Refusal, RefusalReason, SendMessageParams, Sender, SwarmBatcher, SwarmItem,
+    Transport, UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use super::gate::{
-    self, Admitter, Callee, Caller, Decision, Grant, InvokeTarget, NodeCaller, Owner, PostTo,
-    Refused, Request, Snapshot, SpawnView, Unreadable,
+    self, Addressee, Admitter, Callee, Caller, Decision, Delivery, Grant, InvokeTarget,
+    NodeCaller, Owner, PostTo, Refused, Request, Snapshot, SpawnView, Unreadable,
 };
 use super::hosted::Hosted;
 use super::protocol::{CallStamp, DelegatedTask, TaskState};
@@ -197,6 +203,10 @@ enum Recipient {
     /// The in-process root, which is not a node.
     Root,
     Node(NodeId),
+    /// A node's mid-run list (TM-5): what the human or the node's owner
+    /// sent it, which its next tool round takes. TM-2's delivery point a
+    /// never reads it.
+    MidRun(NodeId),
 }
 
 /// The broker's call path: the agents a call can reach, the messages
@@ -1124,6 +1134,18 @@ impl BrokerCalls {
                 let status = self.send_message(&peer, &caller, params);
                 futures::stream::iter([Ok(CallEvent::Result(CallResult::Posted(status)))]).boxed()
             }
+            CallRequest::TakeMessages => match self.gate(&peer, &caller, &Request::Take).outcome {
+                Ok(_) => {
+                    let messages = self.take_mid_run(&peer);
+                    futures::stream::iter([Ok(CallEvent::Result(CallResult::Messages(messages)))])
+                        .boxed()
+                }
+                Err(refused) => {
+                    let error = refused.to_call_error();
+                    self.log_refusal(&peer, "mailbox.take", &error.to_string());
+                    refusal_stream(error)
+                }
+            },
         }
     }
 
@@ -1165,6 +1187,17 @@ impl BrokerCalls {
             },
             _ => Owner::None,
         };
+        let addressee = match request {
+            Request::Post(params) => match self.registry.node_and_owner(&params.to) {
+                None => Addressee::None,
+                Some((node, owner)) => Addressee::Node {
+                    id: node.id(),
+                    owner: owner.map(|owner| owner.name().as_str().to_string()),
+                    ended: node.state() == NodeState::Ended,
+                },
+            },
+            _ => Addressee::None,
+        };
         let answer_nonce = match (request, self.hosted.as_ref()) {
             (Request::Answer { id, .. } | Request::AnswerApproval { id, .. }, Some(hosted)) => {
                 hosted.nonce_of(id)
@@ -1177,6 +1210,7 @@ impl BrokerCalls {
             root_task_id: uuid::Uuid::new_v4().to_string(),
             callee,
             owner,
+            addressee,
             binding: self.hosted.as_ref().map(|hosted| &hosted.binding),
             answer_nonce,
         })
@@ -1310,18 +1344,29 @@ impl BrokerCalls {
     ) -> MessageStatus {
         let refused = |reason| MessageStatus::Refused { reason };
         let recipient = match self.gate(peer, caller, &Request::Post(&params)).outcome {
-            Ok(Grant::Post { to: PostTo::Root }) => Recipient::Root,
+            Ok(Grant::Post {
+                to: PostTo::Root, ..
+            }) => Recipient::Root,
             Ok(Grant::Post {
                 to: PostTo::Node(id),
+                at: Delivery::Run,
             }) => Recipient::Node(id),
+            Ok(Grant::Post {
+                to: PostTo::Node(id),
+                at: Delivery::ToolRound,
+            }) => Recipient::MidRun(id),
             Ok(other) => unreachable!("mailbox.post granted as {other:?}"),
             Err(Refused::Message(reason)) => return refused(reason),
             // Nothing else refuses a post; were it to, it is not on the
             // tree.
             Err(_) => return refused(RefusalReason::NotOnTree),
         };
-        let Some((sender, _)) = self.registry.node_and_owner(peer.name()) else {
-            return refused(RefusalReason::NotOnTree);
+        let from = match peer {
+            Peer::Root => Sender::Root,
+            Peer::Node(name) => match self.registry.node_and_owner(name) {
+                Some((sender, _)) => Sender::Node(sender.id()),
+                None => return refused(RefusalReason::NotOnTree),
+            },
         };
 
         let id = format!(
@@ -1330,8 +1375,8 @@ impl BrokerCalls {
         );
         let message = Message {
             id: id.clone(),
-            from: sender.id(),
-            from_name: sender.name().clone(),
+            from,
+            from_name: peer.name().to_string(),
             text: params.text,
         };
         let mut pending = lock(&self.pending);
@@ -1356,33 +1401,81 @@ impl BrokerCalls {
     /// `caller` is starting a new run — the root's next user turn, a node's
     /// next task: take what is waiting for it, wrapped and oldest first,
     /// and give each sender its allowance back (delivery point b).
+    ///
+    /// A node's run also opens with what its mid-run list still holds: the
+    /// human's or its owner's messages that no tool round of its last run
+    /// took (TM-5).
     pub fn start_run(&self, caller: &Peer) -> Vec<String> {
         let Some(inbox) = self.inbox(caller) else {
             return Vec::new();
         };
+        let mid_run = match inbox {
+            Recipient::Node(id) => Some(Recipient::MidRun(id)),
+            Recipient::Root | Recipient::MidRun(_) => None,
+        };
         let mut pending = lock(&self.pending);
-        let Some(list) = pending.get_mut(&inbox) else {
+        [Some(inbox), mid_run]
+            .into_iter()
+            .flatten()
+            .flat_map(|inbox| {
+                pending
+                    .get_mut(&inbox)
+                    .map(|list| {
+                        list.start_run();
+                        deliver(list)
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The node `caller` is between two tool rounds (TM-5): take its
+    /// mid-run list, wrapped and oldest first, one `delivered_mid_run`
+    /// message row per message. The senders' allowances for this run stay
+    /// spent.
+    fn take_mid_run(&self, caller: &Peer) -> Vec<String> {
+        let Some(Recipient::Node(id)) = self.inbox(caller) else {
             return Vec::new();
         };
-        list.start_run();
-        deliver(list)
+        let taken = lock(&self.pending)
+            .get_mut(&Recipient::MidRun(id))
+            .map(PendingList::take_all)
+            .unwrap_or_default();
+        for message in &taken {
+            debug!(from = %message.from_name, to = %caller.name(), id = %message.id, "Delivered a message mid-run");
+            EdgeGuard {
+                log: self.edges.clone(),
+                from: message.from_name.clone(),
+                to: caller.name().to_string(),
+                chain: vec![message.from_name.clone()],
+                bytes: message.bytes() as u64,
+                outcome: None,
+                usd: None,
+            }
+            .write(EdgeKind::Message, "delivered_mid_run".to_string());
+        }
+        taken.iter().map(Message::wrapped).collect()
     }
 
     /// The node `id`, admitted as `name`, has ended: what was waiting for it
     /// is dropped, one `message` row per message with outcome `dropped`.
     /// Later messages to it are `recipient_ended`.
     pub(crate) fn recipient_ended(&self, id: NodeId, name: &str) {
-        let dropped = lock(&self.pending)
-            .remove(&Recipient::Node(id))
-            .map(|mut list| list.take_all())
-            .unwrap_or_default();
+        let dropped: Vec<Message> = {
+            let mut pending = lock(&self.pending);
+            [Recipient::Node(id), Recipient::MidRun(id)]
+                .iter()
+                .filter_map(|inbox| pending.remove(inbox))
+                .flat_map(|mut list| list.take_all())
+                .collect()
+        };
         for message in dropped {
             debug!(from = %message.from_name, to = %name, id = %message.id, "Dropped a message with its recipient");
             EdgeGuard {
                 log: self.edges.clone(),
-                from: message.from_name.as_str().to_string(),
+                from: message.from_name.clone(),
                 to: name.to_string(),
-                chain: vec![message.from_name.as_str().to_string()],
+                chain: vec![message.from_name.clone()],
                 bytes: message.bytes() as u64,
                 outcome: None,
                 usd: None,
@@ -2466,6 +2559,7 @@ mod tests {
                 spec: agent.to_string(),
             },
             owner: Owner::None,
+            addressee: Addressee::None,
             binding: None,
             answer_nonce: None,
         });

@@ -336,7 +336,7 @@ fn from_run(request: CallRequest, run: &str) -> CallRequest {
             run: Some(run.to_string()),
             ..params
         }),
-        other @ (CallRequest::ListAgents | CallRequest::SendMessage(_)) => other,
+        other @ (CallRequest::ListAgents | CallRequest::SendMessage(_) | CallRequest::TakeMessages) => other,
     }
 }
 

@@ -2212,6 +2212,16 @@ impl chatty_core::services::lazy_broker::LazyBroker for StartedBroker {
     fn take_run_messages(&self) -> Vec<String> {
         self.0.take_run_messages()
     }
+
+    async fn post_message(
+        &self,
+        to: &str,
+        text: String,
+    ) -> anyhow::Result<chatty_fabric::MessageStatus> {
+        chatty_core::services::lazy_broker::post_as_root(self.0.as_ref(), to, text)
+            .await
+            .map_err(anyhow::Error::from)
+    }
 }
 
 /// The root as a real agent, in this process: its model is `ROOT_MODEL` on

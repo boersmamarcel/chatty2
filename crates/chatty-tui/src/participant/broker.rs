@@ -569,6 +569,21 @@ impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
         };
         broker.transport().cancel(node).map_err(anyhow::Error::from)
     }
+
+    /// `/msg <agent> <text>` reaches a running agent at its next tool
+    /// round (TM-5); a broker that has not started runs nobody.
+    async fn post_message(
+        &self,
+        to: &str,
+        text: String,
+    ) -> anyhow::Result<chatty_fabric::MessageStatus> {
+        let Some(broker) = self.once.get() else {
+            anyhow::bail!("the broker is not running, so nothing is named '{to}'");
+        };
+        chatty_core::services::lazy_broker::post_as_root(broker.transport().as_ref(), to, text)
+            .await
+            .map_err(anyhow::Error::from)
+    }
 }
 
 /// One `LocalRunner` per resolved agent, all metered on one shared budget

@@ -2,7 +2,7 @@
 //!
 //! | Requests | Notifications | Results |
 //! |---|---|---|
-//! | `task.run`, `human.ask` (a callee's, relayed) | `req.progress`, `req.cancel` | `session.hello` ([`Welcome`]), `agent.invoke` ([`InvokeAgentOutcome`](crate::InvokeAgentOutcome)), `agent.list` ([`AgentEntry`]s), `mailbox.post` ([`MessageStatus`](crate::MessageStatus)), `human.approve` ([`ApprovalVerdict`](crate::ApprovalVerdict)), `human.ask` ([`Answer`](crate::Answer)s), any of them an [`error`](super::WireError) |
+//! | `task.run`, `human.ask` (a callee's, relayed) | `req.progress`, `req.cancel` | `session.hello` ([`Welcome`]), `agent.invoke` ([`InvokeAgentOutcome`](crate::InvokeAgentOutcome)), `agent.list` ([`AgentEntry`]s), `mailbox.post` ([`MessageStatus`](crate::MessageStatus)), `mailbox.take` (wrapped messages), `human.approve` ([`ApprovalVerdict`](crate::ApprovalVerdict)), `human.ask` ([`Answer`](crate::Answer)s), any of them an [`error`](super::WireError) |
 
 use std::borrow::Cow;
 
