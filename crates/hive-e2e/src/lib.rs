@@ -160,8 +160,11 @@ impl Stack {
     /// `publisher_role` step-up (CX-0).
     pub async fn publisher(&self) -> User {
         let mut user = self.user().await;
-        let (status, me) =
-            send(self.request(reqwest::Method::GET, "/me").bearer_auth(&user.pair.token)).await;
+        let (status, me) = send(
+            self.request(reqwest::Method::GET, "/me")
+                .bearer_auth(&user.pair.token),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "/api/me: {me}");
         let id = me["id"].as_str().expect("a user id").to_string();
         let assertion = self
@@ -216,7 +219,10 @@ impl Stack {
         );
         self.page(form(
             self.http.post(format!("{page}/approve")),
-            &[("nonce", form_nonce(&signed_in).as_str()), ("request_id", id)],
+            &[
+                ("nonce", form_nonce(&signed_in).as_str()),
+                ("request_id", id),
+            ],
         ))
         .await;
 

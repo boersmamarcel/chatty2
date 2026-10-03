@@ -71,14 +71,16 @@ enum StepUpNext {
 /// Read a `get_step_up_request` answer for `name`@`version`.
 fn step_up_next(status: &serde_json::Value, name: &str, version: &str) -> StepUpNext {
     let field = |key: &str| status.get(key).and_then(|v| v.as_str()).unwrap_or_default();
-    if field("action") != "module_publish" || field("target") != name || field("value") != version
-    {
+    if field("action") != "module_publish" || field("target") != name || field("value") != version {
         return StepUpNext::Wait(format!(
             "That step-up request is not for publishing {name}@{version}. \
              Call publish_wasm_module again without step_up_request_id to file a new one."
         ));
     }
-    match (field("status"), status.get("assertion").and_then(|v| v.as_str())) {
+    match (
+        field("status"),
+        status.get("assertion").and_then(|v| v.as_str()),
+    ) {
         ("approved", Some(assertion)) => StepUpNext::Publish(assertion.to_string()),
         ("expired", _) => StepUpNext::Wait(format!(
             "The approval for publishing {name}@{version} expired. \
@@ -272,7 +274,10 @@ impl Tool for PublishModuleTool {
                 .await?;
             let filed = tool_json(&filed)?;
             let id = filed.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            let page = filed.get("page").and_then(|v| v.as_str()).unwrap_or_default();
+            let page = filed
+                .get("page")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             return Ok(PublishModuleOutput {
                 success: false,
                 message: format!(
@@ -362,8 +367,14 @@ mod tests {
         for (other, why) in [
             (status("module_publish", "m", "1.0.0", "pending"), "waiting"),
             (status("module_publish", "m", "1.0.0", "expired"), "expired"),
-            (status("module_publish", "m", "2.0.0", "approved"), "not for"),
-            (status("module_publish", "n", "1.0.0", "approved"), "not for"),
+            (
+                status("module_publish", "m", "2.0.0", "approved"),
+                "not for",
+            ),
+            (
+                status("module_publish", "n", "1.0.0", "approved"),
+                "not for",
+            ),
             (status("pricing_set", "m", "1.0.0", "approved"), "not for"),
         ] {
             match step_up_next(&other, "m", "1.0.0") {

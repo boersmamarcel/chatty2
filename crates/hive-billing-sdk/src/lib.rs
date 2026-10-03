@@ -181,8 +181,8 @@ pub fn verify_session_token(
     now: i64,
 ) -> Result<SessionClaims, String> {
     use base64::{
-        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
         Engine,
+        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     };
     use ed25519_dalek::{Signature, Verifier};
 
@@ -315,7 +315,7 @@ pub fn require_session(estimated_tokens: i64) -> Result<BillingSession, String> 
         .map_err(|_| "System time error".to_string())?
         .as_secs() as i64;
     let claims = verify_session_token(&session_info.token, &root_keys(), now)?;
-    
+
     // Validate reserved tokens match the request
     if claims.res != estimated_tokens {
         return Err(format!(
@@ -323,7 +323,7 @@ pub fn require_session(estimated_tokens: i64) -> Result<BillingSession, String> 
             estimated_tokens, claims.res
         ));
     }
-    
+
     Ok(BillingSession {
         token: session_info.token,
         claims,

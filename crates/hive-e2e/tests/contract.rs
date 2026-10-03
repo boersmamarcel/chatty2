@@ -14,8 +14,8 @@ use hive_client::{
     HiveRegistryClient, HiveSession, TokenPair, UsageCollector, UsageCollectorConfig,
 };
 use hive_e2e::{
-    SEEDED_VERSION, Stack, flat_manifest, install_from_hive, local_module_registry,
-    module_dir, send, send_via_gateway, start_gateway, unique,
+    SEEDED_VERSION, Stack, flat_manifest, install_from_hive, local_module_registry, module_dir,
+    send, send_via_gateway, start_gateway, unique,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -1039,5 +1039,8 @@ async fn cx0b_an_external_key_is_created_only_through_step_up() {
         ),
         "{again:?}"
     );
-    client.revoke_external_key(created.id).await.expect("revoke");
+    client
+        .revoke_external_key(created.id)
+        .await
+        .expect("revoke");
 }

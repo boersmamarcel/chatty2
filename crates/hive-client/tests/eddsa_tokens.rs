@@ -222,7 +222,11 @@ async fn an_external_key_is_created_through_step_up_with_the_body_it_approved() 
     assert_eq!(pending.status, "pending");
     assert!(pending.page.ends_with("/step-up"));
     let assertion = client
-        .wait_for_step_up(pending.id, Duration::from_millis(10), Duration::from_secs(5))
+        .wait_for_step_up(
+            pending.id,
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+        )
         .await
         .unwrap();
     assert_eq!(assertion, "assertion-1");

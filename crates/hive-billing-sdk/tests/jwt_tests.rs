@@ -5,12 +5,12 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use base64::{
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use ed25519_dalek::{Signer, SigningKey};
-use hive_billing_sdk::{verify_session_token, SESSION_KEY_CERT_DOMAIN};
-use serde_json::{json, Value};
+use hive_billing_sdk::{SESSION_KEY_CERT_DOMAIN, verify_session_token};
+use serde_json::{Value, json};
 
 const NOW: i64 = 1_700_000_000;
 
