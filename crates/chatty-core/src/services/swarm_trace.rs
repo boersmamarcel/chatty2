@@ -578,7 +578,11 @@ impl SwarmTrace {
             nodes.push(next);
             stack.extend(self.tree.children(next).iter().copied());
         }
-        merge_lines(nodes.into_iter().flat_map(|n| self.tree.get(n).usage.iter()))
+        merge_lines(
+            nodes
+                .into_iter()
+                .flat_map(|n| self.tree.get(n).usage.iter()),
+        )
     }
 
     /// The root calls the turn made, in the order their runs first

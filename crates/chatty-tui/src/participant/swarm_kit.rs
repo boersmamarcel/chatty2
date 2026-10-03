@@ -2297,8 +2297,9 @@ impl KitRoot {
     /// from now on, as the session would hear it.
     pub(crate) fn watch_progress(
         &self,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<chatty_core::tools::invoke_agent_tool::InvokeAgentProgress>
-    {
+    ) -> tokio::sync::mpsc::UnboundedReceiver<
+        chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+    > {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         *self.progress_slot.lock() = Some(tx);
         rx

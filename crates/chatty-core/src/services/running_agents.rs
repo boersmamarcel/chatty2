@@ -238,8 +238,8 @@ pub fn render_text(rows: &[RunningAgent], now: SystemTime, book: Option<&PriceBo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::SessionEvent;
     use crate::models::message_types::ToolSource;
+    use crate::session::SessionEvent;
     use crate::tools::invoke_agent_tool::InvokeAgentProgress;
     use chatty_fabric::{CallChain, SwarmEvent, SwarmItem};
 
@@ -303,8 +303,16 @@ mod tests {
                 SessionEvent::TurnStarted,
                 started("lead"),
                 admitted("lead-0"),
-                batch("coder-0", &["root", "lead", "coder"], SwarmItem::TurnStarted),
-                batch("tester-0", &["root", "lead", "tester"], SwarmItem::TurnStarted),
+                batch(
+                    "coder-0",
+                    &["root", "lead", "coder"],
+                    SwarmItem::TurnStarted,
+                ),
+                batch(
+                    "tester-0",
+                    &["root", "lead", "tester"],
+                    SwarmItem::TurnStarted,
+                ),
                 batch(
                     "tester-0",
                     &["root", "lead", "tester"],
@@ -317,7 +325,11 @@ mod tests {
         running.update(
             "conv-b",
             "Write the docs",
-            trace(&[SessionEvent::TurnStarted, started("writer"), admitted("writer-0")]),
+            trace(&[
+                SessionEvent::TurnStarted,
+                started("writer"),
+                admitted("writer-0"),
+            ]),
         );
 
         let rows = running.rows();
@@ -351,7 +363,10 @@ mod tests {
             "{text}"
         );
         running.end("conv-b");
-        assert_eq!(render_text(&running.rows(), SystemTime::now(), None), NONE_RUNNING);
+        assert_eq!(
+            render_text(&running.rows(), SystemTime::now(), None),
+            NONE_RUNNING
+        );
     }
 
     #[test]
@@ -360,7 +375,11 @@ mod tests {
             SessionEvent::TurnStarted,
             started("lead"),
             admitted("lead-0"),
-            batch("coder-0", &["root", "lead", "coder"], SwarmItem::TurnStarted),
+            batch(
+                "coder-0",
+                &["root", "lead", "coder"],
+                SwarmItem::TurnStarted,
+            ),
             SessionEvent::Delegation(InvokeAgentProgress::Waiting {
                 id: "question-1".to_string(),
                 agent: "coder-0".to_string(),

@@ -1247,7 +1247,9 @@ impl Parked {
         };
         InvokeAgentProgress::Waiting {
             id: id.to_string(),
-            agent: asker.map_or(agent, |asker| asker.agent.as_str()).to_string(),
+            agent: asker
+                .map_or(agent, |asker| asker.agent.as_str())
+                .to_string(),
             on,
         }
     }

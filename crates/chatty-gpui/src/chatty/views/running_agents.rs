@@ -68,16 +68,13 @@ impl RunningAgentsModel {
                         conversation_id,
                         trace,
                     } => this.update(conversation_id, trace.clone(), cx),
+                    // A superseded stream's end is not this turn's (AGE-151).
                     StreamManagerEvent::StreamEnded {
                         conversation_id,
                         epoch,
                         ..
-                    } => {
-                        // A superseded stream's end is not this turn's
-                        // (AGE-151).
-                        if manager.read(cx).is_current_epoch(conversation_id, *epoch) {
-                            this.end(conversation_id, cx);
-                        }
+                    } if manager.read(cx).is_current_epoch(conversation_id, *epoch) => {
+                        this.end(conversation_id, cx);
                     }
                     _ => {}
                 })
@@ -314,7 +311,12 @@ fn agent_row(
                 .items_end()
                 .gap_0p5()
                 .child(div().text_xs().text_color(theme.foreground).child(elapsed))
-                .child(div().text_xs().text_color(theme.muted_foreground).child(spend)),
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(spend),
+                ),
         )
         .child(
             Button::new(ElementId::Name(format!("running-agent-stop-{ix}").into()))
@@ -429,5 +431,68 @@ impl Render for RunningAgentTranscript {
                 .child("This agent is no longer running.")
                 .into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: gpui's `test` macro would shadow `#[test]`.
+    use super::{RunningAgentsEvent, RunningAgentsModel};
+    use chatty_core::models::message_types::ToolSource;
+    use chatty_core::services::running_agents::Activity;
+    use chatty_core::services::swarm_trace::SwarmTrace;
+    use chatty_core::session::SessionEvent;
+    use chatty_core::tools::invoke_agent_tool::{InvokeAgentProgress, WaitingOn};
+    use gpui::AppContext as _;
+    use std::sync::Arc;
+
+    fn trace(waiting: bool) -> Arc<SwarmTrace> {
+        let mut trace = SwarmTrace::new();
+        trace.apply(&SessionEvent::TurnStarted);
+        trace.apply(&SessionEvent::Delegation(InvokeAgentProgress::Started {
+            agent_name: "lead".to_string(),
+            prompt: "go".to_string(),
+            source: ToolSource::Local,
+        }));
+        trace.apply(&SessionEvent::Delegation(InvokeAgentProgress::Admitted(
+            "lead-0".to_string(),
+        )));
+        if waiting {
+            trace.apply(&SessionEvent::Delegation(InvokeAgentProgress::Waiting {
+                id: "approval-1".to_string(),
+                agent: "lead-0".to_string(),
+                on: WaitingOn::Approval,
+            }));
+        }
+        Arc::new(trace)
+    }
+
+    /// The chip's numbers follow the conversations' swarms, and the app
+    /// hears about it only when they move.
+    #[gpui::test]
+    fn counts_follow_updates_and_ends(cx: &mut gpui::TestAppContext) {
+        let model = cx.new(RunningAgentsModel::new);
+        let moved = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = moved.clone();
+        cx.update(|cx| {
+            cx.subscribe(&model, move |_, _: &RunningAgentsEvent, _| {
+                seen.set(seen.get() + 1)
+            })
+            .detach()
+        });
+
+        model.update(cx, |m, cx| m.update("a", trace(false), cx));
+        model.update(cx, |m, cx| m.update("a", trace(false), cx));
+        model.update(cx, |m, cx| m.update("b", trace(true), cx));
+        model.read_with(cx, |m, _| {
+            assert_eq!(m.counts(), (2, 1));
+            assert_eq!(m.rows()[1].activity, Activity::Waiting(WaitingOn::Approval));
+        });
+        assert_eq!(moved.get(), 2, "the repeated update moved nothing");
+
+        model.update(cx, |m, cx| m.end("b", cx));
+        model.update(cx, |m, cx| m.end("a", cx));
+        model.read_with(cx, |m, _| assert_eq!(m.counts(), (0, 0)));
+        assert_eq!(moved.get(), 4);
     }
 }

@@ -487,8 +487,7 @@ impl ChattyApp {
 
         // The overview listens to the StreamManager itself; the app redraws
         // only when the footer chip's numbers move (TB-6).
-        let running_agents =
-            cx.new(crate::chatty::views::running_agents::RunningAgentsModel::new);
+        let running_agents = cx.new(crate::chatty::views::running_agents::RunningAgentsModel::new);
         cx.subscribe(&running_agents, |_, _, _event, cx| cx.notify())
             .detach();
 
