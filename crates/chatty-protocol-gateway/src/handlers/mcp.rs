@@ -166,11 +166,8 @@ async fn handle_tools_call(
         caller: None,
     };
 
-    // Pre-invocation credit check for paid modules only
-    if let Err(e) = module_call::check_credits(state, module_name).await {
-        return json_rpc_error(StatusCode::OK, id, -32000, e);
-    }
-    if let Err(e) = module_call::check_usage_reporting(state, module_name) {
+    // Credits (or a free call) and usage reporting, for paid modules only.
+    if let Err(e) = module_call::admit(state, module_name).await {
         return json_rpc_error(StatusCode::OK, id, -32000, e);
     }
 
