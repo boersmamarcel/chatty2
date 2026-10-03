@@ -94,6 +94,15 @@ pub fn install_hive_session(cx: &mut App) -> Arc<HiveSession> {
         apply_session_state(SessionState::Revoked, cx);
     }
     cx.set_global(GlobalHiveSession(session.clone()));
+    // A chatty-server checks the same login session (AGE-835), so hosted
+    // conversations authenticate with this one too. The store may not exist
+    // yet; `ChattyApp::new` hands it the session when it creates it.
+    if cx.has_global::<chatty_core::models::ConversationsStore>() {
+        let auth = session.clone();
+        cx.update_global::<chatty_core::models::ConversationsStore, _>(|store, _| {
+            store.set_hosted_auth(Some(auth));
+        });
+    }
 
     let mut states = session.subscribe();
     cx.spawn(async move |cx| {

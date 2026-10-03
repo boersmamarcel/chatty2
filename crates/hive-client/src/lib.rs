@@ -75,6 +75,6 @@ pub use error::ClientError;
 pub use metering::{CallUsage, ModuleMeter};
 pub use models::{BegunDownload, MAX_DOWNLOAD_BYTES, TokenPair};
 pub use secure_url::ensure_secure_url;
-pub use session::{HiveSession, SessionState};
+pub use session::{HiveSession, SessionState, send_authed};
 pub use usage::{UsageCollector, UsageCollectorConfig};
 pub use verify::{TrustLevel, VerifyError};

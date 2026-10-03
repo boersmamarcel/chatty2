@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::Arc;
+
+use hive_client::HiveSession;
 
 use crate::models::clarification_store::ClarificationAnswer;
 use crate::models::execution_approval_store::ApprovalDecision;
@@ -45,6 +48,10 @@ pub struct ConversationsStore {
     /// about where a conversation runs. A conversation always has a session;
     /// it has an entry here as well only while it runs elsewhere.
     hosted: HashMap<String, HostedSession>,
+    /// The Hive sign-in every hosted client authenticates with (AGE-835): a
+    /// `chatty-server` validates the same login session the registry issued.
+    /// `None` until the frontend installs its session.
+    hosted_auth: Option<Arc<HiveSession>>,
     /// Tracks access order for LRU eviction. Most recently used at the back.
     access_order: VecDeque<String>,
     active_conversation_id: Option<String>,
@@ -59,6 +66,7 @@ impl ConversationsStore {
             metadata: Vec::new(),
             sessions: HashMap::new(),
             hosted: HashMap::new(),
+            hosted_auth: None,
             access_order: VecDeque::new(),
             active_conversation_id: None,
             streaming_ids: HashSet::new(),
@@ -181,8 +189,9 @@ impl ConversationsStore {
                 server_url,
                 remote_id,
             }) => {
-                self.hosted
-                    .insert(id.clone(), HostedSession::new(server_url, remote_id));
+                let client =
+                    HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
+                self.hosted.insert(id.clone(), client);
             }
             _ => {
                 self.hosted.remove(&id);
@@ -191,6 +200,21 @@ impl ConversationsStore {
         self.sessions.insert(id.clone(), session);
         self.touch_access_order(&id);
         self.evict_if_needed();
+    }
+
+    /// Authenticate every hosted client, present and future, as the user
+    /// signed in to `auth`.
+    pub fn set_hosted_auth(&mut self, auth: Option<Arc<HiveSession>>) {
+        for client in self.hosted.values_mut() {
+            client.set_auth(auth.clone());
+        }
+        self.hosted_auth = auth;
+    }
+
+    /// The Hive sign-in hosted requests authenticate with, for a move that
+    /// talks to a server before any hosted client exists.
+    pub fn hosted_auth(&self) -> Option<Arc<HiveSession>> {
+        self.hosted_auth.clone()
     }
 
     /// The hosted client for a conversation, when its turns run on a server.
@@ -228,8 +252,9 @@ impl ConversationsStore {
                 server_url,
                 remote_id,
             } => {
-                self.hosted
-                    .insert(id.to_string(), HostedSession::new(server_url, remote_id));
+                let client =
+                    HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
+                self.hosted.insert(id.to_string(), client);
             }
             ConversationMode::Local => {
                 self.hosted.remove(id);
