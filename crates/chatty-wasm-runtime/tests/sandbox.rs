@@ -1178,12 +1178,12 @@ fn sandbox_1_14_a_grant_the_module_did_not_request_fails_the_load() {
 }
 
 /// A module granted what it requests reads through it; so does one served
-/// on its own with the grants it requested.
+/// on its own (`config` is a default there).
 #[tokio::test(flavor = "multi_thread")]
 async fn sandbox_1_14_granted_capabilities_are_linked() {
     for manifest in [
         ModuleManifest::new("config-reader").with_grants([Capability::Config]),
-        ModuleManifest::new("config-reader").with_requested_grants(),
+        ModuleManifest::new("config-reader").with_specless_grants([]),
     ] {
         let mut m = load(
             "config-reader",

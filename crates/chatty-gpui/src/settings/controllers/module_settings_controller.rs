@@ -20,9 +20,9 @@ use chatty_core::settings::models::extensions_store::{
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::models_store::{ModelsModel, resolve_model_query};
 use chatty_core::settings::models::providers_store::ProviderModel;
-use chatty_module_registry::{ModuleManifest, ModuleRegistry};
+use chatty_module_registry::{ModuleGrants, ModuleManifest, ModuleRegistry};
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
+use chatty_wasm_runtime::{Capability, CompletionResponse, LlmProvider, Message, ResourceLimits};
 use gpui::{App, AsyncApp};
 use std::collections::HashSet;
 use std::path::Path;
@@ -144,9 +144,13 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
         let requested = validation_registry
             .requested_capabilities(&manifest.name)
             .map(|caps| caps.iter().map(|c| c.name().to_string()).collect());
+        let granted = ModuleGrants::read(&dir)
+            .map(|g| g.granted)
+            .unwrap_or_default();
         DiscoveredModuleEntry {
             trust_level,
             requested,
+            granted,
             ..discovered_entry(&dir, manifest, ModuleLoadStatus::Loaded)
         }
     });
@@ -208,6 +212,7 @@ fn discovered_entry(
         execution_mode: manifest.execution_mode.to_string(),
         trust_level: None,
         requested: None,
+        granted: Vec::new(),
     }
 }
 
@@ -225,6 +230,7 @@ fn invalid_manifest_entry(dir: &Path, status: ModuleLoadStatus) -> DiscoveredMod
         execution_mode: "local".to_string(),
         trust_level: None,
         requested: None,
+        granted: Vec::new(),
     }
 }
 
@@ -363,6 +369,29 @@ pub fn toggle_module_runtime(cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Grant or revoke `capability` (`llm`, `file`, `billing`) for the module in
+/// `directory_name` (Settings → Plugins, SEC-11, AGE-815), then rescan so the
+/// gateway links the module against the new set. A module served with no
+/// agent spec gets nothing gated until it is granted here.
+pub fn set_module_grant(directory_name: &str, capability: &str, on: bool, cx: &mut App) {
+    let Some(capability) = Capability::from_name(capability) else {
+        error!(capability, "Unknown capability in a module grant");
+        return;
+    };
+    let dir = Path::new(&cx.global::<ModuleSettingsModel>().module_dir).join(directory_name);
+    let result = ModuleGrants::read(&dir).and_then(|mut grants| {
+        grants.set(capability, on);
+        grants.write(&dir).map_err(Into::into)
+    });
+    match result {
+        Ok(()) => {
+            info!(module = directory_name, %capability, on, "Module grant changed");
+            refresh_runtime(cx);
+        }
+        Err(e) => error!(error = ?e, module = directory_name, "Failed to save module grant"),
+    }
 }
 
 pub fn refresh_runtime(cx: &mut App) {
@@ -675,6 +704,7 @@ mod refresh_runtime_tests {
             execution_mode: "local".to_string(),
             trust_level: None,
             requested: None,
+            granted: Vec::new(),
         }
     }
 
