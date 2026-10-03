@@ -1,7 +1,7 @@
 //! Core `ProtocolGateway` implementation — builds the axum router and manages
 //! the server lifecycle.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use chatty_module_registry::ModuleRegistry;
-use hive_client::{CreditGuard, HiveRegistryClient, UsageCollector};
+use hive_client::{HiveRegistryClient, ModuleMeter};
 
 use crate::access::{self, GatewayToken};
 use crate::handlers::a2a;
@@ -34,14 +34,11 @@ use chatty_fabric::{CallPolicy, EdgeLog, Transport, UsagePricer};
 #[derive(Clone)]
 pub struct GatewayState {
     pub registry: Arc<RwLock<ModuleRegistry>>,
-    pub usage: Option<Arc<UsageCollector>>,
-    pub credit_guard: Option<Arc<CreditGuard>>,
+    /// Admits and reports every module call: the same meter a spec's
+    /// plugins are called through (AGE-837).
+    pub meter: Arc<ModuleMeter>,
     pub hive_client: Option<Arc<HiveRegistryClient>>,
     pub runner_url: Option<String>,
-    /// Set of module names that require credits (paid modules).
-    /// Credit checks are skipped for modules NOT in this set.
-    /// An empty set means no paid modules — all credit checks are skipped.
-    pub paid_modules: Arc<HashSet<String>>,
     /// Processes registered over the participant socket (ADR-0011), served
     /// at `/a2a/{name}` and consulted first.
     pub participants: ParticipantRegistry,
@@ -144,11 +141,9 @@ pub struct ProtocolGateway {
     runtime_dir: Option<PathBuf>,
     #[cfg(unix)]
     server: Option<access::SocketServer>,
-    usage: Option<Arc<UsageCollector>>,
-    credit_guard: Option<Arc<CreditGuard>>,
+    meter: Arc<ModuleMeter>,
     hive_client: Option<Arc<HiveRegistryClient>>,
     runner_url: Option<String>,
-    paid_modules: HashSet<String>,
     participants: ParticipantRegistry,
     /// Where local participants register. `None` disables the socket, which
     /// is the default: only an embedder that wants child processes to reach
@@ -181,11 +176,9 @@ impl ProtocolGateway {
             runtime_dir: None,
             #[cfg(unix)]
             server: None,
-            usage: None,
-            credit_guard: None,
+            meter: Arc::default(),
             hive_client: None,
             runner_url: None,
-            paid_modules: HashSet::new(),
             participants: ParticipantRegistry::new(),
             participant_socket: None,
             participant_task: None,
@@ -211,15 +204,10 @@ impl ProtocolGateway {
         &self.token
     }
 
-    /// Attach a [`UsageCollector`] so that WASM invocations are automatically reported.
-    pub fn with_usage_collector(mut self, collector: Arc<UsageCollector>) -> Self {
-        self.usage = Some(collector);
-        self
-    }
-
-    /// Attach a [`CreditGuard`] for pre-invocation credit checks on paid modules.
-    pub fn with_credit_guard(mut self, guard: Arc<CreditGuard>) -> Self {
-        self.credit_guard = Some(guard);
+    /// Admit and report module calls through `meter`: which modules are
+    /// paid, and the credit guard and usage collector that bill them.
+    pub fn with_meter(mut self, meter: Arc<ModuleMeter>) -> Self {
+        self.meter = meter;
         self
     }
 
@@ -232,15 +220,6 @@ impl ProtocolGateway {
     /// Set the runner URL for remote module execution.
     pub fn with_runner_url(mut self, url: impl Into<String>) -> Self {
         self.runner_url = Some(url.into());
-        self
-    }
-
-    /// Specify which modules require credits (paid modules).
-    ///
-    /// Credit checks are only applied to modules in this set.
-    /// Free modules are always allowed regardless of credit balance.
-    pub fn with_paid_modules(mut self, modules: HashSet<String>) -> Self {
-        self.paid_modules = modules;
         self
     }
 
@@ -345,11 +324,9 @@ impl ProtocolGateway {
     pub fn build_router(&self) -> Router {
         let state = GatewayState {
             registry: Arc::clone(&self.registry),
-            usage: self.usage.clone(),
-            credit_guard: self.credit_guard.clone(),
+            meter: Arc::clone(&self.meter),
             hive_client: self.hive_client.clone(),
             runner_url: self.runner_url.clone(),
-            paid_modules: Arc::new(self.paid_modules.clone()),
             participants: self.participants.clone(),
             runners: Arc::new(self.runners.clone()),
             sse_sessions: SseSessions::default(),

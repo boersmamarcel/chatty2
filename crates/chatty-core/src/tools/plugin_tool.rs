@@ -33,6 +33,17 @@
 //!   [`PluginLlmProvider`] on the calling agent's model; the calls it served
 //!   are drained into the turn by `stream_prompt` as their own usage line,
 //!   attributed to the plugin ([`TokenUsage::plugin`](crate::models::token_usage::TokenUsage::plugin)).
+//! * **Metering** (AGE-837). Every call goes through the host's
+//!   [`ModuleMeter`] — the same one the desktop's MCP gateway admits and
+//!   reports its calls with: a paid plugin's call needs a free call left or
+//!   credits before it runs, and is reported to Hive after it answers. A
+//!   host with no meter knows no paid modules.
+//! * **Not wired: the `billing` host import.** A plugin granted `billing`
+//!   still gets no [`BillingProvider`](chatty_wasm_runtime::BillingProvider),
+//!   so its `acquire-session` answers "billing not configured on host".
+//!   Per-call pricing does not need it (the meter bills the call); a
+//!   plugin-driven session (bill by what the guest reserves) is a pricing
+//!   model, and waits for ADR-0024.
 
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -40,7 +51,12 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result, bail};
 use chatty_module_registry::ModuleManifest;
 use chatty_wasm_runtime::{
-    Engine, LlmProvider, ResourceLimits, ToolCallRequest, UnrequestedGrant, WasmModule,
+    Engine, InvocationMetrics, LlmProvider, ResourceLimits, ToolCallRequest, UnrequestedGrant,
+    WasmModule,
+};
+use hive_client::{
+    CallUsage, CreditGuard, HiveRegistryClient, HiveSession, ModuleMeter, UsageCollector,
+    UsageCollectorConfig,
 };
 use rig_agent::tool::{DynamicTool, ToolOutput};
 use tokio::sync::Mutex;
@@ -49,6 +65,8 @@ use crate::agent_spec::{Grant, PluginSpec, SpecError, SpecErrors};
 use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
 use crate::services::plugin_llm::{PluginLlmProvider, PluginUsage};
 use crate::settings::models::execution_settings::ApprovalMode;
+use crate::settings::models::extensions_store::ExtensionsModel;
+use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
@@ -100,6 +118,35 @@ pub struct PluginHost {
     /// agent's.
     pub models: Vec<ModelConfig>,
     pub providers: Vec<ProviderConfig>,
+    /// What admits and reports each plugin call (AGE-837): which modules
+    /// are paid, and the Hive credit guard and usage collector. The
+    /// default knows no paid modules.
+    pub meter: Arc<ModuleMeter>,
+}
+
+/// The meter for a process that runs plugins but does not own the user's
+/// Hive sign-in: the TUI, and a desktop worker running a delegated spec
+/// (AGE-837). Paid modules are the installed ones priced `paid`; their
+/// calls are admitted by a credit guard and reported by the process's usage
+/// collector, both on a [borrowed](HiveSession::borrowed) session — this
+/// process must not rotate a refresh token the desktop holds. Each call's
+/// report is flushed at once: a worker may exit before a periodic flush.
+pub async fn borrowed_meter(
+    extensions: &ExtensionsModel,
+    hive: &HiveSettingsModel,
+) -> ModuleMeter {
+    let session = Arc::new(HiveSession::borrowed(
+        hive.registry_url.clone(),
+        hive.token_pair(),
+    ));
+    let client =
+        Arc::new(HiveRegistryClient::new(&hive.registry_url).with_session(Arc::clone(&session)));
+    let usage = UsageCollector::global(&hive.registry_url, UsageCollectorConfig::default());
+    usage.set_session(session).await;
+    ModuleMeter::new(extensions.paid_wasm_modules())
+        .with_credit_guard(Arc::new(CreditGuard::with_default_ttl(client)))
+        .with_usage_collector(usage)
+        .flushing_each_call()
 }
 
 /// One tool a plugin offers, as the agent advertises it.
@@ -117,6 +164,8 @@ pub struct PluginToolDef {
 pub struct LoadedPlugin {
     /// The module name, as the spec names it.
     pub name: String,
+    /// The installed module's version: what its calls are reported under.
+    pub version: String,
     /// `[module].description`, for the `load_tools` catalog.
     pub description: String,
     pub tools: Vec<PluginToolDef>,
@@ -127,6 +176,7 @@ pub struct LoadedPlugin {
     /// What the spec granted it.
     pub grants: Vec<Grant>,
     module: Arc<Mutex<WasmModule>>,
+    meter: Arc<ModuleMeter>,
 }
 
 /// The one engine every plugin instance in this process is compiled on.
@@ -308,12 +358,14 @@ pub fn load_plugin(
 
     Ok(LoadedPlugin {
         name: manifest.name,
+        version: manifest.version,
         description: manifest.description,
         tools,
         usage,
         requested,
         grants: spec.grants.clone(),
         module: Arc::new(Mutex::new(module)),
+        meter: Arc::clone(&host.meter),
     })
 }
 
@@ -381,7 +433,11 @@ pub struct PluginApprovals {
 #[derive(Clone)]
 pub struct PluginTool {
     def: PluginToolDef,
+    /// The plugin's module name and version, as the meter knows them.
+    plugin: String,
+    version: String,
     module: Arc<Mutex<WasmModule>>,
+    meter: Arc<ModuleMeter>,
     /// `Some` when the plugin's grants make every call ask first.
     approvals: Option<PluginApprovals>,
 }
@@ -396,7 +452,10 @@ impl PluginTool {
             .iter()
             .map(|def| Self {
                 def: def.clone(),
+                plugin: plugin.name.clone(),
+                version: plugin.version.clone(),
                 module: Arc::clone(&plugin.module),
+                meter: Arc::clone(&plugin.meter),
                 approvals: approvals.clone(),
             })
             .collect()
@@ -406,8 +465,9 @@ impl PluginTool {
         &self.def
     }
 
-    /// Run the tool: approval first when the grants ask for it, then
-    /// `invoke-tool` under the module's own lock and per-call limits.
+    /// Run the tool: approval first when the grants ask for it, then the
+    /// meter's admission, then `invoke-tool` under the module's own lock
+    /// and per-call limits; a call that answered is reported to the meter.
     pub async fn call(&self, args: serde_json::Value) -> Result<String, ToolError> {
         let args = match args {
             serde_json::Value::Null => "{}".to_string(),
@@ -436,6 +496,10 @@ impl PluginTool {
                 ));
             }
         }
+        self.meter
+            .admit(&self.plugin)
+            .await
+            .map_err(ToolError::OperationFailed)?;
         let call = ToolCallRequest {
             name: self.def.tool.clone(),
             arguments_json: args,
@@ -447,11 +511,16 @@ impl PluginTool {
         // `ToolResult.usage` is the guest's own account of what it spent
         // through `llm::complete`; the host already counted each of those
         // calls in the plugin's `PluginUsage`, so it is not added again.
-        module
-            .invoke_tool(call)
-            .await
+        let result = module.invoke_tool(call).await;
+        let metrics = module.last_invocation_metrics();
+        drop(module);
+        let content = result
             .map(|result| result.content)
-            .map_err(|e| ToolError::OperationFailed(format!("{e:#}")))
+            .map_err(|e| ToolError::OperationFailed(format!("{e:#}")))?;
+        self.meter
+            .record(&self.plugin, &self.version, call_usage(metrics.as_ref()))
+            .await;
+        Ok(content)
     }
 
     /// The rig tool: the plugin's name/schema, errors through
@@ -473,6 +542,16 @@ impl PluginTool {
                     .map_err(|e| map_tool_error(&tool.def.name, e))
             })
         })
+    }
+}
+
+/// The runtime's measurements of a call, as the meter reports them.
+fn call_usage(metrics: Option<&InvocationMetrics>) -> CallUsage {
+    CallUsage {
+        input_tokens: metrics.and_then(|m| m.input_tokens.map(|t| t as i32)),
+        output_tokens: metrics.and_then(|m| m.output_tokens.map(|t| t as i32)),
+        fuel_consumed: metrics.map(|m| m.fuel_consumed),
+        execution_ms: metrics.map(|m| m.execution_ms),
     }
 }
 

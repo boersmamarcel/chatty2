@@ -471,6 +471,14 @@ impl HiveRegistryClient {
         .await
     }
 
+    /// The signed-in user's recorded calls per module: what a publisher's
+    /// free tier is counted against.
+    pub async fn get_my_modules_usage(
+        &self,
+    ) -> Result<crate::models::MyModuleUsageList, ClientError> {
+        self.get_json("/api/usage/me/modules", &()).await
+    }
+
     // ── Billing sessions (Phase 3b) ────────────────────────────────────────
 
     /// Acquire a billing session before module invocation.
