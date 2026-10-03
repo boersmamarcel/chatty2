@@ -1,0 +1,9 @@
+store_id,city,region,currency,utc_offset_hours
+S01,Amsterdam,EMEA,EUR,1
+S02,Berlin,EMEA,EUR,1
+S03,London,EMEA,GBP,0
+S04,New York,AMER,USD,-5
+S05,Chicago,AMER,USD,-6
+S06,Tokyo,APAC,JPY,9
+S07,Sydney,APAC,AUD,11
+S08,Toronto,AMER,CAD,-5

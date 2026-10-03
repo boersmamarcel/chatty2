@@ -1,0 +1,76 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "S03: meter swap M03->M08 on 09-14 09:00Z, M08 multiplier 2, M03 ghost readings and M08 pre-install pulses excluded",
+      "expect": 49146.93,
+      "tol": 0.5
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "peak share: local hours per site offset, 22:00 hour inclusive, weekdays only, multipliers",
+      "expect": 68.1,
+      "tol": 0.02
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "number",
+      "desc": "S05 bill: CT multiplier 40, tariff T3 peak/off-peak split, 30 days standing charge",
+      "expect": 17116.83,
+      "tol": 0.5
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "text",
+      "desc": "max site hour: multiplier decides (S05 raw readings are small); X spikes excluded",
+      "expect": "S05"
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "number",
+      "desc": "S06 missing hours: UTC-4 window of 720 local hours, gaps plus current-X intervals (X later replaced by E counts as valid)",
+      "expect": 37,
+      "tol": 0
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "text",
+      "desc": "peak day: per-site local dates, all meters with multipliers",
+      "expect": "2026-09-17"
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "estimated kWh: E rows later replaced by A do not count; X replaced by E does",
+      "expect": 8061.48,
+      "tol": 0.5
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "S01 weekend average: local weekend dates (8 days), UTC+2 boundaries",
+      "expect": 508.46,
+      "tol": 0.05
+    }
+  ]
+}

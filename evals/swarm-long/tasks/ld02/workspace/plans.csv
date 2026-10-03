@@ -1,0 +1,7 @@
+plan_code,tier,billing_period,list_price_usd
+STARTER-M,starter,monthly,49
+STARTER-A,starter,annual,490
+TEAM-M,team,monthly,199
+TEAM-A,team,annual,1990
+BUSINESS-M,business,monthly,799
+BUSINESS-A,business,annual,7990

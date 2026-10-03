@@ -1,0 +1,65 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: loop.last/revindex wrong, generators crash, add previtem/nextitem/cycle",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_loop",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: whitespace control strips newlines and works on all tag kinds",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_whitespace",
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: escape order and apostrophe, Markup concatenation/join, safe and escape filters",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: 1-based positions with CRLF/CR line breaks and name:line:col: message format",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: round half away from zero on the decimal value; filesizeformat boundaries and rounding",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_numeric",
+        "tests.test_issue5"
+      ]
+    },
+    {
+      "desc": "issue 6: template name normalisation, .. rejection, normalised cache keys",
+      "id": "P6",
+      "kind": "tests",
+      "modules": [
+        "tests.test_loaders",
+        "tests.test_issue6"
+      ]
+    },
+    {
+      "desc": "issue 7: for-loop if condition with filtered loop counters and else",
+      "id": "P7",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue7"
+      ]
+    }
+  ],
+  "type": "parts"
+}

@@ -30,6 +30,7 @@ Written for Python 3.6+: this workstation's pyenv default is 3.6.
 
 import argparse
 import datetime
+import fcntl
 import hashlib
 import http.client
 import http.server
@@ -194,7 +195,8 @@ class Meter(object):
     With `metrics_url` set it first waits, up to `hold_max_s`, while the
     server's running + waiting requests are at `throttle_max` or more."""
 
-    def __init__(self, upstream, metrics_url=None, throttle_max=2, hold_max_s=90.0):
+    def __init__(self, upstream, metrics_url=None, throttle_max=2, hold_max_s=90.0,
+                 lock_path=None):
         parts = urlsplit(upstream)
         self.host = parts.hostname
         self.port = parts.port or (443 if parts.scheme == "https" else 80)
@@ -203,6 +205,10 @@ class Meter(object):
         self.metrics_url = metrics_url
         self.throttle_max = throttle_max
         self.hold_max_s = hold_max_s
+        # Several bench processes (and a team's parallel workers) share one
+        # server: the check-then-send gap is serialised through this file
+        # lock, so two of them cannot both see a free slot and both take it.
+        self.lock_path = lock_path
         self.records = []
         self.lock = threading.Lock()
         meter = self
@@ -238,7 +244,18 @@ class Meter(object):
         length = int(handler.headers.get("Content-Length") or 0)
         body = handler.rfile.read(length) if length else None
         is_chat = handler.path.endswith("/chat/completions")
-        held = self.hold() if is_chat else 0.0
+        slot = None
+        if is_chat and self.metrics_url and self.lock_path:
+            slot = open(self.lock_path, "a")
+            fcntl.flock(slot, fcntl.LOCK_EX)
+        try:
+            held = self.hold() if is_chat else 0.0
+            self._forward(handler, body, is_chat, held, slot)
+        finally:
+            if slot is not None:
+                slot.close()
+
+    def _forward(self, handler, body, is_chat, held, slot):
         path = handler.path
         if path.startswith("/v1"):
             path = self.prefix + path[3:]
@@ -257,6 +274,11 @@ class Meter(object):
         except OSError as error:
             handler.send_error(502, "swarm-bench meter: %s" % error)
             return
+        finally:
+            # The server has the request (it answers with headers once it
+            # schedules it): the next caller may check the load now.
+            if slot is not None:
+                fcntl.flock(slot, fcntl.LOCK_UN)
         handler.send_response(response.status)
         content_type = re.sub(r"[\r\n]", "", response.getheader("Content-Type") or "")
         if content_type:
@@ -283,8 +305,12 @@ class Meter(object):
             usage = self.usage_of(b"".join(whole))
         upstream.close()
         if is_chat:
+            error = None
+            if response.status >= 400:
+                error = b"".join(whole)[:400].decode("utf-8", "replace")
             with self.lock:
                 self.records.append({
+                    "error": error,
                     "start": started, "end": time.time(), "held_s": held,
                     "status": response.status,
                     "input": (usage or {}).get("prompt_tokens"),
@@ -321,6 +347,12 @@ class Meter(object):
             "output_tokens": total("output"),
             "cached_tokens": total("cached"),
             "held_s": round(sum(r["held_s"] for r in calls), 3),
+            # Context pressure (EV-7): the largest prompt sent, and the calls
+            # the server refused for exceeding its context window.
+            "max_input_tokens": max([r["input"] or 0 for r in calls] or [0]),
+            "context_errors": sum(1 for r in calls if r.get("error") and
+                                  re.search(r"context|too long|max_model_len|maximum", r["error"], re.I)),
+            "errors": [r["error"] for r in calls if r.get("error")][:5],
         }
 
 
@@ -460,6 +492,7 @@ def run_one(args, task, arm, env, meter, scratch, out_dir):
         "exit_code": code, "started_at": started_at,
         "wall_ms": int(round((end - start) * 1000)), "waited_before_s": round(waited, 1),
         "pass": bool(check.get("pass")), "check": check,
+        "score": check.get("score", 1.0 if check.get("pass") else 0.0),
         "usage": usage, "meter": meter.between(start, end),
         "worker_branches": sorted(b for b in branches if b.startswith("sub-agent/")),
         "complete": True,
@@ -494,6 +527,11 @@ def parse_args(argv):
     p.add_argument("--metrics-url", help="vLLM /metrics for the throttle "
                    "(default: derived from --base-url for openai-compat)")
     p.add_argument("--throttle-max", type=int, default=2)
+    p.add_argument("--hold-max-s", type=float, default=90.0,
+                   help="the longest a model request waits for a free server slot")
+    p.add_argument("--throttle-lock", default=os.path.join(tempfile.gettempdir(), "swarm-bench-throttle.lock"),
+                   help="a lock file shared by every bench process on this host")
+    p.add_argument("--prereg", default=PREREG, help="the pre-registration this run follows")
     p.add_argument("--keep-work", action="store_true", help="keep the scratch workspaces")
     args = p.parse_args(argv)
     if args.provider == "fake" and not args.base_url:
@@ -526,7 +564,8 @@ def main(argv):
         "max_turns_single": args.max_turns, "max_duration": args.max_duration,
         "family_preset": FAMILY_PRESET,
         "tasks": [t["name"] for t in tasks], "arms": list(arms),
-        "prereg_sha256": sha256_file(PREREG) if os.path.isfile(PREREG) else None,
+        "prereg": os.path.relpath(os.path.abspath(args.prereg), ROOT),
+        "prereg_sha256": sha256_file(args.prereg) if os.path.isfile(args.prereg) else None,
         "tasks_sha256": sha256_tree(args.tasks),
         "chatty_tui": args.chatty_tui,
     }
@@ -552,7 +591,8 @@ def main(argv):
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2, sort_keys=True)
 
-    meter = Meter(args.base_url, metrics_url=args.metrics_url, throttle_max=args.throttle_max)
+    meter = Meter(args.base_url, metrics_url=args.metrics_url, throttle_max=args.throttle_max,
+                  hold_max_s=args.hold_max_s, lock_path=args.throttle_lock)
     scratch = tempfile.mkdtemp(prefix="swarm-bench-")
     home = os.path.join(scratch, "home")
     write_home(home, args, meter.url)
@@ -581,8 +621,8 @@ def main(argv):
                     continue
                 log("%s/%s: running" % (task["name"], arm))
                 result = run_one(args, task, arm, env, meter, scratch, out_dir)
-                log("%s/%s: %s in %.0f s, %d calls, %d+%d tokens (%s)" % (
-                    task["name"], arm, "PASS" if result["pass"] else "fail",
+                log("%s/%s: %s (score %.2f) in %.0f s, %d calls, %d+%d tokens (%s)" % (
+                    task["name"], arm, "PASS" if result["pass"] else "fail", result["score"],
                     result["wall_ms"] / 1000.0, result["meter"]["calls"],
                     result["meter"]["input_tokens"], result["meter"]["output_tokens"],
                     result["check"].get("reason", "")[:80]))

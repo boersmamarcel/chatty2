@@ -1,0 +1,106 @@
+{
+  "type": "parts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "archive-migration-runbook.md",
+    "competitor-vendor-skyvault.md",
+    "dpa-v1.md",
+    "dpa-v2.md",
+    "faq-vendor-management.md",
+    "finance-budget-notes.md",
+    "it-onboarding-plan.md",
+    "legal-review-checklist.md",
+    "msa-v1.md",
+    "msa-v2.md",
+    "msa-v3.md",
+    "order-form-1.md",
+    "order-form-2.md",
+    "order-form-draft-0.md",
+    "procurement-policy-excerpt.md",
+    "procurement-wiki-vendor-terms.md",
+    "quarterly-ops-review.md",
+    "security-guild-notes.md",
+    "security-questionnaire-2025.md",
+    "soc2-letter-2025.md",
+    "steering-notes-2026-01.md",
+    "steering-notes-2026-02.md",
+    "steering-notes-2026-03.md",
+    "subprocessor-list-v3.md",
+    "subprocessor-list-v4.md",
+    "vendor-intro-call-notes.md",
+    "wiki-sources-of-truth.md"
+  ],
+  "parts": [
+    {
+      "id": "F1",
+      "kind": "fact",
+      "desc": "MSA v3 effective 1 March 2026 (not v2 / 2025-01-15)",
+      "all": [
+        "v(ersion)?\\s*3|third version",
+        "2026-03-01|1(st)?\\s+March\\s+2026|March\\s+1(st)?,?\\s+2026|01[./]03[./]2026"
+      ]
+    },
+    {
+      "id": "F2",
+      "kind": "fact",
+      "desc": "OF1 184,000 + OF2 36,500 = 220,500",
+      "all": [
+        "220[,.\\s']?500"
+      ]
+    },
+    {
+      "id": "F3",
+      "kind": "fact",
+      "desc": "90 days notice (signed MSA beats wiki 60)",
+      "all": [
+        "\\b90\\b|ninety"
+      ]
+    },
+    {
+      "id": "F4",
+      "kind": "fact",
+      "desc": "Effective 2026-02-10 + 45d = commencement 2026-03-27; +24m, last day 2028-03-26",
+      "all": [
+        "2028-03-26|26(th)?\\s+March\\s+2028|March\\s+26(th)?,?\\s+2028|26[./]03[./]2028"
+      ]
+    },
+    {
+      "id": "F5",
+      "kind": "fact",
+      "desc": "eu-central-1 (DPA v2 beats questionnaire/DPA v1 eu-west-1)",
+      "all": [
+        "eu-central-1|Frankfurt"
+      ]
+    },
+    {
+      "id": "F6",
+      "kind": "fact",
+      "desc": "latest SOC 2 period ended 30 Sep 2025",
+      "all": [
+        "2025-09-30|30(th)?\\s+Sep(tember)?\\.?,?\\s+2025|Sep(tember)?\\.?\\s+30(th)?,?\\s+2025|30[./]09[./]2025"
+      ]
+    },
+    {
+      "id": "F7",
+      "kind": "fact",
+      "desc": "cap 1.5 x 220,500 = 330,750",
+      "all": [
+        "330[,.\\s']?750"
+      ]
+    },
+    {
+      "id": "F8",
+      "kind": "fact",
+      "desc": "Brightline Analytics (v4 list, not Corvid in v3)",
+      "all": [
+        "Brightline"
+      ]
+    },
+    {
+      "id": "C",
+      "kind": "citations",
+      "desc": "cites >=5 corpus files",
+      "min_files": 5
+    }
+  ]
+}

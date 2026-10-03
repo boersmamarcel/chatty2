@@ -1,0 +1,105 @@
+{
+  "type": "parts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "action-items-register-v1.md",
+    "action-items-register-v2.md",
+    "alerting-review.md",
+    "capacity-planning-notes.md",
+    "change-advisory-board-notes.md",
+    "customer-impact-report.md",
+    "faq-incident-management.md",
+    "oncall-handbook-excerpt.md",
+    "other-incident-INC-2204.md",
+    "pager-log-export.md",
+    "postmortem-draft-v1.md",
+    "postmortem-draft-v2.md",
+    "postmortem-final-v3.md",
+    "postmortem-template.md",
+    "quarterly-reliability-review.md",
+    "reliability-council-notes-2026-06.md",
+    "reliability-council-notes-2026-07.md",
+    "reliability-council-notes-2026-08.md",
+    "runbook-token-vault.md",
+    "security-guild-notes.md",
+    "severity-policy-v2.md",
+    "severity-policy-v3.md",
+    "sla-credit-policy-v1.md",
+    "sla-credit-policy-v2.md",
+    "slack-export-incident-channel.md",
+    "support-playbook.md",
+    "timeline-final.md"
+  ],
+  "parts": [
+    {
+      "id": "F1",
+      "kind": "fact",
+      "desc": "impact began 14:07 UTC (pager/chat in CEST say 16:07)",
+      "all": [
+        "14:07"
+      ]
+    },
+    {
+      "id": "F2",
+      "kind": "fact",
+      "desc": "14:07->15:49 = 102 minutes (draft v1 15:31, v2 84 min)",
+      "all": [
+        "\\b102\\b|1\\s*h(ours?|r)?\\s*(and\\s*)?42|1:42"
+      ]
+    },
+    {
+      "id": "F3",
+      "kind": "fact",
+      "desc": "expired certificate, not DB failover",
+      "all": [
+        "expired.{0,60}certificate|certificate.{0,60}expir"
+      ]
+    },
+    {
+      "id": "F4",
+      "kind": "fact",
+      "desc": "18,420 + 7,315 = 25,735",
+      "all": [
+        "25[,.\\s']?735"
+      ]
+    },
+    {
+      "id": "F5",
+      "kind": "fact",
+      "desc": "15% (policy v2) of 1,240,000 = 186,000 (v1 10% = 124,000)",
+      "all": [
+        "186[,.\\s']?000"
+      ]
+    },
+    {
+      "id": "F6",
+      "kind": "fact",
+      "desc": "AP-4 due 2026-08-14 (register v2, not v1 08-07)",
+      "all": [
+        "2026-08-14|14(th)?\\s+Aug(ust)?\\.?,?\\s+2026|Aug(ust)?\\.?\\s+14(th)?,?\\s+2026|14[./]08[./]2026"
+      ]
+    },
+    {
+      "id": "F7",
+      "kind": "fact",
+      "desc": "#platform-alerts-old",
+      "all": [
+        "platform-alerts-old"
+      ]
+    },
+    {
+      "id": "F8",
+      "kind": "fact",
+      "desc": "SEV-1 final (policy v3), not SEV-2",
+      "all": [
+        "SEV[- ]?1\\b"
+      ]
+    },
+    {
+      "id": "C",
+      "kind": "citations",
+      "desc": "cites >=5 corpus files",
+      "min_files": 5
+    }
+  ]
+}

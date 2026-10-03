@@ -1,0 +1,13 @@
+{
+  "title": "stencil: fix seven issues in a small text templating engine",
+  "package": "stencil",
+  "issues": [
+    {"n": 1, "title": "loop.last/revindex wrong, generators crash, add previtem/nextitem/cycle", "visible": ["tests.test_loop"]},
+    {"n": 2, "title": "whitespace control strips newlines and works on all tag kinds", "visible": ["tests.test_whitespace"]},
+    {"n": 3, "title": "escape order and apostrophe, Markup concatenation/join, safe and escape filters", "visible": []},
+    {"n": 4, "title": "1-based positions with CRLF/CR line breaks and name:line:col: message format", "visible": []},
+    {"n": 5, "title": "round half away from zero on the decimal value; filesizeformat boundaries and rounding", "visible": ["tests.test_numeric"]},
+    {"n": 6, "title": "template name normalisation, .. rejection, normalised cache keys", "visible": ["tests.test_loaders"]},
+    {"n": 7, "title": "for-loop if condition with filtered loop counters and else", "visible": []}
+  ]
+}

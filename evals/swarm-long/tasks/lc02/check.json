@@ -1,0 +1,65 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: rate lookup inclusive of effective day, currency normalisation, RateNotFound message",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_rates",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: VAT half-up rounding, once per tax code, split_gross adds up",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: trial balance zero rows, include_zero, numeric order; thousands separators",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_trial_balance",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: period close: inclusive end, closing entry date, zero lines, lock",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: aging from due date, inclusive buckets, payment allocation order and cut-off",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_aging",
+        "tests.test_issue5"
+      ]
+    },
+    {
+      "desc": "issue 6: multi-currency conversion: base totals, half-up, rounding line tolerance",
+      "id": "P6",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue6"
+      ]
+    },
+    {
+      "desc": "issue 7: CSV import: thousands separators, collected errors with file line numbers",
+      "id": "P7",
+      "kind": "tests",
+      "modules": [
+        "tests.test_importer",
+        "tests.test_issue7"
+      ]
+    }
+  ],
+  "type": "parts"
+}

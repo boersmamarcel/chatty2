@@ -1,0 +1,13 @@
+{
+  "title": "stockroom: seven warehouse inventory issues (FEFO, packs, costing, reorder, bins, import, report)",
+  "package": "stockroom",
+  "issues": [
+    {"n": 1, "title": "FEFO allocation: expiry-day lots and receipt-date tie-break", "visible": ["tests.test_allocation"]},
+    {"n": 2, "title": "multi-level pack sizes and whole-each unit conversion", "visible": []},
+    {"n": 3, "title": "average cost half-up rounding, stock-out residue, over-issue", "visible": ["tests.test_valuation"]},
+    {"n": 4, "title": "reorder: round up to multiple, minimum order, discontinued", "visible": []},
+    {"n": 5, "title": "bin parsing, numeric sort, serpentine pick path", "visible": ["tests.test_locations"]},
+    {"n": 6, "title": "movement import: thousands, DD/MM/YYYY, duplicates, line numbers", "visible": []},
+    {"n": 7, "title": "amount formatting and aligned stock value report", "visible": ["tests.test_money"]}
+  ]
+}

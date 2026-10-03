@@ -1,0 +1,77 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "June MRR: annual spread /12 incl. 2025 annual invoices, credits, FX at period_start month, void/draft/internal excluded",
+      "expect": 676602.66,
+      "tol": 1.0
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "active count: annual accounts invoiced in 2025 still active; fully credited invoices make MRR 0",
+      "expect": 271,
+      "tol": 0
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "number",
+      "desc": "churn: active March, not April; void+reissue and re-sent status changes",
+      "expect": 15,
+      "tol": 0
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "number",
+      "desc": "NRR cohort: fixed January cohort, churned members count as 0 in June",
+      "expect": 92.97,
+      "tol": 0.02
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "text",
+      "desc": "country growth: Jan vs Jun MRR per country, internal accounts and FX matter",
+      "expect": "GB"
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "number",
+      "desc": "enterprise ARPA: MRR / active enterprise accounts, annual spread",
+      "expect": 7906.31,
+      "tol": 0.05
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "new accounts: reactivated accounts (paused, then back) are not new; annual accounts count once",
+      "expect": 84,
+      "tol": 0
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "annual share: needs annual spread over 12 months including invoices from mid-2025",
+      "expect": 26.5,
+      "tol": 0.02
+    }
+  ]
+}

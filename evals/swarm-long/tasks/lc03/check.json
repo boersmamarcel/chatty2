@@ -1,0 +1,65 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: recurrence UNTIL/COUNT/BYDAY series bounds",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_recurrence",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: observed holidays in the working calendar",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: rest-time conflict detection",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_conflicts",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: auto-assignment ignores time off; tie-break",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: iCalendar escaping, folding and UTC times",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_ical",
+        "tests.test_issue5"
+      ]
+    },
+    {
+      "desc": "issue 6: weekly hours report",
+      "id": "P6",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue6"
+      ]
+    },
+    {
+      "desc": "issue 7: meeting slot finder misses free time",
+      "id": "P7",
+      "kind": "tests",
+      "modules": [
+        "tests.test_availability",
+        "tests.test_issue7"
+      ]
+    }
+  ],
+  "type": "parts"
+}

@@ -1,0 +1,65 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: FEFO allocation: expiry-day lots and receipt-date tie-break",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_allocation",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: multi-level pack sizes and whole-each unit conversion",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: average cost half-up rounding, stock-out residue, over-issue",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_valuation",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: reorder: round up to multiple, minimum order, discontinued",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: bin parsing, numeric sort, serpentine pick path",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_locations",
+        "tests.test_issue5"
+      ]
+    },
+    {
+      "desc": "issue 6: movement import: thousands, DD/MM/YYYY, duplicates, line numbers",
+      "id": "P6",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue6"
+      ]
+    },
+    {
+      "desc": "issue 7: amount formatting and aligned stock value report",
+      "id": "P7",
+      "kind": "tests",
+      "modules": [
+        "tests.test_money",
+        "tests.test_issue7"
+      ]
+    }
+  ],
+  "type": "parts"
+}

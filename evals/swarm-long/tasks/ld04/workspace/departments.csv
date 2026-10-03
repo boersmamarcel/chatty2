@@ -1,0 +1,6 @@
+dept_id,name,cost_center
+D10,Assembly,CC-100
+D20,Logistics,CC-200
+D30,Engineering,CC-300
+D40,Customer Service,CC-400
+D50,Quality,CC-500

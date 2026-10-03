@@ -1,0 +1,105 @@
+{
+  "type": "parts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "applicant-faq-2026-06.md",
+    "budget-sheet-v1.md",
+    "budget-sheet-v3.md",
+    "call-annex-c-ineligible-costs.md",
+    "call-eligibility-annex-v1.md",
+    "call-eligibility-annex-v2.md",
+    "call-text-v1.md",
+    "call-text-v2.md",
+    "competing-consortium-intel.md",
+    "consortium-meeting-2026-07.md",
+    "consortium-meeting-2026-08.md",
+    "consortium-meeting-2026-09.md",
+    "consortium-overview.md",
+    "data-management-plan.md",
+    "dissemination-plan.md",
+    "ethics-approval-letter.md",
+    "ethics-previous-project.md",
+    "faq-consortium-admin.md",
+    "gender-equality-plan.md",
+    "grants-office-guidance.md",
+    "letter-brevik-systems.md",
+    "letter-nordkap-university.md",
+    "letter-oceanic-instruments.md",
+    "reviewer-criteria-notes.md",
+    "risk-assessment.md",
+    "sensor-deployment-notes.md",
+    "work-package-descriptions.md"
+  ],
+  "parts": [
+    {
+      "id": "F1",
+      "kind": "fact",
+      "desc": "deadline 6 Nov 2026 (v2), not 30 Oct",
+      "all": [
+        "2026-11-06|6(th)?\\s+Nov(ember)?\\.?,?\\s+2026|Nov(ember)?\\.?\\s+6(th)?,?\\s+2026|06[./]11[./]2026"
+      ]
+    },
+    {
+      "id": "F2",
+      "kind": "fact",
+      "desc": "(2,400,000-180,000) x 60% SME = 1,332,000",
+      "all": [
+        "1[.,]332\\s*(m\\b|mn|million)|1[,.\\s']?332[,.\\s']?000"
+      ]
+    },
+    {
+      "id": "F3",
+      "kind": "fact",
+      "desc": "25% x 640,000 = 160,000 (v1 20% = 128,000)",
+      "all": [
+        "160[,.\\s']?000|160\\s*k\\b"
+      ]
+    },
+    {
+      "id": "F4",
+      "kind": "fact",
+      "desc": "30 pages (call v2 beats FAQ 25)",
+      "all": [
+        "\\b(30|thirty)\\b[\\s-]*pages?|page\\s*limit\\s*(is|of|:)?\\s*(a\\s*)?(maximum\\s*(of\\s*)?)?\\b30\\b"
+      ]
+    },
+    {
+      "id": "F5",
+      "kind": "fact",
+      "desc": "1 Mar 2027 + 36 months -> 28 Feb 2030",
+      "all": [
+        "2030-02-28|28(th)?\\s+Feb(ruary)?\\.?,?\\s+2030|Feb(ruary)?\\.?\\s+28(th)?,?\\s+2030|28[./]02[./]2030"
+      ]
+    },
+    {
+      "id": "F6",
+      "kind": "fact",
+      "desc": "Oceanic Instruments (Zavria removed in annex v2)",
+      "all": [
+        "Oceanic"
+      ]
+    },
+    {
+      "id": "F7",
+      "kind": "fact",
+      "desc": "150,000 + 90,000 cash = 240,000 (in-kind excluded)",
+      "all": [
+        "240[,.\\s']?000|240\\s*k\\b"
+      ]
+    },
+    {
+      "id": "F8",
+      "kind": "fact",
+      "desc": "ERB-2026-0417 (not 2025-0417 / provisional 0399)",
+      "all": [
+        "ERB-2026-0417"
+      ]
+    },
+    {
+      "id": "C",
+      "kind": "citations",
+      "desc": "cites >=5 corpus files",
+      "min_files": 5
+    }
+  ]
+}

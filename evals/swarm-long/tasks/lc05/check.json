@@ -1,0 +1,65 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: token bucket overflows capacity after idle; cost above capacity must raise",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_token_bucket",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: Retry-After rounds up (min 1) and X-RateLimit-Remaining is a floored integer",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: sliding window half-open boundary and refused attempts not logged",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_sliding_window",
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: case-insensitive and 'per' rate strings; config collects all errors in line order",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: billing anchor day clamped to month end; periods are half-open",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_periods",
+        "tests.test_issue5"
+      ]
+    },
+    {
+      "desc": "issue 6: route normalisation: query/fragment, slashes, UUID segments",
+      "id": "P6",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue6"
+      ]
+    },
+    {
+      "desc": "issue 7: report deny% ROUND_HALF_UP Decimal and row ordering tie-breaks",
+      "id": "P7",
+      "kind": "tests",
+      "modules": [
+        "tests.test_report",
+        "tests.test_issue7"
+      ]
+    }
+  ],
+  "type": "parts"
+}

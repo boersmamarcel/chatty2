@@ -1,0 +1,13 @@
+{
+  "title": "ledgerly: double-entry bookkeeping ledger (7 issues)",
+  "package": "ledgerly",
+  "issues": [
+    {"n": 1, "title": "rate lookup inclusive of effective day, currency normalisation, RateNotFound message", "visible": ["tests.test_rates"]},
+    {"n": 2, "title": "VAT half-up rounding, once per tax code, split_gross adds up", "visible": []},
+    {"n": 3, "title": "trial balance zero rows, include_zero, numeric order; thousands separators", "visible": ["tests.test_trial_balance"]},
+    {"n": 4, "title": "period close: inclusive end, closing entry date, zero lines, lock", "visible": []},
+    {"n": 5, "title": "aging from due date, inclusive buckets, payment allocation order and cut-off", "visible": ["tests.test_aging"]},
+    {"n": 6, "title": "multi-currency conversion: base totals, half-up, rounding line tolerance", "visible": []},
+    {"n": 7, "title": "CSV import: thousands separators, collected errors with file line numbers", "visible": ["tests.test_importer"]}
+  ]
+}

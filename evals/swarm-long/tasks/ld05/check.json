@@ -1,0 +1,76 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "Q2 no-show rate: late cancels (<24h, exactly 24h not late) count as no-shows; other cancels out of the denominator",
+      "expect": 14.5,
+      "tol": 0.02
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "March revenue: tariff by patient class (uninsured = S), no-show fee incl late cancels, re-sent no_show->completed",
+      "expect": 59550.0,
+      "tol": 0.5
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "text",
+      "desc": "top clinician May: current versions only",
+      "expect": "P11"
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "number",
+      "desc": "65+ with >=3 visits: exact age on 2026-06-30 (birthday not yet reached)",
+      "expect": 71,
+      "tol": 0
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "number",
+      "desc": "median lead time: date difference, completed new_patient only",
+      "expect": 24,
+      "tol": 0.05
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "text",
+      "desc": "clinic no-show rate over H1 with late cancels",
+      "expect": "K3"
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "repeat no-shows: late cancels included, corrected no_show rows superseded",
+      "expect": 47,
+      "tol": 0
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "class S revenue: uninsured patients are S; April fee schedule; no-show fees included",
+      "expect": 16536.0,
+      "tol": 0.5
+    }
+  ]
+}

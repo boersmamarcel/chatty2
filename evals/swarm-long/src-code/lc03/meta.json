@@ -1,0 +1,11 @@
+{"title": "rota: shift and meeting scheduling (7 issues)",
+ "package": "rota",
+ "issues": [
+  {"n": 1, "title": "recurrence UNTIL/COUNT/BYDAY series bounds", "visible": ["tests.test_recurrence"]},
+  {"n": 2, "title": "observed holidays in the working calendar", "visible": []},
+  {"n": 3, "title": "rest-time conflict detection", "visible": ["tests.test_conflicts"]},
+  {"n": 4, "title": "auto-assignment ignores time off; tie-break", "visible": []},
+  {"n": 5, "title": "iCalendar escaping, folding and UTC times", "visible": ["tests.test_ical"]},
+  {"n": 6, "title": "weekly hours report", "visible": []},
+  {"n": 7, "title": "meeting slot finder misses free time", "visible": ["tests.test_availability"]}
+ ]}

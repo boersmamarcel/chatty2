@@ -1,0 +1,77 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "Aug hours: latest version per entry_id, approved only, post-termination entries out",
+      "expect": 12632.0,
+      "tol": 0.01
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "E017 July: rate change on 2026-07-13, BE holiday 07-21 at 2x, OT weeks by Sunday (week of Jun 29 belongs to July, week ending Aug 2 to August)",
+      "expect": 6295.6,
+      "tol": 0.05
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "number",
+      "desc": "OT hours: hourly only, weekly >40 excluding holiday hours, weeks by Sunday",
+      "expect": 1136.75,
+      "tol": 0.01
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "text",
+      "desc": "dept cost Sept: base + OT premium of weeks ending in Sept",
+      "expect": "Assembly"
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "number",
+      "desc": "post-termination entries: count employees, current versions only",
+      "expect": 4,
+      "tol": 0
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "number",
+      "desc": "project hours: case/space variants of the code, Q3 date bounds (data runs Jun 29 - Oct 4)",
+      "expect": 8115.75,
+      "tol": 0.01
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "effective-dated rate lookup; exclude future hires, terminated, salaried; ignore 2026-10-01 rows",
+      "expect": 25.76,
+      "tol": 0.01
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "holiday premium: per-country holidays (BE 07-21, NL 07-01, DE 09-21; Saturday holidays)",
+      "expect": 5300.07,
+      "tol": 0.05
+    }
+  ]
+}

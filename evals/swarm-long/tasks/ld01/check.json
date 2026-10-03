@@ -1,0 +1,81 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "count Feb orders: needs dedup by latest ingested_at, status case, test customers, store-local date",
+      "expect": 862,
+      "tol": 0
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "Q1 net EUR: FX divide by units_per_eur per order month, refunds attributed to order, local dates",
+      "expect": 224432.57,
+      "tol": 1.0
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "text",
+      "desc": "March net by region: FX trap (JPY/GBP volumes), refunds netted",
+      "expect": "EMEA"
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "number",
+      "desc": "app refund rate: refunds of cancelled orders ignored, refunds after March still count",
+      "expect": 7.63,
+      "tol": 0.02
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "text",
+      "desc": "top customer: a heavy test account (C0006) must be excluded",
+      "expect": "C0061"
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "number",
+      "desc": "fully refunded: sums multiple partial refunds per order vs current gross",
+      "expect": 156,
+      "tol": 0
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "S06 median: JPY conversion per month and UTC+9 date boundary",
+      "expect": 73.03,
+      "tol": 0.011
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "set",
+      "desc": "store growth set: per-store net EUR Feb vs Mar, local month boundaries",
+      "expect": [
+        "S01",
+        "S03",
+        "S04",
+        "S05",
+        "S07"
+      ]
+    }
+  ]
+}

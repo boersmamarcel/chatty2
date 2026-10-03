@@ -1,0 +1,6 @@
+carrier_code,name,sla_business_days
+DHX,DHL Express,1
+FDX,FedEx Economy,3
+PNL,PostNL Parcel,2
+SGP,SingPost Speedpost,3
+UPG,UPS Ground,4

@@ -1,0 +1,13 @@
+{
+  "title": "transit: routing toolkit with seven open issues (loader ids, Dijkstra penalties/ties, night timetables, zone fares, itinerary legs, loopless alternatives, network check)",
+  "package": "transit",
+  "issues": [
+    {"n": 1, "title": "case-insensitive stop ids in the network file", "visible": ["tests.test_loader"]},
+    {"n": 2, "title": "shortest route: first boarding free, deterministic ties, unknown destination", "visible": ["tests.test_routing"]},
+    {"n": 3, "title": "earliest arrival: service times past midnight and inclusive transfer boundary", "visible": []},
+    {"n": 4, "title": "fares: distinct zones, half-up concession rounding, missing zone", "visible": ["tests.test_fares"]},
+    {"n": 5, "title": "itinerary legs per consecutive run and hour durations", "visible": []},
+    {"n": 6, "title": "alternative routes: loopless, inclusive max_extra, k validation", "visible": ["tests.test_alternatives"]},
+    {"n": 7, "title": "network check: one-way reachability, sorted messages, exit status", "visible": []}
+  ]
+}

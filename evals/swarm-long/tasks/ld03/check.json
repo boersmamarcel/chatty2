@@ -1,0 +1,76 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "Aug delivered: latest update wins, ship date with cut-off/holiday roll and DC timezone",
+      "expect": 1287,
+      "tol": 0
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "DHX on-time: 1-day SLA, business days per DC calendar incl. holidays, Saturday deliveries",
+      "expect": 90.1,
+      "tol": 0.02
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "text",
+      "desc": "worst carrier: per-carrier on-time over delivered Q3 shipments",
+      "expect": "DHX"
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "number",
+      "desc": "SIN1 freight: volumetric billable weight rounded up, inclusive bands, returned/in-transit billed, cancelled not",
+      "expect": 4755.7,
+      "tol": 0.5
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "number",
+      "desc": "ATL1 transit: US holidays (Jul 3, Sep 7), UTC-4 dates, 15:00 cut-off",
+      "expect": 2.66,
+      "tol": 0.011
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "text",
+      "desc": "late by country: on-time rule applied per shipment",
+      "expect": "MX"
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "stuck parcels: only the latest update counts; earlier in_transit rows of delivered parcels are noise",
+      "expect": 77,
+      "tol": 0
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "UPG billable kg: volumetric max then ceil per parcel, corrected weights from later updates",
+      "expect": 7799,
+      "tol": 0
+    }
+  ]
+}

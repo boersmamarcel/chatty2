@@ -1,0 +1,4 @@
+tariff_id,peak_rate_eur_per_kwh,offpeak_rate_eur_per_kwh,standing_charge_eur_per_day
+T1,0.3120,0.2140,1.85
+T2,0.2890,0.1960,4.20
+T3,0.2410,0.1580,12.50

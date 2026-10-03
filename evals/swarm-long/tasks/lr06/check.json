@@ -1,0 +1,104 @@
+{
+  "type": "parts",
+  "deliverable": "brief.md",
+  "corpus": [
+    "amendment-2-summary.md",
+    "amendment-3-protocol-v4.md",
+    "ctms-export-2025-12.md",
+    "data-management-guide.md",
+    "faq-trial-office.md",
+    "investigator-brochure-v7.md",
+    "investigator-training-slides-2025.md",
+    "irb-approval-letter-amendment-2.md",
+    "irb-approval-letter-amendment-3.md",
+    "lab-manual-excerpt.md",
+    "monitoring-plan.md",
+    "other-study-note-cardio-st2.md",
+    "pharmacy-manual-excerpt.md",
+    "protocol-v1-original.md",
+    "recruitment-strategy.md",
+    "regulatory-submissions-log.md",
+    "site-014-contact-memo.md",
+    "site-feedback-notes.md",
+    "sponsor-memo-sample-size.md",
+    "steering-committee-2026-01.md",
+    "steering-committee-2026-03.md",
+    "steering-committee-2026-05.md",
+    "study-operations-manual.md",
+    "visit-schedule-appendix.md"
+  ],
+  "parts": [
+    {
+      "id": "F1",
+      "kind": "fact",
+      "desc": "effective at IRB approval 2026-03-05 (not sponsor 02-17 / letter 03-09)",
+      "all": [
+        "2026-03-05|5(th)?\\s+March\\s+2026|March\\s+5(th)?,?\\s+2026|05[./]03[./]2026"
+      ]
+    },
+    {
+      "id": "F2",
+      "kind": "fact",
+      "desc": "540 x 1.12 = 604.8 -> 605",
+      "all": [
+        "\\b605\\b"
+      ]
+    },
+    {
+      "id": "F3",
+      "kind": "fact",
+      "desc": "week 24 (not 12)",
+      "all": [
+        "\\b(week|wk)\\s*24\\b|\\b24[\\s-]*weeks?\\b"
+      ]
+    },
+    {
+      "id": "F4",
+      "kind": "fact",
+      "desc": "80 mg halved = 40 mg (not 60/30)",
+      "all": [
+        "\\b40\\s*mg\\b"
+      ]
+    },
+    {
+      "id": "F5",
+      "kind": "fact",
+      "desc": "Day 0 = randomisation; Day 77 = 2026-06-30",
+      "all": [
+        "2026-06-30|30(th)?\\s+June\\s+2026|June\\s+30(th)?,?\\s+2026|30[./]06[./]2026"
+      ]
+    },
+    {
+      "id": "F6",
+      "kind": "fact",
+      "desc": "SAE 24 hours to sponsor; 5 calendar days to authority",
+      "all": [
+        "\\b24[\\s-]*hours?\\b",
+        "\\b(5|five)\\s*(\\(5\\)\\s*)?(calendar[\\s-]*)?days?\\b"
+      ]
+    },
+    {
+      "id": "F7",
+      "kind": "fact",
+      "desc": "Dr. Emeka Adeyemi (memo overrides CTMS export)",
+      "all": [
+        "Adeyemi"
+      ]
+    },
+    {
+      "id": "F8",
+      "kind": "fact",
+      "desc": "exclusion eGFR below 30 (previously 45)",
+      "all": [
+        "eGFR",
+        "(<|below|under|less than|lower than)\\s*30\\b"
+      ]
+    },
+    {
+      "id": "C",
+      "kind": "citations",
+      "desc": "cites >=5 corpus files",
+      "min_files": 5
+    }
+  ]
+}

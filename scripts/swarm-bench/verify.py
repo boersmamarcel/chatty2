@@ -19,6 +19,20 @@ Three checks, one per family:
   at least one corpus file in square brackets, and cites nothing that is not
   a corpus file (no other file name, no URL).
 
+A fourth check, `parts`, scores a long multi-part task (EV-7, AGE-826)
+part by part: {"pass": all parts, "score": passed / parts, "parts": {id:
+bool}}. Its part kinds:
+
+- `answer`: the last `Qn: <value>` line of the deliverable (else of the
+  final answer), matched as a number within `tol`, a text or a set;
+- `tests`: the named test modules of the task's `hidden/tests/`, run on a
+  copy of the workspace whose own `tests/` is replaced by the hidden suite
+  (so editing a test cannot change the score);
+- `fact`: regexes that must all (`all`) or at least once (`any`) match the
+  deliverable;
+- `citations`: at least `min_files` corpus files cited in square brackets,
+  and nothing cited outside the corpus.
+
 Where a deliverable is looked for: the workspace root, then the workers' git
 worktrees under `.chatty/worktrees/`, then any branch of the workspace's
 repository. A team's writer works in its own worktree and Chatty commits its
@@ -31,8 +45,10 @@ Written for Python 3.6+.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 VERDICT_RE = re.compile(r"VERDICT\s*[:=]\s*(.+)", re.I)
 CITE_RE = re.compile(r"\[([^\]\n]+)\]")
@@ -153,6 +169,118 @@ def check_facts(check, workspace):
             "reason": "; ".join(reasons) or "all facts, corpus-only citations"}
 
 
+NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def answer_line(key, texts):
+    """The value of the last `<key>: value` line of the first text holding one."""
+    pattern = re.compile(r"^[\s>*#|-]*\**\s*%s\s*\**\s*[:=]\s*\**\s*(.+?)\s*$" % re.escape(key),
+                         re.I | re.M)
+    for text in texts:
+        found = pattern.findall(text or "")
+        if found:
+            return found[-1].strip().strip("*|").strip()
+    return None
+
+
+def match_answer(part, value):
+    if value is None:
+        return False
+    kind = part.get("match", "text")
+    if kind == "number":
+        cleaned = re.sub(r"(?<=\d)[,_ ](?=\d{3}\b)", "", value)
+        cleaned = cleaned.replace("\u2212", "-")
+        m = NUM_RE.search(cleaned)
+        return m is not None and abs(float(m.group(0)) - float(part["expect"])) <= float(part.get("tol", 0))
+    if kind == "set":
+        items = set(norm(x) for x in re.split(r"[,;]", value) if norm(x))
+        return items == set(norm(x) for x in part["expect"])
+    value = norm(value)
+    for want in [part["expect"]] + list(part.get("accept", [])):
+        want = norm(str(want))
+        if value == want or value.startswith(want + " "):
+            return True
+    return False
+
+
+def run_hidden_tests(modules, scratch):
+    """Run `modules` of the hidden suite on a copy of the workspace."""
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    for key in list(env):
+        if key.endswith("_API_KEY"):
+            env.pop(key)
+    try:
+        out = subprocess.run(["python3", "-m", "unittest"] + list(modules),
+                             cwd=scratch, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             universal_newlines=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, "timed out"
+    ran = re.search(r"Ran (\d+) tests?", out.stdout)
+    ok = out.returncode == 0 and ran is not None and int(ran.group(1)) > 0
+    return ok, "\n".join(out.stdout.strip().splitlines()[-2:])
+
+
+def code_copy(task_dir, workspace):
+    """A scratch copy of the workspace with the hidden suite as its tests/."""
+    scratch = tempfile.mkdtemp(prefix="verify-parts-")
+    target = os.path.join(scratch, "ws")
+    shutil.copytree(workspace, target, symlinks=True,
+                    ignore=shutil.ignore_patterns(".git", ".chatty", "__pycache__"))
+    tests = os.path.join(target, "tests")
+    if os.path.isdir(tests):
+        shutil.rmtree(tests)
+    shutil.copytree(os.path.join(task_dir, "hidden", "tests"), tests)
+    return scratch, target
+
+
+def check_parts(check, task_dir, workspace, answer):
+    results, notes = {}, {}
+    text = None
+    if check.get("deliverable"):
+        text, where = find_file(workspace, check["deliverable"])
+        notes["found_in"] = where
+    scratch = target = None
+    try:
+        for part in check["parts"]:
+            kind = part["kind"]
+            if kind == "answer":
+                value = answer_line(part.get("key", part["id"]), [text, answer])
+                if value is None:
+                    notes.setdefault("missing_answers", []).append(part["id"])
+                ok = match_answer(part, value)
+            elif kind == "tests":
+                if target is None:
+                    scratch, target = code_copy(task_dir, workspace)
+                ok, tail = run_hidden_tests(part["modules"], target)
+                if not ok:
+                    notes.setdefault("test_failures", {})[part["id"]] = tail
+            elif kind == "fact":
+                body = text or ""
+                ok = bool(body) and all(re.search(p, body, re.I) for p in part.get("all", [])) \
+                    and (not part.get("any") or any(re.search(p, body, re.I) for p in part["any"]))
+            elif kind == "citations":
+                facts = check_facts({"deliverable": check["deliverable"], "facts": [],
+                                     "corpus": check["corpus"]}, workspace)
+                ok = bool(text) and not facts["foreign"] and len(facts["cited"]) >= part.get("min_files", 1)
+                notes["cited"] = facts.get("cited", [])
+                notes["foreign"] = facts.get("foreign", [])
+            else:
+                sys.stderr.write("verify.py: %s: unknown part kind %r\n" % (task_dir, kind))
+                sys.exit(2)
+            results[part["id"]] = bool(ok)
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
+    passed = sum(1 for v in results.values() if v)
+    failed = [k for k, v in results.items() if not v]
+    out = {"pass": passed == len(results), "score": round(passed / float(len(results)), 4),
+           "parts_passed": passed, "parts_total": len(results), "parts": results,
+           "reason": "all %d parts" % passed if not failed else
+           "%d/%d parts; failed: %s" % (passed, len(results), ", ".join(failed))}
+    out.update(notes)
+    return out
+
+
 def verify(task_dir, workspace, answer):
     with open(os.path.join(task_dir, "check.json"), encoding="utf-8") as f:
         check = json.load(f)
@@ -163,6 +291,8 @@ def verify(task_dir, workspace, answer):
         return check_tests(check, task_dir, workspace)
     if kind == "facts":
         return check_facts(check, workspace)
+    if kind == "parts":
+        return check_parts(check, task_dir, workspace, answer)
     sys.stderr.write("verify.py: %s: unknown check type %r\n" % (task_dir, kind))
     sys.exit(2)
 

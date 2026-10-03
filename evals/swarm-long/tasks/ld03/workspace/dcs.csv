@@ -1,0 +1,5 @@
+dc_id,city,country,utc_offset_hours,cutoff_local
+AMS1,Amsterdam,NL,2,17:00
+ATL1,Atlanta,US,-4,15:00
+SIN1,Singapore,SG,8,16:00
+MAD1,Madrid,ES,2,18:00

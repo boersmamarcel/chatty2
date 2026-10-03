@@ -1,0 +1,13 @@
+{
+  "title": "throttle: API rate limiting and quota service",
+  "package": "throttle",
+  "issues": [
+    {"n": 1, "title": "token bucket overflows capacity after idle; cost above capacity must raise", "visible": ["tests.test_token_bucket"]},
+    {"n": 2, "title": "Retry-After rounds up (min 1) and X-RateLimit-Remaining is a floored integer", "visible": []},
+    {"n": 3, "title": "sliding window half-open boundary and refused attempts not logged", "visible": ["tests.test_sliding_window"]},
+    {"n": 4, "title": "case-insensitive and 'per' rate strings; config collects all errors in line order", "visible": []},
+    {"n": 5, "title": "billing anchor day clamped to month end; periods are half-open", "visible": ["tests.test_periods"]},
+    {"n": 6, "title": "route normalisation: query/fragment, slashes, UUID segments", "visible": []},
+    {"n": 7, "title": "report deny% ROUND_HALF_UP Decimal and row ordering tie-breaks", "visible": ["tests.test_report"]}
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Incident post-mortem: INC-2291 payment outage",
+  "prompt": "Read REQUEST.md and the documents in docs/ (there are many and they are long; search them, do not try to read everything at once). Write brief.md in the workspace root answering all 8 numbered questions, each answer citing its source file in square brackets, e.g. [policy-v3.md]. Corpus only, no web. Finish by summarising the answers in your final chat message.",
+  "deliverable": "brief.md"
+}

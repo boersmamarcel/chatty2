@@ -1,0 +1,19 @@
+clinician_id,name,clinic_id,specialty
+P01,Dr. A,K1,general
+P02,Dr. B,K2,general
+P03,Dr. C,K3,general
+P04,Dr. D,K4,orthopedics
+P05,Dr. E,K1,cardiology
+P06,Dr. F,K2,dermatology
+P07,Dr. G,K3,physiotherapy
+P08,Dr. H,K4,cardiology
+P09,Dr. I,K1,general
+P10,Dr. J,K2,cardiology
+P11,Dr. K,K3,cardiology
+P12,Dr. L,K4,orthopedics
+P13,Dr. M,K1,general
+P14,Dr. N,K2,general
+P15,Dr. O,K3,general
+P16,Dr. P,K4,dermatology
+P17,Dr. Q,K1,general
+P18,Dr. R,K2,orthopedics

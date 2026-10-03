@@ -1,0 +1,6 @@
+{
+  "family": "data-audit",
+  "title": "Outpatient no-show and billing audit",
+  "prompt": "You are auditing outpatient clinic appointment data. Your working directory holds the data as CSV files at its root (appointments.csv, clinicians.csv, clinics.csv, insurers.csv, patients.csv, tariffs.csv), README.md (the data dictionary and the business definitions; follow them exactly, they override any intuition) and QUESTIONS.md (8 questions, Q1..Q8). The files are too large to read whole: compute with the query_data tool or with python3 scripts, and check your joins and filters against the README rules.\n\nAnswer every question in QUESTIONS.md. Write report.md in the working directory. It must START with one line per question, in order, exactly `Qn: <answer>` (for example `Q1: 1234`), each answer in the format the question states, followed by your working notes (do not start any other line with `Qn:`; the last such line is the one that counts). End your final chat answer with the same Q1..Q8 lines.",
+  "deliverable": "report.md"
+}

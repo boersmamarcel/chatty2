@@ -1,0 +1,65 @@
+{
+  "parts": [
+    {
+      "desc": "issue 1: case-insensitive stop ids in the network file",
+      "id": "P1",
+      "kind": "tests",
+      "modules": [
+        "tests.test_loader",
+        "tests.test_issue1"
+      ]
+    },
+    {
+      "desc": "issue 2: shortest route: first boarding free, deterministic ties, unknown destination",
+      "id": "P2",
+      "kind": "tests",
+      "modules": [
+        "tests.test_routing",
+        "tests.test_issue2"
+      ]
+    },
+    {
+      "desc": "issue 3: earliest arrival: service times past midnight and inclusive transfer boundary",
+      "id": "P3",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue3"
+      ]
+    },
+    {
+      "desc": "issue 4: fares: distinct zones, half-up concession rounding, missing zone",
+      "id": "P4",
+      "kind": "tests",
+      "modules": [
+        "tests.test_fares",
+        "tests.test_issue4"
+      ]
+    },
+    {
+      "desc": "issue 5: itinerary legs per consecutive run and hour durations",
+      "id": "P5",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue5"
+      ]
+    },
+    {
+      "desc": "issue 6: alternative routes: loopless, inclusive max_extra, k validation",
+      "id": "P6",
+      "kind": "tests",
+      "modules": [
+        "tests.test_alternatives",
+        "tests.test_issue6"
+      ]
+    },
+    {
+      "desc": "issue 7: network check: one-way reachability, sorted messages, exit status",
+      "id": "P7",
+      "kind": "tests",
+      "modules": [
+        "tests.test_issue7"
+      ]
+    }
+  ],
+  "type": "parts"
+}

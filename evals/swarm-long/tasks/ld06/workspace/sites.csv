@@ -1,0 +1,8 @@
+site_id,name,utc_offset_hours,tariff_id
+S01,Head office,2,T1
+S02,Warehouse North,2,T2
+S03,Cold store,2,T2
+S04,London branch,1,T1
+S05,Plant,2,T3
+S06,Boston lab,-4,T1
+S07,Campus,2,T2

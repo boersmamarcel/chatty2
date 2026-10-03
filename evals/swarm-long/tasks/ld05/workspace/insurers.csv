@@ -1,0 +1,7 @@
+insurer_id,name,tariff_class
+INS1,Zorgverzekeraar Een,A
+INS2,Delta Zorg,A
+INS3,Basis Verzekerd,B
+INS4,Budget Zorg,B
+INS5,Expat Health,S
+INS6,Cross-border Care,B
