@@ -29,9 +29,10 @@ pub struct HiveRegistryClient {
     http: reqwest::Client,
     cache: Option<Cache>,
     session: Option<Arc<HiveSession>>,
-    /// The registry root public key downloads are verified against
-    /// ([`trust::trusted_root`]); `None` refuses every download.
-    root_key: Option<String>,
+    /// The registry root public keys downloads are verified against
+    /// ([`trust::trusted_roots`]); a download verifies if any one of them
+    /// signed it (SEC-3, AGE-816). Empty refuses every download.
+    root_keys: Vec<String>,
     /// Why `base_url` is not allowed (SEC-16, AGE-756), computed once at
     /// construction since the URL never changes afterwards. `None` means
     /// every request may proceed.
@@ -49,8 +50,9 @@ impl HiveRegistryClient {
         Self::with_timeout_inner(base_url, timeout)
     }
 
-    /// The root key comes from [`trust::trusted_root_from_env`]: the compiled
-    /// production key, or `CHATTY_HIVE_ROOT_KEY` for a local registry.
+    /// The root keys come from [`trust::trusted_roots_from_env`]: the
+    /// compiled production list, or `CHATTY_HIVE_ROOT_KEY` alone for a local
+    /// registry.
     fn with_timeout_inner(base_url: impl Into<String>, timeout: std::time::Duration) -> Self {
         let http = reqwest::Client::builder()
             .timeout(timeout)
@@ -58,7 +60,7 @@ impl HiveRegistryClient {
             .unwrap_or_default();
         let base_url = base_url.into().trim_end_matches('/').to_string();
         Self {
-            root_key: trust::trusted_root_from_env(&base_url),
+            root_keys: trust::trusted_roots_from_env(&base_url),
             insecure_url: ensure_secure_url(&base_url).err(),
             base_url,
             http,
@@ -80,13 +82,14 @@ impl HiveRegistryClient {
     /// [`new`](Self::new) found, under the same rule as `CHATTY_HIVE_ROOT_KEY`:
     /// honoured for a local (loopback) registry only.
     pub fn with_local_root_key(mut self, root_public_key_hex: &str) -> Self {
-        self.root_key = trust::trusted_root(&self.base_url, Some(root_public_key_hex));
+        self.root_keys = trust::trusted_roots(&self.base_url, Some(root_public_key_hex));
         self
     }
 
-    /// The root public key downloads are verified against, if any.
-    pub fn root_key(&self) -> Option<&str> {
-        self.root_key.as_deref()
+    /// The root public keys downloads are verified against. A download
+    /// verifies if any one of them signed it; empty refuses every download.
+    pub fn root_keys(&self) -> &[String] {
+        &self.root_keys
     }
 
     /// Enable the offline module-list cache, persisted under `dir`.
@@ -315,7 +318,7 @@ impl HiveRegistryClient {
         name: &str,
         version: &str,
     ) -> Result<BegunDownload, ClientError> {
-        if self.root_key.is_none() {
+        if self.root_keys.is_empty() {
             return Err(ClientError::NoTrustedRoot {
                 registry: self.base_url.clone(),
             });
@@ -366,9 +369,10 @@ impl HiveRegistryClient {
     /// Verify and finalise a download started with [`begin_download`][Self::begin_download].
     ///
     /// Verifies `chain` (the [`BegunDownload`]'s) against this client's root
-    /// key: root → publisher certificate → signed manifest → the SHA-256 of
-    /// `wasm`, and that the manifest names `name@version`. Then fetches the
-    /// version manifest. Any failure is [`ClientError::SignatureInvalid`].
+    /// keys: any one of them → publisher certificate → signed manifest → the
+    /// SHA-256 of `wasm`, and that the manifest names `name@version`. Then
+    /// fetches the version manifest. Any failure is
+    /// [`ClientError::SignatureInvalid`].
     pub async fn finalize_download(
         &self,
         wasm: Vec<u8>,
@@ -376,13 +380,12 @@ impl HiveRegistryClient {
         name: &str,
         version: &str,
     ) -> Result<DownloadResult, ClientError> {
-        let root = self
-            .root_key
-            .as_deref()
-            .ok_or_else(|| ClientError::NoTrustedRoot {
+        if self.root_keys.is_empty() {
+            return Err(ClientError::NoTrustedRoot {
                 registry: self.base_url.clone(),
-            })?;
-        let verified = verify::verify_download(root, chain, &wasm, name, version)
+            });
+        }
+        let verified = verify::verify_download_any(&self.root_keys, chain, &wasm, name, version)
             .map_err(|e| ClientError::SignatureInvalid(e.to_string()))?;
 
         let manifest = match self.list_versions(name).await {

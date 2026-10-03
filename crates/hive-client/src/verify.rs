@@ -318,6 +318,30 @@ pub fn verify_download(
     Ok(verified)
 }
 
+/// [`verify_download`] against each of `roots` in turn; succeeds as soon as
+/// any one of them signed the certificate (SEC-3, AGE-816). This is what
+/// makes a key-rotation window possible: chatty trusts the `current` and
+/// `next` root at once, so a certificate signed by either verifies.
+///
+/// With an empty `roots` list there is nothing to trust, so this always
+/// returns [`VerifyError::CertificateSignatureMismatch`].
+pub fn verify_download_any(
+    roots: &[String],
+    chain: &ModuleChain,
+    wasm: &[u8],
+    name: &str,
+    version: &str,
+) -> Result<VerifiedModule, VerifyError> {
+    let mut last_err = VerifyError::CertificateSignatureMismatch;
+    for root in roots {
+        match verify_download(root, chain, wasm, name, version) {
+            Ok(verified) => return Ok(verified),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(last_err)
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -475,6 +499,40 @@ mod tests {
         assert_eq!(
             ModuleChain::from_headers(Some("Yw=="), Some("s"), Some("Yw=="), None),
             Err(VerifyError::Missing(HEADER_CERTIFICATE_SIGNATURE))
+        );
+    }
+
+    #[test]
+    fn a_cert_signed_by_either_listed_root_verifies() {
+        let (root, publisher, chain) = chain();
+        let other_root = key(5);
+
+        // The real root is second in the list: order must not matter.
+        let roots = vec![root_hex(&other_root), root_hex(&root)];
+        let verified = verify_download_any(&roots, &chain, WASM, "echo", "1.0.0").unwrap();
+        assert_eq!(
+            verified.certificate.public_key,
+            hex::encode(publisher.verifying_key().to_bytes())
+        );
+
+        // And with the real root first.
+        let roots = vec![root_hex(&root), root_hex(&other_root)];
+        verify_download_any(&roots, &chain, WASM, "echo", "1.0.0").unwrap();
+    }
+
+    #[test]
+    fn a_cert_signed_by_an_unlisted_root_is_refused() {
+        let (_root, _publisher, chain) = chain();
+        let roots = vec![root_hex(&key(5)), root_hex(&key(6))];
+        assert_eq!(
+            verify_download_any(&roots, &chain, WASM, "echo", "1.0.0"),
+            Err(VerifyError::CertificateSignatureMismatch)
+        );
+
+        // No roots at all: refused the same way, not a panic.
+        assert_eq!(
+            verify_download_any(&[], &chain, WASM, "echo", "1.0.0"),
+            Err(VerifyError::CertificateSignatureMismatch)
         );
     }
 
