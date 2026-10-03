@@ -78,6 +78,12 @@ pub struct TeamConfig {
     /// only. It is never run for a worker whose profile has no shell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<String>,
+    /// Whether each worker gets a `git worktree` of its own (ADR-0012)
+    /// rather than the conversation's workspace: a `--team` run's
+    /// `team.json` `isolate` (AGE-822), for an agent no team claims by name.
+    /// Off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolate: bool,
 }
 
 impl TeamConfig {

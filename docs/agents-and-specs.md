@@ -576,7 +576,12 @@ first-class and is the A2A-shaped answer; it was weighed and not taken, because
 it makes the broker stateful for open tasks and every delegation path here
 streams.
 
-Each worker runs in its own `git worktree` under the conversation's workspace
+A worker works in its caller's tree — the conversation's workspace, passed as its
+`--workspace` and `cwd` — unless its team asks for isolation (AGE-822): `isolate` in the
+`team.json` that claims the agent by name, else `module_settings.team.isolate`. Off by
+default; the coding preset `fix-and-verify` turns it on. Only then does the embedder hand
+the runner a workspace factory, and only then does BI-5's nesting below apply. An
+isolated worker runs in its own `git worktree` under the conversation's workspace
 (ADR-0012), through `chatty_core::services::worker_tree`: `.chatty/worktrees/<name>`
 on branch `sub-agent/<name>`, where `<name>` is the participant name (`local-coder-0`)
 unless that branch or directory already exists in the repository — another root
@@ -585,8 +590,22 @@ an earlier run keeps its branch — in which case it is the first free `<name>-N
 (AGE-402). A sub-leader's worker gets its tree under the sub-leader's, branched from
 the sub-leader's branch, and its evidence is measured against that branch (BI-5). The evidence envelope
 appended to the worker's answer names the branch actually created. In a repository, a
-tree that cannot be made fails the delegation; only a workspace that is not a
-repository runs its workers unisolated.
+tree that cannot be made fails the delegation — a repository with no commits yet fails
+before anything is made, since its branch is unborn — and only a workspace that is not
+a repository runs an isolated team's workers unisolated.
+
+A worker that never started — its tree, its spawn or its hello failed — is a setup
+problem only the user can fix (AGE-822). The broker's result for it carries the typed
+`worker_start_failed: '<agent>' could not be started: <why>`
+(`chatty_fabric::worker_start_failed`); `invoke_agent` turns it into the terminal,
+non-retryable `InvokeAgentError::WorkerStartFailed`; the `StopOnWorkerStartFailure` hook
+(`services::worker_start`) ends the caller's run at its next model call, with a
+**Could not start** card (what failed, what to do) as its answer; a sub-leader's
+`TaskMapper` fails its own task with the same typed text, so every caller up the tree
+stops; and the desktop draws the card as an error alert. `/agent` checks the same way
+before it spawns anything (`agent_command::preflight`): no workspace, or code execution
+off, is a card instead of a delegation, and a turn that goes ahead shows its workspace
+under the command.
 
 **Per-endpoint concurrency budget (ADR-0011 C6).** Workers all talk to the same model
 server, so the broker holds a semaphore per *endpoint* — the server's base URL, not a
@@ -628,8 +647,9 @@ host never collide), and a `local-agent` `LocalRunner` sized against the same
 per-endpoint budget as the desktop. It carries no WASM module registry of its own —
 `--broker` exists to make `local-agent` reachable, not to load modules — and it is
 valid with `--headless`, `--pipe` and the interactive TUI alike. Workspace isolation is
-the same `git worktree`-per-worker as the desktop when `--workspace` (or the persisted
-workspace) is a git repository. When the turn (or the session) ends the gateway stops
+the same as the desktop's: workers work in `--workspace` (or the persisted workspace),
+and a team with `"isolate": true` gives each a `git worktree` there when it is a git
+repository. When the turn (or the session) ends the gateway stops
 serving; any worker still running is reaped by the runner the same way it always is.
 `--broker` never writes module settings: its ephemeral port lives only in this run's
 agent-build context, so `/modules` in the same session still saves exactly what was on
@@ -801,6 +821,7 @@ The verification command is the team's, not an agent's, and lives next to
 
 | Field | Meaning |
 |-------|---------|
+| `team.isolate` | Optional, default `false`. Whether each worker of a roster no team claims gets a `git worktree` of its own (AGE-822). |
 | `team.verification` | Optional. A shell command the runner runs in each worker's worktree once its task ends, whose exit code and output tail go into the evidence envelope. Absent: the envelope carries branch, commits and diff stat only. |
 
 It is skipped for any agent **whose profile has no shell**: a worker that could not run
@@ -840,6 +861,7 @@ beside it.
 | `leader` | The spec the leader runs as. `--model`, `--tools` and `--preamble` still beat its fields; `--model` also replaces every roster member's model for the run, a pinned one included (`Team::run_roster`, AGE-808). |
 | `agents` | The roster, by spec name. Replaces `module_settings.virtual_agents` for the run. |
 | `verification` | Optional. The team's verification command (`team.verification` above) for the run. |
+| `isolate` | Optional, default `false`. Each worker gets a `git worktree` of its own instead of the conversation's workspace (AGE-822). A coding team sets it; an analysis team works where the user's files are. Copied into `module_settings.team.isolate` for a `--team` run. |
 | `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
 | `max_agent_turns` | Optional. The leader's turn budget for the run, ahead of the leader spec's own; without either a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own spec's. |
 | `handoffs` | Optional. Role → a JSON Schema its handoff must match, as a path relative to the team directory (see *Typed handoffs* below). |

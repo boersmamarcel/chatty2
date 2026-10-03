@@ -33,7 +33,7 @@ Nothing leaves your machine unless a provider, extension or website you use rece
 | Rendered math and diagram caches | `~/Library/Application Support/chatty/math_cache/`, `~/Library/Application Support/chatty/mermaid_cache/` | `~/.config/chatty/math_cache/`, `~/.config/chatty/mermaid_cache/` | `%APPDATA%\chatty\math_cache\`, `%APPDATA%\chatty\mermaid_cache\` |
 | Browser screenshots and console logs | `<workspace>/.chatty/browser/` | same | same |
 | Project skills | `<workspace>/.agents/skills/`, `<workspace>/.claude/skills/` (and in parent folders up to the git root) | same | same |
-| Sub-agent worktrees (one per delegated worker, left in place; delete when done) | `<workspace>/.chatty/worktrees/<name>/` | same | same |
+| Sub-agent worktrees (one per delegated worker of a team with `"isolate": true`, left in place; delete when done) | `<workspace>/.chatty/worktrees/<name>/` | same | same |
 | Team directories (`<id>/team.json` + `SKILL.md`) | `<workspace>/.chatty/teams/`, then `~/Library/Application Support/chatty/teams/` | same, then `~/.local/share/chatty/teams/` | same, then `%APPDATA%\chatty\teams\` |
 | Context-window thresholds (`token_tracking.json`) | same folder as settings | `~/.config/chatty/` | same folder |
 | Terminal app binary | `/usr/local/bin/chatty-tui` | `~/.local/bin/chatty-tui` | the app's install folder |

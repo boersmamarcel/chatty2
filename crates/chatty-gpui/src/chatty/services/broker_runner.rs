@@ -41,9 +41,10 @@ pub fn socket_path() -> std::io::Result<PathBuf> {
 
 /// The runners the gateway publishes, one per resolved virtual agent.
 ///
-/// `workspace_dir` is the conversation's workspace root; each worker gets a
-/// `git worktree` under it (ADR-0012). Without one — or when it is not a git
-/// repository — workers share the desktop's tree, as they did before AGE-314.
+/// `workspace_dir` is the conversation's workspace root, where every worker
+/// works. A team that asks for isolation (`"isolate": true`, AGE-822) gives
+/// each of its workers a `git worktree` under it instead (ADR-0012); in a
+/// workspace that is not a git repository those share it too.
 /// Every runner with an endpoint is metered on one shared budget, so two
 /// agents on the same model server queue against each other and two on
 /// different servers do not (ADR-0011 C6/C10); `default_budget` sizes an
@@ -72,8 +73,10 @@ pub fn local_runners(
                 .with_description(spec.description)
                 .with_args(spec.args)
                 .with_workspace_root(workspace_dir.clone())
-                .with_verification(spec.verification)
-                .with_workspace_factory(worktree_factory());
+                .with_verification(spec.verification);
+            if spec.isolate {
+                runner = runner.with_workspace_factory(worktree_factory());
+            }
             if let Some((endpoint, _)) = spec.endpoint {
                 runner = runner.with_endpoint_budget(endpoint, budget.clone());
             }

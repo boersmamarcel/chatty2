@@ -330,6 +330,15 @@ impl GitService {
         Ok(listed.lines().any(|line| line.trim() == name))
     }
 
+    /// Whether `HEAD` names a commit: `false` in a fresh `git init` with
+    /// nothing committed yet, whose branch is unborn — nothing a worktree
+    /// can be branched from (AGE-822).
+    pub async fn has_commits(&self) -> bool {
+        self.run_git(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+            .await
+            .is_ok()
+    }
+
     /// The branch actually checked out at this tree's root, or `None` on a
     /// detached `HEAD` — a tree with no branch of its own to fall back to.
     ///

@@ -376,6 +376,9 @@ pub struct TaskMapper {
     tool_names: HashMap<String, String>,
     state: TaskState,
     failure: Option<String>,
+    /// The typed failure of a worker under this one that never started
+    /// (AGE-822): when set, the terminal status fails with it.
+    start_failure: Option<String>,
     /// What this task spent, its own turns and everything its delegations
     /// reported (AGE-415), one line per model (AGE-682).
     usage: Vec<TokenUsage>,
@@ -422,6 +425,7 @@ impl TaskMapper {
             // events that mean otherwise say so explicitly.
             state: TaskState::Completed,
             failure: None,
+            start_failure: None,
             usage: Vec::new(),
             trace: Vec::new(),
             open_calls: HashMap::new(),
@@ -577,6 +581,14 @@ impl TaskMapper {
                 if let Some(index) = self.open_calls.remove(id) {
                     self.trace[index].outcome = StepOutcome::Failed(error.clone());
                 }
+                // A worker under this one never started: this task fails
+                // with it, so the caller stops too and the user is shown
+                // it (AGE-822), whatever the run then says.
+                if self.start_failure.is_none()
+                    && let Some((agent, reason)) = chatty_fabric::find_worker_start_failure(error)
+                {
+                    self.start_failure = Some(chatty_fabric::worker_start_failed(agent, reason));
+                }
             }
             _ => {}
         }
@@ -701,7 +713,10 @@ impl TaskMapper {
                     errors.join("; ")
                 )),
             ),
-            _ => (self.state, self.failure.clone()),
+            _ => match &self.start_failure {
+                Some(failure) => (TaskState::Failed, Some(failure.clone())),
+                None => (self.state, self.failure.clone()),
+            },
         };
         ParticipantFrame::Status {
             task_id: self.task_id.clone(),

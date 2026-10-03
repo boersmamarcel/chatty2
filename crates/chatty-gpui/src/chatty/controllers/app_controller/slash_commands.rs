@@ -1,6 +1,8 @@
 use super::*;
 use chatty_core::agent_spec::AgentSpec;
-use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
+use chatty_core::services::agent_command::{
+    AgentCommandTarget, preflight, resolve_agent_command, workspace_line,
+};
 use chatty_core::session::Delegation;
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::tools::LOCAL_AGENT_NAME;
@@ -300,19 +302,22 @@ impl ChattyApp {
                     }
                     // A spec on the roster, or the default sub-agent by its
                     // roster name: both through the conversation's own
-                    // broker, so the swarm tree shows (AGE-744).
-                    AgentCommandTarget::Spec { spec, prompt } => self.send_delegation(
+                    // broker, so the swarm tree shows (AGE-744) — once the
+                    // workspace and code execution are there (AGE-822).
+                    AgentCommandTarget::Spec { spec, prompt } => self.send_local_delegation(
                         Delegation {
                             agent: spec.agent.name,
                             prompt,
                         },
+                        workspace.as_deref(),
                         cx,
                     ),
-                    AgentCommandTarget::Default { prompt } => self.send_delegation(
+                    AgentCommandTarget::Default { prompt } => self.send_local_delegation(
                         Delegation {
                             agent: LOCAL_AGENT_NAME.to_string(),
                             prompt,
                         },
+                        workspace.as_deref(),
                         cx,
                     ),
                 }
@@ -336,6 +341,28 @@ impl ChattyApp {
             return true;
         }
         false
+    }
+
+    /// Hand `delegation` to a local agent, or tell the user why not before
+    /// anything is spawned: no workspace, or code execution off (AGE-822).
+    /// The turn shows the workspace its agents work in under the command.
+    fn send_local_delegation(
+        &mut self,
+        delegation: Delegation,
+        workspace: Option<&Path>,
+        cx: &mut Context<Self>,
+    ) {
+        let code_execution = cx
+            .try_global::<ExecutionSettingsModel>()
+            .is_some_and(|settings| settings.enabled);
+        match preflight(&delegation.agent, workspace, code_execution) {
+            Ok(workspace) => self.send_delegation(delegation, Some(workspace_line(&workspace)), cx),
+            Err(card) => {
+                warn!(agent = %delegation.agent, "/agent refused before spawning: {card}");
+                self.chat_view
+                    .update(cx, |view, cx| view.add_info_message(card, cx));
+            }
+        }
     }
 
     /// Dispatch a task to a remote A2A agent and display the result.

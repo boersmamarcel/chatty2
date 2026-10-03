@@ -54,6 +54,12 @@ pub struct VirtualAgentSpec {
     /// team's `verification` when it declared one and this agent's profile
     /// has a shell; `None` otherwise.
     pub verification: Option<String>,
+    /// Whether each of its workers gets a `git worktree` of its own
+    /// (ADR-0012): the `isolate` of the team that claims it, else
+    /// `module_settings.team.isolate` (AGE-822). Off for an agent no team
+    /// claims and for every team that does not ask: its workers work in
+    /// the caller's tree, the conversation's workspace.
+    pub isolate: bool,
     /// The schema this agent's answers must match, when its team names one
     /// (TD-2, AGE-693). Never set here: a team's `handoffs` are the
     /// broker's to attach, since module settings have none.
@@ -117,6 +123,8 @@ pub fn resolve_virtual_agents(
                 args,
                 endpoint,
                 verification: verification_for(spec, module_settings, workspace),
+                isolate: team::isolate_for_member(&spec.agent.name, workspace)
+                    .unwrap_or(module_settings.team.isolate),
                 handoff: None,
                 spec: spec.clone(),
             }
@@ -475,6 +483,7 @@ mod tests {
         let settings = ModuleSettingsModel {
             team: TeamConfig {
                 verification: Some("cargo test".to_string()),
+                ..TeamConfig::default()
             },
             ..ModuleSettingsModel::default()
         };
@@ -620,6 +629,85 @@ mod tests {
             data_analyst.verification, None,
             "data-analysis's own team declares no verification command"
         );
+    }
+
+    /// AGE-822: an analysis team's workers work in the conversation's own
+    /// workspace — no worktree, so a repository's state (no commits, a
+    /// stale branch) never matters to them — and so does an agent no team
+    /// claims. Only a team that asks for isolation gets worktrees.
+    #[test]
+    fn team_without_isolate_runs_in_the_shared_workspace() {
+        let declared: Vec<String> = ["data-lead", "data-analyst", "reviewer", "researcher"]
+            .map(String::from)
+            .to_vec();
+        let roster = crate::agent_spec::load_roster(&declared, None).expect("the roster loads");
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &roster,
+            &[],
+            None,
+        );
+        assert_eq!(specs.len(), 4);
+        for spec in &specs {
+            assert!(!spec.isolate, "{} runs in the shared workspace", spec.name);
+        }
+    }
+
+    /// AGE-822: a coding preset (`fix-and-verify`) and a workspace team
+    /// with `"isolate": true` give every member a worktree; a `--team` run
+    /// carries the flag in `module_settings.team` for the members no team
+    /// claims by name.
+    #[test]
+    fn isolated_team_gets_worktrees() {
+        let declared: Vec<String> = ["fix-lead", "fix-coder", "code-reviewer"]
+            .map(String::from)
+            .to_vec();
+        let roster = crate::agent_spec::load_roster(&declared, None).expect("the roster loads");
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &roster,
+            &[],
+            None,
+        );
+        assert!(specs.iter().all(|spec| spec.isolate), "{specs:?}");
+
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let team = workspace.path().join(".chatty/teams/my-coders");
+        std::fs::create_dir_all(&team).expect("a team dir");
+        std::fs::write(
+            team.join("team.json"),
+            r#"{"leader": "my-lead", "agents": ["my-coder"], "isolate": true}"#,
+        )
+        .expect("team.json");
+        let mine = [AgentSpec::named("my-lead"), AgentSpec::named("my-coder")];
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &mine,
+            &[],
+            Some(workspace.path()),
+        );
+        assert!(specs.iter().all(|spec| spec.isolate), "{specs:?}");
+
+        let unclaimed = [AgentSpec::named("someone")];
+        let mut settings = ModuleSettingsModel::default();
+        settings.team.isolate = true;
+        let specs = resolve_virtual_agents(&[], &[], &settings, &unclaimed, &[], None);
+        assert!(specs[0].isolate);
+        let specs = resolve_virtual_agents(
+            &[],
+            &[],
+            &ModuleSettingsModel::default(),
+            &unclaimed,
+            &[],
+            None,
+        );
+        assert!(!specs[0].isolate);
     }
 
     #[test]

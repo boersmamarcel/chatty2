@@ -132,6 +132,13 @@ pub struct TeamFile {
     /// AGE-406) for the run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<String>,
+    /// Whether each of the team's workers gets a `git worktree` of its own
+    /// (ADR-0012) rather than the conversation's workspace (AGE-822). Off
+    /// by default: an analysis team reads and writes where the user's files
+    /// are. A coding team, whose workers edit the same files in parallel and
+    /// hand back branches to merge, turns it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub isolate: bool,
     /// The skill the leader is told to read and follow on its first turn.
     /// Served by `read_skill` from the `SKILL.md` beside this file when
     /// there is one, else from the usual skill directories.
@@ -221,6 +228,7 @@ impl Team {
         let mut settings = on_disk.clone();
         settings.virtual_agents = self.file.agents.clone();
         settings.team.verification = self.file.verification.clone();
+        settings.team.isolate = self.file.isolate;
         settings
     }
 
@@ -299,6 +307,19 @@ impl Team {
 /// blocks this lookup. `None` when no team claims `name`, or the team that
 /// does declares no verification command.
 pub fn verification_for_member(name: &str, workspace: Option<&Path>) -> Option<String> {
+    team_file_for_member(name, workspace).and_then(|file| file.verification)
+}
+
+/// Whether the team that claims `name` — found as
+/// [`verification_for_member`] finds it — isolates its workers in
+/// worktrees (AGE-822). `None` when no team claims `name`.
+pub fn isolate_for_member(name: &str, workspace: Option<&Path>) -> Option<bool> {
+    team_file_for_member(name, workspace).map(|file| file.isolate)
+}
+
+/// The `team.json` of the team that has `name` as its leader or on its
+/// roster: a workspace team first, then a preset.
+fn team_file_for_member(name: &str, workspace: Option<&Path>) -> Option<TeamFile> {
     if let Some(root) = workspace {
         let dir = root.join(WORKSPACE_TEAMS_DIR);
         if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -314,18 +335,15 @@ pub fn verification_for_member(name: &str, workspace: Option<&Path>) -> Option<S
                     continue;
                 };
                 if file.leader == name || file.agents.iter().any(|agent| agent == name) {
-                    return file.verification;
+                    return Some(file);
                 }
             }
         }
     }
-    for preset in PRESETS {
-        let file = TeamFile::parse(preset.team_json).expect("a preset team.json parses");
-        if file.leader == name || file.agents.iter().any(|agent| agent == name) {
-            return file.verification;
-        }
-    }
-    None
+    PRESETS
+        .iter()
+        .map(|preset| TeamFile::parse(preset.team_json).expect("a preset team.json parses"))
+        .find(|file| file.leader == name || file.agents.iter().any(|agent| agent == name))
 }
 
 /// Load the team `id` from the workspace, the data directory, or the

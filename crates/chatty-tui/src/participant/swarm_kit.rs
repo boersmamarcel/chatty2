@@ -43,6 +43,7 @@ use chatty_core::agent_spec::AgentSpec;
 use chatty_core::models::token_usage::{PriceBook, TokenPricing, TokenUsage};
 use chatty_core::services::install_progress_channel;
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
+use chatty_core::services::worker_start::{STOP_NOTE, WorkerStartFailure, parse_card};
 use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::models_store::ModelConfig;
@@ -328,11 +329,14 @@ impl SwarmKit {
             )
             .expect("spec file");
         }
-        let module_settings = ModuleSettingsModel {
+        // A repository kit is an isolated team's (BI-5 under
+        // `"isolate": true`, AGE-822).
+        let mut module_settings = ModuleSettingsModel {
             virtual_agents: roster.iter().map(|agent| agent.name.clone()).collect(),
             default_endpoint_budget: endpoint_budget,
             ..ModuleSettingsModel::default()
         };
+        module_settings.team.isolate = repo;
         let execution = ExecutionSettingsModel {
             enabled: true,
             workspace_dir: Some(workspace.to_string_lossy().into_owned()),
@@ -3097,4 +3101,114 @@ async fn cancelled_permit_wait_makes_no_model_call() {
         "kit-m made a model request after its caller gave up"
     );
     assert!(subtree(&kit).is_empty(), "every worker is gone");
+}
+
+// ---------------------------------------------------------------------------
+// Worktrees opt-in per team; start failures go to the user (AGE-822)
+// ---------------------------------------------------------------------------
+
+/// AGE-822, Marcel's v0.5.7 run: the workspace is a fresh `git init` with
+/// nothing committed. A team that does not ask for isolation — the default
+/// — runs in that shared workspace, so the unborn branch never matters:
+/// the worker reads the file where the user put it, and no worktree is
+/// made.
+#[tokio::test]
+async fn an_unisolated_team_works_in_an_empty_git_repository() {
+    let kit = SwarmKit::start(
+        vec![AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse)],
+        Script::new().route(
+            WORKER_MODEL,
+            [
+                Reply::tool_call("read_file", serde_json::json!({ "path": "README.md" })),
+                Reply::text("It says Chatty."),
+            ],
+        ),
+        Script::new(),
+    )
+    .await;
+    let workspace = kit.workspace();
+    git(&workspace, &["init", "-q", "-b", "main"]);
+
+    let run = kit.run_leader("read the readme").await;
+
+    let out = run.output.as_ref().expect("the delegation succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response, "It says Chatty.");
+    let requests = kit.sse.requests_for(WORKER_MODEL);
+    assert!(String::from_utf8_lossy(&requests[1].body).contains("# Chatty"));
+    assert!(
+        !workspace.join(".chatty/worktrees").exists(),
+        "no worktree for a team that does not isolate"
+    );
+}
+
+/// AGE-822: a worker that cannot be started — here a grandchild whose
+/// worktree cannot be made inside its sub-leader's — is terminal for the
+/// agent that called it: the sub-leader's model is not asked anything
+/// after the failed call, so it cannot retry or explain git. The failure
+/// travels up as the typed `worker_start_failed`, and the root hands the
+/// user a card saying what failed and what to do.
+#[tokio::test]
+async fn worker_start_failure_is_a_user_visible_error_and_terminal_for_the_caller() {
+    let kit = SwarmKit::start_in_repo(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(GRANDCHILD, GRANDCHILD_MODEL, Endpoint::Ndjson),
+        ],
+        Script::new().route(
+            LEAD_MODEL,
+            [
+                Reply::tool_call(
+                    "invoke_agent",
+                    serde_json::json!({ "agent": GRANDCHILD, "prompt": "read the readme" }),
+                ),
+                Reply::text("Git needs a branch; please create one and retry."),
+            ],
+        ),
+        Script::new().route(GRANDCHILD_MODEL, [Reply::text("unreachable")]),
+    )
+    .await;
+    // `HEAD` holds a file where the sub-leader's tree must make the
+    // grandchild's worktree directory; the workspace itself does not, so
+    // the sub-leader's own tree is made.
+    let workspace = kit.workspace();
+    std::fs::create_dir_all(workspace.join(".chatty")).expect(".chatty");
+    std::fs::write(workspace.join(".chatty/worktrees"), "in the way\n").expect("blocker");
+    git(&workspace, &["add", "-f", ".chatty/worktrees"]);
+    git(&workspace, &["commit", "-q", "-m", "blocker"]);
+    git(&workspace, &["rm", "-q", "--cached", ".chatty/worktrees"]);
+    std::fs::remove_file(workspace.join(".chatty/worktrees")).expect("unblocked here");
+
+    let run = kit.run_leader("have the grandchild read the readme").await;
+
+    let error = run.output.as_ref().expect_err("the delegation failed");
+    let failure = WorkerStartFailure::find(error)
+        .unwrap_or_else(|| panic!("a typed start failure reached the root: {error}"));
+    assert_eq!(failure.agent, GRANDCHILD);
+    assert!(
+        error.contains(STOP_NOTE),
+        "the root's model is told to stop: {error}"
+    );
+    assert_eq!(
+        kit.sse.requests_for(LEAD_MODEL).len(),
+        1,
+        "the sub-leader's model is not asked again after the failed start"
+    );
+    assert!(kit.ndjson.requests_for(GRANDCHILD_MODEL).is_empty());
+
+    let card = run
+        .progress
+        .iter()
+        .find_map(|p| match p {
+            InvokeAgentProgress::Finished {
+                success: false,
+                result: Some(result),
+                ..
+            } => parse_card(result).map(|_| result.clone()),
+            _ => None,
+        })
+        .expect("the user is shown a card");
+    assert!(card.contains(&format!("'{GRANDCHILD}'")), "{card}");
+    assert!(card.contains("What to do:"), "{card}");
+    assert!(!card.contains("create one and retry"), "{card}");
 }

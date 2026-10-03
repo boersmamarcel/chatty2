@@ -64,6 +64,7 @@ cat > .chatty/teams/bank-fix/team.json <<'EOF'
   "leader": "bank-lead",
   "agents": ["local-coder", "local-reviewer"],
   "verification": "python3 -m unittest discover -s tests -t . -v",
+  "isolate": true,
   "skill": "bank-fix",
   "max_agent_turns": 50
 }
@@ -77,6 +78,7 @@ What each field does, and why:
 | `agent.model` in the worker specs | `qwen2.5-coder:14b` on both workers | A coding model for the code; the leader keeps `qwen3:14b` for planning. Each worker is metered on its own model's server, so a worker on another machine would not queue behind the leader. |
 | `budget.max_agent_turns` in `local-coder.toml` | `30` | A cap on the coder's tool rounds. Without one a worker has no turn cap and a 30-minute time budget (`--max-duration`). This is the coder's own budget. |
 | `verification` | in the file | So the task no longer has to say it. Chatty runs this in each worker's tree at the end and puts the result in the evidence block. |
+| `isolate` | `true` | Each worker gets its own git worktree and branch, so the coder's edits never land in your checkout until the leader merges them. Without it every worker works in the workspace itself, which is right for analysis teams and wrong for a coding team. |
 | `max_agent_turns` (top level) | `50` | The **leader's** budget for the run. A delegating leader burns a turn per hand-off and per tool call. Without it the leader has no turn cap and a 30-minute time budget. |
 | `skill` | `bank-fix` | The playbook, next: the leader's first turn opens with *read_skill bank-fix and follow it*. |
 

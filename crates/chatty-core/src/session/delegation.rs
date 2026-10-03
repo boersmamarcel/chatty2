@@ -24,6 +24,7 @@ use crate::models::clarification_store::ClarificationNotification;
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::services::StreamChunk;
 use crate::services::llm_service::ResponseStream;
+use crate::services::worker_start::WorkerStartFailure;
 use crate::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentTool};
 
 /// Who a [`TurnInput`](super::TurnInput) is handed to, and what they are
@@ -145,10 +146,13 @@ pub(super) fn delegation_stream(
                     id: CALL_ID.to_string(),
                     error: error.clone(),
                 });
-                yield Ok(StreamChunk::Text(format!(
-                    "⚠️ '{}' failed: {error}",
-                    delegation.agent
-                )));
+                // A worker that never started — the agent's own or one
+                // under it — is a setup problem: the user gets the card
+                // saying what failed and what to do (AGE-822).
+                yield Ok(StreamChunk::Text(match WorkerStartFailure::find(&error) {
+                    Some(failure) => failure.card(),
+                    None => format!("⚠️ '{}' failed: {error}", delegation.agent),
+                }));
             }
         }
         yield Ok(StreamChunk::Done);

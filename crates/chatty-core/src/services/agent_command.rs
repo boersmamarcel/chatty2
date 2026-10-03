@@ -7,7 +7,10 @@
 //! the default sub-agent. A WASM plugin is never an agent, so a plugin's
 //! name is just a word.
 
+use std::path::{Path, PathBuf};
+
 use crate::agent_spec::AgentSpec;
+use crate::services::worker_start::preflight_card;
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::LOCAL_AGENT_NAME;
 
@@ -71,10 +74,92 @@ pub fn resolve_agent_command(
     }
 }
 
+/// What a local `/agent` delegation needs before anything is spawned
+/// (AGE-822): a workspace folder that exists, and code execution on — a
+/// worker's tools are confined to the workspace, and without code execution
+/// it has none to read a file with. `Ok` is the workspace, which the turn
+/// shows; `Err` is the card the user is shown instead of starting `agent`.
+pub fn preflight(
+    agent: &str,
+    workspace: Option<&Path>,
+    code_execution: bool,
+) -> Result<PathBuf, String> {
+    let Some(workspace) = workspace else {
+        return Err(preflight_card(
+            agent,
+            "this conversation has no workspace folder, so the agent would have no files to \
+             work on.",
+            "Pick a folder with the folder chip under the message box, then send the message \
+             again.",
+        ));
+    };
+    if !workspace.is_dir() {
+        return Err(preflight_card(
+            agent,
+            &format!(
+                "the workspace folder {} does not exist.",
+                workspace.display()
+            ),
+            "Pick an existing folder with the folder chip under the message box, then send \
+             the message again.",
+        ));
+    }
+    if !code_execution {
+        return Err(preflight_card(
+            agent,
+            "code execution is off, so the agent cannot read or run anything in the \
+             workspace.",
+            "Turn on code execution in Settings \u{2192} Execution, then send the message again.",
+        ));
+    }
+    Ok(workspace.to_path_buf())
+}
+
+/// The workspace line a local `/agent` turn carries under its command, so
+/// the user sees where its agents work before they start (AGE-822).
+pub fn workspace_line(workspace: &Path) -> String {
+    let shown = match dirs::home_dir()
+        .as_deref()
+        .and_then(|home| workspace.strip_prefix(home).ok())
+    {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => workspace.display().to_string(),
+    };
+    format!("Workspace: `{shown}`")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent_spec::load_roster_from;
+    use crate::services::worker_start::parse_card;
+
+    /// AGE-822: `/agent` with no workspace, a missing one, or code
+    /// execution off is refused with a card before anything is spawned;
+    /// with both it goes ahead in that workspace.
+    #[test]
+    fn agent_command_without_workspace_fails_before_spawn() {
+        let refused = preflight("data-lead", None, true).expect_err("no workspace");
+        let (title, body) = parse_card(&refused).expect("a card");
+        assert_eq!(title, "\u{26d4} Could not start 'data-lead'");
+        assert!(body.contains("no workspace folder"), "{body}");
+        assert!(body.contains("folder chip"), "{body}");
+
+        let gone = Path::new("/nonexistent/age-822/sales");
+        let refused = preflight("data-lead", Some(gone), true).expect_err("missing folder");
+        assert!(refused.contains("does not exist"), "{refused}");
+
+        let dir = tempfile::tempdir().expect("a workspace");
+        let refused = preflight("data-lead", Some(dir.path()), false).expect_err("no execution");
+        assert!(refused.contains("code execution is off"), "{refused}");
+
+        assert_eq!(
+            preflight("data-lead", Some(dir.path()), true).expect("ready"),
+            dir.path()
+        );
+        assert!(workspace_line(dir.path()).starts_with("Workspace: `"));
+    }
 
     fn remote(name: &str, enabled: bool) -> A2aAgentConfig {
         A2aAgentConfig {

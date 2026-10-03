@@ -18,6 +18,7 @@ use crate::models::execution_approval_store::{ApprovalNotification, ApprovalReso
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
 use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
+use crate::services::worker_start::{StopOnWorkerStartFailure, WORKER_START_STOP};
 
 /// Stream chunks emitted during responses
 #[derive(Debug, Clone)]
@@ -481,6 +482,38 @@ fn budget_spent_end(
     Some(chunks)
 }
 
+/// The end of a run whose `invoke_agent` call could not start its worker
+/// (see [`crate::services::worker_start`]): the run's messages so far, the
+/// card the hook stopped it with as its text — after a blank line when the
+/// last call already said something — then `Done`. A normal end, not an
+/// error: the card is the answer, which the user reads and a sub-leader's
+/// caller is handed. `None` for every other error.
+fn worker_start_end(
+    err: &StreamingError,
+    history_len: usize,
+    text_in_last_call: bool,
+) -> Option<Vec<StreamChunk>> {
+    let StreamingError::Prompt(e) = err else {
+        return None;
+    };
+    let PromptError::PromptCancelled {
+        chat_history,
+        reason,
+    } = e.as_ref()
+    else {
+        return None;
+    };
+    let card = reason.strip_prefix(WORKER_START_STOP)?;
+    let mut chunks = Vec::new();
+    if let Some(messages) = chat_history.get(history_len..).filter(|m| !m.is_empty()) {
+        chunks.push(StreamChunk::TurnMessages(messages.to_vec()));
+    }
+    let separator = if text_in_last_call { "\n\n" } else { "" };
+    chunks.push(StreamChunk::Text(format!("{separator}{card}")));
+    chunks.push(StreamChunk::Done);
+    Some(chunks)
+}
+
 /// The messages of a run that failed with a provider error (transport, HTTP
 /// status, malformed or unknown tool call): what its last model call was
 /// sending, past the `history_len` the run started with, as the turn's
@@ -607,8 +640,10 @@ pub async fn stream_prompt(
 
     // The turn budget sets rig's call cap (the tool turns plus one tool-free
     // wrap-up call) and tells the model how many tool turns it has left.
+    // A delegation whose worker never started ends the run (AGE-822).
     let mut agent_stream = turn_budget
         .apply(agent.agent.stream_prompt(user_message).history(history))
+        .add_hook(StopOnWorkerStartFailure)
         .await;
 
     // A caller that does not wire a channel is treated the same as one whose
@@ -644,6 +679,7 @@ pub async fn stream_prompt(
                         Some(result) => {
                             if let Err(e) = &result
                                 && let Some(chunks) = budget_spent_end(e, history_len, text_in_last_call)
+                                    .or_else(|| worker_start_end(e, history_len, text_in_last_call))
                             {
                                 for chunk in chunks {
                                     yield Ok(chunk);

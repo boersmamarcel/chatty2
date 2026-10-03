@@ -2,5 +2,6 @@
   "leader": "fix-lead",
   "agents": ["fix-coder", "code-reviewer"],
   "verification": "python3 -m unittest discover -s tests -t . -v",
+  "isolate": true,
   "max_agent_turns": 16
 }

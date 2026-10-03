@@ -370,9 +370,10 @@ struct Cli {
     /// (ADR-0011 C2) that `invoke_agent`/`list_agents` can reach — the same
     /// wiring the desktop's module settings turn on, minus the WASM module
     /// runtime. Valid with --headless, --pipe and the interactive TUI.
-    /// A worker is a `chatty-tui` process next to this one; when the
-    /// workspace is a git repository each worker gets its own `git
-    /// worktree`, as on the desktop. Unix only.
+    /// A worker is a `chatty-tui` process next to this one, working in the
+    /// same workspace; a team with `"isolate": true` in a git repository
+    /// gives each worker its own `git worktree`, as on the desktop
+    /// (AGE-822). Unix only.
     ///
     /// Only a root process starts a broker (ADR-0020, BI-5): inside a
     /// worker (--participant-fd) this means "use my connection", which a

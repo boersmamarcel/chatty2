@@ -1486,9 +1486,15 @@ impl BrokerCalls {
             let running = match effect {
                 Effect::Submit(node) => a2a_participant::submit(&registry, &node, task).await
                     .ok_or_else(|| format!("participant '{agent}' is no longer connected")),
+                // A worker that never started is a setup problem — its
+                // worktree, its process, its hello — that only the user can
+                // fix, so it is typed for every caller up the tree to stop
+                // on and the user to be shown (AGE-822).
                 Effect::Spawn(runner) => {
                     info!(caller = %caller.name(), agent = %agent, "Starting a worker for a call");
-                    a2a_participant::spawn(runner.as_ref(), task).await
+                    a2a_participant::spawn(runner.as_ref(), task)
+                        .await
+                        .map_err(|reason| chatty_fabric::worker_start_failed(&agent, &reason))
                 }
             };
             let mut running = match running {
