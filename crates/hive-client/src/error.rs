@@ -49,6 +49,15 @@ pub enum ClientError {
     #[error("http error: {0}")]
     HttpTransport(#[source] reqwest::Error),
 
+    /// A registry token or its session key did not verify (CX-0b).
+    #[error("registry token refused: {0}")]
+    Token(#[from] crate::session_key::TokenError),
+
+    /// A step-up request expired before it was approved, or was not
+    /// approved within the wait.
+    #[error("the step-up request was not approved: {0}")]
+    StepUpNotApproved(String),
+
     /// The registry's base URL is plain `http://` to a non-local address
     /// (SEC-16, AGE-756): refused before any request is sent, so a bearer
     /// token or password never has a chance to leave in clear text.

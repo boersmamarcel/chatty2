@@ -64,6 +64,7 @@ pub mod error;
 pub mod models;
 pub mod secure_url;
 pub mod session;
+pub mod session_key;
 pub mod trust;
 pub mod usage;
 pub mod verify;
@@ -71,7 +72,10 @@ pub mod verify;
 pub use client::HiveRegistryClient;
 pub use credit_guard::{CreditGuard, InsufficientFunds};
 pub use error::ClientError;
-pub use models::{BegunDownload, MAX_DOWNLOAD_BYTES, TokenPair};
+pub use models::{
+    BegunDownload, CreateExternalKey, ExternalKey, ExternalKeyScope, MAX_DOWNLOAD_BYTES,
+    StepUpAction, StepUpRequest, TokenPair,
+};
 pub use secure_url::ensure_secure_url;
 pub use session::{HiveSession, SessionState};
 pub use usage::{UsageCollector, UsageCollectorConfig};

@@ -427,14 +427,55 @@ async fn report_usage() {
 
 #[tokio::test]
 async fn acquire_and_settle_a_billing_session() {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
+    use ed25519_dalek::Signer;
+
     let server = MockServer::start().await;
-    serve_authed(
-        &server,
-        "POST",
-        "/api/credits/acquire-session",
-        "acquire_session",
-    )
-    .await;
+    // The recorded token is scrubbed; the client now verifies it (CX-0b),
+    // so the double serves a real EdDSA one under a root-certified key.
+    let (root, session_key) = (
+        ed25519_dalek::SigningKey::from_bytes(&[1; 32]),
+        ed25519_dalek::SigningKey::from_bytes(&[2; 32]),
+    );
+    let session_hex = hex::encode(session_key.verifying_key().to_bytes());
+    Mock::given(method("GET"))
+        .and(path("/.well-known/hive-session-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "public_key": session_hex,
+            "signature": BASE64.encode(
+                root.sign(&hive_client::session_key::certificate_message(&session_hex))
+                    .to_bytes()
+            ),
+        })))
+        .mount(&server)
+        .await;
+    let now = Utc::now().timestamp();
+    let input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#),
+        URL_SAFE_NO_PAD.encode(
+            json!({
+                "sid": "e96ad058-bbba-47a4-9f8f-738b85e97861", "uid": "u",
+                "mod": "paid-module", "ver": "1.0.0", "res": 100, "bal": 0,
+                "iat": now, "exp": now + 300,
+            })
+            .to_string()
+        )
+    );
+    let token = format!(
+        "{input}.{}",
+        URL_SAFE_NO_PAD.encode(session_key.sign(input.as_bytes()).to_bytes())
+    );
+    let mut acquired = recorded("acquire_session");
+    acquired["token"] = json!(token);
+    Mock::given(method("POST"))
+        .and(path("/api/credits/acquire-session"))
+        .and(header("authorization", format!("Bearer {TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(acquired))
+        .expect(1)
+        .mount(&server)
+        .await;
     serve_authed(
         &server,
         "POST",
@@ -442,7 +483,8 @@ async fn acquire_and_settle_a_billing_session() {
         "settle_session",
     )
     .await;
-    let client = signed_in(&server);
+    let client =
+        signed_in(&server).with_local_root_key(&hex::encode(root.verifying_key().to_bytes()));
     let session = client
         .acquire_session("paid-module", "1.0.0", 100)
         .await
