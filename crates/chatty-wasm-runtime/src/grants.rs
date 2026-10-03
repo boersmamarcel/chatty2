@@ -20,7 +20,7 @@
 use std::fmt;
 
 use tracing::warn;
-use wasmtime::component::Linker;
+use wasmtime::component::{HasData, HasSelf, Linker};
 
 use crate::bindings::chatty::plugin::billing::SessionInfo;
 use crate::bindings::chatty::plugin::types::{CompletionResponse, Message};
@@ -186,33 +186,40 @@ pub(crate) fn add_to_linker(
     granted: &[Capability],
 ) -> anyhow::Result<()> {
     let real = |c: Capability| granted.contains(&c);
-    types::add_to_linker(linker, |s| s)?;
-    logging::add_to_linker(linker, |s| s)?;
+    types::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
+    logging::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     if real(Capability::Llm) {
-        llm::add_to_linker(linker, |s| s)?;
+        llm::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        llm::add_to_linker_get_host(linker, refused)?;
+        llm::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     if real(Capability::Config) {
-        config::add_to_linker(linker, |s| s)?;
+        config::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        config::add_to_linker_get_host(linker, refused)?;
+        config::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     if real(Capability::File) {
-        file::add_to_linker(linker, |s| s)?;
+        file::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        file::add_to_linker_get_host(linker, refused)?;
+        file::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     if real(Capability::Billing) {
-        billing::add_to_linker(linker, |s| s)?;
+        billing::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        billing::add_to_linker_get_host(linker, refused)?;
+        billing::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     Ok(())
 }
 
 fn refused(state: &mut ModuleState) -> Refused<'_> {
     Refused(state)
+}
+
+/// Links the [`Refused`] host side for a capability.
+struct Refusing;
+
+impl HasData for Refusing {
+    type Data<'a> = Refused<'a>;
 }
 
 /// The host side of every ungranted capability: each call is refused.
@@ -244,7 +251,7 @@ impl config::Host for Refused<'_> {
     /// `config::get` has no error channel, so the refusal is a trap: the
     /// call fails with the refusal as its reason.
     fn get(&mut self, _key: String) -> wasmtime::Result<Option<String>> {
-        Err(anyhow::Error::new(self.refuse(Capability::Config)))
+        Err(wasmtime::Error::new(self.refuse(Capability::Config)))
     }
 }
 
