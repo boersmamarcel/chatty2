@@ -14,7 +14,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use super::provider_repository::{RepositoryError, RepositoryResult};
 
 /// Resolve the chatty config directory (`$XDG_CONFIG_HOME/chatty`).
-fn chatty_config_dir() -> RepositoryResult<PathBuf> {
+pub(crate) fn chatty_config_dir() -> RepositoryResult<PathBuf> {
     let config_dir = dirs::config_dir()
         .ok_or_else(|| RepositoryError::PathError("Cannot determine config directory".into()))?;
     Ok(config_dir.join("chatty"))
@@ -34,13 +34,13 @@ static WRITE_SLOTS: LazyLock<Mutex<HashMap<PathBuf, WriteSlot>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// A save's place in line for its file (AGE-562).
-struct SaveTicket {
+pub(crate) struct SaveTicket {
     seq: u64,
     slot: WriteSlot,
 }
 
 impl SaveTicket {
-    fn take(path: &Path) -> Self {
+    pub(crate) fn take(path: &Path) -> Self {
         let seq = NEXT_SAVE.fetch_add(1, Ordering::Relaxed);
         let slot = WRITE_SLOTS
             .lock()
@@ -49,6 +49,60 @@ impl SaveTicket {
             .or_default()
             .clone();
         Self { seq, slot }
+    }
+
+    /// Wait for this file's turn. `None` when a newer save has already been
+    /// written, so this one must be dropped. Holding the returned turn keeps
+    /// every other save of the file waiting, so work that has to happen in
+    /// save order (a secret written to the keychain, AGE-741) goes between
+    /// this and [`SaveTurn::write`].
+    pub(crate) async fn turn(self) -> Option<SaveTurn> {
+        let last_written = self.slot.lock_owned().await;
+        if *last_written > self.seq {
+            return None;
+        }
+        Some(SaveTurn {
+            seq: self.seq,
+            last_written,
+        })
+    }
+}
+
+/// A save holding its file's write lock (see [`SaveTicket::turn`]).
+pub(crate) struct SaveTurn {
+    seq: u64,
+    last_written: tokio::sync::OwnedMutexGuard<u64>,
+}
+
+impl SaveTurn {
+    /// Write `json` to `path` atomically (own temp file + rename).
+    pub(crate) async fn write(mut self, path: &Path, json: String) -> RepositoryResult<()> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+        }
+
+        let extension = path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let temp_path = path.with_extension(format!(
+            "{extension}.{}.{}.tmp",
+            std::process::id(),
+            self.seq
+        ));
+        tokio::fs::write(&temp_path, &json)
+            .await
+            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+
+        if let Err(e) = tokio::fs::rename(&temp_path, path).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(RepositoryError::IoError(e.to_string()));
+        }
+
+        *self.last_written = self.seq;
+        Ok(())
     }
 }
 
@@ -61,37 +115,10 @@ impl SaveTicket {
 /// each has its own temp file, and a save older than the last one written is
 /// dropped rather than written over it.
 async fn write_ordered(path: &Path, json: String, ticket: SaveTicket) -> RepositoryResult<()> {
-    let mut last_written = ticket.slot.lock().await;
-    if *last_written > ticket.seq {
-        return Ok(());
+    match ticket.turn().await {
+        Some(turn) => turn.write(path, json).await,
+        None => Ok(()),
     }
-
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-    }
-
-    let extension = path
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let temp_path = path.with_extension(format!(
-        "{extension}.{}.{}.tmp",
-        std::process::id(),
-        ticket.seq
-    ));
-    tokio::fs::write(&temp_path, &json)
-        .await
-        .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-    if let Err(e) = tokio::fs::rename(&temp_path, path).await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(RepositoryError::IoError(e.to_string()));
-    }
-
-    *last_written = ticket.seq;
-    Ok(())
 }
 
 /// Write `value` to `path` atomically (temp file + rename), outside the

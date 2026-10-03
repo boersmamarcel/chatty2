@@ -543,7 +543,8 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
 }
 
 /// A `chatty-tui` that runs `real` with the kit's home and XDG dirs, so the
-/// worker reads the kit's settings. Everything else is inherited.
+/// worker reads the kit's settings and keeps any secret in the kit's config
+/// dir (`CHATTY_SECRET_STORE=file`). Everything else is inherited.
 fn wrapper(base: &Path, real: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
@@ -563,7 +564,8 @@ fn wrapper(base: &Path, real: &Path) -> PathBuf {
     };
     let script = format!(
         "#!/bin/sh\nexport HOME='{}' XDG_CONFIG_HOME='{}' XDG_DATA_HOME='{}' \
-         XDG_CACHE_HOME='{}' XDG_STATE_HOME='{}' XDG_RUNTIME_DIR='{}'\nexec '{}' \"$@\"\n",
+         XDG_CACHE_HOME='{}' XDG_STATE_HOME='{}' XDG_RUNTIME_DIR='{}' \
+         CHATTY_SECRET_STORE=file\nexec '{}' \"$@\"\n",
         dir("home"),
         dir("config"),
         dir("data"),

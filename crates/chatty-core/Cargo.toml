@@ -37,6 +37,10 @@ similar.workspace = true
 # validator; default features off, so no HTTP `$ref` resolution (no
 # reqwest/rustls from here) and no IDNA tables.
 jsonschema = { version = "0.58", default-features = false }
+# OS keychain for provider keys and Hive tokens (AGE-741): macOS Keychain,
+# Windows Credential Manager, Secret Service on Linux. The zbus-based Secret
+# Service client needs no system libdbus; `crypto-rust` avoids OpenSSL.
+keyring = { version = "3.6", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 
 # Date/time
 chrono = { workspace = true, features = ["serde"] }
