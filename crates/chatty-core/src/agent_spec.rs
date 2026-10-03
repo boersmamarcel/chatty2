@@ -11,6 +11,7 @@
 //! description = "Reviews a worker's branch"
 //! model = "qwen3:4b"            # resolved like --model
 //! preamble = "Verify, do not trust."
+//! example_prompt = "Review the branch fix/login"  # shown in the marketplace
 //!
 //! [tools]
 //! profile = "reviewer"          # a tool_profile name
@@ -147,6 +148,9 @@ pub struct AgentSection {
     /// The role's standing instructions, after the base system prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preamble: Option<String>,
+    /// A task to try it with, shown on its marketplace listing (MK-T2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example_prompt: Option<String>,
 }
 
 /// `[tools]`: what it may call.
