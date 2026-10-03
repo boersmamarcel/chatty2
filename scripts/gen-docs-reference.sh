@@ -212,7 +212,20 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 | `mcp_oauth_<sanitized>.json` | object | opaque `StoredCredentials` JSON | live: `FileCredentialStore`; also `JsonOAuthCredentialRepository` |
 
 Secrets in **bold** must never appear in logs, traces, or LLM-facing tool
-output. Docs examples use `"****"` or omit the field.
+output.
+
+**Secrets kept outside the JSON (AGE-741).** In `providers.json`,
+`mcp_servers.json`, `a2a_agents.json` and `hive_settings.json` the secret
+fields marked *(store)* below are not written to the file. The model keeps
+the plain field; on disk it becomes `<field>_ref` (`"api_key_ref":
+"provider/<name>"`, `mcp/<name>`, `a2a/<name>`, `hive/token`,
+`hive/refresh_token`) and the value lives in the `SecretStore`
+(`settings/secret_store.rs`): the OS keychain under the service
+`chatty:<config dir>`, or, when no keychain answers, the owner-only
+`secrets.json` in the config dir (one warning line; `CHATTY_SECRET_STORE=keychain`
+refuses the fallback, `=file` forces it). A file from an older version that
+still holds a plaintext secret is moved into the store and rewritten on its
+first load (one-shot; removal tracked in AGE-832). Docs examples use `"****"` or omit the field.
 
 ---
 
@@ -335,7 +348,9 @@ Source: `settings/models/hive_settings.rs`.
 |-------|------|---------|-------|
 | `registry_url` | `String` | `http://localhost:8080` | `DEFAULT_REGISTRY_URL` |
 | `runner_url` | `String` | `http://localhost:8081` | `DEFAULT_RUNNER_URL` |
-| **`token`** | `Option<String>` | `null` | JWT (30-day expiry). Secret. `is_logged_in()` = token present |
+| **`token`** | `Option<String>` | `null` | One-hour access JWT. Secret *(store: `token_ref` → `hive/token`)*. `is_logged_in()` = token present |
+| **`refresh_token`** | `Option<String>` | `null` | 30-day refresh token, rotated on every refresh. Secret *(store: `refresh_token_ref` → `hive/refresh_token`)* |
+| `expires_at` | `Option<DateTime>` | `null` | When `token` expires |
 | `username` | `Option<String>` | `null` | Cached for UI |
 | `email` | `Option<String>` | `null` | Cached for re-login |
 
@@ -412,7 +427,7 @@ Source: `settings/models/providers_store.rs`. See also
 |-------|------|---------|-------|
 | `name` | `String` | required | Display name |
 | `provider_type` | `ProviderType` | required | JSON: `open_router`, `ollama`, `azure_openai`. Serde `rename_all = "snake_case"` on the variant `OpenRouter` yields `open_router` — the string `openrouter` **does not** deserialize. Legacy aliases `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as OpenRouter |
-| **`api_key`** | `Option<String>` | omitted if `null` | Secret. Never expose to the LLM |
+| **`api_key`** | `Option<String>` | omitted if `null` | Secret. Never expose to the LLM *(store: `api_key_ref` → `provider/<name>`)* |
 | `base_url` | `Option<String>` | omitted if `null` | Ollama / Azure / OpenAI-compat |
 | `extra_config` | `Map<String, String>` | `{}` (omitted if empty) | Azure: `auth_method` = `api_key` (default) or `entra_id` |
 
@@ -459,7 +474,7 @@ not spawn stdio servers). Writes are serialized with `MCP_WRITE_LOCK`.
 |-------|------|---------|-------|
 | `name` | `String` | required | Unique id |
 | `url` | `String` | required | e.g. `http://localhost:3000/mcp` |
-| **`api_key`** | `Option<String>` | omitted if `null` | Bearer token. Secret. LLM-facing copies must not include the real value |
+| **`api_key`** | `Option<String>` | omitted if `null` | Bearer token. Secret. LLM-facing copies must not include the real value *(store: `api_key_ref` → `mcp/<name>`)* |
 | `enabled` | `bool` | `true` | |
 | `is_module` | `bool` | `false` (omitted when false) | Auto-registered WASM gateway entry |
 
@@ -478,7 +493,7 @@ Source: `settings/models/a2a_store.rs`.
 |-------|------|---------|-------|
 | `name` | `String` | required | Also the `/agent <name>` token |
 | `url` | `String` | required | A2A base URL |
-| **`api_key`** | `Option<String>` | omitted if `null` | Bearer token. Secret |
+| **`api_key`** | `Option<String>` | omitted if `null` | Bearer token. Secret *(store: `api_key_ref` → `a2a/<name>`)* |
 | `enabled` | `bool` | `true` | |
 | `skills` | `[String]` | `[]` (omitted if empty) | Cached from the remote agent card |
 
@@ -510,6 +525,7 @@ into issues, PRs, or docs.** Corrupt files are deleted on load.
 |-------|--------------|-------|
 | `TokenTrackingSettings` | in-memory GPUI global | Defaults: `enabled` `true`, `response_reserve` `4096`, `high_threshold` `0.70`, `critical_threshold` `0.90`, `auto_summarize` `false`, `summarization_model_id` omitted. Source comment: JSON persistence is a follow-up. |
 | Conversations | config dir `chatty/conversations.db` | SQLite, not settings JSON |
+| Provider keys, MCP/A2A tokens, Hive tokens | OS keychain, service `chatty:<config dir>`; fallback config dir `chatty/secrets.json` | Referenced from the JSON by `<field>_ref` (AGE-741) |
 | Agent memory / skills | data dir `chatty/` | memvid + skill files |
 | WASM module binaries | data dir `chatty/modules/` | See `module_dir` |
 | Pdfium native lib | data dir `chatty/lib/` | See [env-vars](./env-vars.md) |
@@ -625,6 +641,7 @@ cat > "$OUT/env-vars.md" << 'EOF'
 | `CHATTY_DEBUG_UI` | Enable chat view debug overlay | unset |
 | `CHATTY_PDFIUM_LIB_DIR` | Path to pdfium native library | auto-detect + cache |
 | `CHATTY_ENABLE_DOC_RETRIEVER` | Enable doc_retriever tool | unset = disabled |
+| `CHATTY_SECRET_STORE` | Where provider keys, MCP/A2A tokens and Hive tokens are kept (AGE-741): `auto`, `keychain` (refuse the file fallback), `file` (owner-only `secrets.json` in the config dir) | `auto` = OS keychain, else `secrets.json` with a warning |
 | `CHATTY_INFER_MISSING_ANSWER` | Headless: infer missing final answer | unset |
 | `CHATTY_PROGRESS` prefix | Sub-agent stderr progress lines | protocol constant |
 | `XDG_RUNTIME_DIR` | Required for GPUI on Linux/X11 | `/tmp/...` |
