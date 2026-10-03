@@ -715,6 +715,11 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
             engine.add_system_message(summary);
             None
         }
+        Command::AgentsRunning => {
+            let summary = engine.running_agents_summary();
+            engine.add_system_message(summary);
+            None
+        }
         Command::Swarm => {
             let summary = engine.swarm_summary();
             engine.add_system_message(summary);

@@ -68,6 +68,9 @@ pub mod project_instructions;
 /// What a run has left to hand its callees: turns, time and dollars
 /// (PL-S2 DP-3).
 pub mod run_budget;
+/// One turn's swarm as a tree of agents, built live from the session's
+/// events and the broker's edge log (TB-2 / AGE-664).
+pub mod running_agents;
 pub mod search_service;
 pub mod shell_service;
 pub mod skill_service;
@@ -86,8 +89,6 @@ pub mod ssrf_guard;
 #[cfg(any(test, feature = "test-support"))]
 pub mod stream_fixtures;
 pub mod stream_processor;
-/// One turn's swarm as a tree of agents, built live from the session's
-/// events and the broker's edge log (TB-2 / AGE-664).
 pub mod swarm_trace;
 /// The team directory: roster, leader role, verification, skill and turn
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).

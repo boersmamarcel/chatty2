@@ -36,7 +36,11 @@ When a sub-agent delegates in turn, its row in the desktop transcript opens into
 - **Stop** on a running agent's line, or **Stop this agent** in its sheet, stops that one agent and every agent it started. The rest of the swarm keeps running. The agent that called it is told `cancelled_by_user` and carries on without it. Any approval or question the stopped agents were waiting on is withdrawn, and the line shows as canceled.
 - If you stop a turn, runs still drawn as running show as canceled.
 
-A single delegation with no further delegation keeps its plain row. Its ↗ button (on the "Sub-agented" row, once its activity is unfolded) opens that agent's transcript in the same side sheet; it is greyed out until the agent has started. While an agent is running, its transcript sheet has a message box under the transcript: what you send is read by that agent at its next tool call, not at the end of its run (in the terminal, `/msg <agent> <text>` does the same). In the terminal, `/swarm` prints the same tree as text, and `/stop <agent>` stops one agent by the name `/swarm` shows.
+### Every running agent at once
+
+While any conversation has agents running, the status bar shows a **N running** chip next to the agents chip (amber, with how many are waiting, when one of them waits on you). Click it to open the running-agents panel: one row per live agent across all your conversations, with its conversation, the agents above it, whether it is working or waiting on your approval or answer, how long it has run, and what it has spent so far. Click a row to jump to that conversation with the agent's transcript open; **Stop** on a row stops that agent and every agent it started, like Stop in the tree. The list updates as the agents report; nothing is polled.
+
+A single delegation with no further delegation keeps its plain row. Its ↗ button (on the "Sub-agented" row, once its activity is unfolded) opens that agent's transcript in the same side sheet; it is greyed out until the agent has started. While an agent is running, its transcript sheet has a message box under the transcript: what you send is read by that agent at its next tool call, not at the end of its run (in the terminal, `/msg <agent> <text>` does the same). In the terminal, `/swarm` prints the same tree as text, `/agents running` prints the running-agents list, and `/stop <agent>` stops one agent by the name `/swarm` shows.
 
 ## Let the agent decide
 

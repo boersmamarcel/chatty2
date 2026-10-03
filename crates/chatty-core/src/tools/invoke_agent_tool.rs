@@ -85,6 +85,29 @@ pub enum InvokeAgentProgress {
     /// carries this: without it, a swarm tree can only name both callees
     /// by the shared spec, so a stop by that name would hit both.
     Admitted(String),
+    /// A run under this delegation is waiting on the human (TB-6, AGE-748):
+    /// `agent` — the name the broker stamped on the request, never one the
+    /// worker wrote — asked for an approval or put a question, which the
+    /// broker delivered to this call under `id`. Lasts until
+    /// [`Resumed`](Self::Resumed) names the same `id`.
+    Waiting {
+        id: String,
+        agent: String,
+        on: WaitingOn,
+    },
+    /// What [`Waiting`](Self::Waiting) named under `id` is over: answered,
+    /// or withdrawn.
+    Resumed { id: String },
+}
+
+/// What a run is waiting on the human for (TB-6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitingOn {
+    /// An execution or write approval (`human.approve`).
+    Approval,
+    /// An answer to its question (`human.ask`, `ask_user`).
+    Answer,
 }
 
 /// A callee's progress as the broker sends it over a call.
@@ -800,7 +823,8 @@ impl InvokeAgentTool {
             std::collections::HashMap::new();
         loop {
             let event = tokio::select! {
-                Some(answered) = parked.next(), if !parked.is_empty() => {
+                Some((id, answered)) = parked.next(), if !parked.is_empty() => {
+                    self.send_progress(InvokeAgentProgress::Resumed { id });
                     if let Err(e) = answered {
                         // Dropping the stream on the way out cancels the
                         // call, which reaps the worker.
@@ -826,14 +850,18 @@ impl InvokeAgentTool {
                         continue;
                     };
                     let (withdrawn_tx, withdrawn) = tokio::sync::oneshot::channel::<()>();
+                    // Who waits on the human, for the running-agents
+                    // overview (TB-6) — until the future below ends.
+                    self.send_progress(waiting.waiting(&key, agent));
                     let answer = self.answer_parked(transport, agent, waiting);
-                    withdraw.insert(key, withdrawn_tx);
+                    withdraw.insert(key.clone(), withdrawn_tx);
                     parked.push(Box::pin(async move {
-                        tokio::select! {
+                        let answered = tokio::select! {
                             answered = answer => answered,
                             // Withdrawn below: nothing to answer.
                             _ = withdrawn => Ok(()),
-                        }
+                        };
+                        (key, answered)
                     }));
                 }
                 Ok(CallEvent::InputWithdrawn { id }) => {
@@ -1209,6 +1237,23 @@ enum Parked {
 }
 
 impl Parked {
+    /// The progress saying who waits on the human for this, under the
+    /// broker's `id`: the asker the broker stamped, else the callee this
+    /// call addressed as `agent`.
+    fn waiting(&self, id: &str, agent: &str) -> InvokeAgentProgress {
+        let (asker, on) = match self {
+            Self::Question { request, .. } => (request.asker.as_ref(), WaitingOn::Answer),
+            Self::Approval { request, .. } => (request.asker.as_ref(), WaitingOn::Approval),
+        };
+        InvokeAgentProgress::Waiting {
+            id: id.to_string(),
+            agent: asker
+                .map_or(agent, |asker| asker.agent.as_str())
+                .to_string(),
+            on,
+        }
+    }
+
     /// What `event` waits on, keyed the way its withdrawal names it: by
     /// the broker's id.
     fn from_event(event: CallEvent) -> Option<(String, Self)> {

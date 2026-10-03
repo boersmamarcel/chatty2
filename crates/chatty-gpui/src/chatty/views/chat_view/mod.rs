@@ -48,6 +48,7 @@ mod parent_stream;
 mod scroll;
 mod start_screen;
 mod swarm;
+pub(crate) use swarm::stop_swarm_node;
 mod turn_cache;
 
 use chatty_core::models::clarification_store::{ClarifyingQuestion, MAX_CLARIFYING_QUESTIONS};

@@ -18,6 +18,7 @@ pub use chatty_core::models::message_types;
 pub mod move_conversation_dialog;
 pub mod parsed_cache;
 pub mod quick_open_dialog;
+pub mod running_agents;
 pub mod search_conversations_dialog;
 mod sidebar_file_tree;
 pub mod sidebar_view;

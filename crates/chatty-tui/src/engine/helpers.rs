@@ -107,6 +107,9 @@ pub(crate) fn delegation_line(
         // Not a transcript line: the swarm tree's identity for this call,
         // not something to print (AGE-762).
         InvokeAgentProgress::Admitted(_) => String::new(),
+        // The approval card or question says it; `/agents running` lists
+        // who waits (TB-6).
+        InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => String::new(),
     }
 }
 

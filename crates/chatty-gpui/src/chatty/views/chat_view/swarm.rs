@@ -39,7 +39,7 @@ use crate::chatty::views::transcript::{
 /// Stop `name` — a node of the running swarm, or the spec of the root's
 /// own callee — and everything under it, through the desktop's broker
 /// (TB-7). The rest of the swarm, and the turn, keep running.
-pub(super) fn stop_swarm_node(name: &str, cx: &mut App) {
+pub(crate) fn stop_swarm_node(name: &str, cx: &mut App) {
     let broker = cx
         .try_global::<crate::settings::models::DiscoveredModulesModel>()
         .and_then(|modules| modules.lazy_broker.clone());
