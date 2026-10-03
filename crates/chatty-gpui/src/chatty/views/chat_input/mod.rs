@@ -501,11 +501,6 @@ impl ChatInputState {
         self.hosted_model_label = mode.hosted_model_label();
     }
 
-    /// The chip text of a hosted conversation, `None` while it is local.
-    pub fn hosted_model_label(&self) -> Option<&str> {
-        self.hosted_model_label.as_deref()
-    }
-
     /// Whether the composer offers the local model picker.
     pub fn local_model_picker_offered(&self) -> bool {
         self.hosted_model_label.is_none()

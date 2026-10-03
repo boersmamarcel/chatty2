@@ -703,7 +703,7 @@ fn composer_in(
     use gpui::AppContext as _;
     use gpui_component::input::InputState;
 
-    cx.update(|cx| gpui_component::init(cx));
+    cx.update(gpui_component::init);
     let window = cx.add_empty_window();
     window.update(|window, cx| {
         let input = cx.new(|cx| InputState::new(window, cx));
