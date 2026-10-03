@@ -36,7 +36,7 @@ When a sub-agent delegates in turn, its row in the desktop transcript opens into
 - **Stop** on a running agent's line, or **Stop this agent** in its sheet, stops that one agent and every agent it started. The rest of the swarm keeps running. The agent that called it is told `cancelled_by_user` and carries on without it. Any approval or question the stopped agents were waiting on is withdrawn, and the line shows as canceled.
 - If you stop a turn, runs still drawn as running show as canceled.
 
-A single delegation with no further delegation keeps its plain row. Its ↗ button (on the "Sub-agented" row, once its activity is unfolded) opens that agent's transcript in the same side sheet; it is greyed out until the agent has started. In the terminal, `/swarm` prints the same tree as text, and `/stop <agent>` stops one agent by the name `/swarm` shows.
+A single delegation with no further delegation keeps its plain row. Its ↗ button (on the "Sub-agented" row, once its activity is unfolded) opens that agent's transcript in the same side sheet; it is greyed out until the agent has started. While an agent is running, its transcript sheet has a message box under the transcript: what you send is read by that agent at its next tool call, not at the end of its run (in the terminal, `/msg <agent> <text>` does the same). In the terminal, `/swarm` prints the same tree as text, and `/stop <agent>` stops one agent by the name `/swarm` shows.
 
 ## Let the agent decide
 
