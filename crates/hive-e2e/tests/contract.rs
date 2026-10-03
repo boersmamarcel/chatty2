@@ -15,7 +15,7 @@ use hive_client::{
 };
 use hive_e2e::{
     SEEDED_VERSION, Stack, flat_manifest, install_from_hive, local_module_registry,
-    mint_session_token, module_dir, send, send_via_gateway, start_gateway, unique,
+    module_dir, send, send_via_gateway, start_gateway, unique,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -442,27 +442,44 @@ async fn s5_02_published_manifest_sections_reach_the_installed_module() {
 
 // ── 5.3 ───────────────────────────────────────────────────────────────────
 
-/// 5.3: past its one-hour access token, the desktop client refreshes and
-/// keeps working — download and usage report (the plan's "run" was the
-/// runner path, which PL-H8 retires). Two ways a token is past expiry: the
-/// session knows (`expires_at` passed → refresh first) and it does not
-/// (clock skew → 401 → refresh → retry). F7, fixed by PL-H6 (AGE-609).
+/// 5.3: past its access token, the desktop client refreshes and keeps
+/// working — download and usage report (the plan's "run" was the runner
+/// path, which PL-H8 retires). Two ways a token is past use: the session
+/// knows (`expires_at` passed → refresh first) and it does not (the token
+/// died on the registry → 401 → refresh → retry). F7, fixed by PL-H6
+/// (AGE-609). Since CX-0 a token is only as alive as its session row, so a
+/// dead one is the access token a refresh replaced, not one re-signed with
+/// a shared secret (there is none).
 #[tokio::test]
 #[ignore = "needs hive stack; run by nightly"]
 async fn s5_03_expired_access_token_is_refreshed_and_usage_survives() {
     let stack = Stack::from_env();
-    let expired_at = Utc::now() - TimeDelta::minutes(10);
     for (case, believed_expiry) in [
-        ("session knows the token expired", expired_at),
+        (
+            "session knows the token expired",
+            Utc::now() - TimeDelta::minutes(10),
+        ),
         (
             "session believes the token is still valid",
             Utc::now() + TimeDelta::hours(1),
         ),
     ] {
         let user = stack.user().await;
+        // Refresh once behind the session's back: registration's access
+        // token is dead from now on, and only the new refresh token works.
+        let (status, rotated) = send(
+            stack
+                .request(Method::POST, "/auth/refresh")
+                .json(&json!({ "refresh_token": user.pair.refresh_token })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "refresh: {rotated}");
         let pair = TokenPair {
-            token: mint_session_token(&user.pair.token, &stack.jwt_secret, expired_at),
-            refresh_token: user.pair.refresh_token.clone(),
+            token: user.pair.token.clone(),
+            refresh_token: rotated["refresh_token"]
+                .as_str()
+                .expect("a refresh token")
+                .to_string(),
             expires_at: believed_expiry,
         };
         let session = Arc::new(HiveSession::new(&stack.registry, Some(pair)));
@@ -877,4 +894,150 @@ async fn s5_10_remote_module_chat_reaches_the_runner_llm_upstream() {
         ),
         "gateway → runner → LLM upstream round trip for {name}"
     );
+}
+
+// ── CX-0b ─────────────────────────────────────────────────────────────────
+
+/// CX-0b (AGE-823): hive-client signs in, refreshes and acquires a billing
+/// session against the CX-0 registry, and verifies every token it is given
+/// as EdDSA under the session key the stack's root certifies — the root
+/// chatty trusts for this stack, not anything the registry says.
+#[tokio::test]
+#[ignore = "needs hive stack; run by nightly"]
+async fn cx0b_sign_in_refresh_and_billing_tokens_verify_under_the_root() {
+    let stack = Stack::from_env();
+    let user = stack.user().await;
+    let client = HiveRegistryClient::new(&stack.registry);
+
+    // Sign-in: the access token is EdDSA under the certified key.
+    let pair = client
+        .login(&user.email, &user.password)
+        .await
+        .expect("sign in");
+    let claims: Value = client
+        .verify_token(&pair.token)
+        .await
+        .expect("the access token verifies under the root-certified session key");
+    assert_eq!(claims["username"], json!(user.username));
+
+    // Refresh: a new verified token, and the old one is dead at once.
+    let refreshed = client.refresh(&pair.refresh_token).await.expect("refresh");
+    client
+        .verify_token::<Value>(&refreshed.token)
+        .await
+        .expect("the refreshed token verifies");
+    let (status, _) = send(stack.request(Method::GET, "/me").bearer_auth(&pair.token)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the replaced token still works"
+    );
+    let (status, _) = send(
+        stack
+            .request(Method::GET, "/me")
+            .bearer_auth(&refreshed.token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // An HS256 token over the same claims is refused by the client before
+    // the registry is asked.
+    let hs256 = format!(
+        "{}.{}",
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        refreshed.token.split_once('.').expect("a JWT").1
+    );
+    assert!(client.verify_token::<Value>(&hs256).await.is_err());
+
+    // Billing: acquire verifies the token before handing it over, and the
+    // token carries the root's certificate a WASM module checks with no
+    // fetch (hive-billing-sdk).
+    let session = Arc::new(HiveSession::new(&stack.registry, Some(refreshed)));
+    let billing = HiveRegistryClient::new(&stack.registry).with_session(session);
+    let acquired = billing
+        .acquire_session(ECHO, SEEDED_VERSION, 10)
+        .await
+        .expect("acquire a billing session");
+    let claims: hive_client::session_key::BillingClaims = billing
+        .verify_token(&acquired.token)
+        .await
+        .expect("the billing token verifies");
+    assert_eq!(claims.module_name, ECHO);
+    assert_eq!(
+        claims.skey.as_deref(),
+        Some(hex::encode(billing.session_key().await.unwrap().to_bytes()).as_str())
+    );
+    assert!(claims.skey_sig.is_some());
+    billing
+        .settle_session(&acquired.session_id, 1, 1)
+        .await
+        .expect("settle");
+}
+
+/// CX-0b (AGE-823): a publisher creates an `External` key through hive-client
+/// and the step-up flow; without the assertion, or with a spent one, the
+/// registry refuses.
+#[tokio::test]
+#[ignore = "needs hive stack; run by nightly"]
+async fn cx0b_an_external_key_is_created_only_through_step_up() {
+    let stack = Stack::from_env();
+    let publisher = stack.publisher().await;
+    let client = publisher.client(&stack.registry);
+    let holder = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+    let key = hive_client::CreateExternalKey {
+        name: unique("partner"),
+        public_key: hex::encode(holder.verifying_key().to_bytes()),
+        monthly_limit_micros: 5_000_000,
+        scope: vec![hive_client::ExternalKeyScope {
+            spec_id: "benford-analyst".into(),
+            version: "1.0.0".into(),
+        }],
+        expires_in_days: Some(30),
+    };
+
+    // No valid assertion: refused.
+    let refused = client.create_external_key(&key, "not-an-assertion").await;
+    assert!(
+        matches!(
+            refused,
+            Err(hive_client::ClientError::Http { status: 403, .. })
+        ),
+        "{refused:?}"
+    );
+
+    // File through hive-client, approve on the page, collect, create.
+    let filed = client
+        .request_external_key_step_up(&key)
+        .await
+        .expect("file the step-up");
+    assert_eq!(filed.status, "pending");
+    assert_eq!(filed.value, key.body());
+    let assertion = stack
+        .approve_step_up(&publisher, &filed.id.to_string())
+        .await;
+    let created = client
+        .create_external_key(&key, &assertion)
+        .await
+        .expect("create the External key");
+    assert_eq!(created.public_key, key.target());
+    assert_eq!(created.scope, key.scope);
+    assert!(
+        client
+            .list_external_keys()
+            .await
+            .expect("list")
+            .iter()
+            .any(|k| k.id == created.id)
+    );
+
+    // The assertion is spent: a second create with it is refused.
+    let again = client.create_external_key(&key, &assertion).await;
+    assert!(
+        matches!(
+            again,
+            Err(hive_client::ClientError::Http { status: 403, .. })
+        ),
+        "{again:?}"
+    );
+    client.revoke_external_key(created.id).await.expect("revoke");
 }

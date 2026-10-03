@@ -27,9 +27,6 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
-# HS256 for the short-lived session token row 5.3 mints (the registry's own
-# JWT format; `jsonwebtoken` is not a chatty2 dependency).
-hmac = "0.13"
 chrono = { workspace = true, features = ["now"] }
 uuid = { workspace = true }
 tempfile = { workspace = true }

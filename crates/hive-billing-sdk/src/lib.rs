@@ -6,10 +6,9 @@
 //!
 //! # Overview
 //!
-//! Hive's Phase 3b billing model uses cryptographically signed session tokens
-//! to ensure that modules can verify the host has properly reserved credits
-//! before doing work. This prevents users from running paid modules without
-//! paying, even though they control the runtime environment.
+//! Hive's billing model uses signed session tokens so that a module can check
+//! that the host really reserved credits before it does any work, even though
+//! the user controls the runtime the module runs in.
 //!
 //! # Quick Start
 //!
@@ -30,67 +29,36 @@
 //! }
 //! ```
 //!
-//! # Trust Model
+//! # Trust model (CX-0b, AGE-823)
 //!
-//! The session token is a JWT signed by Hive's server. The module verifies:
-//! - Signature is valid (using Hive's signing key)
-//! - Token hasn't expired (5 minute TTL)
-//! - Token contains expected claims (session ID, user ID, reserved tokens)
+//! The session token is an **EdDSA** (Ed25519) JWT signed by hive-registry's
+//! session key. There is no shared secret: HS256 is refused outright.
 //!
-//! ## Current Implementation: HMAC-SHA256 with Shared Secret
+//! The module never takes the session key on the host's word. Every token
+//! carries the key that signed it (`skey`, hex) and the registry root's
+//! signature certifying that key (`skey_sig`, base64, over
+//! `hive-registry/session-key-cert/v1\n` followed by the key's hex). The
+//! module verifies, in order:
 //!
-//! **IMPORTANT:** The current implementation uses HS256 (HMAC-SHA256) signing
-//! with a shared secret, NOT Ed25519 public key cryptography as originally
-//! envisioned in the design doc.
+//! 1. `skey_sig` under one of the **registry root public keys** it trusts
+//!    ([`PRODUCTION_ROOT_PUBLIC_KEYS`], the same SEC-3 list chatty compiles
+//!    in, or the keys given to [`configure_root_keys`]);
+//! 2. the token's EdDSA signature under `skey`;
+//! 3. that the token has not expired, and that it reserves what was asked.
 //!
-//! This means:
-//! - The module must embed Hive's JWT secret to verify tokens
-//! - This secret must be kept confidential (embedded at compile time)
-//! - The trust model relies on the secret not being extractable from the WASM binary
-//!
-//! ### Security Considerations
-//!
-//! HMAC verification in WASM modules provides **deterrence**, not **proof**:
-//! - A determined attacker can extract the secret from the WASM binary
-//! - However, this requires more effort than simply modifying the host runtime
-//! - The embedded secret can be rotated by Hive without republishing modules
-//!   (modules check a well-known endpoint for the current secret)
-//!
-//! For **high-trust scenarios**, modules should be run on Hive's Firecracker
-//! infrastructure (Phase 4) where the billing verification happens server-side.
-//!
-//! ### Future: Ed25519 Upgrade Path
-//!
-//! A future version will migrate to Ed25519 signing:
-//! - Hive signs JWTs with a private key (never shared)
-//! - Modules verify using Hive's public key (safe to embed)
-//! - Provides true asymmetric cryptographic verification
-//!
-//! The API surface remains unchanged — only the verification mechanism evolves.
+//! Only public keys are embedded in the module, so nothing in the binary is
+//! worth extracting.
 //!
 //! # Configuration
 //!
-//! ## Option 1: Compile-Time Secret (Default)
-//!
-//! Embed Hive's JWT secret at compile time:
-//!
-//! ```rust,ignore
-//! use hive_billing_sdk::{configure_secret, require_session};
-//!
-//! // Call once at module initialization
-//! configure_secret("your-hive-jwt-secret");
-//! ```
-//!
-//! ## Option 2: Runtime Fetch (Recommended for Production)
-//!
-//! Fetch the secret from a well-known endpoint at module load:
+//! A module built for the production registry needs nothing: it trusts the
+//! compiled [`PRODUCTION_ROOT_PUBLIC_KEYS`]. A module tested against a local
+//! registry (the hive docker compose stack) names that registry's root key
+//! once, at initialisation:
 //!
 //! ```rust,ignore
-//! // TODO: Implement HTTP fetch for wasm32-wasip2
-//! // This requires WASI HTTP support or a host import
+//! hive_billing_sdk::configure_root_keys(&[env!("HIVE_DEV_ROOT_PUBLIC_KEY")]);
 //! ```
-//!
-//! For now, use compile-time embedding and rotate secrets via module updates.
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -99,48 +67,41 @@ use std::sync::OnceLock;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Global storage for the Hive JWT secret.
-///
-/// This secret is used to verify session tokens. It must be configured
-/// before calling [`require_session`].
-static JWT_SECRET: OnceLock<String> = OnceLock::new();
+/// The production registry root public keys (hex Ed25519), compiled in.
+/// Mirrors `hive_client::trust::PRODUCTION_ROOT_PUBLIC_KEYS` (SEC-3,
+/// AGE-816); a test in `hive-client` keeps the two equal. Empty until the
+/// real key is pinned, so until then every token is refused unless
+/// [`configure_root_keys`] names a root.
+pub const PRODUCTION_ROOT_PUBLIC_KEYS: &[&str] = &[];
 
-/// Configure the Hive JWT secret for session token verification.
+/// The domain line the root signs ahead of the session key's hex. Must match
+/// hive-registry's `SESSION_KEY_CERT_DOMAIN`.
+pub const SESSION_KEY_CERT_DOMAIN: &[u8] = b"hive-registry/session-key-cert/v1\n";
+
+static ROOT_KEYS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Trust `keys` (hex Ed25519 registry root public keys) instead of
+/// [`PRODUCTION_ROOT_PUBLIC_KEYS`]. Call once, at module initialisation,
+/// before [`require_session`]; for a local registry only.
 ///
-/// This should be called once at module initialization, before any calls
-/// to [`require_session`].
+/// # Panics
 ///
-/// # Example
-///
-/// ```rust,ignore
-/// use hive_billing_sdk::configure_secret;
-///
-/// // At module startup
-/// configure_secret("your-hive-jwt-secret");
-/// ```
-///
-/// # Security
-///
-/// The secret should be:
-/// - Embedded at compile time (from a secure build environment)
-/// - OR fetched from a well-known Hive endpoint at module load
-/// - Kept confidential (though extractable from the WASM binary with effort)
-///
-/// A missing or incorrect secret will cause all billing calls to fail.
-pub fn configure_secret(secret: impl Into<String>) {
-    JWT_SECRET
-        .set(secret.into())
-        .unwrap_or_else(|_| panic!("JWT secret already configured"));
+/// If called twice.
+pub fn configure_root_keys(keys: &[&str]) {
+    ROOT_KEYS
+        .set(keys.iter().map(|k| k.trim().to_ascii_lowercase()).collect())
+        .unwrap_or_else(|_| panic!("root keys already configured"));
 }
 
-/// Get the configured JWT secret, or return an error if not configured.
-fn get_secret() -> Result<&'static str, String> {
-    JWT_SECRET
-        .get()
-        .map(|s| s.as_str())
-        .ok_or_else(|| {
-            "Billing SDK not configured: call configure_secret() at module initialization".to_string()
-        })
+/// The root keys tokens are verified against.
+fn root_keys() -> Vec<String> {
+    match ROOT_KEYS.get() {
+        Some(keys) => keys.clone(),
+        None => PRODUCTION_ROOT_PUBLIC_KEYS
+            .iter()
+            .map(|k| k.to_ascii_lowercase())
+            .collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +110,7 @@ fn get_secret() -> Result<&'static str, String> {
 
 /// Claims embedded in a Hive billing session JWT.
 ///
-/// Matches the structure defined in `hive-registry/src/models.rs`.
+/// Matches `BillingSessionClaims` in `hive-registry/src/models.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionClaims {
     /// Session ID (UUID)
@@ -169,6 +130,10 @@ pub struct SessionClaims {
     pub iat: i64,
     /// Expires at (Unix timestamp)
     pub exp: i64,
+    /// The session public key that signed the token (hex).
+    pub skey: String,
+    /// The root's base64 signature certifying `skey`.
+    pub skey_sig: String,
 }
 
 /// Verified billing session information.
@@ -188,67 +153,108 @@ pub struct BillingSession {
     pub pricing_model: String,
 }
 
-/// Verify a session token JWT.
-///
-/// Returns the decoded and verified claims, or an error if verification fails.
-fn verify_token(token: &str, secret: &str) -> Result<SessionClaims, String> {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+fn parse_key(hex_key: &str) -> Option<ed25519_dalek::VerifyingKey> {
+    let bytes: [u8; 32] = decode_hex(hex_key)?.try_into().ok()?;
+    ed25519_dalek::VerifyingKey::from_bytes(&bytes).ok()
+}
 
-    // JWT format: header.payload.signature
+fn decode_hex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Verify a billing session token against `roots` (hex Ed25519 registry
+/// root public keys) at `now` (Unix seconds): the root certifies the key in
+/// `skey`, the key signed the token (EdDSA, never HS256), and it has not
+/// expired. Returns the verified claims.
+///
+/// [`require_session`] calls this with the trusted roots; it is public so a
+/// module can check a token it got some other way.
+pub fn verify_session_token(
+    token: &str,
+    roots: &[String],
+    now: i64,
+) -> Result<SessionClaims, String> {
+    use base64::{
+        engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+        Engine,
+    };
+    use ed25519_dalek::{Signature, Verifier};
+
+    if roots.is_empty() {
+        return Err(
+            "no registry root key is trusted: call configure_root_keys() for a local registry"
+                .to_string(),
+        );
+    }
     let parts: Vec<&str> = token.split('.').collect();
-    if parts.len() != 3 {
+    let [header, payload, signature] = parts[..] else {
         return Err("Invalid JWT format: expected 3 parts".to_string());
+    };
+
+    #[derive(Deserialize)]
+    struct Header {
+        alg: String,
+    }
+    let header: Header = URL_SAFE_NO_PAD
+        .decode(header)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .ok_or_else(|| "Invalid JWT header".to_string())?;
+    if header.alg != "EdDSA" {
+        return Err(format!(
+            "Session token is not EdDSA-signed (alg `{}`)",
+            header.alg
+        ));
     }
 
-    let header_payload = format!("{}.{}", parts[0], parts[1]);
-    let signature = parts[2];
-
-    // Verify HMAC-SHA256 signature
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .map_err(|_| "Invalid secret key".to_string())?;
-    mac.update(header_payload.as_bytes());
-    
-    // Decode the signature from base64url
-    let signature_bytes = URL_SAFE_NO_PAD
-        .decode(signature)
-        .map_err(|e| format!("Invalid signature encoding: {}", e))?;
-    
-    // Verify the signature
-    mac.verify_slice(&signature_bytes)
-        .map_err(|_| "JWT signature verification failed".to_string())?;
-
-    // Decode and parse the payload
-    let payload = parts[1];
-    let padded = match payload.len() % 4 {
-        2 => format!("{}==", payload),
-        3 => format!("{}=", payload),
-        _ => payload.to_string(),
-    };
-    
     let payload_bytes = URL_SAFE_NO_PAD
-        .decode(&payload)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(&padded))
+        .decode(payload)
         .map_err(|e| format!("Failed to decode JWT payload: {}", e))?;
-
     let claims: SessionClaims = serde_json::from_slice(&payload_bytes)
         .map_err(|e| format!("Failed to parse JWT claims: {}", e))?;
 
-    // Verify expiry
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| "System time error".to_string())?
-        .as_secs() as i64;
+    // 1. The root certifies the key the token names.
+    let skey_hex = claims.skey.to_ascii_lowercase();
+    let skey = parse_key(&skey_hex).ok_or_else(|| "Invalid session key".to_string())?;
+    let cert_sig = STANDARD
+        .decode(claims.skey_sig.trim())
+        .ok()
+        .and_then(|b| Signature::from_slice(&b).ok())
+        .ok_or_else(|| "Invalid session key certificate".to_string())?;
+    let mut message = SESSION_KEY_CERT_DOMAIN.to_vec();
+    message.extend_from_slice(skey_hex.as_bytes());
+    let certified = roots.iter().any(|root| {
+        parse_key(root)
+            .map(|root| root.verify(&message, &cert_sig).is_ok())
+            .unwrap_or(false)
+    });
+    if !certified {
+        return Err("Session key is not certified by a trusted registry root".to_string());
+    }
 
-    if claims.exp < now {
+    // 2. The key signed the token.
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature)
+        .ok()
+        .and_then(|b| Signature::from_slice(&b).ok())
+        .ok_or_else(|| "Invalid signature encoding".to_string())?;
+    let signed = format!("{}.{}", parts[0], parts[1]);
+    skey.verify(signed.as_bytes(), &signature)
+        .map_err(|_| "JWT signature verification failed".to_string())?;
+
+    // 3. Unexpired.
+    if claims.exp <= now {
         return Err(format!(
             "Session token expired (exp: {}, now: {})",
             claims.exp, now
         ));
     }
-
     Ok(claims)
 }
 
@@ -260,7 +266,8 @@ fn verify_token(token: &str, secret: &str) -> Result<SessionClaims, String> {
 ///
 /// This function:
 /// 1. Calls the host's `billing::acquire-session` import
-/// 2. Verifies the returned JWT signature using the configured secret
+/// 2. Verifies the returned token ([`verify_session_token`]) against the
+///    trusted registry root keys
 /// 3. Checks token expiry and claims
 /// 4. Returns a verified [`BillingSession`] on success
 ///
@@ -273,7 +280,7 @@ fn verify_token(token: &str, secret: &str) -> Result<SessionClaims, String> {
 /// # Returns
 ///
 /// - `Ok(BillingSession)` — Session acquired and verified
-/// - `Err(String)` — Verification failed, or insufficient credits, or billing not configured
+/// - `Err(String)` — Verification failed, or insufficient credits, or no trusted registry root
 ///
 /// # Example
 ///
@@ -292,20 +299,22 @@ fn verify_token(token: &str, secret: &str) -> Result<SessionClaims, String> {
 /// # Errors
 ///
 /// This function returns an error if:
-/// - The billing SDK secret is not configured ([`configure_secret`])
+/// - No registry root key is trusted (see [`configure_root_keys`])
 /// - The host returns an error (insufficient credits, network failure)
-/// - The JWT signature is invalid
+/// - The session key is not certified by a trusted root, or the token is
+///   not EdDSA-signed by it
 /// - The JWT has expired
 /// - The JWT claims are malformed
 pub fn require_session(estimated_tokens: i64) -> Result<BillingSession, String> {
-    // Get the configured secret
-    let secret = get_secret()?;
-    
     // Call the host import to acquire a session
     let session_info = billing_acquire_session(estimated_tokens)?;
-    
-    // Verify the JWT token
-    let claims = verify_token(&session_info.token, secret)?;
+
+    // Verify the token under the trusted registry roots
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "System time error".to_string())?
+        .as_secs() as i64;
+    let claims = verify_session_token(&session_info.token, &root_keys(), now)?;
     
     // Validate reserved tokens match the request
     if claims.res != estimated_tokens {

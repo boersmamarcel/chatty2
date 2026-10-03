@@ -1,193 +1,117 @@
-//! Integration tests for hive-billing-sdk
-//!
-//! These tests verify JWT verification logic outside of WASM context.
-//! Full end-to-end tests require a WASM runtime with billing host imports.
+//! Billing session token verification (CX-0b, AGE-823), on the host
+//! target: EdDSA under a root-certified session key, never HS256.
+//! Full end-to-end tests need a WASM runtime with the billing host imports.
 
-#[cfg(not(target_arch = "wasm32"))]
-mod jwt_verification_tests {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-    use hmac::{Hmac, Mac};
-    use serde::{Deserialize, Serialize};
-    use sha2::Sha256;
+#![cfg(not(target_arch = "wasm32"))]
 
-    #[derive(Debug, Serialize, Deserialize)]
-    struct TestClaims {
-        sid: String,
-        uid: String,
-        #[serde(rename = "mod")]
-        module_name: String,
-        ver: String,
-        res: i64,
-        bal: i64,
-        iat: i64,
-        exp: i64,
-    }
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
+};
+use ed25519_dalek::{Signer, SigningKey};
+use hive_billing_sdk::{verify_session_token, SESSION_KEY_CERT_DOMAIN};
+use serde_json::{json, Value};
 
-    /// Create a test JWT with HMAC-SHA256 signature
-    fn create_test_jwt(claims: &TestClaims, secret: &str) -> String {
-        // Header for HS256
-        let header = r#"{"alg":"HS256","typ":"JWT"}"#;
-        let header_b64 = URL_SAFE_NO_PAD.encode(header.as_bytes());
+const NOW: i64 = 1_700_000_000;
 
-        // Payload
-        let payload = serde_json::to_string(claims).unwrap();
-        let payload_b64 = URL_SAFE_NO_PAD.encode(payload.as_bytes());
+fn key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed; 32])
+}
 
-        // Signature
-        let message = format!("{}.{}", header_b64, payload_b64);
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(message.as_bytes());
-        let signature = mac.finalize().into_bytes();
-        let signature_b64 = URL_SAFE_NO_PAD.encode(&signature);
+fn hex(key: &SigningKey) -> String {
+    key.verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
-        format!("{}.{}.{}", header_b64, payload_b64, signature_b64)
-    }
+/// Claims as hive-registry mints them, with `session` certified by `root`.
+fn claims(root: &SigningKey, session: &SigningKey) -> Value {
+    let skey = hex(session);
+    let mut message = SESSION_KEY_CERT_DOMAIN.to_vec();
+    message.extend_from_slice(skey.as_bytes());
+    json!({
+        "sid": "s-1", "uid": "u-1", "mod": "paid-mod", "ver": "1.0.0",
+        "res": 5000, "bal": 100000, "iat": NOW, "exp": NOW + 300,
+        "skey": skey, "skey_sig": STANDARD.encode(root.sign(&message).to_bytes()),
+    })
+}
 
-    #[test]
-    fn test_jwt_creation() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+fn jwt(alg: &str, claims: &Value, signer: &SigningKey) -> String {
+    let header = URL_SAFE_NO_PAD.encode(json!({ "alg": alg, "typ": "JWT" }).to_string());
+    let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
+    let input = format!("{header}.{payload}");
+    format!(
+        "{input}.{}",
+        URL_SAFE_NO_PAD.encode(signer.sign(input.as_bytes()).to_bytes())
+    )
+}
 
-        let claims = TestClaims {
-            sid: "test-session-id".to_string(),
-            uid: "test-user-id".to_string(),
-            module_name: "test-module".to_string(),
-            ver: "1.0.0".to_string(),
-            res: 5000,
-            bal: 100000,
-            iat: now,
-            exp: now + 300, // 5 minutes
-        };
+#[test]
+fn a_token_signed_by_a_root_certified_key_verifies() {
+    let (root, other_root, session) = (key(1), key(2), key(3));
+    let token = jwt("EdDSA", &claims(&root, &session), &session);
+    let verified = verify_session_token(&token, &[hex(&other_root), hex(&root)], NOW)
+        .expect("a genuine token verifies");
+    assert_eq!(verified.module_name, "paid-mod");
+    assert_eq!(verified.res, 5000);
+}
 
-        let secret = "test-secret-key";
-        let jwt = create_test_jwt(&claims, secret);
+#[test]
+fn hs256_is_refused() {
+    let (root, session) = (key(1), key(3));
+    let token = jwt("HS256", &claims(&root, &session), &session);
+    let err = verify_session_token(&token, &[hex(&root)], NOW).unwrap_err();
+    assert!(err.contains("not EdDSA"), "{err}");
+}
 
-        // Verify format
-        assert_eq!(jwt.split('.').count(), 3, "JWT should have 3 parts");
-        println!("Generated JWT: {}", jwt);
-    }
+#[test]
+fn a_key_no_trusted_root_certified_is_refused() {
+    let (root, impostor) = (key(1), key(4));
+    // The impostor certifies itself: not a trusted root.
+    let token = jwt("EdDSA", &claims(&impostor, &impostor), &impostor);
+    let err = verify_session_token(&token, &[hex(&root)], NOW).unwrap_err();
+    assert!(err.contains("not certified"), "{err}");
+    // And with no root at all, nothing verifies.
+    let err = verify_session_token(&token, &[], NOW).unwrap_err();
+    assert!(err.contains("no registry root"), "{err}");
+}
 
-    #[test]
-    fn test_jwt_verification_manual() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
+#[test]
+fn a_token_signed_by_another_key_than_its_certified_one_is_refused() {
+    let (root, session, other) = (key(1), key(3), key(5));
+    let token = jwt("EdDSA", &claims(&root, &session), &other);
+    let err = verify_session_token(&token, &[hex(&root)], NOW).unwrap_err();
+    assert!(err.contains("signature verification failed"), "{err}");
+}
 
-        let claims = TestClaims {
-            sid: "test-session-id".to_string(),
-            uid: "test-user-id".to_string(),
-            module_name: "test-module".to_string(),
-            ver: "1.0.0".to_string(),
-            res: 5000,
-            bal: 100000,
-            iat: now,
-            exp: now + 300,
-        };
+#[test]
+fn tampered_claims_are_refused() {
+    let (root, session) = (key(1), key(3));
+    let token = jwt("EdDSA", &claims(&root, &session), &session);
+    let mut forged = claims(&root, &session);
+    forged["res"] = json!(1);
+    let parts: Vec<&str> = token.split('.').collect();
+    let tampered = format!(
+        "{}.{}.{}",
+        parts[0],
+        URL_SAFE_NO_PAD.encode(forged.to_string()),
+        parts[2]
+    );
+    assert!(verify_session_token(&tampered, &[hex(&root)], NOW).is_err());
+}
 
-        let secret = "test-secret-key";
-        let jwt = create_test_jwt(&claims, secret);
+#[test]
+fn an_expired_token_is_refused() {
+    let (root, session) = (key(1), key(3));
+    let token = jwt("EdDSA", &claims(&root, &session), &session);
+    let err = verify_session_token(&token, &[hex(&root)], NOW + 301).unwrap_err();
+    assert!(err.contains("expired"), "{err}");
+}
 
-        // Verify the JWT manually
-        let parts: Vec<&str> = jwt.split('.').collect();
-        assert_eq!(parts.len(), 3);
-
-        let header_payload = format!("{}.{}", parts[0], parts[1]);
-        let signature = parts[2];
-
-        type HmacSha256 = Hmac<Sha256>;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(header_payload.as_bytes());
-
-        let signature_bytes = URL_SAFE_NO_PAD.decode(signature).unwrap();
-        mac.verify_slice(&signature_bytes).unwrap();
-
-        // Decode and verify claims
-        let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
-        let decoded_claims: TestClaims = serde_json::from_slice(&payload_bytes).unwrap();
-
-        assert_eq!(decoded_claims.sid, "test-session-id");
-        assert_eq!(decoded_claims.res, 5000);
-        assert_eq!(decoded_claims.bal, 100000);
-    }
-
-    #[test]
-    fn test_jwt_verification_wrong_secret() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        let claims = TestClaims {
-            sid: "test-session-id".to_string(),
-            uid: "test-user-id".to_string(),
-            module_name: "test-module".to_string(),
-            ver: "1.0.0".to_string(),
-            res: 5000,
-            bal: 100000,
-            iat: now,
-            exp: now + 300,
-        };
-
-        let secret = "test-secret-key";
-        let jwt = create_test_jwt(&claims, secret);
-
-        // Try to verify with wrong secret
-        let parts: Vec<&str> = jwt.split('.').collect();
-        let header_payload = format!("{}.{}", parts[0], parts[1]);
-        let signature = parts[2];
-
-        type HmacSha256 = Hmac<Sha256>;
-        let wrong_secret = "wrong-secret-key";
-        let mut mac = HmacSha256::new_from_slice(wrong_secret.as_bytes()).unwrap();
-        mac.update(header_payload.as_bytes());
-
-        let signature_bytes = URL_SAFE_NO_PAD.decode(signature).unwrap();
-        let result = mac.verify_slice(&signature_bytes);
-
-        assert!(result.is_err(), "Verification should fail with wrong secret");
-    }
-
-    #[test]
-    fn test_compatibility_with_hive_registry_format() {
-        // This test ensures our verification works with the same format
-        // that hive-registry generates using jsonwebtoken crate.
-        //
-        // The format should be:
-        // - Header: {"alg":"HS256","typ":"JWT"}
-        // - Payload: {...claims...}
-        // - Signature: HMAC-SHA256(base64url(header).base64url(payload), secret)
-
-        let now = 1712345678i64; // Fixed timestamp for reproducibility
-        let claims = TestClaims {
-            sid: "550e8400-e29b-41d4-a716-446655440000".to_string(),
-            uid: "user-uuid".to_string(),
-            module_name: "weather-pro".to_string(),
-            ver: "1.2.0".to_string(),
-            res: 5000,
-            bal: 4200000,
-            iat: now,
-            exp: now + 300,
-        };
-
-        let secret = "test-hive-secret";
-        let jwt = create_test_jwt(&claims, secret);
-
-        // Verify round-trip
-        let parts: Vec<&str> = jwt.split('.').collect();
-        let payload_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
-        let decoded: TestClaims = serde_json::from_slice(&payload_bytes).unwrap();
-
-        assert_eq!(decoded.module_name, "weather-pro");
-        assert_eq!(decoded.res, 5000);
-        assert_eq!(decoded.bal, 4200000);
-
-        println!(
-            "✓ JWT verification compatible with hive-registry format:\n  {}",
-            jwt
-        );
-    }
+#[test]
+fn a_malformed_token_is_refused() {
+    let root = key(1);
+    assert!(verify_session_token("not.a-jwt", &[hex(&root)], NOW).is_err());
 }

@@ -7,7 +7,7 @@ Publisher-facing Rust SDK for integrating Hive billing into WASM modules.
 This SDK wraps the WIT `billing` interface with ergonomic helpers for paid modules on the Hive marketplace. It provides:
 
 - **Session acquisition** with cryptographic verification
-- **JWT token verification** using Hive's signing key
+- **Session token verification** (EdDSA, certified by the registry root key)
 - **Usage reporting** for post-execution settlement
 - **Helper functions** like `require_session()` and `report_usage()`
 
@@ -29,7 +29,7 @@ plugin built on `chatty-module-sdk`). It uses `chatty-module-sdk`'s own
 
 ```rust
 use chatty_module_sdk::*;
-use hive_billing_sdk::{configure_secret, require_session, report_usage};
+use hive_billing_sdk::{require_session, report_usage};
 
 struct MyPaidPlugin;
 
@@ -53,17 +53,14 @@ impl Plugin for MyPaidPlugin {
     }
 
     fn invoke_tool(call: ToolCallRequest) -> Result<ToolResult, ToolError> {
-        // 1. Configure the JWT secret (once per instance)
-        configure_secret(env!("HIVE_JWT_SECRET"));
-
-        // 2. Acquire and verify a billing session (reserve 5000 tokens)
+        // 1. Acquire and verify a billing session (reserve 5000 tokens)
         let session = require_session(5000).map_err(ToolError::denied)?;
 
-        // 3. Do the work
+        // 2. Do the work
         let prompt = Message::new(Role::User, call.arguments_json);
         let response = llm::complete("", &[prompt], None).map_err(ToolError::failed)?;
 
-        // 4. Report the actual usage
+        // 3. Report the actual usage
         let usage = response.usage.unwrap_or(TokenUsage { input_tokens: 0, output_tokens: 0 });
         report_usage(&session, usage.input_tokens.into(), usage.output_tokens.into())
             .map_err(ToolError::failed)?;
@@ -77,78 +74,66 @@ export!(MyPaidPlugin);
 
 ## Trust Model
 
-### Current Implementation: HMAC-SHA256
+The session token is an **EdDSA** (Ed25519) JWT signed by hive-registry's
+session key. Every token carries:
 
-The current implementation uses **HS256** (HMAC-SHA256) signing with a shared secret. This provides **deterrence-level security**:
+- `skey`: the session public key that signed it (hex)
+- `skey_sig`: the registry root's base64 signature certifying that key, over
+  `hive-registry/session-key-cert/v1\n` followed by the key's hex
 
-✅ **Prevents casual tampering**: Harder than modifying the host runtime
-✅ **Verifiable by module**: Cryptographic proof that Hive issued the token
-✅ **Short-lived tokens**: 5-minute expiry limits abuse window
+`require_session()` verifies, in order:
 
-⚠️ **Not cryptographically perfect**: A determined attacker can extract the secret from WASM
-⚠️ **Shared secret**: Module must embed Hive's JWT secret (rotatable but present in binary)
+1. `skey_sig` under one of the trusted registry root public keys
+2. the token's EdDSA signature under `skey`
+3. that the token has not expired, and that it reserves what was asked
 
-### Why This Works for Phase 3b
+Any other algorithm is refused. Only public keys are embedded in the module,
+so there is nothing secret in the binary. Tokens are short-lived (5 minutes).
 
-The design goal is **"not worth the effort"**, not **"mathematically impossible"**:
-
-1. **Honest users** (~99%) never encounter friction
-2. **Attackers** must reverse-engineer WASM, extract secrets, and maintain a patched runtime
-3. **Cost-benefit**: Paying for usage is easier than building/maintaining a crack
-
-### Future: Ed25519 Upgrade
-
-A future release will migrate to Ed25519 asymmetric cryptography:
-- Hive signs JWTs with a private key (never shared)
-- Modules verify using Hive's public key (safe to embed)
-- True public-key verification
-
-The API remains unchanged — only internal verification evolves.
+`verify_session_token(token, roots, now)` is public if you need to check a
+token you obtained some other way.
 
 ## Configuration
 
-### Option 1: Compile-Time Secret
+A module built for the production registry needs no configuration. It trusts
+`PRODUCTION_ROOT_PUBLIC_KEYS`, which is compiled in and mirrors hive-client's
+SEC-3 list. That list is empty until the real root key is pinned, so until
+then every token is refused unless you name a root key yourself.
 
-Set the secret at compile time via environment variable:
-
-```bash
-export HIVE_JWT_SECRET="your-hive-jwt-secret"
-cargo build --target wasm32-wasip2
-```
-
-Then in your module:
+To test against a local registry (for example the hive docker compose stack),
+pass its root public key (hex Ed25519) once, at module initialisation and
+before `require_session()`:
 
 ```rust
-configure_secret(env!("HIVE_JWT_SECRET"));
+hive_billing_sdk::configure_root_keys(&[env!("HIVE_DEV_ROOT_PUBLIC_KEY")]);
 ```
 
-### Option 2: Runtime Configuration (TODO)
-
-Fetch from a well-known Hive endpoint at module load:
-
-```rust
-// Future: HTTP fetch for wasm32-wasip2
-// let secret = fetch_hive_secret().await?;
-// configure_secret(secret);
-```
+`configure_root_keys` replaces the production list and panics if called twice.
 
 ## API Reference
 
-### `configure_secret(secret: impl Into<String>)`
+### `configure_root_keys(keys: &[&str])`
 
-Configure the Hive JWT secret for token verification. Must be called once before `require_session()`.
+Trust these hex Ed25519 registry root public keys instead of
+`PRODUCTION_ROOT_PUBLIC_KEYS`. For a local registry only. Call once before
+`require_session()`; panics if called twice.
+
+### `verify_session_token(token: &str, roots: &[String], now: i64) -> Result<SessionClaims, String>`
+
+Verify a token against `roots` at `now` (Unix seconds): root certifies `skey`,
+`skey` signed the token (EdDSA), and the token has not expired.
 
 ### `require_session(estimated_tokens: i64) -> Result<BillingSession, String>`
 
 Acquire and verify a billing session:
 1. Calls the host's `billing::acquire-session` import
-2. Verifies the returned JWT signature
-3. Validates token expiry and claims
+2. Verifies the token with `verify_session_token` under the trusted root keys
+3. Checks that the reserved tokens match the request
 4. Returns a verified `BillingSession`
 
 **Returns:** 
 - `Ok(BillingSession)` on success
-- `Err(String)` if verification fails, insufficient credits, or not configured
+- `Err(String)` if verification fails, insufficient credits, or no root key is trusted
 
 ### `report_usage(session: &BillingSession, input_tokens: i64, output_tokens: i64) -> Result<(), String>`
 
@@ -191,6 +176,8 @@ pub struct SessionClaims {
     pub bal: i64,              // User balance
     pub iat: i64,              // Issued at (Unix timestamp)
     pub exp: i64,              // Expires at (Unix timestamp)
+    pub skey: String,          // Session public key that signed the token (hex)
+    pub skey_sig: String,      // Root's base64 signature certifying skey
 }
 ```
 
@@ -199,8 +186,8 @@ pub struct SessionClaims {
 All functions return `Result<T, String>` for easy integration with WIT exports.
 
 Common errors:
-- `"Billing SDK not configured"` — Call `configure_secret()` first
-- `"Session token verification failed"` — Invalid signature or expired token
+- `"no registry root key is trusted: ..."` — No root key is pinned yet; call `configure_root_keys()` for a local registry
+- `"Session token verification failed"` — Uncertified session key, bad signature, or expired token
 - `"Insufficient credits"` — User balance too low
 - `"Session token mismatch"` — Reserved tokens don't match request
 
@@ -212,11 +199,10 @@ For development, test in the context of a full chatty module build and runtime.
 
 ## Security Best Practices
 
-1. **Rotate secrets regularly**: Update `HIVE_JWT_SECRET` and republish modules
-2. **Fail closed**: Return errors if billing verification fails; never skip checks
-3. **Over-estimate**: Reserve more tokens than expected to avoid mid-execution failures
-4. **Report accurately**: Under-reporting costs users more (full reservation deducted after timeout)
-5. **Use remote execution for high-value modules**: Phase 4 Firecracker hosting eliminates local trust issues
+1. **Fail closed**: Return errors if billing verification fails; never skip checks
+2. **Over-estimate**: Reserve more tokens than expected to avoid mid-execution failures
+3. **Report accurately**: Under-reporting costs users more (full reservation deducted after timeout)
+4. **Use remote execution for high-value modules**: Phase 4 Firecracker hosting eliminates local trust issues
 
 ## Related Documentation
 
