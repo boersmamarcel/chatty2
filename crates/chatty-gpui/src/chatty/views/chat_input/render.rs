@@ -182,6 +182,7 @@ impl RenderOnce for ChatInput {
         let model_display_full = self.state.read(cx).get_selected_model_display_name();
         let model_display = self.state.read(cx).selected_model_button_label();
         let selected_model = self.state.read(cx).selected_model().cloned();
+        let local_picker_offered = self.state.read(cx).local_model_picker_offered();
         let _no_models = self.state.read(cx).available_models.is_empty();
 
         // --- Slash menu ---
@@ -642,7 +643,20 @@ impl RenderOnce for ChatInput {
                                             .tooltip(move |window, cx| {
                                                 Tooltip::new(model_tooltip.clone()).build(window, cx)
                                             })
-                                            .child(model_popover),
+                                            .child(if local_picker_offered {
+                                                model_popover.into_any_element()
+                                            } else {
+                                                // Hosted: the server's model, a label and not a
+                                                // picker (AGE-849).
+                                                div()
+                                                    .id("model-hosted")
+                                                    .px_2()
+                                                    .text_sm()
+                                                    .truncate()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(model_display.clone())
+                                                    .into_any_element()
+                                            }),
                                     )
                                     .when(is_streaming, |row| {
                                         // Send stays while a reply streams: the

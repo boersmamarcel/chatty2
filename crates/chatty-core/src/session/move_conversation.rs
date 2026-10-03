@@ -132,6 +132,7 @@ pub async fn take_online(
     Ok(ConversationMode::Hosted {
         server_url: server_url.to_string(),
         remote_id: created.id,
+        model_id: Some(created.model_id),
     })
 }
 
@@ -206,6 +207,7 @@ mod tests {
         let hosted = ConversationMode::Hosted {
             server_url: "http://localhost:8081".into(),
             remote_id: "r-1".into(),
+            model_id: None,
         };
         assert!(
             refuse_reason(true, &hosted, false)
@@ -221,6 +223,7 @@ mod tests {
         let hosted = ConversationMode::Hosted {
             server_url: "http://localhost:8081".into(),
             remote_id: "r-1".into(),
+            model_id: None,
         };
         assert!(refuse_reason(false, &hosted, true).is_some());
         assert!(refuse_reason(false, &ConversationMode::Local, false).is_some());
@@ -231,6 +234,7 @@ mod tests {
         let hosted = ConversationMode::Hosted {
             server_url: "http://localhost:8081".into(),
             remote_id: "r-1".into(),
+            model_id: None,
         };
         assert!(refuse_reason(false, &ConversationMode::Local, true).is_none());
         assert!(refuse_reason(false, &hosted, false).is_none());

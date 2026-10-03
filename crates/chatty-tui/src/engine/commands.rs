@@ -466,6 +466,7 @@ impl ChatEngine {
             ConversationMode::Hosted {
                 server_url,
                 remote_id,
+                ..
             } => {
                 out.push_str(&format!(
                     "This conversation runs on {server_url} (as {remote_id}).\n"
