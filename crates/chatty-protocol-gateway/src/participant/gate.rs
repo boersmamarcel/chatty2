@@ -880,7 +880,11 @@ fn approve(node: &NodeCaller) -> Result<Grant, Refused> {
 /// next tool round (TM-5). Anyone else — a sibling, itself, a grandchild,
 /// a name nobody has — is not on the tree. The list's bounds are the
 /// effect's quota.
-fn post(node: &NodeCaller, params: &SendMessageParams, snapshot: &Snapshot<'_>) -> Result<Grant, Refused> {
+fn post(
+    node: &NodeCaller,
+    params: &SendMessageParams,
+    snapshot: &Snapshot<'_>,
+) -> Result<Grant, Refused> {
     let owner = match &snapshot.owner {
         Owner::Root => Some((PostTo::Root, ROOT_NAME, false)),
         Owner::Node { id, name, ended } => Some((PostTo::Node(*id), name.as_str(), *ended)),
@@ -903,9 +907,7 @@ fn post(node: &NodeCaller, params: &SendMessageParams, snapshot: &Snapshot<'_>) 
             owner: Some(owner),
             ended,
         } if *owner == node.name => mid_run(*id, *ended),
-        Addressee::Node { .. } | Addressee::None => {
-            Err(Refused::Message(RefusalReason::NotOnTree))
-        }
+        Addressee::Node { .. } | Addressee::None => Err(Refused::Message(RefusalReason::NotOnTree)),
     }
 }
 

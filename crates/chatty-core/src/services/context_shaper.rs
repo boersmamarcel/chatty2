@@ -99,6 +99,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use chatty_fabric::{CallEvent, CallRequest, CallResult, Transport};
+use futures::StreamExt;
 use rig_agent::agent::{
     AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
     ToolResultAction, ToolResultEvent,
@@ -106,8 +108,6 @@ use rig_agent::agent::{
 use rig_core::completion::Message;
 use rig_core::completion::message::{Text, ToolCallId, ToolResult, ToolResultContent};
 use rig_core::message::UserContent;
-use chatty_fabric::{CallEvent, CallRequest, CallResult, Transport};
-use futures::StreamExt;
 use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
 

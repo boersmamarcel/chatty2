@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use chatty_core::models::token_usage::PriceBook;
 use chatty_core::services::swarm_trace::{NodeStatus, SwarmTrace};
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme, WindowExt as _};
@@ -298,9 +299,11 @@ impl SwarmNodeTranscript {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(self.sent.clone().unwrap_or_else(|| {
-                        "It reads your message at its next tool call.".into()
-                    })),
+                    .child(
+                        self.sent.clone().unwrap_or_else(|| {
+                            "It reads your message at its next tool call.".into()
+                        }),
+                    ),
             )
     }
 }

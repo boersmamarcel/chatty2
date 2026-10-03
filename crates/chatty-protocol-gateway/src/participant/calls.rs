@@ -166,8 +166,8 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use super::gate::{
-    self, Addressee, Admitter, Callee, Caller, Decision, Delivery, Grant, InvokeTarget,
-    NodeCaller, Owner, PostTo, Refused, Request, Snapshot, SpawnView, Unreadable,
+    self, Addressee, Admitter, Callee, Caller, Decision, Delivery, Grant, InvokeTarget, NodeCaller,
+    Owner, PostTo, Refused, Request, Snapshot, SpawnView, Unreadable,
 };
 use super::hosted::Hosted;
 use super::protocol::{CallStamp, DelegatedTask, TaskState};
@@ -2060,9 +2060,10 @@ mod tests {
         MessageStatus::Refused { reason }
     }
 
-    /// The owner is the only recipient: the root for a node the root owns,
-    /// the owning node for one a node owns; siblings, self, a grandparent,
-    /// unknown names, an unknown sender and the root itself are refused.
+    /// Up the tree, the owner is the only recipient: the root for a node
+    /// the root owns, the owning node for one a node owns; siblings, self,
+    /// a grandparent, unknown names, an unknown sender and the root itself
+    /// are refused. (Down the tree is TM-5's, below.)
     #[tokio::test]
     async fn only_the_owner_is_on_the_tree() {
         let (calls, registry) = broker(None);
@@ -2083,7 +2084,6 @@ mod tests {
             (coder.as_str(), coder.as_str()),
             (coder.as_str(), ROOT_NAME),
             (coder.as_str(), "nobody-0"),
-            (lead.as_str(), coder.as_str()),
             ("never-admitted-0", ROOT_NAME),
         ] {
             assert_eq!(
@@ -2093,10 +2093,124 @@ mod tests {
             );
         }
         assert_eq!(
-            send(&calls, Peer::Root, &lead, "x").await,
+            send(&calls, Peer::Root, "nobody-0", "x").await,
             refused(RefusalReason::NotOnTree),
-            "the root's handles come with RC-3"
+            "the human reaches nodes, not names nobody has"
         );
+    }
+
+    async fn take(calls: &BrokerCalls, caller: Peer) -> Result<Vec<String>, CallError> {
+        let mut stream = calls.call(caller, CallRequest::TakeMessages);
+        match stream.next().await {
+            Some(Ok(CallEvent::Result(CallResult::Messages(messages)))) => Ok(messages),
+            Some(Err(error)) => Err(error),
+            other => panic!("a mailbox.take call answers with its messages: {other:?}"),
+        }
+    }
+
+    /// TM-5: a node's message to its own running child goes on the child's
+    /// mid-run list, which the child's next tool round takes — wrapped,
+    /// once, with a `delivered_mid_run` row — and never on the list TM-2's
+    /// invoke result delivers. The human reaches any node the same way.
+    #[tokio::test]
+    async fn owner_message_reaches_own_child_mid_run() {
+        let data = tempfile::tempdir().unwrap();
+        let log = EdgeLog::open(data.path()).unwrap();
+        let path = log.path();
+        let (calls, registry) = broker(Some(Arc::new(Mutex::new(log))));
+        let lead = registry.admit_running("lead", None);
+        let coder = registry.admit_running("coder", Some(&lead));
+
+        assert!(matches!(
+            send(&calls, node(&lead), &coder, "stop that, look at X").await,
+            MessageStatus::Pending { .. }
+        ));
+        assert!(matches!(
+            send(&calls, Peer::Root, &coder, "and Y").await,
+            MessageStatus::Pending { .. }
+        ));
+        assert_eq!(
+            take(&calls, node(&coder)).await.unwrap(),
+            [
+                format!(
+                    "<message from=\"{lead}\" untrusted=\"true\">stop that, look at X</message>"
+                ),
+                format!("<message from=\"{ROOT_NAME}\" untrusted=\"true\">and Y</message>"),
+            ]
+        );
+        assert!(
+            take(&calls, node(&coder)).await.unwrap().is_empty(),
+            "taken once"
+        );
+        assert!(
+            calls.start_run(&node(&coder)).is_empty(),
+            "nothing is left for the child's next run"
+        );
+        let delivered: Vec<_> = rows(&path)
+            .into_iter()
+            .filter(|row| row.4 == "delivered_mid_run")
+            .collect();
+        assert_eq!(
+            delivered,
+            [
+                (
+                    EdgeKind::Message,
+                    lead.clone(),
+                    coder.clone(),
+                    20,
+                    "delivered_mid_run".into()
+                ),
+                (
+                    EdgeKind::Message,
+                    ROOT_NAME.to_string(),
+                    coder.clone(),
+                    5,
+                    "delivered_mid_run".into()
+                ),
+            ]
+        );
+
+        // A message no tool round took opens the child's next run.
+        send(&calls, node(&lead), &coder, "late").await;
+        assert_eq!(
+            calls.start_run(&node(&coder)),
+            [format!(
+                "<message from=\"{lead}\" untrusted=\"true\">late</message>"
+            )]
+        );
+        // The root takes nothing mid-run: its messages open its next run.
+        assert!(matches!(
+            take(&calls, Peer::Root).await,
+            Err(CallError::Refused(_))
+        ));
+    }
+
+    /// TM-5 leaves sideways messages gated (F3): a node's message to its
+    /// sibling — mid-run or not — is `not_on_tree`, and the sibling's
+    /// tool rounds and next run find nothing.
+    #[tokio::test]
+    async fn sibling_mid_run_message_still_refused() {
+        let (calls, registry) = broker(None);
+        let lead = registry.admit_running("lead", None);
+        let coder = registry.admit_running("coder", Some(&lead));
+        let other = registry.admit_running("coder", Some(&lead));
+        let grandchild = registry.admit_running("coder", Some(&coder));
+
+        for (from, to) in [
+            (&coder, &other),
+            (&lead, &grandchild),
+            (&grandchild, &other),
+        ] {
+            assert_eq!(
+                send(&calls, node(from), to, "do it my way").await,
+                refused(RefusalReason::NotOnTree),
+                "{from} -> {to}"
+            );
+        }
+        for recipient in [&other, &grandchild] {
+            assert!(take(&calls, node(recipient)).await.unwrap().is_empty());
+            assert!(calls.start_run(&node(recipient)).is_empty());
+        }
     }
 
     #[tokio::test]

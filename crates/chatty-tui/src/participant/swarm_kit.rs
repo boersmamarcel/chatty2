@@ -1563,7 +1563,7 @@ fn offered_tools(request: &RecordedRequest) -> Vec<String> {
 }
 
 /// The edge log's message rows, as `(from, to, bytes, outcome)`.
-fn message_rows(kit: &SwarmKit) -> Vec<(String, String, u64, String)> {
+pub(crate) fn message_rows(kit: &SwarmKit) -> Vec<(String, String, u64, String)> {
     std::fs::read_to_string(kit.broker().edge_log_path())
         .expect("the edge log")
         .lines()

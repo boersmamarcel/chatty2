@@ -178,8 +178,7 @@ pub enum Command {
 }
 
 /// How `/msg` is used.
-pub const MSG_USAGE: &str =
-    "Usage: /msg <agent> <text> (/swarm shows the running agents' names)";
+pub const MSG_USAGE: &str = "Usage: /msg <agent> <text> (/swarm shows the running agents' names)";
 
 impl ChatEngine {
     pub fn try_handle_command(&self, input: &str) -> Option<Command> {
