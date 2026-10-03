@@ -40,7 +40,9 @@ pub use directory::{
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES, UsagePricer};
 pub use handoff::HandoffContract;
 pub use origin::AgentOrigin;
-pub use pending::{Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, wrap_message};
+pub use pending::{
+    Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, Sender, wrap_message,
+};
 pub use permit::{
     ChildCall, DEFAULT_ENDPOINT_LIMIT, EndpointBudget, EndpointPermit, RunPermit, RunPermitState,
     WeakRunPermit,

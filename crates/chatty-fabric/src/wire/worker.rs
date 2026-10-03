@@ -2,7 +2,7 @@
 //!
 //! | Requests | Notifications | Results |
 //! |---|---|---|
-//! | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `human.ask`, `human.approve` | `task.event`, `req.cancel` | `task.run` ([`TaskOutcome`]), a relayed `human.ask` ([`AskReply`](crate::AskReply)) |
+//! | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `mailbox.take`, `human.ask`, `human.approve` | `task.event`, `req.cancel` | `task.run` ([`TaskOutcome`]), a relayed `human.ask` ([`AskReply`](crate::AskReply)) |
 
 use std::borrow::Cow;
 
@@ -24,6 +24,9 @@ pub enum WorkerRequest {
     AgentList,
     /// `mailbox.post`
     MailboxPost(SendMessageParams),
+    /// `mailbox.take` (TM-5): the messages waiting on the worker's mid-run
+    /// list, taken between two of its tool rounds. No params.
+    MailboxTake,
     /// `human.approve` (EN-2a): an approval only the root answers.
     HumanApprove(ApprovalRequest),
     /// `human.ask` (EN-2b): a question, relayed up the caller chain.
@@ -42,6 +45,10 @@ impl WorkerRequest {
                 Self::AgentList
             }
             "mailbox.post" => Self::MailboxPost(params(method, raw)?),
+            "mailbox.take" => {
+                no_params(method, raw)?;
+                Self::MailboxTake
+            }
             "human.approve" => Self::HumanApprove(params(method, raw)?),
             "human.ask" => Self::HumanAsk(params(method, raw)?),
             other => return Err(DecodeError::WrongDirection(other.to_string())),

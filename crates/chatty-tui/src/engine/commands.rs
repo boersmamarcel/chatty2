@@ -150,6 +150,9 @@ pub enum Command {
     /// /stop <agent> — stop one agent of the swarm and everything it
     /// started, while the rest keeps running (TB-7, AGE-749)
     Stop(Option<String>),
+    /// /msg <agent> <text> — message a running agent; it reads the
+    /// message at its next tool round (TM-5, AGE-750)
+    Msg(Option<String>),
     /// /clear, /new — clear conversation and start fresh
     Clear,
     /// /compact — summarize older conversation turns
@@ -177,6 +180,9 @@ pub enum Command {
     Quit,
 }
 
+/// How `/msg` is used.
+pub const MSG_USAGE: &str = "Usage: /msg <agent> <text> (/swarm shows the running agents' names)";
+
 impl ChatEngine {
     pub fn try_handle_command(&self, input: &str) -> Option<Command> {
         Self::parse_command(input)
@@ -203,6 +209,7 @@ impl ChatEngine {
             "/agents" => Some(Command::Agents),
             "/swarm" => Some(Command::Swarm),
             "/stop" => Some(Command::Stop(arg)),
+            "/msg" => Some(Command::Msg(arg)),
             "/clear" | "/new" => Some(Command::Clear),
             "/compact" => Some(Command::Compact),
             "/context" => Some(Command::Context),
@@ -270,6 +277,31 @@ impl ChatEngine {
         match broker.cancel(agent) {
             Ok(()) => format!("Stopped {agent} and everything it started."),
             Err(error) => format!("Could not stop {agent}: {error}"),
+        }
+    }
+
+    /// `/msg <agent> <text>`: send `text` from the human to the running
+    /// agent `agent` (TM-5). It reaches that agent at its next tool round,
+    /// wrapped as untrusted data, and grants it nothing.
+    pub async fn message_agent(&self, arg: &str) -> String {
+        let Some((agent, text)) = arg
+            .split_once(char::is_whitespace)
+            .map(|(agent, text)| (agent, text.trim()))
+            .filter(|(_, text)| !text.is_empty())
+        else {
+            return MSG_USAGE.to_string();
+        };
+        let Some(broker) = self.broker.as_ref() else {
+            return "No agents are running: this session has no broker.".to_string();
+        };
+        match broker.post_message(agent, text.to_string()).await {
+            Ok(chatty_fabric::MessageStatus::Pending { .. }) => {
+                format!("Sent to {agent}: it reads it at its next tool call.")
+            }
+            Ok(chatty_fabric::MessageStatus::Refused { reason }) => {
+                format!("{agent} did not take the message: {reason}.")
+            }
+            Err(error) => format!("Could not message {agent}: {error}"),
         }
     }
 

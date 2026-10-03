@@ -113,8 +113,8 @@ pub enum MessageStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RefusalReason {
-    /// The recipient is not the sender's owner (nor, once resumable
-    /// conversations exist, one of its live handles).
+    /// No rule lets the sender message the recipient: it is neither the
+    /// sender's owner nor, mid-run, the sender's own child (TM-5).
     NotOnTree,
     /// The message would take the recipient's pending list, or this
     /// sender's share of it, past its bound.
@@ -141,13 +141,16 @@ impl std::fmt::Display for RefusalReason {
 }
 
 /// One call. On a worker's connection each variant is its own request
-/// method (`agent.invoke`, `agent.list`, `mailbox.post`) with these params
-/// ([`wire::WorkerRequest`](crate::wire::WorkerRequest)).
+/// method (`agent.invoke`, `agent.list`, `mailbox.post`, `mailbox.take`)
+/// with these params ([`wire::WorkerRequest`](crate::wire::WorkerRequest)).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallRequest {
     InvokeAgent(InvokeAgentParams),
     ListAgents,
     SendMessage(SendMessageParams),
+    /// `mailbox.take` (TM-5): a node, between two of its tool rounds, takes
+    /// the messages waiting on its mid-run list.
+    TakeMessages,
 }
 
 /// One item of a [`CallStream`].
@@ -201,6 +204,9 @@ pub enum CallResult {
     Agents(Vec<AgentEntry>),
     /// `send_message` (`mailbox.post`): whether the message was taken.
     Posted(MessageStatus),
+    /// `mailbox.take` (TM-5): the messages a node's tool round delivers,
+    /// each already wrapped as untrusted data, oldest first.
+    Messages(Vec<String>),
 }
 
 /// A result is written as its method's result type: which one it is, the
@@ -211,6 +217,7 @@ impl Serialize for CallResult {
             Self::Invoked(outcome) => outcome.serialize(serializer),
             Self::Agents(agents) => agents.serialize(serializer),
             Self::Posted(status) => status.serialize(serializer),
+            Self::Messages(messages) => messages.serialize(serializer),
         }
     }
 }

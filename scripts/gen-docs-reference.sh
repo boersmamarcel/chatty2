@@ -124,6 +124,7 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/swarm` | Print this conversation's latest swarm tree: agent · model · status · spend (TB-5, AGE-667) | — | Yes |
 | `/agents running` | Every live agent of the conversation's swarm: agent · conversation · chain · running or waiting on you · elapsed · spend (TB-6, AGE-748) | — | Yes |
 | `/stop <agent>` | Stop one agent of the swarm and every agent it started; the rest keeps running (TB-7, AGE-749) | — | Yes |
+| `/msg <agent> <text>` | Message a running agent; it reads the message at its next tool call (TM-5, AGE-750) | — | Yes |
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |
 | `/paste [n]` | Print the full text of an elided long paste | — | Yes |
