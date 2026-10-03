@@ -168,10 +168,13 @@ impl ModuleManifest {
         self
     }
 
-    /// Grant whatever the plugin's `metadata` requests: for a module served
-    /// on its own, with no agent spec to grant from.
-    pub fn with_requested_grants(mut self) -> Self {
-        self.grants = Grants::Requested;
+    /// For a module served on its own, with no agent spec to grant from:
+    /// `config` (if requested) plus whichever of `approved` the plugin
+    /// requests. `llm`, `file` and `billing` link only when approved.
+    pub fn with_specless_grants(mut self, approved: impl IntoIterator<Item = Capability>) -> Self {
+        self.grants = Grants::Specless {
+            approved: approved.into_iter().collect(),
+        };
         self
     }
 

@@ -122,6 +122,7 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/agent [name] <prompt>` | Run an agent spec on the local roster or a named A2A agent, else a local sub-agent | Yes | Yes |
 | `/agents` | List the agents `/agent` and `invoke_agent` reach, and the spec files left out | — | Yes |
 | `/swarm` | Print this conversation's latest swarm tree: agent · model · status · spend (TB-5, AGE-667) | — | Yes |
+| `/agents running` | Every live agent of the conversation's swarm: agent · conversation · chain · running or waiting on you · elapsed · spend (TB-6, AGE-748) | — | Yes |
 | `/stop <agent>` | Stop one agent of the swarm and every agent it started; the rest keeps running (TB-7, AGE-749) | — | Yes |
 | `/msg <agent> <text>` | Message a running agent; it reads the message at its next tool call (TM-5, AGE-750) | — | Yes |
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
@@ -705,8 +706,9 @@ All entity-to-entity communication uses `EventEmitter` + `cx.subscribe()` (see [
 | | `ClarificationRequested` | `conversation_id`, `id`, `questions` | `StreamManager` | `ChattyApp` → `ChatView` (ask-user card) |
 | | `TokenUsage` | `conversation_id`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens` | `StreamManager` | `ChattyApp` |
 | | `TurnProgress` | `conversation_id`, `turn`, `tokens` | `StreamManager` | `ChattyApp` → `ChatInputState` (live turn/token/elapsed indicator) |
-| | `SwarmTreeChanged` | `conversation_id`, `trace` | `StreamManager` | `ChattyApp` → `ChatView` (swarm tree under each delegation row, TB-4) |
-| | `StreamEnded` | `conversation_id`, `status`, `token_usage`, `trace_json`, … | `StreamManager` | `ChattyApp` (finalization) |
+| | `SwarmTreeChanged` | `conversation_id`, `trace` | `StreamManager` | `ChattyApp` → `ChatView` (swarm tree under each delegation row, TB-4); `RunningAgentsModel` (every conversation, TB-6) |
+| | `StreamEnded` | `conversation_id`, `status`, `token_usage`, `trace_json`, … | `StreamManager` | `ChattyApp` (finalization); `RunningAgentsModel` (drops the conversation's live agents) |
+| `RunningAgentsEvent` | `CountsChanged` | — | `RunningAgentsModel` | `ChattyApp` (redraws the footer's running-agents chip, TB-6) |
 | `SidebarEvent` | `NewChat` | — | `SidebarView` | `ChattyApp` |
 | | `OpenSettings` | — | `SidebarView` | `ChattyApp` |
 | | `SelectConversation` | `String` (id) | `SidebarView` | `ChattyApp` |

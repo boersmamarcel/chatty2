@@ -17,6 +17,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use chatty_wasm_runtime::Capability;
 use hive_client::TrustLevel;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,6 +72,67 @@ impl InstallRecord {
     }
 }
 
+/// The grants file's name, inside the module's directory.
+pub const GRANTS_FILE: &str = ".chatty-grants.json";
+
+/// What the user granted a module served with no agent spec (SEC-11,
+/// AGE-815), kept beside the install record. `config` and `logging` are
+/// default and need no entry; `llm`, `file` and `billing` link only when
+/// listed. A module with no file has been granted nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleGrants {
+    /// WIT names of the granted capabilities.
+    pub granted: Vec<String>,
+}
+
+impl ModuleGrants {
+    /// The grants in `module_dir`; none when there is no file. A file that
+    /// exists but does not parse is an error: the module is refused rather
+    /// than loaded with a guess.
+    pub fn read(module_dir: &Path) -> Result<Self> {
+        let path = module_dir.join(GRANTS_FILE);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid grants file {}", path.display()))
+    }
+
+    /// Write the grants into `module_dir`.
+    pub fn write(&self, module_dir: &Path) -> std::io::Result<()> {
+        let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
+        std::fs::write(module_dir.join(GRANTS_FILE), json)
+    }
+
+    /// Whether `capability` is granted.
+    pub fn allows(&self, capability: Capability) -> bool {
+        self.granted.iter().any(|g| g == capability.name())
+    }
+
+    /// Grant or revoke `capability`, keeping the list in WIT order.
+    pub fn set(&mut self, capability: Capability, on: bool) {
+        self.granted.retain(|g| g != capability.name());
+        if on {
+            self.granted.push(capability.name().to_string());
+        }
+        self.granted
+            .sort_by_key(|g| Capability::ALL.iter().position(|c| c.name() == g));
+    }
+
+    /// The granted capabilities (an unknown name is ignored).
+    pub fn capabilities(&self) -> Vec<Capability> {
+        self.granted
+            .iter()
+            .filter_map(|g| Capability::from_name(g))
+            .collect()
+    }
+}
+
 /// The trust a module's `wasm` bytes load at: the recorded level when they
 /// still hash to the record in `module_dir`, [`TrustLevel::Local`] when
 /// there is no record, and an error (`hash mismatch …`) when they do not.
@@ -110,6 +172,24 @@ mod tests {
         );
         let err = verify_installed(dir.path(), b"wasn").unwrap_err();
         assert!(err.to_string().contains("hash mismatch"), "{err}");
+    }
+
+    #[test]
+    fn grants_round_trip_and_default_to_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            ModuleGrants::read(dir.path()).unwrap(),
+            ModuleGrants::default()
+        );
+        let mut grants = ModuleGrants::default();
+        grants.set(Capability::Billing, true);
+        grants.set(Capability::Llm, true);
+        grants.write(dir.path()).unwrap();
+        let read = ModuleGrants::read(dir.path()).unwrap();
+        assert_eq!(read.capabilities(), [Capability::Llm, Capability::Billing]);
+        assert!(read.allows(Capability::Llm) && !read.allows(Capability::File));
+        grants.set(Capability::Llm, false);
+        assert_eq!(grants.capabilities(), [Capability::Billing]);
     }
 
     #[test]
