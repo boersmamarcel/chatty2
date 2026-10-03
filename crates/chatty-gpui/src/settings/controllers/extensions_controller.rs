@@ -98,10 +98,8 @@ pub fn install_hive_session(cx: &mut App) -> Arc<HiveSession> {
     // conversations authenticate with this one too. The store may not exist
     // yet; `ChattyApp::new` hands it the session when it creates it.
     if cx.has_global::<chatty_core::models::ConversationsStore>() {
-        let auth = session.clone();
-        cx.update_global::<chatty_core::models::ConversationsStore, _>(|store, _| {
-            store.set_hosted_auth(Some(auth));
-        });
+        cx.global_mut::<chatty_core::models::ConversationsStore>()
+            .set_hosted_auth(Some(session.clone()));
     }
 
     let mut states = session.subscribe();
