@@ -166,6 +166,10 @@ struct Inner {
     /// The name each open run goes by: the `taskId` of the `task.run` that
     /// opened it, which is what a node's call names.
     run_names: HashMap<RunId, String>,
+    /// Why the broker closed a node's connection before welcoming it, by
+    /// node name (AGE-818). The worker only sees the socket close; whoever
+    /// spawned it reads this to say why.
+    refusals: HashMap<String, String>,
 }
 
 impl Inner {
@@ -475,6 +479,21 @@ impl ParticipantRegistry {
         let mut names: Vec<String> = self.lock().participants.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    /// Why the broker closed `name`'s connection before welcoming it, if it
+    /// did and nobody has asked yet.
+    pub fn take_refusal(&self, name: &str) -> Option<String> {
+        self.lock().refusals.remove(name)
+    }
+
+    /// [`abandon`](Self::abandon) a node whose connection the broker closed
+    /// without welcoming it, recording `reason` for [`take_refusal`](Self::take_refusal).
+    pub(crate) fn refuse(&self, node: AdmittedNode, reason: String) {
+        self.lock()
+            .refusals
+            .insert(node.name.as_str().to_string(), reason);
+        self.abandon(node);
     }
 
     pub fn is_registered(&self, name: &str) -> bool {

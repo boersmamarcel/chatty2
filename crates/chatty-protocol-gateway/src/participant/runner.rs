@@ -479,8 +479,20 @@ impl LocalRunner {
                 && let Some(status) = child.try_wait()?
             {
                 let stderr = worker.stderr_tail().await;
+                // The worker only saw the socket close; the broker knows
+                // why it closed it (AGE-818).
+                let refusal = self
+                    .registry
+                    .take_refusal(&worker.name)
+                    .map(|why| {
+                        format!(
+                            "; the broker refused it: {why} (worker binary: {})",
+                            self.executable.display()
+                        )
+                    })
+                    .unwrap_or_default();
                 bail!(
-                    "worker '{}' exited before registering ({status}){}",
+                    "worker '{}' exited before registering ({status}){refusal}{}",
                     worker.name,
                     if stderr.is_empty() {
                         String::new()
@@ -834,6 +846,42 @@ mod tests {
             text.contains("no model configured"),
             "the child's own stderr is the useful part: {text}"
         );
+    }
+
+    /// AGE-818: the worker only sees the socket close; the error the
+    /// delegation ends with carries the broker's own reason.
+    #[tokio::test]
+    async fn a_refused_hello_is_named_in_the_error_not_just_a_closed_socket() {
+        for (script, needle) in [
+            // A build from before the v3 envelope.
+            (
+                format!(
+                    "printf '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}}\\n' >&{PARTICIPANT_FD}; read -r line <&{PARTICIPANT_FD}"
+                ),
+                "different build",
+            ),
+            // A build whose wire schema differs.
+            (
+                format!(
+                    "printf '{{\"v\":3,\"id\":1,\"method\":\"session.hello\",\"params\":{{\"schema\":\"stale\"}}}}\\n' >&{PARTICIPANT_FD}; read -r line <&{PARTICIPANT_FD}"
+                ),
+                "schema",
+            ),
+        ] {
+            let registry = ParticipantRegistry::new();
+            let runner = runner(registry.clone(), &script);
+
+            let error = runner
+                .run_task(DelegatedTask::from_root("anything"))
+                .await
+                .expect_err("a refused worker cannot take a task");
+            let text = format!("{error:#}");
+
+            assert!(text.contains("the broker refused it"), "{text}");
+            assert!(text.contains(needle), "{needle}: {text}");
+            assert!(text.contains("/bin/sh"), "names the worker binary: {text}");
+            assert!(!registry.is_registered("local-agent-0"));
+        }
     }
 
     #[tokio::test]

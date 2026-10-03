@@ -208,7 +208,12 @@ where
                                 .to_string(),
                         })
                         .await;
-                    registry.abandon(node);
+                    registry.refuse(
+                        node,
+                        "its hello's schema does not match this broker's: the worker and the \
+                         broker are different builds"
+                            .to_string(),
+                    );
                     drop(outbound_tx);
                     let _ = writer.await;
                     return;
@@ -217,16 +222,23 @@ where
                 registry.register(node, card, outbound_tx.clone())
             }
             refused => {
-                match refused {
+                let reason = match refused {
                     Err(e) => {
-                        warn!(node = node.name(), error = %e, "Closing a connection: its first line does not decode")
+                        warn!(node = node.name(), error = %e, "Closing a connection: its first line does not decode");
+                        format!(
+                            "its first line is not a session.hello this broker can decode ({e}): \
+                             the worker is probably a different build than the broker"
+                        )
                     }
-                    Ok(_) => warn!(
-                        node = node.name(),
-                        "Closing a connection: its first message is not a session.hello"
-                    ),
-                }
-                registry.abandon(node);
+                    Ok(_) => {
+                        warn!(
+                            node = node.name(),
+                            "Closing a connection: its first message is not a session.hello"
+                        );
+                        "its first message is not a session.hello".to_string()
+                    }
+                };
+                registry.refuse(node, reason);
                 drop(outbound_tx);
                 let _ = writer.await;
                 return;
@@ -242,7 +254,7 @@ where
         }
         Err(e) => {
             warn!(node = node.name(), error = %e, "A connection failed before its worker said hello");
-            registry.abandon(node);
+            registry.refuse(node, format!("reading its hello failed: {e}"));
             return;
         }
     };
