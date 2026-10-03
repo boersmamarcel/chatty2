@@ -311,7 +311,12 @@ jobs:
             crates/chatty-gpui/libs
           key: pdfium-macos-${{ hashFiles('crates/chatty-core/build.rs', 'crates/chatty-gpui/build.rs') }}
 
+      # The updater refuses a macOS update whose Team ID differs from this one
+      # (AGE-817). Empty when Developer ID signing is off: those releases carry
+      # no Team ID, so the check is skipped in the app they produce.
       - name: Build release binary
+        env:
+          CHATTY_MACOS_TEAM_ID: ${{ vars.MACOS_SIGNING_ENABLED == 'true' && secrets.NOTARIZE_TEAM_ID || '' }}
         run: cargo build --release
 
       - name: Import code signing certificate
@@ -469,14 +474,28 @@ jobs:
           name: windows-x86_64-setup
           path: scripts/chatty-windows-x86_64.exe
 
-  upload-assets:
+  # Collect the build artifacts and hash them. The signing job below signs
+  # exactly this checksums.txt; upload-assets publishes exactly these files.
+  checksums:
     needs: [validate-version, build-linux, build-macos-arm, build-windows]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout release_keys.txt
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
+          sparse-checkout: crates/chatty-gpui/src/auto_updater/release_keys.txt
+          sparse-checkout-cone-mode: false
+
+      # Once a release key is pinned, an unsigned release would lock every
+      # updated install out of the next update: refuse to build one.
+      - name: Refuse an unsigned release once a key is pinned
+        if: ${{ vars.RELEASE_SIGNING_ENABLED != 'true' }}
+        run: |
+          if [ -n "$(grep -Ev '^[[:space:]]*(#|$)' crates/chatty-gpui/src/auto_updater/release_keys.txt || true)" ]; then
+            echo "::error::release_keys.txt pins a release key but RELEASE_SIGNING_ENABLED is off; this release would be unsigned and refused by the updater (docs/release-signing.md)."
+            exit 1
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -538,6 +557,108 @@ jobs:
           done
 
           echo "✅ All $ASSET_COUNT assets have checksums"
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/
+          retention-days: 1
+
+  # Sign checksums.txt with the Ed25519 release key (AGE-817, SEC-10). The key
+  # lives only in the `release-signing` environment, and only this job, which
+  # runs no third-party action after the key is written, can read it. Switched
+  # on by the RELEASE_SIGNING_ENABLED repo variable; once on, a missing secret
+  # or a signature no pinned key accepts FAILS the release, so no unsigned
+  # release goes out. Runbook: docs/release-signing.md.
+  sign-checksums:
+    needs: [validate-version, checksums]
+    if: ${{ vars.RELEASE_SIGNING_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: release-signing
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
+          sparse-checkout: crates/chatty-gpui/src/auto_updater/release_keys.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Download checksums.txt
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Install minisign
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq minisign
+
+      - name: Sign checksums.txt
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::error::RELEASE_SIGNING_ENABLED is true but the RELEASE_SIGNING_KEY secret is not set in the release-signing environment. Refusing to publish an unsigned release (docs/release-signing.md)."
+            exit 1
+          fi
+          KEY_FILE="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          umask 077
+          printf '%s' "$RELEASE_SIGNING_KEY" | base64 --decode > "$KEY_FILE"
+          cd release-assets
+          minisign -S -s "$KEY_FILE" -m checksums.txt -x checksums.txt.sig \
+            -t "chatty ${{ needs.validate-version.outputs.tag_name }} checksums.txt" < /dev/null
+
+      - name: Check the signature against the pinned release keys
+        run: |
+          KEYS=$(grep -Ev '^[[:space:]]*(#|$)' crates/chatty-gpui/src/auto_updater/release_keys.txt || true)
+          if [ -z "$KEYS" ]; then
+            echo "::warning::No release public key is pinned in release_keys.txt yet; this build's updater skips the signature check. Pin the key (docs/release-signing.md)."
+            exit 0
+          fi
+          while read -r KEY; do
+            if minisign -V -q -P "$KEY" -m release-assets/checksums.txt -x release-assets/checksums.txt.sig; then
+              echo "✅ checksums.txt.sig verifies against pinned key $KEY"
+              exit 0
+            fi
+          done <<< "$KEYS"
+          echo "::error::checksums.txt.sig does not verify against any key in release_keys.txt; the updater would refuse this release."
+          exit 1
+
+      - name: Upload signature
+        uses: actions/upload-artifact@v4
+        with:
+          name: checksums-signature
+          path: release-assets/checksums.txt.sig
+          retention-days: 1
+
+  upload-assets:
+    needs: [validate-version, checksums, sign-checksums]
+    # Runs when signing succeeded, or when it was skipped because
+    # RELEASE_SIGNING_ENABLED is off. A failed signing job blocks the upload.
+    if: >-
+      ${{ !cancelled() && needs.checksums.result == 'success' &&
+      (needs.sign-checksums.result == 'success' ||
+      (needs.sign-checksums.result == 'skipped' && vars.RELEASE_SIGNING_ENABLED != 'true')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Download signature
+        if: ${{ needs.sign-checksums.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: checksums-signature
+          path: release-assets
+
+      - name: List release assets
+        run: ls -lah release-assets/
 
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
