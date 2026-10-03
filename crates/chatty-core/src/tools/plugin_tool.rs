@@ -888,6 +888,16 @@ mod tests {
         model_config: ModelConfig,
         provider: ProviderConfig,
     ) -> (Vec<SessionEvent>, AgentSession) {
+        run_metered_turn(spec, model_config, provider, Arc::default()).await
+    }
+
+    /// [`run_turn`] with the plugins called through `meter`.
+    async fn run_metered_turn(
+        spec: AgentSpec,
+        model_config: ModelConfig,
+        provider: ProviderConfig,
+        meter: Arc<ModuleMeter>,
+    ) -> (Vec<SessionEvent>, AgentSession) {
         let _ = crate::init_repositories();
         let workspace = tempfile::tempdir().expect("a workspace");
         let settings = ExecutionSettingsModel {
@@ -902,6 +912,7 @@ mod tests {
                 plugin_host: PluginHost {
                     models: vec![model_config.clone()],
                     providers: vec![provider.clone()],
+                    meter,
                     ..host()
                 },
                 ..AgentServices::default()
@@ -1280,5 +1291,199 @@ mod tests {
                 .expect("the fake answers");
             assert_eq!(dotted.status(), 400, "{provider_type:?} refuses a dot");
         }
+    }
+
+    // -- metering (AGE-837) ---------------------------------------------------
+
+    /// A Hive registry that prices `echo` with `free_tier` free calls, has
+    /// `used` of them on record for this user, holds `balance` tokens, and
+    /// accepts usage reports.
+    async fn hive(free_tier: i32, used: i64, balance: i64) -> MockServer {
+        use wiremock::matchers::{method, path};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/modules/echo/pricing"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "module_name": "echo",
+                "price_per_call": "2",
+                "free_tier_calls": free_tier,
+                "updated_at": "2026-10-03T00:00:00Z",
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/usage/me/modules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{ "module_name": "echo", "total_invocations": used }],
+                "total": 1,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/credits/balance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "balance_tokens": balance,
+                "lifetime_purchased_tokens": balance,
+                "lifetime_consumed_tokens": 0,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/usage/report"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "accepted": 1, "duplicates": 0 })),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// The meter a worker builds, with `echo` paid, against `server`, as a
+    /// signed-in user; its offline queue in `queue_dir`.
+    async fn paid_echo_meter(server: &MockServer, queue_dir: &std::path::Path) -> Arc<ModuleMeter> {
+        let pair = hive_client::TokenPair {
+            token: "access".to_string(),
+            refresh_token: "refresh".to_string(),
+            expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+        };
+        let session = Arc::new(HiveSession::borrowed(server.uri(), Some(pair)));
+        let client = Arc::new(HiveRegistryClient::new(server.uri()).with_session(Arc::clone(&session)));
+        let usage = Arc::new(UsageCollector::new(
+            server.uri(),
+            UsageCollectorConfig {
+                queue_dir: queue_dir.to_path_buf(),
+                ..UsageCollectorConfig::default()
+            },
+        ));
+        usage.set_session(session).await;
+        Arc::new(
+            ModuleMeter::new(["echo".to_string()].into())
+                .with_credit_guard(Arc::new(CreditGuard::with_default_ttl(client)))
+                .with_usage_collector(usage)
+                .flushing_each_call(),
+        )
+    }
+
+    /// The usage events `server` received, in order.
+    async fn reported(server: &MockServer) -> Vec<serde_json::Value> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.url.path() == "/api/usage/report")
+            .flat_map(|r| {
+                let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                body["events"].as_array().cloned().unwrap_or_default()
+            })
+            .collect()
+    }
+
+    async fn load_metered(meter: Arc<ModuleMeter>) -> LoadedPlugin {
+        load_plugins(
+            &[plugin("echo")],
+            &PluginHost { meter, ..host() },
+            &model(ProviderType::Ollama, "m"),
+        )
+        .await
+        .expect("echo loads")
+        .remove(0)
+    }
+
+    /// The marketplace tour's leak (AGE-837): a paid plugin a spec lists,
+    /// called by the model inside a turn with no free calls and 0 credits,
+    /// is refused before the guest runs — with the gateway's own message —
+    /// and nothing is reported. A meter with no credit guard (signed out)
+    /// refuses it too, instead of running it unbilled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn paid_plugin_in_spec_is_refused_without_credit() {
+        let server = hive(0, 0, 0).await;
+        let queue = tempfile::tempdir().unwrap();
+        let key = "paid-plugin-model";
+        let daemon = FakeDaemon::scripted(Script::new().route(
+            key,
+            [
+                Reply::tool_call("echo__reverse", serde_json::json!({ "input": "hello" })),
+                Reply::text("Refused."),
+            ],
+        ));
+        let (events, _session) = run_metered_turn(
+            spec_with(vec![plugin("echo")], None),
+            model(ProviderType::Ollama, key),
+            ollama(&daemon),
+            paid_echo_meter(&server, queue.path()).await,
+        )
+        .await;
+        no_error(&events);
+        let result = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::ToolCallError { error, .. } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("the plugin call fails, and the model reads why");
+        assert!(
+            result.contains("Insufficient credits (0 tokens) for module 'echo'"),
+            "{result}"
+        );
+        assert!(!result.contains("olleh"), "the guest never ran: {result}");
+        assert!(reported(&server).await.is_empty(), "a refused call is not reported");
+
+        let unbilled = Arc::new(ModuleMeter::new(["echo".to_string()].into()));
+        let err = tool_of(&load_metered(unbilled).await, "echo__reverse")
+            .call(serde_json::json!({ "input": "hello" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("paid module 'echo'"), "{err}");
+    }
+
+    /// A paid plugin's call that ran is reported to Hive under the module's
+    /// installed version, before the call returns (a worker may exit next).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn paid_plugin_in_spec_reports_usage() {
+        let server = hive(0, 0, 100).await;
+        let queue = tempfile::tempdir().unwrap();
+        let echo = load_metered(paid_echo_meter(&server, queue.path()).await).await;
+        let out = tool_of(&echo, "echo__reverse")
+            .call(serde_json::json!({ "input": "hello" }))
+            .await
+            .expect("a paid call with credits runs");
+        assert_eq!(out, "olleh");
+
+        let events = reported(&server).await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["module_name"], "echo");
+        assert_eq!(events[0]["module_version"], echo.version.as_str());
+        assert_eq!(events[0]["event_type"], "invocation");
+    }
+
+    /// The publisher's free tier comes from the registry, counted against
+    /// the calls Hive already has on record: with 3 free calls and 1 used,
+    /// two more run at 0 credits — each reported — and the next is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn free_tier_calls_are_allowed_then_metered() {
+        let server = hive(3, 1, 0).await;
+        let queue = tempfile::tempdir().unwrap();
+        let echo = load_metered(paid_echo_meter(&server, queue.path()).await).await;
+        let reverse = tool_of(&echo, "echo__reverse");
+        for n in 1..=2 {
+            let out = reverse
+                .call(serde_json::json!({ "input": "hello" }))
+                .await
+                .unwrap_or_else(|e| panic!("free call {n} runs: {e}"));
+            assert_eq!(out, "olleh");
+            assert_eq!(reported(&server).await.len(), n, "free call {n} is reported");
+        }
+        let err = reverse
+            .call(serde_json::json!({ "input": "hello" }))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Insufficient credits (0 tokens) for module 'echo'"),
+            "{err}"
+        );
+        assert_eq!(reported(&server).await.len(), 2, "the refused call is not");
     }
 }

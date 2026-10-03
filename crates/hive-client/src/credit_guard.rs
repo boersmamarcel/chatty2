@@ -219,3 +219,31 @@ impl CreditGuard {
         self.refresh().await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    /// A paid call whose balance cannot be read (here: signed out, so the
+    /// registry answers 401) is refused, not let through: an expired
+    /// sign-in must not make a paid module free (AGE-837).
+    #[tokio::test]
+    async fn a_paid_call_whose_balance_cannot_be_read_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/credits/balance"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let guard = CreditGuard::with_default_ttl(Arc::new(HiveRegistryClient::new(server.uri())));
+        let refusal = guard.admit("iban-check").await.unwrap_err();
+        assert!(
+            matches!(refusal, CreditRefusal::Unverified { .. }),
+            "{refusal:?}"
+        );
+        assert!(refusal.to_string().contains("sign in to Hive"), "{refusal}");
+    }
+}
