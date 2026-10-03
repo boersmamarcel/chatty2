@@ -430,6 +430,9 @@ impl DesktopSink {
             // nothing else here has a per-call identity to update
             // (AGE-762).
             InvokeAgentProgress::Admitted(_) => {}
+            // The running-agents overview reads these off `SwarmTrace`
+            // (TB-6); the approval card or question is the row's own.
+            InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => {}
         }
     }
 }

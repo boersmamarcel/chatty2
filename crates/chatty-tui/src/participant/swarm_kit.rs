@@ -648,6 +648,8 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             // Recorded before this existed (AGE-762): a golden with it
             // would no longer replay byte for byte.
             InvokeAgentProgress::Admitted(_) => continue,
+            // Newer than the goldens too (TB-6).
+            InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => continue,
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),
@@ -2238,6 +2240,9 @@ pub(crate) struct KitRoot {
     pub resolved: tokio::sync::mpsc::UnboundedReceiver<
         chatty_core::models::execution_approval_store::ApprovalResolution,
     >,
+    /// Where its `invoke_agent` sends delegation progress; empty until
+    /// [`watch_progress`](Self::watch_progress).
+    progress_slot: chatty_core::tools::invoke_agent_tool::InvokeAgentProgressSlot,
 }
 
 impl KitRoot {
@@ -2294,7 +2299,20 @@ impl KitRoot {
             approvals,
             raised,
             resolved,
+            progress_slot: built.invoke_agent_progress_slot,
         }
+    }
+
+    /// Every delegation progress event the root's `invoke_agent` sends
+    /// from now on, as the session would hear it.
+    pub(crate) fn watch_progress(
+        &self,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<
+        chatty_core::tools::invoke_agent_tool::InvokeAgentProgress,
+    > {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        *self.progress_slot.lock() = Some(tx);
+        rx
     }
 
     /// Run one prompt to its end through the production stream path, on a

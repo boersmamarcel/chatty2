@@ -10,13 +10,13 @@ use chatty_core::testing::fake_model::{Reply, Script};
 
 use super::swarm_kit::{AgentDef, Endpoint, KitRoot, ROOT_MODEL, SwarmKit};
 
-const LEAD: &str = "kit-lead";
+pub(super) const LEAD: &str = "kit-lead";
 const LEAD_MODEL: &str = "kit/lead";
-const CODER: &str = "kit-coder";
+pub(super) const CODER: &str = "kit-coder";
 const CODER_MODEL: &str = "kit/coder";
 
 /// Generous for CI: only a failure waits this long.
-const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+pub(super) const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn invoke(agent: &str, prompt: &str) -> Reply {
     Reply::tool_call(
@@ -31,7 +31,7 @@ fn shell(command: &str) -> Reply {
 
 /// root → kit-lead → kit-coder; the coder runs `echo hi`. The root runs
 /// `root_first` before it delegates.
-async fn asking_chain(root_first: Vec<Reply>) -> SwarmKit {
+pub(super) async fn asking_chain(root_first: Vec<Reply>) -> SwarmKit {
     let mut root = root_first;
     root.extend([invoke(LEAD, "Run it."), Reply::text("Root done.")]);
     SwarmKit::start_asking(
@@ -48,7 +48,7 @@ async fn asking_chain(root_first: Vec<Reply>) -> SwarmKit {
     .await
 }
 
-async fn finish(run: tokio::task::JoinHandle<String>) {
+pub(super) async fn finish(run: tokio::task::JoinHandle<String>) {
     let answer = tokio::time::timeout(DEADLINE, run)
         .await
         .expect("the root's run ends before the deadline")
