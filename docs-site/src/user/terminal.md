@@ -108,9 +108,11 @@ keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
 answered one at a time; press `Esc` while typing a custom answer to go back
 to the options.
 
-The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/swarm`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
+The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/swarm`, `/msg`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 
 `/swarm` prints the agent tree for the conversation's latest delegation as an indented list, one row per agent: name, model, status (running, done or failed) and spend. With no delegation yet, it says so.
+
+`/msg <agent> <text>` sends a message to a running agent, by the name `/swarm` shows. The agent reads it at its next tool call rather than waiting for its run to end.
 
 `/stop <agent>` stops one agent of the running swarm, by the name `/swarm` shows, and every agent it started. The rest keeps running, and the agent that called it carries on without it.
 
