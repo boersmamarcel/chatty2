@@ -8,7 +8,9 @@
 //! imports is satisfied by a stub that refuses with
 //! `capability <x> not granted to this agent` ([`NotGranted`]), so
 //! instantiation succeeds and the refusal reaches the model through the
-//! tool result. `logging` is always linked.
+//! tool result. `logging` is always linked. A module served with no agent
+//! spec also gets `config` by default; `llm`, `file` and `billing` need the
+//! user's grant ([`Grants::Specless`]).
 //!
 //! A grant the plugin did not request is refused at load
 //! ([`UnrequestedGrant`]): the grant list is checked against the
@@ -18,7 +20,7 @@
 use std::fmt;
 
 use tracing::warn;
-use wasmtime::component::Linker;
+use wasmtime::component::{HasData, HasSelf, Linker};
 
 use crate::bindings::chatty::plugin::billing::SessionInfo;
 use crate::bindings::chatty::plugin::types::{CompletionResponse, Message};
@@ -66,11 +68,20 @@ pub enum Grants {
     /// Exactly these capabilities, each of which the plugin must request.
     /// The default is none.
     Only(Vec<Capability>),
-    /// Whatever the plugin's `metadata` requests: for a module served on
-    /// its own (the gateway's registry), with no agent spec to grant from,
-    /// installing it is what granted its requests.
-    Requested,
+    /// A module served on its own (the gateway's registry), with no agent
+    /// spec to grant from (SEC-11, AGE-815): it gets
+    /// [`SPECLESS_DEFAULTS`] if it requests them, plus whatever the user
+    /// approved in Settings (`approved`) that it also requests. A stale
+    /// approval for something the module no longer requests links nothing.
+    Specless {
+        /// The capabilities the user granted this module in Settings.
+        approved: Vec<Capability>,
+    },
 }
+
+/// What a module served with no agent spec gets without a grant from the
+/// user, besides `logging`: `llm`, `file` and `billing` need one.
+pub const SPECLESS_DEFAULTS: [Capability; 1] = [Capability::Config];
 
 impl Default for Grants {
     fn default() -> Self {
@@ -138,9 +149,17 @@ pub(crate) fn resolve(
     grants: &Grants,
     requested: &[Capability],
 ) -> Result<Vec<Capability>, UnrequestedGrant> {
+    let specless: Vec<Capability>;
     let granted: &[Capability] = match grants {
         Grants::Only(granted) => granted,
-        Grants::Requested => requested,
+        Grants::Specless { approved } => {
+            specless = requested
+                .iter()
+                .copied()
+                .filter(|c| SPECLESS_DEFAULTS.contains(c) || approved.contains(c))
+                .collect();
+            &specless
+        }
     };
     let unrequested: Vec<Capability> = Capability::ALL
         .into_iter()
@@ -167,33 +186,40 @@ pub(crate) fn add_to_linker(
     granted: &[Capability],
 ) -> anyhow::Result<()> {
     let real = |c: Capability| granted.contains(&c);
-    types::add_to_linker(linker, |s| s)?;
-    logging::add_to_linker(linker, |s| s)?;
+    types::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
+    logging::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     if real(Capability::Llm) {
-        llm::add_to_linker(linker, |s| s)?;
+        llm::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        llm::add_to_linker_get_host(linker, refused)?;
+        llm::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     if real(Capability::Config) {
-        config::add_to_linker(linker, |s| s)?;
+        config::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        config::add_to_linker_get_host(linker, refused)?;
+        config::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     if real(Capability::File) {
-        file::add_to_linker(linker, |s| s)?;
+        file::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        file::add_to_linker_get_host(linker, refused)?;
+        file::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     if real(Capability::Billing) {
-        billing::add_to_linker(linker, |s| s)?;
+        billing::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
     } else {
-        billing::add_to_linker_get_host(linker, refused)?;
+        billing::add_to_linker::<_, Refusing>(linker, refused)?;
     }
     Ok(())
 }
 
 fn refused(state: &mut ModuleState) -> Refused<'_> {
     Refused(state)
+}
+
+/// Links the [`Refused`] host side for a capability.
+struct Refusing;
+
+impl HasData for Refusing {
+    type Data<'a> = Refused<'a>;
 }
 
 /// The host side of every ungranted capability: each call is refused.
@@ -225,7 +251,7 @@ impl config::Host for Refused<'_> {
     /// `config::get` has no error channel, so the refusal is a trap: the
     /// call fails with the refusal as its reason.
     fn get(&mut self, _key: String) -> wasmtime::Result<Option<String>> {
-        Err(anyhow::Error::new(self.refuse(Capability::Config)))
+        Err(wasmtime::Error::new(self.refuse(Capability::Config)))
     }
 }
 
@@ -264,12 +290,20 @@ mod tests {
     }
 
     #[test]
-    fn requested_grants_link_what_was_requested() {
-        let requested = [Capability::Billing, Capability::Config];
-        let linked = resolve("m", &Grants::Requested, &requested).unwrap();
+    fn specless_links_config_and_what_the_user_approved() {
+        let requested = [Capability::Billing, Capability::Config, Capability::Llm];
+        let none = Grants::Specless { approved: vec![] };
         assert_eq!(
-            linked,
-            [Capability::Config, Capability::Logging, Capability::Billing]
+            resolve("m", &none, &requested).unwrap(),
+            [Capability::Config, Capability::Logging]
+        );
+        let llm = Grants::Specless {
+            approved: vec![Capability::Llm, Capability::File],
+        };
+        // `file` was approved but is not requested: it links nothing.
+        assert_eq!(
+            resolve("m", &llm, &requested).unwrap(),
+            [Capability::Llm, Capability::Config, Capability::Logging]
         );
     }
 

@@ -501,7 +501,8 @@ once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
   `chatty_fabric::PendingList`: at most 64 KB per recipient, and at most 8 KB
   per sender per run of the recipient. A message over either bound is
   `over_allowance` — refused whole, never truncated.
-- **Delivery** (TM-2, AGE-655) happens at exactly two points, never mid-run:
+- **Delivery** (TM-2, AGE-655) of a message to an owner happens at exactly two
+  points, never mid-run:
   appended to the next `invoke_agent` result the recipient receives, as
   `messages: [...]` in `InvokeAgentOutput` (absent when empty; a failed
   delegation lists them after its error), or prepended to the recipient's next
@@ -516,6 +517,17 @@ once: `{"status": "pending", "id": "msg-1"}` or `{"status": "refused",
   with `<` and `>` in the body escaped (`chatty_fabric::wrap_message`). A
   message grants nothing: the recipient's tools, budget and approval policy
   are what they were.
+- **Mid-run messages** (TM-5, AGE-750). Two senders reach a *running* agent
+  sooner: you, to any agent of your swarm (`/msg <agent> <text>` in chatty-tui,
+  or the message box under a running agent's transcript sheet on the desktop),
+  and an agent to its own child. The message reaches the recipient at its next
+  tool call: the worker takes it between tool rounds (`mailbox.take`) and it
+  rides at the end of that round's tool result, wrapped and escaped as above,
+  so it is in the next model request and never in one already streaming. If
+  the agent makes no further tool call, it opens the agent's next task. It
+  grants nothing, and it costs one prompt-cache break (new bytes in the middle
+  of the run). Each delivery writes a `message` row with outcome
+  `delivered_mid_run`. Sideways messages between siblings stay refused.
 - **Drops.** When the recipient ends, what is still waiting for it is dropped,
   one edge-log `message` row per message with outcome `dropped`.
 - **Neutral description.** The description says what the tool does and names

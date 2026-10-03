@@ -65,7 +65,7 @@ If a module fails to load — an invalid `module.toml`, a missing `.wasm` file, 
 
 ## Use a plugin from another MCP client
 
-A plugin whose `module.toml` sets `[protocols] mcp = true` is also served to MCP clients outside Chatty, by the desktop's module gateway (**Enable module runtime** in **Settings → Plugins**). The gateway starts the first time an agent delegates, and **Settings → Plugins** then shows where it runs.
+A plugin whose `module.toml` sets `[protocols] mcp = true` is also served to MCP clients outside Chatty, by the desktop's module gateway (**Enable module runtime** in **Settings → Plugins**). Served that way there is no agent spec to grant from, so a plugin gets only logging and config by default. If it asks for an LLM call, a file read or billing, its row in **Settings → Plugins** shows a switch for each, off until you turn it on; switching one on reloads the gateway. The gateway starts the first time an agent delegates, and **Settings → Plugins** then shows where it runs.
 
 The gateway has no network port. It listens on a Unix socket in a folder only you can open, and answers only a caller that sends the token Chatty writes there each time it starts the gateway:
 

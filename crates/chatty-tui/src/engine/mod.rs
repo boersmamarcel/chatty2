@@ -40,7 +40,7 @@ mod commands;
 pub mod helpers;
 mod transcript;
 
-pub use commands::Command;
+pub use commands::{Command, MSG_USAGE};
 pub(crate) use helpers::sanitize_progress_line;
 pub use transcript::Transcript;
 

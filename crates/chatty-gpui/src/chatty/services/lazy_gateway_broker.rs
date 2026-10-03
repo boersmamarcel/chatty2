@@ -128,4 +128,19 @@ impl chatty_core::services::lazy_broker::LazyBroker for LazyGatewayBroker {
         };
         started.transport.cancel(node).map_err(anyhow::Error::from)
     }
+
+    /// The transcript sheet's message box reaches a running agent at its
+    /// next tool round (TM-5); a broker that has not started runs nobody.
+    async fn post_message(
+        &self,
+        to: &str,
+        text: String,
+    ) -> anyhow::Result<chatty_fabric::MessageStatus> {
+        let Some(started) = self.once.get() else {
+            anyhow::bail!("the broker is not running, so nothing is named '{to}'");
+        };
+        chatty_core::services::lazy_broker::post_as_root(started.transport.as_ref(), to, text)
+            .await
+            .map_err(anyhow::Error::from)
+    }
 }

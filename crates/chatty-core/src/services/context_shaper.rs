@@ -78,12 +78,29 @@
 //! every later call (the AGE-277 property holds for it too) and the model
 //! sees as much of it as the window allows. Everything under that cap is
 //! recorded whole.
+//!
+//! # Mid-run messages (TM-5)
+//!
+//! A worker's guard is also where the human, or the worker's owner, reaches
+//! it mid-run. Once [`ContextShaper::deliver_mid_run_messages`] gives it the
+//! worker's broker connection, every tool result it records first takes the
+//! worker's mid-run list (`mailbox.take`), and whatever was waiting rides at
+//! the end of that result, each message in its `<message … untrusted="true">`
+//! wrapper with its body escaped. So it is in the next model request — the
+//! tool round's user-role tool-results message — and never in one already on
+//! the wire. rig's hooks cannot add a message after a round's results (the
+//! post-tool call's prompt *is* that message), so the result carries it; it
+//! is recorded once, like the result, and resent unchanged after. It grants
+//! nothing: it is data in a tool result. And it costs one prompt-cache break,
+//! like any new tool result whose bytes nobody could predict.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use chatty_fabric::{CallEvent, CallRequest, CallResult, Transport};
+use futures::StreamExt;
 use rig_agent::agent::{
     AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
     ToolResultAction, ToolResultEvent,
@@ -254,6 +271,8 @@ struct Inner {
     /// Usage of the summary calls made since the stream last took it
     /// ([`ContextShaper::take_compaction_usage`], AGE-683).
     compaction_usage: Mutex<Vec<ApiCallUsage>>,
+    /// A worker's broker connection, its mid-run messages' source (TM-5).
+    mid_run: OnceLock<Arc<dyn Transport>>,
 }
 
 /// A compaction in force: `history[..covered]` goes out as `summary`.
@@ -316,6 +335,7 @@ impl ContextShaper {
                 compaction: Mutex::new(None),
                 compaction_enabled: AtomicBool::new(false),
                 compaction_usage: Mutex::new(Vec::new()),
+                mid_run: OnceLock::new(),
             }),
         }
     }
@@ -337,6 +357,39 @@ impl ContextShaper {
             let _ = self.inner.workspace.set(dir);
         }
         self.inner.compaction_enabled.store(true, Ordering::Relaxed);
+    }
+
+    /// Take this worker's mid-run messages (TM-5) over `transport`, its
+    /// broker connection, at every tool result it records. Set once.
+    pub fn deliver_mid_run_messages(&self, transport: Arc<dyn Transport>) {
+        let _ = self.inner.mid_run.set(transport);
+    }
+
+    /// The messages waiting on this worker's mid-run list, wrapped by the
+    /// broker; none without a connection. A failed take delivers nothing
+    /// now and leaves the messages for the next tool round or run.
+    async fn take_mid_run_messages(&self) -> Vec<String> {
+        let Some(transport) = self.inner.mid_run.get() else {
+            return Vec::new();
+        };
+        let mut stream = match transport.call(CallRequest::TakeMessages).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                warn!(%error, "mid-run messages: mailbox.take failed");
+                return Vec::new();
+            }
+        };
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(CallEvent::Result(CallResult::Messages(messages))) => return messages,
+                Ok(_) => continue,
+                Err(error) => {
+                    warn!(%error, "mid-run messages: mailbox.take failed");
+                    return Vec::new();
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// The usage of every compaction summary call made since the last time
@@ -730,18 +783,36 @@ impl AgentHook for ContextShaper {
         _ctx: &HookContext,
         event: ToolResultEvent<'_>,
     ) -> ToolResultAction {
-        match self.record_tool_output(event.presentation) {
-            Some(truncated) => {
-                warn!(
-                    tool = event.tool_name,
-                    cap_tokens = self.recording_cap(),
-                    "context shaper: tool result larger than the recording cap; recorded truncated"
-                );
-                ToolResultAction::Rewrite(truncated)
-            }
-            None => ToolResultAction::Keep,
+        let recorded = self.record_tool_output(event.presentation);
+        if recorded.is_some() {
+            warn!(
+                tool = event.tool_name,
+                cap_tokens = self.recording_cap(),
+                "context shaper: tool result larger than the recording cap; recorded truncated"
+            );
         }
+        let messages = self.take_mid_run_messages().await;
+        if messages.is_empty() {
+            return recorded.map_or(ToolResultAction::Keep, ToolResultAction::Rewrite);
+        }
+        debug!(
+            tool = event.tool_name,
+            messages = messages.len(),
+            "Delivering mid-run messages with a tool result"
+        );
+        ToolResultAction::Rewrite(with_messages(
+            recorded.unwrap_or_else(|| event.presentation.clone()),
+            &messages,
+        ))
     }
+}
+
+/// `output` with `messages` (already wrapped) after it, as one more text
+/// block of the same tool result.
+fn with_messages(output: ToolOutput, messages: &[String]) -> ToolOutput {
+    let mut content = output.into_content();
+    content.push(ToolResultContent::text(messages.join("\n")));
+    ToolOutput::content(content).expect("a tool result with a text block is valid")
 }
 
 // ── Round trips ───────────────────────────────────────────────────────────────

@@ -376,3 +376,43 @@ async fn runtime_off_agent_command_reaches_local_spec() {
         "the module runtime is off: no gateway socket is bound"
     );
 }
+
+/// AGE-818: the first delegation starts the lazy broker and spawns the
+/// worker at once. A worker the broker cannot welcome — here a build with
+/// another wire — ends the row with the broker's own reason and the worker
+/// binary, not with only the worker's "the broker closed the connection
+/// without a welcome". (A worker that can be welcomed registers on the same
+/// path: `desktop_root_invoke_agent_reaches_broker`.)
+#[tokio::test]
+async fn first_delegation_with_an_unwelcomable_worker_names_the_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let worker = worker_script(
+        dir.path(),
+        &format!(
+            r#"printf '{{"v":3,"id":1,"method":"session.hello","params":{{"schema":"another-build"}}}}\n' >&{PARTICIPANT_FD}
+read -r reply <&{PARTICIPANT_FD}
+echo 'the broker did not welcome this worker' >&2
+exit 1"#
+        ),
+    );
+    let broker = desktop_broker(worker);
+    let daemon = FakeDaemon::scripted(Script::new());
+    let mut session = desktop_session(&daemon, broker, dir.path()).await;
+
+    let events = run_turn(
+        &mut session,
+        TurnInput::delegation(Delegation {
+            agent: ANALYST.to_string(),
+            prompt: "check the ledger".to_string(),
+        }),
+    )
+    .await;
+
+    let failure = format!("{events:?}");
+    assert!(failure.contains("the broker refused it"), "{failure}");
+    assert!(failure.contains("schema does not match"), "{failure}");
+    assert!(
+        failure.contains("chatty-tui"),
+        "names the binary: {failure}"
+    );
+}

@@ -578,6 +578,7 @@ mod tests {
                 daytona_api_key: Some("dt-key".to_string()),
                 rerank_url: Some("http://127.0.0.1:8001/rerank".to_string()),
                 rerank_model: Some("BAAI/bge-reranker-v2-m3".to_string()),
+                managed: None,
             },
         )
         .await;

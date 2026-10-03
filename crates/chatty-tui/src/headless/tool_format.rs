@@ -53,7 +53,9 @@ pub(super) fn format_delegation_lines(
         InvokeAgentProgress::Text(_)
         | InvokeAgentProgress::Step(_)
         | InvokeAgentProgress::Swarm(_)
-        | InvokeAgentProgress::Admitted(_) => Vec::new(),
+        | InvokeAgentProgress::Admitted(_)
+        | InvokeAgentProgress::Waiting { .. }
+        | InvokeAgentProgress::Resumed { .. } => Vec::new(),
         InvokeAgentProgress::Finished {
             success, result, ..
         } => {

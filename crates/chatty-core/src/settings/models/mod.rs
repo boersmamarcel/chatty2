@@ -21,7 +21,7 @@ pub use mcp_store::McpServersModel;
 pub use models_store::ModelsModel;
 pub use module_settings::ModuleSettingsModel;
 pub use providers_store::ProviderModel;
-pub use search_settings::SearchSettingsModel;
+pub use search_settings::{ManagedSearch, SearchSettingsModel};
 pub use token_tracking_settings::TokenTrackingSettings;
 pub use training_settings::TrainingSettingsModel;
 pub use user_secrets_store::UserSecretsModel;

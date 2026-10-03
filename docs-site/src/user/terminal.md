@@ -108,11 +108,15 @@ keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
 answered one at a time; press `Esc` while typing a custom answer to go back
 to the options.
 
-The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/swarm`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
+The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/swarm`, `/msg`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 
 `/swarm` prints the agent tree for the conversation's latest delegation as an indented list, one row per agent: name, model, status (running, done or failed) and spend. With no delegation yet, it says so.
 
+`/msg <agent> <text>` sends a message to a running agent, by the name `/swarm` shows. The agent reads it at its next tool call rather than waiting for its run to end.
+
 `/stop <agent>` stops one agent of the running swarm, by the name `/swarm` shows, and every agent it started. The rest keeps running, and the agent that called it carries on without it.
+
+`/agents running` lists only the agents still running, one per line: name, conversation, the agents above it, whether it is working or waiting on you (for an approval or an answer), how long it has run, and what it has spent so far. The desktop shows the same list across all conversations (see [sub-agents](sub-agents.md)).
 
 Sending a message while a reply is still streaming doesn't get refused — press `Enter` as usual and it queues, showing up in the transcript as `Queued #1: <text>`, `Queued #2: <text>` and so on, and runs as its own turn once the current one ends. `/now <text>` instead cancels the running turn right away and sends `<text>` next. `/unqueue` takes back the message queued last. Up to 5 messages can wait; a sixth is refused. `Ctrl+C` cancels the current turn but leaves the queue as it is — nothing runs until you send (or `/now`) again, which then runs the queue's front first.
 

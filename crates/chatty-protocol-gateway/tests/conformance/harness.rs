@@ -26,6 +26,8 @@ pub struct Module {
     fixture: &'static str,
     name: Option<&'static str>,
     mcp: Option<bool>,
+    /// What the user granted it in Settings (SEC-11): `.chatty-grants.json`.
+    grants: Vec<&'static str>,
 }
 
 impl Module {
@@ -35,6 +37,7 @@ impl Module {
             fixture,
             name: None,
             mcp: None,
+            grants: Vec::new(),
         }
     }
 
@@ -44,12 +47,20 @@ impl Module {
             fixture,
             name: None,
             mcp: Some(true),
+            grants: Vec::new(),
         }
     }
 
     /// Serve this module's wasm under another name.
     pub fn named(mut self, name: &'static str) -> Self {
         self.name = Some(name);
+        self
+    }
+
+    /// The user granted this module `capability` (`llm`, `file`, `billing`):
+    /// a module served with no spec gets none of them otherwise (SEC-11).
+    pub fn granted(mut self, capability: &'static str) -> Self {
+        self.grants.push(capability);
         self
     }
 
@@ -83,6 +94,11 @@ impl Module {
             fixture = self.fixture,
         );
         std::fs::write(dir.join("module.toml"), manifest).expect("the manifest writes");
+        if !self.grants.is_empty() {
+            let grants = serde_json::json!({ "granted": self.grants });
+            std::fs::write(dir.join(".chatty-grants.json"), grants.to_string())
+                .expect("the grants write");
+        }
         dir
     }
 }
