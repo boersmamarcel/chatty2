@@ -1,0 +1,11 @@
+cause_code,description,applies_to,cat_window_start,cat_window_end
+COLL,Collision,motor,,
+THEFT,Theft,any,,
+GLASS,Glass breakage,any,,
+FIRE,Fire,any,,
+WATER,Escape of water,home,,
+STORM,Windstorm (storm Ines),any,2026-02-14,2026-02-18
+FLOOD,Flood (river Maas),any,2026-05-20,2026-05-24
+HAIL,Hail,any,2026-06-10,2026-06-11
+MED,Medical expenses abroad,travel,,
+BAG,Baggage loss,travel,,

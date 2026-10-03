@@ -1,0 +1,78 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "H2 occupancy window: rooms per booking, nights by date, NRF no-shows from May (A2), 45 rooms before 05-01 then 42 (A3)",
+      "expect": 66.59,
+      "tol": 0.01
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "April revenue: VAT by night, breakfast carve-out, GBP at night month, HOLD out, month-crossing stays",
+      "expect": 770960.24,
+      "tol": 0.5
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "number",
+      "desc": "suite ADR June: H1 EXEC is suite from 04-15, rooms multiplier, net revenue",
+      "expect": 361.84,
+      "tol": 0.01
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "number",
+      "desc": "H4 RevPAR: GBP per night month, 20% VAT, 70 rooms x 91 nights, no-show nights from May",
+      "expect": 131.25,
+      "tol": 0.01
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "number",
+      "desc": "A2 no-shows: non-refundable plans (NRF, OTA-NRF, PKG), arrivals from 05-01, first night x rooms",
+      "expect": 52,
+      "tol": 0
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "number",
+      "desc": "June commission: gross base from 06-01 (A4), OTA 15% and PKG 10%, FX",
+      "expect": 52960.66,
+      "tol": 0.05
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "H1 window: NL VAT 9% -> 21% on 05-01 by night date, breakfast plans, A2 no-shows",
+      "expect": 164697.47,
+      "tol": 0.05
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "H4 deluxe: KNG becomes deluxe from 05-01 by night date, rooms multiplier",
+      "expect": 960,
+      "tol": 0
+    }
+  ]
+}

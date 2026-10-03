@@ -1,0 +1,78 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "count: current version, withdrawn/internal/out-of-cover out, accident month (A2), mapping on loss date",
+      "expect": 177,
+      "tol": 0
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "net paid March: reversal pairs out, FX by paid month, recoveries subtracted, accident month, withdrawn expenses out",
+      "expect": 913782.08,
+      "tol": 0.5
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "number",
+      "desc": "large losses: amended 25k threshold (A3), net paid incl expenses, FX by paid month",
+      "expect": 18,
+      "tol": 0
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "number",
+      "desc": "motor avg: MOT-FLEET is motor before 04-01, CAT by window, current status closed",
+      "expect": 3412.46,
+      "tol": 0.05
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "number",
+      "desc": "recovery ratio: mapping effective from 04-01, reversals, recoveries paid later count (A4)",
+      "expect": 1.6,
+      "tol": 0.02
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "number",
+      "desc": "out of cover: inclusive policy dates incl early cancellations, withdrawn/internal still excluded",
+      "expect": 73,
+      "tol": 0
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "delay: HM-PLUS is home only before 04-01, CAT window exclusion, accident month",
+      "expect": 8.61,
+      "tol": 0.01
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "CAT expenses: window test on loss date, rejected claims' expenses count, withdrawn out",
+      "expect": 137275.13,
+      "tol": 0.05
+    }
+  ]
+}

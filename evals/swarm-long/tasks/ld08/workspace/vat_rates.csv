@@ -1,0 +1,5 @@
+country,valid_from,valid_to,accommodation_vat_pct
+NL,2020-01-01,2026-04-30,9.0
+NL,2026-05-01,,21.0
+BE,2020-01-01,,6.0
+GB,2020-01-01,,20.0

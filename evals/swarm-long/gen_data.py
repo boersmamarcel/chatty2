@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the data-audit family (ld01..ld06) of the EV-7 long task set (AGE-826).
+"""Generate the data-audit family (ld01..ld09) of the EV-7 long task set (AGE-826).
 
     python3 evals/swarm-long/gen_data.py
 
@@ -10,7 +10,10 @@ from the CSV files exactly as written (they are read back), never from SQL.
 `solution/report.md` is the reference deliverable built from those values.
 
 Every task has a fixed seed: a re-run reproduces the bytes exactly. The
-script deletes and rewrites only tasks/ld01..ld06.
+script deletes and rewrites only the tasks/ldNN directories it generates;
+`gen_data.py ld07 ld08` regenerates just those (ld01..ld06 are frozen).
+ld07..ld09 are the harder round: 6 CSVs with an effective-dated mapping
+table, a long README whose changelog amends earlier rules, numeric answers.
 
 Run with `--traps` to print, per task, which answers change when one trap of
 the README is ignored (a sanity check that every trap bites).
@@ -2112,12 +2115,1854 @@ def ld06():
     trap_report("ld06", ld06_compute, data, ["dedup", "invalid", "window", "tz", "multiplier"])
 
 
+# ===================================================================== ld07
+# Insurance claims: versions, payment reversals, effective-dated product map,
+# catastrophe windows, an amended large-loss threshold and reporting basis.
+
+LD07_PRODUCTS = [("MOT-STD", 35), ("MOT-FLEET", 12), ("HM-BASIC", 25), ("HM-PLUS", 15),
+                 ("TRV-ANN", 13)]
+LD07_MAP = [
+    ("MOT-STD", "motor", "2020-01-01", ""),
+    ("MOT-FLEET", "motor", "2020-01-01", "2026-03-31"),
+    ("MOT-FLEET", "commercial_motor", "2026-04-01", ""),
+    ("HM-BASIC", "home", "2020-01-01", ""),
+    ("HM-PLUS", "home", "2021-06-01", "2026-03-31"),
+    ("HM-PLUS", "home_premium", "2026-04-01", ""),
+    ("TRV-ANN", "travel", "2022-01-01", ""),
+]
+LD07_CAUSES = [
+    ("COLL", "Collision", "motor", "", ""), ("THEFT", "Theft", "any", "", ""),
+    ("GLASS", "Glass breakage", "any", "", ""), ("FIRE", "Fire", "any", "", ""),
+    ("WATER", "Escape of water", "home", "", ""),
+    ("STORM", "Windstorm (storm Ines)", "any", "2026-02-14", "2026-02-18"),
+    ("FLOOD", "Flood (river Maas)", "any", "2026-05-20", "2026-05-24"),
+    ("HAIL", "Hail", "any", "2026-06-10", "2026-06-11"),
+    ("MED", "Medical expenses abroad", "travel", "", ""),
+    ("BAG", "Baggage loss", "travel", "", ""),
+]
+LD07_MONTHS = ["2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07"]
+LD07_GBP = [1.1912, 1.2034, 1.1987, 1.1863, 1.1795, 1.1921, 1.2078, 1.1956]
+LD07_CUTOFF = D(2026, 7, 15)
+
+
+def ld07_generate():
+    rng = random.Random(82607)
+    policies = []
+    for i in range(1, 1601):
+        prod = rng.choices([p[0] for p in LD07_PRODUCTS], weights=[p[1] for p in LD07_PRODUCTS])[0]
+        country = rng.choices(["NL", "BE", "GB"], weights=[50, 25, 25])[0]
+        inc = D(2025, 1, 1) + TD(days=rng.randint(0, 515))
+        exp = inc + TD(days=364)
+        if rng.random() < 0.08:
+            exp = inc + TD(days=rng.randint(60, 300))
+        ded = rng.choice([0, 150, 250, 500]) if not prod.startswith("TRV") else rng.choice([0, 50])
+        policies.append(["P%06d" % i, prod, country, "GBP" if country == "GB" else "EUR",
+                         inc.isoformat(), exp.isoformat(), ded, 0])
+    for k in rng.sample(range(1600), 24):
+        policies[k][7] = 1
+    freq = {"MOT-STD": 1.0, "MOT-FLEET": 2.6, "HM-BASIC": 0.9, "HM-PLUS": 1.1, "TRV-ANN": 0.7}
+    pw = [freq[p[1]] for p in policies]
+    w0, w1 = D(2025, 12, 1), D(2026, 6, 30)
+    causes_for = {"MOT": ["COLL", "COLL", "COLL", "THEFT", "GLASS", "FIRE", "STORM", "HAIL"],
+                  "HM-": ["WATER", "WATER", "THEFT", "FIRE", "GLASS", "STORM", "STORM", "FLOOD"],
+                  "TRV": ["MED", "MED", "BAG", "THEFT"]}
+    windows = {c[0]: (pdate(c[3]), pdate(c[4])) for c in LD07_CAUSES if c[3]}
+    claims, payments = [], []
+    pay_no = [1]
+
+    def add_pay(cid, d, typ, amt_c, cur):
+        if d > LD07_CUTOFF:
+            return None
+        pid = "PAY%06d" % pay_no[0]
+        pay_no[0] += 1
+        payments.append([pid, cid, d.isoformat(), typ, money(amt_c), ""])
+        return pid
+
+    for n in range(1, 3801):
+        pol = rng.choices(policies, weights=pw)[0]
+        inc, exp = pdate(pol[4]), pdate(pol[5])
+        lo, hi = max(inc, w0), min(exp, w1)
+        if lo > hi:
+            continue
+        loss = lo + TD(days=rng.randint(0, (hi - lo).days))
+        if rng.random() < 0.045:
+            if rng.random() < 0.5 and inc - TD(days=1) >= w0:
+                loss = inc - TD(days=rng.randint(1, min(20, (inc - w0).days)))
+            elif exp + TD(days=1) <= w1:
+                loss = exp + TD(days=rng.randint(1, min(20, (w1 - exp).days)))
+        cause = rng.choice(causes_for[pol[1][:3]])
+        if cause in windows and rng.random() < 0.75:
+            a, b = windows[cause]
+            if lo <= a and b <= hi:
+                loss = a + TD(days=rng.randint(0, (b - a).days))
+        line = pol[1][:3]
+        mu, sd = {"MOT": (7.5, 1.0), "HM-": (7.9, 1.1), "TRV": (6.4, 1.1)}[line]
+        if pol[1] == "MOT-FLEET":
+            mu += 0.3
+        loss_eur = rng.lognormvariate(mu, sd)
+        rate = LD07_GBP[LD07_MONTHS.index(ym(loss))] if pol[3] == "GBP" else 1.0
+        loss_c = int(loss_eur / rate * 100)
+        delay = int(rng.lognormvariate(1.4 if line != "HM-" else 1.9, 0.8))
+        rep = DT(loss.year, loss.month, loss.day) + TD(days=delay, hours=rng.randint(0, 23),
+                                                       minutes=rng.randint(0, 59))
+        if rep.date() > D(2026, 7, 14):
+            continue
+        cid = "CL%07d" % (2600000 + n)
+        final = rng.choices(["closed", "open", "rejected", "withdrawn"], weights=[60, 25, 8, 7])[0]
+        vt = rep + TD(minutes=rng.randint(5, 300))
+        if rng.random() < 0.4:
+            first = "open" if final != "open" else "closed"
+            claims.append([cid, pol[0], loss.isoformat(), iso(rep), cause, first, iso(vt)])
+            vt = vt + TD(days=rng.randint(2, 40), hours=rng.randint(0, 23))
+        claims.append([cid, pol[0], loss.isoformat(), iso(rep), cause, final, iso(vt)])
+        start = rep.date()
+        if final == "closed":
+            k = rng.choice([1, 1, 2, 3])
+            left = loss_c
+            for j in range(k):
+                part = left if j == k - 1 else int(left * rng.uniform(0.3, 0.7))
+                left -= part
+                d = start + TD(days=rng.randint(5, 60))
+                pid = add_pay(cid, d, "indemnity", part, pol[3])
+                if pid and rng.random() < 0.04:
+                    rd = d + TD(days=rng.randint(1, 15))
+                    if rd <= LD07_CUTOFF:
+                        payments.append(["PAY%06d" % pay_no[0], cid, rd.isoformat(),
+                                         "indemnity", money(part), pid])
+                        pay_no[0] += 1
+                    if rng.random() < 0.6:
+                        add_pay(cid, d + TD(days=rng.randint(16, 25)), "indemnity",
+                                int(part * rng.uniform(0.7, 1.0)), pol[3])
+            for _ in range(rng.choice([0, 1, 1, 2])):
+                add_pay(cid, start + TD(days=rng.randint(3, 50)), "expense",
+                        int(loss_c * rng.uniform(0.04, 0.15)), pol[3])
+            if line == "MOT" and rng.random() < 0.18:
+                add_pay(cid, start + TD(days=rng.randint(40, 120)), "recovery",
+                        int(loss_c * rng.uniform(0.2, 0.6)), pol[3])
+        elif final == "open":
+            if rng.random() < 0.5:
+                add_pay(cid, start + TD(days=rng.randint(5, 60)), "indemnity",
+                        int(loss_c * rng.uniform(0.2, 0.6)), pol[3])
+            if rng.random() < 0.4:
+                add_pay(cid, start + TD(days=rng.randint(3, 50)), "expense",
+                        int(loss_c * rng.uniform(0.03, 0.1)), pol[3])
+        elif final == "rejected":
+            add_pay(cid, start + TD(days=rng.randint(3, 50)), "expense",
+                    int(loss_c * rng.uniform(0.03, 0.12)), pol[3])
+        elif rng.random() < 0.3:
+            add_pay(cid, start + TD(days=rng.randint(3, 30)), "expense",
+                    int(loss_c * rng.uniform(0.02, 0.06)), pol[3])
+    rng.shuffle(claims)
+    claims.sort(key=lambda r: r[3][:10])
+    payments.sort(key=lambda r: (r[2], r[0]))
+    fx = []
+    for i, m in enumerate(LD07_MONTHS):
+        fx.append([m, "EUR", "1.0000"])
+        fx.append([m, "GBP", "%.4f" % LD07_GBP[i]])
+    files = {
+        "claims.csv": (["claim_id", "policy_id", "loss_date", "reported_at_utc", "cause_code",
+                        "status", "version_ts"], claims),
+        "claim_payments.csv": (["payment_id", "claim_id", "paid_date", "payment_type", "amount",
+                                "reverses_payment_id"], payments),
+        "policies.csv": (["policy_id", "product_code", "country", "currency", "inception_date",
+                          "expiry_date", "deductible", "is_internal"], policies),
+        "product_line_map.csv": (["product_code", "line_of_business", "valid_from", "valid_to"],
+                                 [list(m) for m in LD07_MAP]),
+        "cause_codes.csv": (["cause_code", "description", "applies_to", "cat_window_start",
+                             "cat_window_end"], [list(c) for c in LD07_CAUSES]),
+        "fx_rates.csv": (["month", "currency", "eur_per_unit"], fx),
+    }
+    return files
+
+
+def ld07_compute(data, naive):
+    pols = {p["policy_id"]: p for p in data["policies.csv"]}
+    fx = {(r["month"], r["currency"]): float(r["eur_per_unit"]) for r in data["fx_rates.csv"]}
+    cmap = []
+    for m in data["product_line_map.csv"]:
+        cmap.append((m["product_code"], pdate(m["valid_from"]),
+                     pdate(m["valid_to"]) if m["valid_to"] else D(2099, 1, 1), m["line_of_business"]))
+    win = {c["cause_code"]: (pdate(c["cat_window_start"]), pdate(c["cat_window_end"]))
+           for c in data["cause_codes.csv"] if c["cat_window_start"]}
+
+    def lob(prod, d):
+        if "map" in naive:
+            d = D(2026, 7, 1)
+        return [l for p, a, b, l in cmap if p == prod and a <= d <= b][0]
+
+    if "dedup" in naive:
+        cur = first_kept(data["claims.csv"], "claim_id")
+    else:
+        cur = latest(data["claims.csv"], "claim_id", "version_ts")
+    reversed_ids = {p["reverses_payment_id"] for p in data["claim_payments.csv"] if p["reverses_payment_id"]}
+    pay = {}
+    for p in data["claim_payments.csv"]:
+        if "reversal" not in naive and (p["reverses_payment_id"] or p["payment_id"] in reversed_ids):
+            continue
+        pol = pols[cur[p["claim_id"]]["policy_id"]]
+        month = p["paid_date"][:7]
+        if "fx_loss" in naive:
+            month = cur[p["claim_id"]]["loss_date"][:7]
+        eur = cents(p["amount"]) / 100.0 * fx[(month, pol["currency"])]
+        e = pay.setdefault(p["claim_id"], {"indemnity": 0.0, "expense": 0.0, "recovery": 0.0})
+        e[p["payment_type"]] += eur
+    recs, ooc = [], []
+    for c in cur.values():
+        pol = pols[c["policy_id"]]
+        if c["status"] == "withdrawn" and "withdrawn" not in naive:
+            continue
+        if pol["is_internal"] == "1" and "internal" not in naive:
+            continue
+        loss = pdate(c["loss_date"])
+        basis = loss if "basis" not in naive else piso(c["reported_at_utc"]).date()
+        covered = pdate(pol["inception_date"]) <= loss <= pdate(pol["expiry_date"])
+        r = {"c": c, "loss": loss, "month": ym(basis), "lob": lob(pol["product_code"], loss),
+             "cat": c["cause_code"] in win and win[c["cause_code"]][0] <= loss <= win[c["cause_code"]][1],
+             "p": pay.get(c["claim_id"], {"indemnity": 0.0, "expense": 0.0, "recovery": 0.0}),
+             "delay": (piso(c["reported_at_utc"]).date() - loss).days}
+        if "cat" in naive:
+            r["cat"] = c["cause_code"] in win
+        r["net"] = r["p"]["indemnity"] + r["p"]["expense"] - r["p"]["recovery"]
+        if not covered:
+            ooc.append(r)
+            if "cover" not in naive:
+                continue
+        recs.append(r)
+
+    def inm(r, a, b):
+        return a <= r["month"] <= b
+
+    out = {}
+    out["Q1"] = sum(1 for r in recs if inm(r, "2026-04", "2026-06") and r["lob"] == "home_premium")
+    out["Q2"] = r2(sum(r["net"] for r in recs if r["month"] == "2026-03"))
+    thr = 25000.0 if "threshold" not in naive else 50000.0
+    out["Q3"] = sum(1 for r in recs if inm(r, "2026-01", "2026-06") and r["net"] > thr)
+    xs = [r["net"] for r in recs if inm(r, "2026-01", "2026-03") and r["lob"] == "motor"
+          and not r["cat"] and r["c"]["status"] == "closed"]
+    out["Q4"] = r2(sum(xs) / len(xs))
+    cm = [r for r in recs if inm(r, "2026-04", "2026-06") and r["lob"] == "commercial_motor"]
+    out["Q5"] = r2(100.0 * sum(r["p"]["recovery"] for r in cm) / sum(r["p"]["indemnity"] for r in cm))
+    out["Q6"] = sum(1 for r in ooc if "2026-01" <= ym(r["loss"]) <= "2026-06")
+    hd = [r["delay"] for r in recs if inm(r, "2026-01", "2026-06") and r["lob"] == "home" and not r["cat"]]
+    out["Q7"] = r2(float(sum(hd)) / len(hd))
+    out["Q8"] = r2(sum(r["p"]["expense"] for r in recs if inm(r, "2026-01", "2026-06") and r["cat"]))
+    return out
+
+
+LD07_README = """
+# Claims data mart: data dictionary and reporting rules
+
+This is the data dictionary of the claims data mart of a mid-sized property
+and casualty insurer operating in the Netherlands, Belgium and the United
+Kingdom. The extract in this folder covers claims with a loss date from
+1 December 2025 to 30 June 2026, together with every payment booked on those
+claims up to the extract cut-off of **15 July 2026**. It is the input for the
+half-year claims report of 2026. The document has four parts: the files
+(part A), the reporting rules (part B), worked examples and answers to
+frequent questions (part C) and the changelog (part D).
+
+> **Precedence.** The changelog in part D amends the rules of part B. Where
+> an amendment and a rule in part B disagree, the amendment governs, for
+> every period in this extract, unless the amendment itself says otherwise.
+> Footnotes are part of the rules.
+
+All files are comma-separated, UTF-8, with one header row. Dates are ISO
+`YYYY-MM-DD`; timestamps are ISO 8601 in UTC with a trailing `Z`. Monetary
+amounts are decimal numbers with two decimals and no thousands separators.
+
+---
+
+## Part A. Files
+
+### A.1 claims.csv
+
+One row per **version** of a claim. The claims system writes a new version
+whenever a claim handler changes the claim: opening it, closing it,
+re-opening it, rejecting it or recording that the customer withdrew it. The
+extract contains all versions, not only the latest one, and the rows are not
+in version order.
+
+| column | meaning |
+| -- | -- |
+| claim_id | claim identifier, stable across versions |
+| policy_id | the policy the claim is made under, see policies.csv |
+| loss_date | the date the loss event happened, as stated by the customer and confirmed by the handler |
+| reported_at_utc | when the claim was first reported to us (first notification of loss), UTC |
+| cause_code | the cause of the loss, see cause_codes.csv |
+| status | `open`, `closed`, `rejected` (we declined cover), `withdrawn` (the customer withdrew the claim) |
+| version_ts | when this version was written, UTC |
+
+The columns `policy_id`, `loss_date`, `reported_at_utc` and `cause_code` do
+not change between the versions of one claim in this extract; `status` does.
+
+### A.2 claim_payments.csv
+
+One row per payment booking on a claim. Bookings are never edited or
+deleted; a wrong payment is cancelled by a **reversal** booking.
+
+| column | meaning |
+| -- | -- |
+| payment_id | booking identifier |
+| claim_id | the claim, see claims.csv |
+| paid_date | booking date of the payment |
+| payment_type | `indemnity` (paid to the customer or a repairer for the loss itself), `expense` (loss adjusters, lawyers, experts: the cost of handling the claim), `recovery` (money we received back: salvage, or recovered from a third party) |
+| amount | the amount, always positive, in the **policy's currency** (see policies.csv) |
+| reverses_payment_id | empty for an ordinary booking; for a reversal booking, the `payment_id` of the booking it cancels |
+
+A reversal carries the same `payment_type` and the same amount as the
+booking it cancels. After a reversal the handler may book a corrected
+payment under a new `payment_id`; that new booking is an ordinary payment.
+
+### A.3 policies.csv
+
+| column | meaning |
+| -- | -- |
+| policy_id | policy identifier |
+| product_code | the product sold, see product_line_map.csv |
+| country | NL, BE or GB |
+| currency | EUR, or GBP for GB policies; all bookings on the policy's claims are in this currency |
+| inception_date | first day of cover |
+| expiry_date | last day of cover (inclusive). Policies cancelled early carry the cancellation date here |
+| deductible | the policy excess in policy currency, for information only: indemnity bookings are already net of it |
+| is_internal | 1 for policies held by staff test accounts of the claims system (see B.2) |
+
+### A.4 product_line_map.csv
+
+Maps a product to a **line of business** for reporting. The mapping is
+effective-dated because the reporting structure was reorganised on
+1 April 2026: the fleet motor product moved to the new commercial motor line
+and the premium home product got its own line. Each row is valid from
+`valid_from` to `valid_to`, both inclusive; an empty `valid_to` means the row
+is still valid.
+
+| column | meaning |
+| -- | -- |
+| product_code | product, as in policies.csv |
+| line_of_business | `motor`, `commercial_motor`, `home`, `home_premium`, `travel` |
+| valid_from | first day the row applies |
+| valid_to | last day the row applies, empty = open-ended |
+
+### A.5 cause_codes.csv
+
+| column | meaning |
+| -- | -- |
+| cause_code | code as used in claims.csv |
+| description | readable name |
+| applies_to | the lines the code is normally used for (informational) |
+| cat_window_start, cat_window_end | for natural-catastrophe codes: the first and last day (inclusive) of the declared catastrophe event; empty for other codes |
+
+### A.6 fx_rates.csv
+
+Monthly average rates. `eur_per_unit` is the number of euros for one unit of
+`currency` in `month` (`YYYY-MM`). EUR rows are 1.
+
+---
+
+## Part B. Reporting rules
+
+### B.1 Current version of a claim
+
+Only the latest version of each claim counts: the row with the greatest
+`version_ts` for that `claim_id`. Earlier versions are history and are
+ignored in every figure. The order of the rows in the file means nothing.
+
+### B.2 Claims in scope
+
+1. A claim whose current status is `withdrawn` is out of scope for every
+   figure: it is not counted, and none of its payments count, including any
+   expense bookings made before the withdrawal.
+2. Rejected claims are in scope. They count as reported claims, and the
+   expense bookings on them count in paid amounts.
+3. Claims under internal policies (`is_internal` = 1) are test data and are
+   out of scope for every figure.
+4. A claim is **out of cover** when its loss date is before the policy's
+   inception date or after its expiry date. Out-of-cover claims are out of
+   scope for every figure except where a question explicitly asks about
+   out-of-cover claims; such a question still applies rules 1 and 3.
+
+### B.3 Reporting period of a claim
+
+Claims are reported in the month of their **reported_at_utc** timestamp
+(the UTC calendar month of the first notification of loss)[^basis]. A
+quarter or half-year is the union of its months.
+
+### B.4 Line of business
+
+The line of business of a claim is found through its policy's
+`product_code` in product_line_map.csv, using the mapping row that is valid
+on the claim's **loss date**. It is not the line valid today, and not the
+line valid on the reporting date.
+
+### B.5 Payments and net paid
+
+1. A reversal booking and the booking it reverses both drop out of every
+   figure (together they are zero). A corrected re-booking after a reversal
+   counts normally.
+2. **Net paid** of a claim = indemnity + expense − recovery, over its
+   remaining bookings up to the cut-off, converted to euros.
+3. Each booking converts to euros at the rate of the month of its own
+   `paid_date`[^fx].
+
+### B.6 Catastrophe claims
+
+A claim is a **catastrophe (CAT) claim** when its cause code has a
+catastrophe window and its loss date lies inside that window (both ends
+inclusive). A storm, flood or hail claim with a loss date outside the window
+is an ordinary (attritional) claim. "Non-CAT" means all other claims.
+
+### B.7 Large losses
+
+A claim is a **large loss** when its net paid exceeds EUR 50,000.00 (strictly
+greater). See part D.
+
+### B.8 Reporting delay
+
+The reporting delay of a claim in days = the UTC calendar date of
+`reported_at_utc` minus the loss date. A claim reported on its loss date has
+a delay of 0.
+
+### B.9 Status questions
+
+"Closed claims" are claims whose current status is `closed`. "Open claims"
+are claims whose current status is `open`; a re-opened claim is open.
+
+[^basis]: The reported-date basis was the regulatory reporting convention
+until the 2026 reorganisation. Read part D before using it.
+
+[^fx]: Not the rate of the loss month and not the rate of the reporting
+month. A claim paid over several months therefore mixes rates.
+
+---
+
+## Part C. Worked examples and frequent questions
+
+**Example 1 (versions).** Claim CL9999991 has two rows: `open` written on
+2026-03-02 and `closed` written on 2026-04-10. Its current status is
+`closed`. If the rows were the other way round in the file, the answer would
+be the same: only `version_ts` decides.
+
+**Example 2 (reversal).** Claim CL9999992 has indemnity bookings PAY1 of
+1,000.00 on 2026-03-05 and PAY2 of 1,000.00 on 2026-03-09 with
+`reverses_payment_id` = PAY1, and then PAY3 of 900.00 on 2026-03-20. Its
+indemnity is 900.00: PAY1 and PAY2 cancel out. Counting PAY2 as a second
+payment would give 2,900.00; subtracting it without removing PAY1 would give
+900.00 too, but only when the reversal carries the same type and amount,
+which this extract guarantees.
+
+**Example 3 (currency).** A GB claim has an indemnity of GBP 2,000.00 paid in
+February and an expense of GBP 100.00 paid in April. Its net paid is
+2,000.00 x (February GBP rate) + 100.00 x (April GBP rate).
+
+**Example 4 (mapping).** A fleet motor policy (MOT-FLEET) claim with a loss on
+2026-03-30 is a `motor` claim, even if it was reported in April and even
+though the product maps to `commercial_motor` today. The same policy's claim
+with a loss on 2026-04-02 is `commercial_motor`.
+
+**Example 5 (catastrophe).** A STORM claim with a loss date of 2026-02-16 is a
+CAT claim (storm Ines, window 14 to 18 February). A STORM claim with a loss
+date of 2026-03-03 is not.
+
+**Q: Do expense bookings count towards the large-loss test?** Yes: the test
+is on net paid, which includes expenses and is reduced by recoveries.
+
+**Q: Do I need the deductible?** No. Indemnity bookings are already net of
+the deductible. The column is for information only.
+
+**Q: Some claims have no payments. Are they in scope?** Yes. Their net paid is
+zero; they count in claim counts.
+
+**Q: What about payments booked after the cut-off?** The extract contains
+none. Use every booking in the file (subject to B.5).
+
+**Q: Is an out-of-cover claim's loss still a CAT claim?** It is out of scope
+(B.2 rule 4) unless the question is about out-of-cover claims.
+
+**Q: Which date decides whether a claim is in "Q2 2026"?** The reporting
+period of B.3 as amended in part D.
+
+**Q: What does "average" mean?** The arithmetic mean over the claims in
+scope of the question.
+
+---
+
+## Part D. Changelog (amendments to part B)
+
+**A1 (2026-01-15). Catastrophe windows.** The storm Ines window was set to
+14-18 February 2026 after the event was declared. Later events are added to
+cause_codes.csv when they are declared (flood 20-24 May, hail 10-11 June).
+
+**A2 (2026-05-01). Reporting basis.** From the 2026 reorganisation onwards,
+all claims figures are reported by **accident month**: the month of the
+claim's loss date, not the month of `reported_at_utc`. This replaces rule
+B.3 and applies to all periods in this extract, including the months before
+May 2026 (prior reports have been restated). Quarters and half-years are the
+unions of their accident months.
+
+**A3 (2026-05-01). Large-loss threshold.** The large-loss threshold of rule
+B.7 is lowered from EUR 50,000.00 to **EUR 25,000.00** (net paid strictly
+greater than the threshold). The new threshold applies to every claim in
+this extract, whatever its loss date.
+
+**A4 (2026-06-01). Clarification of B.5.** Recoveries are always reported
+in the period of the claim they relate to (the claim's accident month), even
+when received months later, and are converted at the rate of their own
+paid month like every other booking.
+
+**A5 (2026-06-20). No change to B.2.** Rejected claims remain in scope after
+the review of June 2026 (see B.2 rule 2).
+
+---
+
+## Part E. Data-quality notes and glossary
+
+### E.1 Known data-quality issues in this extract
+
+1. **Duplicate-looking claims.** Two claims of the same policy with the same
+   loss date and cause are separate claims when their `claim_id` differs
+   (for example a vehicle and its trailer). Do not merge them.
+2. **Version noise.** Roughly four in ten claims have more than one version.
+   Earlier versions frequently show `open` for a claim that is now closed,
+   or `closed` for a claim that was later re-opened. Counting rows instead of
+   claims, or using the first version, overstates and misclassifies claims.
+3. **Withdrawn claims with costs.** Some withdrawn claims carry an expense
+   booking for an adjuster visit made before the customer withdrew. Under
+   B.2 rule 1 these bookings are excluded together with the claim.
+4. **Early-cancelled policies.** About one policy in twelve was cancelled
+   before its anniversary; its `expiry_date` is the cancellation date. A
+   loss after that date is out of cover even though a full-year policy would
+   have covered it.
+5. **Late reporting.** Home claims are typically reported a week or more
+   after the loss; motor claims within a few days. A claim reported in July
+   2026 can have a loss date in June 2026 and is then part of the June
+   accident month.
+6. **Payments in GBP.** All bookings of a GB policy are in GBP, including
+   expenses paid to Dutch adjusters. Convert them with B.5 rule 3; there is
+   no currency column on the booking itself.
+7. **Reversal timing.** A reversal can be booked in a later month than the
+   booking it cancels. Both drop out regardless of their months.
+
+### E.2 Glossary
+
+- **Accident month / accident period.** The month (or the union of months)
+  of the loss date. Since amendment A2 this is the reporting period of
+  every claim figure.
+- **Attritional claim.** Any claim that is not a CAT claim.
+- **Claim in scope.** A claim that survives every rule of B.2: current status
+  not withdrawn, policy not internal, loss date within the policy's cover.
+- **First notification of loss (FNOL).** The moment the claim was first
+  reported; `reported_at_utc`.
+- **Indemnity.** Payments for the loss itself, after the deductible.
+- **Line of business (LoB).** The reporting segment of B.4.
+- **Net paid.** B.5 rule 2.
+- **Recovery ratio.** Recoveries divided by indemnity over the same set of
+  claims, in euros, as a percentage.
+- **Reporting delay.** B.8.
+
+### E.3 Reconciliation totals
+
+Finance reconciles the extract against the general ledger on gross bookings
+(every row of claim_payments.csv, reversals included, in policy currency).
+Those control totals are **not** reporting figures and must not be used to
+answer reporting questions: the reporting rules above remove reversals,
+withdrawn and internal claims and convert currencies, which the ledger
+control does not.
+
+### E.4 Checklist
+
+Before reporting a figure, check that you have: kept only the current
+version of each claim; dropped withdrawn claims, internal policies and
+out-of-cover claims; assigned the accident month from the loss date (A2);
+mapped the line of business on the loss date; removed reversal pairs;
+converted each booking at its own paid month; tested the catastrophe window
+on the loss date; and used the amended large-loss threshold (A3).
+"""
+
+
+def ld07():
+    files = ld07_generate()
+    emit_stub("ld07", files)
+    data = load("ld07", list(files))
+    a = ld07_compute(data, set())
+    qs = [
+        dict(text="How many claims in scope have an accident period in Q2 2026 and the line of "
+                  "business `home_premium`?",
+             fmt="an integer.", match="number", expect=a["Q1"], tol=0,
+             desc="count: current version, withdrawn/internal/out-of-cover out, accident month (A2), mapping on loss date"),
+        dict(text="What is the total net paid in EUR of the claims in scope whose accident period "
+                  "is March 2026?",
+             fmt="EUR with 2 decimals, e.g. `Q2: 123456.78`.", match="number", expect=a["Q2"],
+             tol=0.5, dec=2,
+             desc="net paid March: reversal pairs out, FX by paid month, recoveries subtracted, accident month, withdrawn expenses out"),
+        dict(text="How many large losses are there among the claims in scope with an accident "
+                  "period in the first half of 2026 (January to June)?",
+             fmt="an integer.", match="number", expect=a["Q3"], tol=0,
+             desc="large losses: amended 25k threshold (A3), net paid incl expenses, FX by paid month"),
+        dict(text="What is the average net paid in EUR per closed non-CAT claim of line `motor` "
+                  "with an accident period in Q1 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q4"], tol=0.05, dec=2,
+             desc="motor avg: MOT-FLEET is motor before 04-01, CAT by window, current status closed"),
+        dict(text="What is the recovery ratio of line `commercial_motor` for accident periods in "
+                  "Q2 2026: total recoveries in EUR divided by total indemnity in EUR, as a "
+                  "percentage?",
+             fmt="a percentage with 2 decimals, e.g. `Q5: 12.34`.", match="number", expect=a["Q5"],
+             tol=0.02, dec=2,
+             desc="recovery ratio: mapping effective from 04-01, reversals, recoveries paid later count (A4)"),
+        dict(text="How many out-of-cover claims (B.2 rule 4) have a loss date in the first half "
+                  "of 2026?",
+             fmt="an integer.", match="number", expect=a["Q6"], tol=0,
+             desc="out of cover: inclusive policy dates incl early cancellations, withdrawn/internal still excluded"),
+        dict(text="What is the mean reporting delay in days of the non-CAT claims in scope of "
+                  "line `home` with an accident period in the first half of 2026?",
+             fmt="days with 2 decimals.", match="number", expect=a["Q7"], tol=0.01, dec=2,
+             desc="delay: HM-PLUS is home only before 04-01, CAT window exclusion, accident month"),
+        dict(text="What is the total of expense bookings in EUR on CAT claims in scope with an "
+                  "accident period in the first half of 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q8"], tol=0.05, dec=2,
+             desc="CAT expenses: window test on loss date, rejected claims' expenses count, withdrawn out"),
+    ]
+    emit("ld07", "Insurance claims half-year audit", "insurance claims", files, LD07_README, qs,
+         "All questions use README.md including its changelog (part D) and footnotes. "
+         "\"Claims in scope\" is defined in B.2.")
+    trap_report("ld07", ld07_compute, data,
+                ["dedup", "withdrawn", "internal", "cover", "basis", "map", "reversal",
+                 "fx_loss", "cat", "threshold"])
+
+
+# ===================================================================== ld08
+# Hotel revenue: stay nights, effective-dated VAT and room-type map,
+# breakfast carve-out, amended no-show and commission rules, inventory change.
+
+LD08_HOTELS = [("H1", "Canal House Amsterdam", "NL", "EUR", 60),
+               ("H2", "Harbour Rotterdam", "NL", "EUR", 42),
+               ("H3", "Scheldt Antwerp", "BE", "EUR", 40),
+               ("H4", "Bankside London", "GB", "GBP", 70),
+               ("H5", "Old Town Edinburgh", "GB", "GBP", 35)]
+LD08_VAT = [("NL", "2020-01-01", "2026-04-30", "9.0"), ("NL", "2026-05-01", "", "21.0"),
+            ("BE", "2020-01-01", "", "6.0"), ("GB", "2020-01-01", "", "20.0")]
+LD08_PLANS = [  # plan, description, refundable, breakfast, breakfast value, commission %
+    ("BAR", "Best available rate, room only", 1, 0, "0.00", "0.0"),
+    ("BB", "Bed and breakfast", 1, 1, "18.00", "0.0"),
+    ("NRF", "Non-refundable, room only", 0, 0, "0.00", "0.0"),
+    ("OTA", "Online travel agency, flexible", 1, 0, "0.00", "15.0"),
+    ("OTA-NRF", "Online travel agency, non-refundable", 0, 0, "0.00", "15.0"),
+    ("CORP", "Corporate contract incl. breakfast", 1, 1, "15.00", "0.0"),
+    ("PKG", "Tour operator package incl. breakfast", 0, 1, "18.00", "10.0"),
+    ("HOLD", "Group allotment hold (not a sale)", 1, 0, "0.00", "0.0"),
+]
+LD08_MAP = [
+    ("H1", "STD", "standard", "2020-01-01", ""), ("H1", "DLX", "deluxe", "2020-01-01", ""),
+    ("H1", "EXEC", "deluxe", "2020-01-01", "2026-04-14"), ("H1", "EXEC", "suite", "2026-04-15", ""),
+    ("H1", "STE", "suite", "2020-01-01", ""),
+    ("H2", "STD", "standard", "2020-01-01", ""), ("H2", "FAM", "deluxe", "2020-01-01", ""),
+    ("H3", "STD", "standard", "2020-01-01", ""), ("H3", "DLX", "deluxe", "2020-01-01", ""),
+    ("H3", "STE", "suite", "2020-01-01", ""),
+    ("H4", "STD", "standard", "2020-01-01", ""), ("H4", "KNG", "standard", "2020-01-01", "2026-04-30"),
+    ("H4", "KNG", "deluxe", "2026-05-01", ""), ("H4", "STE", "suite", "2020-01-01", ""),
+    ("H5", "STD", "standard", "2020-01-01", ""), ("H5", "DLX", "deluxe", "2020-01-01", ""),
+]
+LD08_TYPES = {"H1": [("STD", 35, 150), ("DLX", 12, 210), ("EXEC", 8, 260), ("STE", 5, 380)],
+              "H2": [("STD", 34, 110), ("FAM", 11, 160)],
+              "H3": [("STD", 27, 105), ("DLX", 9, 150), ("STE", 4, 260)],
+              "H4": [("STD", 35, 165), ("KNG", 27, 205), ("STE", 8, 420)],
+              "H5": [("STD", 25, 125), ("DLX", 10, 175)]}
+LD08_FX = [("2026-02", "1.1934"), ("2026-03", "1.1872"), ("2026-04", "1.1805"), ("2026-05", "1.1951"),
+           ("2026-06", "1.2047"), ("2026-07", "1.1988")]
+
+
+def ld08_generate():
+    rng = random.Random(82608)
+    cap = {}
+    rows = []
+    bid = 880001
+    plans = [p[0] for p in LD08_PLANS]
+    pw = [26, 14, 12, 20, 10, 8, 6, 4]
+    refundable = {p[0]: p[2] for p in LD08_PLANS}
+    for _ in range(9000):
+        h = rng.choices([x[0] for x in LD08_HOTELS], weights=[30, 18, 16, 26, 10])[0]
+        types = LD08_TYPES[h]
+        rt, cnt, base = rng.choices(types, weights=[t[1] for t in types])[0]
+        arr = D(2026, 2, 25) + TD(days=rng.randint(0, 125))
+        los = rng.choices([1, 2, 3, 4, 5, 7], weights=[30, 30, 18, 10, 7, 5])[0]
+        dep = arr + TD(days=los)
+        rooms = rng.choices([1, 2, 3], weights=[88, 9, 3])[0]
+        nights = [arr + TD(days=k) for k in range(los)]
+        if any(cap.get((h, rt, n), 0) + rooms > cnt - (3 if (h, rt) == ("H2", "STD") and n >= D(2026, 5, 1) else 0)
+               for n in nights):
+            continue
+        plan = rng.choices(plans, weights=pw)[0]
+        season = 1.0 + 0.15 * (arr.month - 3) / 3.0
+        weekend = 1.1 if arr.weekday() >= 4 else 1.0
+        rate = base * season * weekend * rng.uniform(0.85, 1.2)
+        if plan in ("BB", "CORP", "PKG"):
+            rate += 20
+        if plan in ("NRF", "OTA-NRF"):
+            rate *= 0.9
+        rate_s = "%.2f" % rate
+        r = rng.random()
+        if r < 0.17:
+            status = "cancelled"
+        elif r < 0.21:
+            status = "no_show"
+        else:
+            status = "checked_out" if dep <= D(2026, 7, 1) else "confirmed"
+        if plan == "HOLD":
+            status = "confirmed"
+        if status != "cancelled":
+            for n in nights:
+                cap[(h, rt, n)] = cap.get((h, rt, n), 0) + rooms
+        created = DT(arr.year, arr.month, arr.day, 12) - TD(days=rng.randint(1, 60), hours=rng.randint(0, 11))
+        cancelled_at = ""
+        b = ["BK%d" % bid, h]
+        bid += 1
+        if rng.random() < 0.4 or status == "cancelled":
+            old_rt = rt if rng.random() < 0.7 else types[0][0]
+            old_rate = rate_s if rng.random() < 0.5 else "%.2f" % (rate * rng.uniform(0.9, 1.15))
+            rows.append(b + [old_rt, plan, arr.isoformat(), dep.isoformat(), rooms, old_rate,
+                             "confirmed", "", iso(created)])
+            created = created + TD(days=rng.randint(0, 20), hours=rng.randint(1, 20))
+            if created.date() >= arr:
+                created = DT(arr.year, arr.month, arr.day) - TD(hours=rng.randint(2, 30))
+        if status == "cancelled":
+            cancelled_at = iso(created)
+        if status in ("checked_out", "no_show"):
+            created = DT(dep.year, dep.month, dep.day, 11) + TD(minutes=rng.randint(0, 300))
+        rows.append(b + [rt, plan, arr.isoformat(), dep.isoformat(), rooms, rate_s, status,
+                         cancelled_at, iso(created)])
+    rng.shuffle(rows)
+    rows.sort(key=lambda r: r[4])
+    files = {
+        "bookings.csv": (["booking_id", "hotel_id", "room_type_code", "rate_plan", "arrival_date",
+                          "departure_date", "rooms", "nightly_rate", "status", "cancelled_at",
+                          "modified_at"], rows),
+        "hotels.csv": (["hotel_id", "name", "country", "currency", "rooms_total"],
+                       [list(x) for x in LD08_HOTELS]),
+        "room_type_map.csv": (["hotel_id", "room_type_code", "room_category", "valid_from", "valid_to"],
+                              [list(x) for x in LD08_MAP]),
+        "rate_plans.csv": (["rate_plan", "description", "refundable", "breakfast_included",
+                            "breakfast_value_per_room_night", "commission_pct"],
+                           [list(x) for x in LD08_PLANS]),
+        "vat_rates.csv": (["country", "valid_from", "valid_to", "accommodation_vat_pct"],
+                          [list(x) for x in LD08_VAT]),
+        "fx_rates.csv": (["month", "currency", "eur_per_unit"],
+                         [[m, c, v] for mo, gbp in LD08_FX
+                          for m, c, v in ((mo, "EUR", "1.0000"), (mo, "GBP", gbp))]),
+    }
+    return files
+
+
+def ld08_compute(data, naive):
+    hotels = {h["hotel_id"]: h for h in data["hotels.csv"]}
+    plans = {p["rate_plan"]: p for p in data["rate_plans.csv"]}
+    fx = {(r["month"], r["currency"]): float(r["eur_per_unit"]) for r in data["fx_rates.csv"]}
+
+    def eff(rows, d):
+        for r in rows:
+            a = pdate(r["valid_from"])
+            b = pdate(r["valid_to"]) if r["valid_to"] else D(2099, 1, 1)
+            if a <= d <= b:
+                return r
+        raise KeyError(d)
+
+    vat = {}
+    for v in data["vat_rates.csv"]:
+        vat.setdefault(v["country"], []).append(v)
+    rmap = {}
+    for m in data["room_type_map.csv"]:
+        rmap.setdefault((m["hotel_id"], m["room_type_code"]), []).append(m)
+    if "dedup" in naive:
+        cur = first_kept(data["bookings.csv"], "booking_id")
+    else:
+        cur = latest(data["bookings.csv"], "booking_id", "modified_at")
+    nights = []  # one entry per (booking, night)
+    for b in cur.values():
+        if b["rate_plan"] == "HOLD" and "hold" not in naive:
+            continue
+        st = b["status"]
+        arr, dep = pdate(b["arrival_date"]), pdate(b["departure_date"])
+        plan = plans[b["rate_plan"]]
+        if st in ("confirmed", "checked_out"):
+            ns = [arr + TD(days=k) for k in range((dep - arr).days)]
+            noshow = False
+        elif (st == "no_show" and plan["refundable"] == "0" and arr >= D(2026, 5, 1)
+              and "noshow" not in naive):
+            ns = [arr]
+            noshow = True
+        else:
+            continue
+        h = hotels[b["hotel_id"]]
+        rooms = int(b["rooms"])
+        for n in ns:
+            v = float(eff(vat[h["country"]], n if "vat" not in naive else D(2026, 1, 1))["accommodation_vat_pct"])
+            gross = float(b["nightly_rate"])
+            net = gross / (1 + v / 100.0)
+            if plan["breakfast_included"] == "1" and "breakfast" not in naive:
+                net -= float(plan["breakfast_value_per_room_night"])
+            rate = fx[(ym(n), h["currency"])]
+            cat = eff(rmap[(b["hotel_id"], b["room_type_code"])],
+                      n if "map" not in naive else D(2026, 7, 1))["room_category"]
+            cbase = gross if (n >= D(2026, 6, 1) and "commission" not in naive) else net
+            nights.append({"h": b["hotel_id"], "n": n, "month": ym(n), "rooms": rooms,
+                           "eur": net * rooms * rate, "cat": cat, "noshow": noshow,
+                           "comm": cbase * rooms * rate * float(plan["commission_pct"]) / 100.0})
+
+    def avail(h, a, b):
+        tot = 0
+        d = a
+        while d <= b:
+            r = int(hotels[h]["rooms_total"])
+            if h == "H2" and d < D(2026, 5, 1) and "inventory" not in naive:
+                r = 45
+            tot += r
+            d += TD(days=1)
+        return tot
+
+    def sel(h=None, a=None, b=None, cat=None):
+        return [x for x in nights if (h is None or x["h"] == h) and a <= x["n"] <= b
+                and (cat is None or x["cat"] == cat)]
+
+    out = {}
+    win = sel("H2", D(2026, 4, 16), D(2026, 5, 15))
+    out["Q1"] = r2(100.0 * sum(x["rooms"] for x in win) / avail("H2", D(2026, 4, 16), D(2026, 5, 15)))
+    out["Q2"] = r2(sum(x["eur"] for x in sel(None, D(2026, 4, 1), D(2026, 4, 30))))
+    su = sel(None, D(2026, 6, 1), D(2026, 6, 30), "suite")
+    out["Q3"] = r2(sum(x["eur"] for x in su) / sum(x["rooms"] for x in su))
+    h4 = sel("H4", D(2026, 4, 1), D(2026, 6, 30))
+    out["Q4"] = r2(sum(x["eur"] for x in h4) / avail("H4", D(2026, 4, 1), D(2026, 6, 30)))
+    out["Q5"] = sum(x["rooms"] for x in nights if x["noshow"])
+    out["Q6"] = r2(sum(x["comm"] for x in sel(None, D(2026, 6, 1), D(2026, 6, 30))))
+    out["Q7"] = r2(sum(x["eur"] for x in sel("H1", D(2026, 4, 20), D(2026, 5, 10))))
+    out["Q8"] = sum(x["rooms"] for x in sel("H4", D(2026, 4, 1), D(2026, 6, 30), "deluxe"))
+    return out
+
+
+LD08_README = """
+# Hotel revenue data mart: data dictionary and reporting rules
+
+This folder holds the reservation extract of a group of five city hotels in
+the Netherlands, Belgium and the United Kingdom, taken on the morning of
+**1 July 2026**. It covers every booking with an arrival date from
+25 February 2026 to 30 June 2026, and it is the input for the revenue
+management report of the second quarter. The document has five parts: the
+files (A), the reporting rules (B), worked examples and frequent questions
+(C), the changelog (D) and data-quality notes with a glossary (E).
+
+> **Precedence.** The changelog in part D amends the rules of part B. Where
+> an amendment disagrees with part B, the amendment governs from its stated
+> effective date (and only from that date, unless it says otherwise).
+> Footnotes are part of the rules.
+
+All files are comma-separated, UTF-8, with one header row. Dates are ISO
+`YYYY-MM-DD`; timestamps are ISO 8601 UTC with a trailing `Z`. Amounts have
+two decimals and no thousands separators.
+
+---
+
+## Part A. Files
+
+### A.1 bookings.csv
+
+One row per **version** of a booking. The property management system
+writes a new version whenever a booking changes: a rate change, a room
+change, a cancellation, the check-out, or a no-show being posted on the
+morning after the arrival date. All versions are in the extract, in no
+particular order.
+
+| column | meaning |
+| -- | -- |
+| booking_id | booking identifier, stable across versions |
+| hotel_id | the hotel, see hotels.csv |
+| room_type_code | the hotel's own room type code; see room_type_map.csv for its category |
+| rate_plan | the rate plan sold, see rate_plans.csv |
+| arrival_date | first night of the stay |
+| departure_date | the morning the guest leaves; this date is **not** a night of the stay |
+| rooms | number of identical rooms in the booking |
+| nightly_rate | the price of one room for one night, in the hotel's currency, **including VAT** and including breakfast where the plan includes it |
+| status | `confirmed` (booked, not yet departed), `checked_out`, `cancelled`, `no_show` |
+| cancelled_at | when the booking was cancelled, UTC; empty otherwise |
+| modified_at | when this version was written, UTC |
+
+### A.2 hotels.csv
+
+| column | meaning |
+| -- | -- |
+| hotel_id | H1 to H5 |
+| name | hotel name |
+| country | NL, BE or GB; decides the VAT rate |
+| currency | the currency of all rates of the hotel (EUR or GBP) |
+| rooms_total | the number of rooms the hotel can sell **today** (see part D) |
+
+### A.3 room_type_map.csv
+
+Maps a hotel's room type code to a **room category** (`standard`, `deluxe`,
+`suite`) for group reporting. The mapping is effective-dated: two room types
+were re-classified in spring 2026 after renovations. A row is valid from
+`valid_from` to `valid_to`, both inclusive; an empty `valid_to` is
+open-ended.
+
+### A.4 rate_plans.csv
+
+| column | meaning |
+| -- | -- |
+| rate_plan | code as in bookings.csv |
+| description | readable name |
+| refundable | 1 = the guest may cancel free of charge; 0 = non-refundable |
+| breakfast_included | 1 = the nightly rate includes breakfast |
+| breakfast_value_per_room_night | the value of the breakfast component per room per night, in the hotel's currency, **excluding VAT** |
+| commission_pct | commission owed to the selling channel, in percent (see B.7) |
+
+### A.5 vat_rates.csv
+
+Accommodation VAT per country, effective-dated (`valid_from` to `valid_to`
+inclusive, empty `valid_to` = open-ended). The rate that applies to a night
+is the rate valid **on that night's date**, not on the booking date.
+
+### A.6 fx_rates.csv
+
+Monthly rates: `eur_per_unit` = euros per one unit of `currency` in `month`
+(`YYYY-MM`). EUR rows are 1.
+
+---
+
+## Part B. Reporting rules
+
+### B.1 Current version
+
+Only the latest version of each booking counts: the row with the greatest
+`modified_at` for the `booking_id`. Earlier versions are history.
+
+### B.2 Sold bookings
+
+A booking is **sold** when its current status is `confirmed` or
+`checked_out`. Cancelled bookings are not sold. No-show bookings are not
+sold either[^noshow]. Bookings on the rate plan `HOLD` are allotment blocks
+held for tour groups, not sales: they are excluded from every figure,
+whatever their status.
+
+### B.3 Stay nights
+
+The nights of a booking are the dates from `arrival_date` up to and
+including the day before `departure_date`. Every figure is reported by
+**night date**: a stay from 30 April to 2 May has one night in April and one
+in May. A booking of `rooms` = 2 produces two **room-nights** per night.
+
+### B.4 Net room revenue
+
+For each sold room-night:
+
+1. take the `nightly_rate`;
+2. remove VAT: divide by (1 + VAT% / 100), using the VAT rate of the hotel's
+   country valid on the night's date;
+3. if the rate plan includes breakfast, subtract
+   `breakfast_value_per_room_night` (already excluding VAT);
+4. convert to euros at the rate of the **month of the night**.
+
+The sum over room-nights is the net room revenue. Breakfast is food and
+beverage revenue, not room revenue.
+
+### B.5 Available room-nights
+
+The available room-nights of a hotel for a period = its rooms available per
+night x the number of nights in the period. Rooms available per night =
+`rooms_total`, except where part D says otherwise.
+
+### B.6 Key ratios
+
+- **Occupancy** = sold room-nights / available room-nights, as a percentage.
+- **ADR** (average daily rate) = net room revenue in EUR / sold room-nights.
+- **RevPAR** = net room revenue in EUR / available room-nights.
+
+### B.7 Commission
+
+Commission of a sold room-night = `commission_pct` / 100 x the net room
+revenue of that room-night (after VAT and breakfast, in EUR). Plans with a
+commission of 0 owe nothing.
+
+### B.8 Room category
+
+The category of a room-night is found through the booking's `hotel_id` and
+`room_type_code` in room_type_map.csv, using the row valid on the **night's
+date**.
+
+[^noshow]: Until amendment A2 (part D). Hotels charge non-refundable
+no-shows; read A2 before excluding them.
+
+---
+
+## Part C. Worked examples and frequent questions
+
+**Example 1 (nights and months).** A booking from 2026-04-29 to 2026-05-02
+with `rooms` = 2 has nights 29 and 30 April and 1 May: four room-nights in
+April, two in May. Its April revenue uses April's VAT and April's FX rate;
+its May night uses May's.
+
+**Example 2 (net revenue).** An Amsterdam BB booking with a nightly rate of
+EUR 163.50 on a night with 9% VAT: 163.50 / 1.09 = 150.00, minus breakfast
+18.00 = 132.00 net room revenue per room-night.
+
+**Example 3 (re-classification).** A London KNG room-night on 2026-04-30 is a
+`standard` room-night; on 2026-05-01 it is `deluxe`. A stay across both
+dates is split.
+
+**Example 4 (versions).** A booking with versions `confirmed` (rate 120.00,
+written 2026-03-01) and `confirmed` (rate 135.00, written 2026-03-05) counts
+once, at 135.00.
+
+**Q: Does a cancelled booking's cancellation fee count?** No. The extract
+has no fees; cancelled bookings are excluded.
+
+**Q: Are in-house guests (status `confirmed` with a departure in July)
+sold?** Yes. Their June nights count in June; their July nights fall outside
+every question in this report.
+
+**Q: Which date decides the VAT rate, the booking date or the night?** The
+night (A.5).
+
+**Q: Is ADR computed from the gross nightly rate?** No: from net room revenue
+(B.4).
+
+**Q: A booking has `rooms` = 3 but only one guest name. Is it one
+room-night per night?** No, three.
+
+---
+
+## Part D. Changelog (amendments to part B)
+
+**A1 (2026-03-15). HOLD plan.** Allotment holds were moved to their own rate
+plan `HOLD` (rule B.2). There are no allotment holds on other plans.
+
+**A2 (2026-05-01). Non-refundable no-shows.** For bookings with an arrival
+date **on or after 1 May 2026**, a no-show on a non-refundable rate plan
+(`refundable` = 0) is charged one night. Such a booking counts as sold for
+its **first night only** (its arrival date): `rooms` room-nights, with net
+room revenue, category and commission computed as for any sold room-night
+of that date. No-shows on refundable plans, and all no-shows with an arrival
+before 1 May 2026, remain excluded.
+
+**A3 (2026-05-01). Rotterdam inventory.** On 1 May 2026 three rooms of H2 were
+converted to staff housing. `rooms_total` in hotels.csv shows the new
+inventory of 42 rooms; for nights **before** 1 May 2026, H2 had **45**
+rooms available per night.
+
+**A4 (2026-06-01). Commission base.** From the night of 1 June 2026 onwards,
+commission is calculated on the **gross** nightly rate (including VAT and
+breakfast), converted to euros at the night's month rate, instead of on net
+room revenue. Nights before 1 June keep the rule of B.7.
+
+**A5 (2026-06-15). Clarification.** Room-type re-classifications in
+room_type_map.csv apply by night date (B.8); the mapping row valid on the
+booking date is irrelevant.
+
+---
+
+## Part E. Data-quality notes and glossary
+
+### E.1 Known data-quality issues
+
+1. **Version noise.** About four in ten bookings have an earlier version,
+   typically with a different rate or room type (upgrades, re-pricing) or a
+   `confirmed` status that was later cancelled. Use only the current version.
+2. **Multi-room bookings.** About one booking in eight has more than one
+   room. Counting bookings or nights instead of room-nights understates
+   occupancy and inflates ADR.
+3. **Month-crossing stays.** Stays that cross a month end are common in the
+   extract; split them by night.
+4. **GBP hotels.** Rates of H4 and H5 are in GBP, and so are their breakfast
+   values. Convert after removing VAT and breakfast.
+5. **Status timing.** A no-show is posted on the morning after arrival; its
+   `modified_at` can be later than the arrival date.
+
+### E.2 Glossary
+
+- **Room-night.** One room sold for one night.
+- **Sold room-night.** A room-night of a sold booking (B.2, as amended by
+  A2), outside the HOLD plan.
+- **Net room revenue.** B.4.
+- **Occupancy, ADR, RevPAR.** B.6.
+- **Night date.** The calendar date of the evening the room is occupied.
+
+### E.3 Control totals
+
+Front-office control totals (gross rates x rooms over all versions) are used
+to reconcile the extract with the property systems. They are not reporting
+figures and differ from every figure defined above.
+
+---
+
+## Part F. Background for analysts
+
+### F.1 How the hotels sell
+
+The group sells rooms through five kinds of channel. Direct bookings on the
+group website use the plans `BAR` (flexible, room only), `BB` (flexible,
+with breakfast) and `NRF` (non-refundable, room only, about ten percent
+cheaper). Online travel agencies sell the plans `OTA` and `OTA-NRF` and keep
+a commission of fifteen percent. Corporate clients book the negotiated plan
+`CORP`, which always includes breakfast. Tour operators buy the package plan
+`PKG`, which includes breakfast, is non-refundable and carries a ten percent
+commission. Allotment holds (`HOLD`) are rooms blocked for tour groups that
+the operator may or may not fill; they are not sales.
+
+### F.2 Why breakfast is carved out
+
+Room revenue is benchmarked against competitor hotels that sell room only.
+The breakfast component of a plan that includes breakfast is therefore moved
+to food and beverage revenue at a fixed value per room per night, set in
+rate_plans.csv. The value is the same every night and does not depend on
+the number of guests in the room.
+
+### F.3 Why the VAT changes matter
+
+The Dutch accommodation VAT rate rose from 9% to 21% on 1 May 2026. Rates
+loaded in the reservation system include VAT, and most Dutch rates were not
+re-priced, so the same gross rate yields less net room revenue from May.
+Belgian (6%) and British (20%) rates did not change in the period.
+
+### F.4 Inventory and renovations
+
+H1 converted its executive rooms (`EXEC`) to junior suites; they are sold
+under the same code and count as suites from 15 April 2026. H4 refurbished
+its king rooms (`KNG`), which count as deluxe from 1 May 2026. H2 lost rooms
+to staff housing on 1 May 2026 (A3). The other hotels kept their inventory.
+
+### F.5 Reading the questions
+
+Every question names its period in night dates. When a question asks for a
+ratio, compute the numerator and the denominator over the same hotels and
+nights and divide once; do not average daily or monthly ratios. Amounts in
+euros are rounded to cents only in the final answer; percentages to two
+decimals.
+
+### F.6 Checklist
+
+Before reporting a figure, check that you have: kept only the current
+version of each booking; dropped cancelled bookings, HOLD bookings and the
+no-shows that A2 does not cover; expanded bookings into nights and rooms;
+used the VAT rate, the room category and the FX rate of the night; removed
+breakfast where the plan includes it; and applied A3 and A4 where their
+dates apply.
+
+---
+
+## Part G. A complete walk-through
+
+Take a fictitious London booking BK0000001 at H4 with three versions:
+
+1. written 2026-04-02, status `confirmed`, room type `STD`, plan `BB`,
+   arrival 2026-04-29, departure 2026-05-02, `rooms` = 2, nightly rate
+   GBP 180.00;
+2. written 2026-04-20, status `confirmed`, room type `KNG`, same dates and
+   plan, nightly rate GBP 204.00 (an upgrade);
+3. written 2026-05-02, status `checked_out`, room type `KNG`, nightly rate
+   GBP 204.00.
+
+Only version 3 counts (B.1). The booking is sold (B.2). Its nights are
+29 April, 30 April and 1 May (B.3); with two rooms that is six room-nights:
+four in April and two in May.
+
+For each room-night the net room revenue is 204.00 / 1.20 = 170.00 (British
+VAT of 20%), minus the breakfast value of the BB plan, GBP 18.00, giving
+GBP 152.00. The April room-nights convert at April's GBP rate and the May
+room-nights at May's GBP rate (B.4).
+
+The room category is `standard` for the April nights and `deluxe` for the
+1 May night (room_type_map.csv, B.8). The BB plan has no commission.
+
+Had the booking been a non-refundable `NRF` booking with an arrival on
+29 April and status `no_show`, it would contribute nothing: amendment A2 only
+covers arrivals on or after 1 May. With an arrival on 3 May it would
+contribute two room-nights (two rooms, first night only) on 3 May.
+
+Had the booking been an `OTA` booking, its commission would be 15% of the
+net room revenue in euros for the April and May nights (B.7); for nights
+from 1 June, 15% of the gross nightly rate in euros (A4).
+
+The available room-nights of H4 for a period are 70 x the number of nights;
+for H2 they are 45 per night before 1 May and 42 per night from 1 May (A3).
+
+### G.1 Common mistakes seen in earlier reports
+
+- Counting bookings instead of room-nights, or ignoring `rooms`.
+- Attributing the whole stay to the arrival month.
+- Using the VAT rate valid on the booking date instead of the night.
+- Leaving breakfast in room revenue.
+- Converting GBP with one rate for the whole quarter.
+- Using today's room category for nights before a re-classification.
+- Keeping HOLD blocks, which inflates occupancy.
+- Using `rooms_total` of H2 for nights in April.
+"""
+
+
+def ld08():
+    files = ld08_generate()
+    emit_stub("ld08", files)
+    data = load("ld08", list(files))
+    a = ld08_compute(data, set())
+    qs = [
+        dict(text="What was the occupancy of hotel H2 for the nights from 2026-04-16 to "
+                  "2026-05-15 inclusive, as a percentage?",
+             fmt="a percentage with 2 decimals, e.g. `Q1: 81.25`.", match="number", expect=a["Q1"],
+             tol=0.01, dec=2,
+             desc="H2 occupancy window: rooms per booking, nights by date, NRF no-shows from May (A2), 45 rooms before 05-01 then 42 (A3)"),
+        dict(text="What was the net room revenue in EUR of all hotels for nights in April 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q2"], tol=0.5, dec=2,
+             desc="April revenue: VAT by night, breakfast carve-out, GBP at night month, HOLD out, month-crossing stays"),
+        dict(text="What was the ADR in EUR of the `suite` room category, over all hotels, for "
+                  "nights in June 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q3"], tol=0.01, dec=2,
+             desc="suite ADR June: H1 EXEC is suite from 04-15, rooms multiplier, net revenue"),
+        dict(text="What was the RevPAR in EUR of hotel H4 for nights in Q2 2026 (April to June)?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q4"], tol=0.01, dec=2,
+             desc="H4 RevPAR: GBP per night month, 20% VAT, 70 rooms x 91 nights, no-show nights from May"),
+        dict(text="How many sold room-nights come from no-show bookings under amendment A2?",
+             fmt="an integer.", match="number", expect=a["Q5"], tol=0,
+             desc="A2 no-shows: non-refundable plans (NRF, OTA-NRF, PKG), arrivals from 05-01, first night x rooms"),
+        dict(text="What was the total commission in EUR owed for nights in June 2026, all hotels?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q6"], tol=0.05, dec=2,
+             desc="June commission: gross base from 06-01 (A4), OTA 15% and PKG 10%, FX"),
+        dict(text="What was the net room revenue in EUR of hotel H1 for the nights from "
+                  "2026-04-20 to 2026-05-10 inclusive?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q7"], tol=0.05, dec=2,
+             desc="H1 window: NL VAT 9% -> 21% on 05-01 by night date, breakfast plans, A2 no-shows"),
+        dict(text="How many `deluxe` room-nights did hotel H4 sell for nights in Q2 2026?",
+             fmt="an integer.", match="number", expect=a["Q8"], tol=0,
+             desc="H4 deluxe: KNG becomes deluxe from 05-01 by night date, rooms multiplier"),
+    ]
+    emit("ld08", "Hotel revenue Q2 audit", "hotel reservation", files, LD08_README, qs,
+         "All questions use README.md including its changelog (part D) and footnotes. Every "
+         "period refers to night dates.")
+    trap_report("ld08", ld08_compute, data,
+                ["dedup", "hold", "noshow", "vat", "breakfast", "map", "commission", "inventory"])
+
+
+# ===================================================================== ld09
+# Mobile usage billing: effective-dated plan and roaming-zone maps, allowances,
+# amended call rounding and business discount, local billing months.
+
+LD09_PLANS = [  # plan, name, fee, incl voice min, incl sms, incl data MB, voice/min, sms, data/MB
+    ("P-S", "Start", "10.00", 100, 100, 2048, "0.2000", "0.1000", "0.0200"),
+    ("P-M", "Medium", "20.00", 300, -1, 8192, "0.1500", "0.0800", "0.0150"),
+    ("P-L", "Large", "35.00", -1, -1, 20480, "0.1000", "0.0500", "0.0100"),
+    ("P-B", "Business Pro", "45.00", -1, -1, 30720, "0.1000", "0.0500", "0.0080"),
+    ("P-D", "Data only", "15.00", 0, 0, 10240, "0.2500", "0.1200", "0.0100"),
+]
+LD09_ZONES = [
+    ("NL", "HOME", "2020-01-01", ""), ("DE", "EU", "2020-01-01", ""), ("FR", "EU", "2020-01-01", ""),
+    ("ES", "EU", "2020-01-01", ""), ("BE", "EU", "2020-01-01", ""),
+    ("GB", "EU", "2020-01-01", "2026-04-30"), ("GB", "ROW", "2026-05-01", ""),
+    ("CH", "ROW", "2020-01-01", ""), ("US", "ROW", "2020-01-01", ""), ("TR", "ROW", "2020-01-01", ""),
+]
+LD09_ROW = [("ROW", "1.2900", "0.3500", "0.4500")]
+
+
+def ld09_generate():
+    rng = random.Random(82609)
+    subs, plan_rows, usage = [], [], []
+    plan_ids = [p[0] for p in LD09_PLANS]
+    rid = [1]
+    for i in range(1, 116):
+        msisdn = "316%08d" % rng.randint(10000000, 99999999)
+        seg = "business" if rng.random() < 0.3 else "consumer"
+        act = D(2024, 1, 1) + TD(days=rng.randint(0, 800))
+        if rng.random() < 0.08:
+            act = D(2026, 4, 1) + TD(days=rng.randint(5, 70))
+        deact = ""
+        if rng.random() < 0.07:
+            deact = (D(2026, 4, 10) + TD(days=rng.randint(0, 70))).isoformat()
+        if deact and pdate(deact) <= act:
+            deact = ""
+        test = 1 if rng.random() < 0.05 else 0
+        subs.append([msisdn, "AC%05d" % rng.randint(1, 99999), seg, act.isoformat(), deact, test])
+        plan = "P-B" if seg == "business" and rng.random() < 0.6 else \
+            rng.choices(plan_ids, weights=[30, 35, 15, 5, 15])[0]
+        pstart = D(2025, 1, 1) if act < D(2025, 1, 1) else act
+        if rng.random() < 0.25:
+            chg = D(2026, 4, 5) + TD(days=rng.randint(0, 80))
+            new = rng.choice([p for p in plan_ids if p != plan])
+            if chg <= pstart:
+                plan_rows.append([msisdn, new, pstart.isoformat(), ""])
+            else:
+                plan_rows.append([msisdn, plan, pstart.isoformat(), (chg - TD(days=1)).isoformat()])
+                plan_rows.append([msisdn, new, chg.isoformat(), ""])
+        else:
+            plan_rows.append([msisdn, plan, pstart.isoformat(), ""])
+        heavy = rng.uniform(0.5, 1.6)
+        lo = DT(2026, 3, 31, 20)
+        hi = DT(2026, 6, 30, 23, 59)
+        trips = []
+        for _ in range(rng.choice([0, 0, 1, 1, 2])):
+            c = rng.choice(["DE", "FR", "ES", "BE", "GB", "GB", "CH", "US", "TR"])
+            t0 = lo + TD(days=rng.randint(1, 85))
+            trips.append((t0, t0 + TD(days=rng.randint(2, 9)), c))
+
+        def where(t):
+            for a, b, c in trips:
+                if a <= t < b:
+                    return c
+            return "NL"
+
+        def at():
+            return lo + TD(seconds=rng.randint(0, int((hi - lo).total_seconds())))
+        n_voice = int(36 * heavy) if plan != "P-D" else 3
+        for _ in range(n_voice):
+            t = at()
+            sec = int(rng.lognormvariate(4.6, 1.0))
+            if rng.random() < 0.05:
+                sec = 0
+            usage.append([t, msisdn, "voice", sec, where(t)])
+        for _ in range(int(20 * heavy) if plan != "P-D" else 2):
+            t = at()
+            usage.append([t, msisdn, "sms", rng.choices([1, 2, 3], weights=[80, 15, 5])[0], where(t)])
+        allowance = [p for p in LD09_PLANS if p[0] == plan][0][5]
+        n_data = 45
+        mean_kb = allowance * 3 * 1024 * heavy * rng.uniform(0.5, 1.3) / n_data
+        for _ in range(n_data):
+            t = at()
+            usage.append([t, msisdn, "data", int(mean_kb * rng.uniform(0.3, 1.7)), where(t)])
+        for a, b, c in trips:  # extra usage while travelling
+            for _ in range(rng.randint(3, 10)):
+                t = a + TD(seconds=rng.randint(0, int((b - a).total_seconds()) - 1))
+                kind = rng.choice(["voice", "sms", "data", "data"])
+                q = int(rng.lognormvariate(4.5, 0.9)) if kind == "voice" else 1 if kind == "sms" \
+                    else int(rng.lognormvariate(10.5, 0.8))
+                usage.append([t, msisdn, kind, q, c])
+    usage.sort(key=lambda u: (u[0], u[1]))
+    rows = []
+    for u in usage:
+        t, msisdn, kind, q, c = u
+        rec = "U%07d" % rid[0]
+        rid[0] += 1
+        ing = t + TD(minutes=rng.randint(1, 180))
+        if rng.random() < 0.06:
+            q2 = q if rng.random() < 0.5 else (int(q * rng.uniform(0.5, 0.95)) if kind != "sms" else q)
+            rows.append([rec, msisdn, iso(t), kind, q if q2 != q else q, c, iso(ing)])
+            if q2 != q:
+                rows[-1][4] = int(q * rng.uniform(1.1, 2.0)) if kind != "sms" else q + 1
+            rows.append([rec, msisdn, iso(t), kind, q2, c, iso(ing + TD(hours=rng.randint(1, 48)))])
+        else:
+            rows.append([rec, msisdn, iso(t), kind, q, c, iso(ing)])
+    rng.shuffle(rows)
+    rows.sort(key=lambda r: r[2][:10])
+    files = {
+        "usage.csv": (["record_id", "msisdn", "event_start_utc", "event_type", "quantity",
+                       "country_code", "ingested_at"], rows),
+        "subscribers.csv": (["msisdn", "account_id", "segment", "activation_date",
+                             "deactivation_date", "is_test"], subs),
+        "subscriber_plans.csv": (["msisdn", "plan_id", "valid_from", "valid_to"], plan_rows),
+        "plans.csv": (["plan_id", "name", "monthly_fee_eur", "incl_voice_min", "incl_sms",
+                       "incl_data_mb", "voice_eur_per_min", "sms_eur_each", "data_eur_per_mb"],
+                      [list(p) for p in LD09_PLANS]),
+        "roaming_zones.csv": (["country_code", "zone", "valid_from", "valid_to"],
+                              [list(z) for z in LD09_ZONES]),
+        "roaming_rates.csv": (["zone", "voice_eur_per_min", "sms_eur_each", "data_eur_per_mb"],
+                              [list(r) for r in LD09_ROW]),
+    }
+    return files
+
+
+def ld09_compute(data, naive):
+    subs = {s["msisdn"]: s for s in data["subscribers.csv"]}
+    plans = {p["plan_id"]: p for p in data["plans.csv"]}
+    row = data["roaming_rates.csv"][0]
+
+    def eff(rows, d):
+        for r in rows:
+            if pdate(r["valid_from"]) <= d and (not r["valid_to"] or d <= pdate(r["valid_to"])):
+                return r
+        return None
+
+    zones, sp = {}, {}
+    for z in data["roaming_zones.csv"]:
+        zones.setdefault(z["country_code"], []).append(z)
+    for p in data["subscriber_plans.csv"]:
+        sp.setdefault(p["msisdn"], []).append(p)
+    if "dedup" in naive:
+        cur = first_kept(data["usage.csv"], "record_id")
+    else:
+        cur = latest(data["usage.csv"], "record_id", "ingested_at")
+    months = ["2026-04", "2026-05", "2026-06"]
+    agg = {}  # (msisdn, month) -> dict
+    for u in cur.values():
+        s = subs[u["msisdn"]]
+        if s["is_test"] == "1" and "test" not in naive:
+            continue
+        t = piso(u["event_start_utc"])
+        local = t + TD(hours=2) if "tz" not in naive else t
+        d = local.date()
+        if "active" not in naive:
+            if d < pdate(s["activation_date"]):
+                continue
+            if s["deactivation_date"] and d > pdate(s["deactivation_date"]):
+                continue
+        m = ym(local)
+        if m not in months:
+            continue
+        zone = eff(zones[u["country_code"]], d if "zone" not in naive else D(2026, 4, 1))["zone"]
+        roam = zone == "ROW"
+        a = agg.setdefault((u["msisdn"], m), {"min": 0.0, "sms": 0, "kb": 0, "rmin": 0.0, "rsms": 0, "rkb": 0})
+        q = int(u["quantity"])
+        if u["event_type"] == "voice":
+            if d >= D(2026, 5, 1) and "rounding" not in naive:
+                mins = math.ceil(q / 30.0) / 2.0
+            else:
+                mins = float(math.ceil(q / 60.0))
+            a["rmin" if roam else "min"] += mins
+        elif u["event_type"] == "sms":
+            a["rsms" if roam else "sms"] += q
+        else:
+            a["rkb" if roam else "kb"] += q
+    bills = {}
+    for msisdn, s in subs.items():
+        if s["is_test"] == "1" and "test" not in naive:
+            continue
+        for m in months:
+            first = D(int(m[:4]), int(m[5:]), 1)
+            last = (first + TD(days=32)).replace(day=1) - TD(days=1)
+            if pdate(s["activation_date"]) > last:
+                continue
+            if s["deactivation_date"] and pdate(s["deactivation_date"]) < first:
+                continue
+            ref = last
+            if s["deactivation_date"] and pdate(s["deactivation_date"]) < last:
+                ref = pdate(s["deactivation_date"])
+            if "plan" in naive:
+                ref = first if pdate(s["activation_date"]) <= first else pdate(s["activation_date"])
+            p = plans[eff(sp[msisdn], ref)["plan_id"]]
+            a = agg.get((msisdn, m), {"min": 0.0, "sms": 0, "kb": 0, "rmin": 0.0, "rsms": 0, "rkb": 0})
+            fee = float(p["monthly_fee_eur"])
+            if s["segment"] == "business" and m >= "2026-06" and "discount" not in naive:
+                fee *= 0.8
+            mb = int(math.ceil(a["kb"] / 1024.0))
+            rmb = int(math.ceil(a["rkb"] / 1024.0))
+
+            def over(used, incl):
+                incl = int(incl)
+                if incl < 0 and "unlimited" not in naive:
+                    return 0
+                return max(0, used - incl)
+            ov_min = over(a["min"], p["incl_voice_min"])
+            ov_sms = over(a["sms"], p["incl_sms"])
+            ov_mb = over(mb, p["incl_data_mb"])
+            overage = (ov_min * float(p["voice_eur_per_min"]) + ov_sms * float(p["sms_eur_each"])
+                       + ov_mb * float(p["data_eur_per_mb"]))
+            roaming = (a["rmin"] * float(row["voice_eur_per_min"]) + a["rsms"] * float(row["sms_eur_each"])
+                       + rmb * float(row["data_eur_per_mb"]))
+            bills[(msisdn, m)] = {"seg": s["segment"], "fee": fee, "over": overage, "roam": roaming,
+                                  "a": a, "ov_mb": ov_mb, "ov_sms": ov_sms,
+                                  "data_over": ov_mb > 0}
+    out = {}
+    out["Q1"] = round(sum(a["min"] for (ms, m), a in agg.items() if m == "2026-05"), 1)
+    out["Q2"] = r2(sum(b["over"] for (ms, m), b in bills.items() if m == "2026-04"))
+    out["Q3"] = r2(sum(b["roam"] for (ms, m), b in bills.items() if m == "2026-05"))
+    out["Q4"] = sum(1 for (ms, m), b in bills.items() if m == "2026-06" and b["data_over"])
+    out["Q5"] = r2(sum(b["fee"] for (ms, m), b in bills.items() if m == "2026-06"))
+    bz = [b for (ms, m), b in bills.items() if m == "2026-05" and b["seg"] == "business"]
+    out["Q6"] = r2(sum(b["fee"] + b["over"] + b["roam"] for b in bz) / len(bz))
+    out["Q7"] = sum(b["ov_mb"] for (ms, m), b in bills.items() if m == "2026-06")
+    out["Q8"] = sum(b["ov_sms"] + b["a"]["rsms"] for (ms, m), b in bills.items() if m == "2026-04")
+    return out
+
+
+LD09_README = """
+# Mobile billing data mart: data dictionary and rating rules
+
+This folder holds a rating extract of a small Dutch mobile virtual network
+operator (MVNO): every usage record of its subscribers with an event start
+from the evening of 31 March 2026 to the end of 30 June 2026 (UTC), the
+subscriber and plan master data, and the roaming tables. It is used to
+re-rate the second-quarter invoices independently of the billing system.
+The document has five parts: the files (A), the rating rules (B), worked
+examples and frequent questions (C), the changelog (D) and data-quality notes
+with a glossary (E).
+
+> **Precedence.** The changelog in part D amends the rules of part B. Where
+> an amendment disagrees with part B, the amendment governs from its stated
+> effective date, and only from that date unless it says otherwise.
+> Footnotes are part of the rules.
+
+All files are comma-separated, UTF-8, with one header row. Dates are ISO
+`YYYY-MM-DD`; timestamps are ISO 8601 UTC with a trailing `Z`. Monetary
+amounts are in euros.
+
+---
+
+## Part A. Files
+
+### A.1 usage.csv
+
+One row per **version** of a usage record. The mediation platform re-sends a
+record when it corrects it (for example a call duration fixed after a
+switch restart); the re-sent row keeps the `record_id` and has a later
+`ingested_at`. All versions are in the extract, in no particular order.
+
+| column | meaning |
+| -- | -- |
+| record_id | usage record identifier, stable across versions |
+| msisdn | the subscriber's phone number, see subscribers.csv |
+| event_start_utc | when the call, message or data session started, UTC |
+| event_type | `voice`, `sms` or `data` |
+| quantity | voice: call duration in **seconds**; sms: number of messages (a long message counts as several); data: volume in **kilobytes** (KB) |
+| country_code | the country of the network the subscriber used (ISO 3166 alpha-2) |
+| ingested_at | when this version was loaded, UTC |
+
+### A.2 subscribers.csv
+
+| column | meaning |
+| -- | -- |
+| msisdn | phone number |
+| account_id | billing account (several numbers may share one) |
+| segment | `consumer` or `business` |
+| activation_date | first day of service |
+| deactivation_date | last day of service; empty while active |
+| is_test | 1 = a network test SIM of the operator |
+
+### A.3 subscriber_plans.csv
+
+The **plan history** of each number: which plan applied from `valid_from` to
+`valid_to` (both inclusive; empty `valid_to` = still valid). A number that
+changed plan has two rows that do not overlap.
+
+### A.4 plans.csv
+
+| column | meaning |
+| -- | -- |
+| plan_id | plan code |
+| name | plan name |
+| monthly_fee_eur | the monthly subscription fee |
+| incl_voice_min, incl_sms, incl_data_mb | the monthly allowances in minutes, messages and megabytes; **-1 means unlimited**, 0 means none |
+| voice_eur_per_min, sms_eur_each, data_eur_per_mb | out-of-allowance (overage) rates |
+
+### A.5 roaming_zones.csv
+
+Maps the network country to a **zone**: `HOME` (the Netherlands), `EU`
+(regulated roaming, "roam like at home") or `ROW` (rest of world). The
+mapping is effective-dated (`valid_from` to `valid_to`, inclusive; empty =
+open-ended); the row valid on the **event's local date** applies.
+
+### A.6 roaming_rates.csv
+
+Prices for usage in zone `ROW`: per minute, per message and per megabyte.
+
+---
+
+## Part B. Rating rules
+
+### B.1 Current version
+
+Only the latest version of each usage record counts: the row with the
+greatest `ingested_at` for the `record_id`.
+
+### B.2 Billable records
+
+1. Records of test SIMs (`is_test` = 1) are never billed and are excluded
+   from every figure, as are the test SIMs themselves.
+2. A record is billable only when its local event date lies within the
+   subscriber's service period: on or after `activation_date` and, if there
+   is a deactivation date, on or before it. Records outside that period are
+   network noise and are dropped.
+
+### B.3 Local time and billing month
+
+All rating is done in the operator's local time. For the whole extract the
+local time is **UTC + 2 hours** (Central European Summer Time). The **billing
+month** of a record is the month of its local event start; the local event
+date decides the zone (A.5), the call rounding (B.5) and the service period
+(B.2).
+
+### B.4 Plan of a billing month
+
+A subscriber is billed for a month when the service period overlaps that
+month. The plan that applies to the whole billing month (fee, allowances and
+overage rates) is the plan valid on the **last day of the month**, or on the
+deactivation date if the subscriber was deactivated earlier in the month.
+Plan changes inside a month are therefore not prorated.
+
+### B.5 Voice
+
+Each call is rounded **up** to whole minutes (a call of 61 seconds is 2
+minutes; a call of 0 seconds is 0 minutes)[^round]. HOME and EU minutes of a
+billing month are added up per subscriber; ROW minutes are kept apart.
+
+### B.6 Messages
+
+Messages are counted by `quantity`. HOME and EU messages are added up per
+subscriber and month; ROW messages are kept apart.
+
+### B.7 Data
+
+Per subscriber and billing month, the HOME and EU kilobytes are added up and
+converted to megabytes by dividing by 1024 and rounding **up** to a whole
+megabyte. The ROW kilobytes are added up and rounded up the same way,
+separately. Individual sessions are not rounded.
+
+### B.8 Allowances and overage
+
+HOME and EU usage consumes the plan's allowances. For each of minutes,
+messages and megabytes, the **overage** quantity = usage minus allowance, if
+positive; an unlimited allowance (-1) never has overage. The **overage
+charge** = the overage quantity x the plan's overage rate, summed over the
+three. ROW usage does not consume allowances.
+
+### B.9 Roaming charge
+
+The **roaming charge** of a billing month = ROW minutes x ROW voice rate +
+ROW messages x ROW message rate + ROW megabytes x ROW data rate (A.6).
+
+### B.10 Monthly fee and invoice
+
+Every subscriber billed for a month pays the full `monthly_fee_eur` of the
+plan of that month (B.4), even when activated or deactivated during the
+month. The **invoice total** of a subscriber and month = monthly fee +
+overage charge + roaming charge.
+
+[^round]: Per-minute rounding is the rule for calls before the change in
+part D (A2). Check the call's local date.
+
+---
+
+## Part C. Worked examples and frequent questions
+
+**Example 1 (rounding).** A call of 85 seconds on 28 April (local) is 2
+minutes. The same call on 3 May (local) is billed under A2 as 1.5 minutes.
+A 30-second call on 3 May is 0.5 minutes; a 31-second call is 1 minute.
+
+**Example 2 (local month).** A data session starting at 2026-04-30T22:30:00Z
+starts at 00:30 local on 1 May: it belongs to May.
+
+**Example 3 (zones).** A call made in the United Kingdom on 25 April is EU
+usage and consumes the allowance. The same call on 5 May is ROW usage and is
+charged at the roaming rates (A3).
+
+**Example 4 (plan).** A subscriber on P-S until 17 May and on P-M from 18 May
+is billed for May entirely as a P-M subscriber: P-M's fee, allowances and
+overage rates.
+
+**Example 5 (data).** Three sessions of 700 KB each in a month: 2,100 KB /
+1024 = 2.05 MB, rounded up to 3 MB.
+
+**Q: Do 0-second calls count as calls?** They are records but bill 0 minutes.
+
+**Q: Does EU roaming cost extra?** No. EU usage is rated exactly like HOME
+usage ("roam like at home").
+
+**Q: A deactivated subscriber still has records after the deactivation
+date. Are they billed?** No (B.2 rule 2). The subscriber is still billed for
+the month of deactivation.
+
+**Q: How do I count subscribers who "exceeded" an allowance?** A subscriber
+exceeded an allowance in a month when the overage quantity of that allowance
+is greater than zero.
+
+**Q: Is the business discount applied to overage?** No (A4): only to the
+monthly fee.
+
+---
+
+## Part D. Changelog (amendments to part B)
+
+**A1 (2026-03-20). Test SIMs.** Test SIMs are flagged in subscribers.csv
+(`is_test`), replacing the old number-range convention.
+
+**A2 (2026-05-01). Per-half-minute billing.** For calls whose local event
+date is **on or after 1 May 2026**, rule B.5 is replaced: each call is
+rounded **up** to the next whole **30 seconds** and billed in half minutes
+(billed minutes = ceil(seconds / 30) / 2). Calls before 1 May keep per-minute
+rounding.
+
+**A3 (2026-05-01). United Kingdom.** From 1 May 2026 the United Kingdom is
+zone `ROW` (see roaming_zones.csv). Usage there before 1 May remains EU
+usage.
+
+**A4 (2026-06-01). Business discount.** From the June 2026 billing month
+onwards, subscribers of the `business` segment get a **20% discount on the
+monthly fee** (fee x 0.8). Overage and roaming charges are not discounted.
+Earlier months are not restated.
+
+**A5 (2026-06-10). Clarification of B.4.** The plan on the last day of the
+month (or the deactivation date) also decides the overage rates of that
+month, not only the fee.
+
+---
+
+## Part E. Data-quality notes and glossary
+
+### E.1 Known data-quality issues
+
+1. **Re-sent records.** About one record in sixteen has been re-sent, often
+   with a corrected quantity. Summing all rows double counts them and uses
+   wrong durations.
+2. **Boundary records.** The extract starts at 20:00 UTC on 31 March so that
+   it covers local 1 April from midnight. Records before local 1 April are
+   outside every billing month of this report.
+3. **New and leaving subscribers.** Some numbers were activated during the
+   quarter, some deactivated; their SIMs can still produce records outside
+   the service period.
+4. **Plan changes.** About a quarter of the numbers changed plan during the
+   quarter. Use subscriber_plans.csv with B.4; there is no plan column on
+   the usage records.
+5. **Unlimited allowances.** `-1` is a sentinel, not a number of minutes.
+
+### E.2 Glossary
+
+- **Billing month.** B.3.
+- **Overage.** Usage above an allowance (B.8).
+- **ROW.** Rest of world (zone outside HOME and EU).
+- **Invoice total.** B.10.
+- **MSISDN.** The subscriber's phone number.
+
+---
+
+## Part F. Background for analysts
+
+### F.1 The plans
+
+The operator sells five plans. `P-S` (Start) is a small bundle for light
+users. `P-M` (Medium) has unlimited messages. `P-L` (Large) has unlimited
+minutes and messages and a large data bundle. `P-B` (Business Pro) is sold
+to business customers only and has the largest data bundle; business
+customers may also take any other plan. `P-D` (Data only) is meant for
+tablets and routers: it has no voice or message allowance at all, so every
+minute and message on it is overage. Allowances are monthly and do not roll
+over to the next month.
+
+### F.2 Roaming
+
+Inside the European Union, regulated roaming means usage abroad is rated
+exactly as at home: it consumes the allowance and is charged overage rates
+only when the allowance is used up. Outside the EU, usage is charged at the
+ROW rates and never consumes the allowance. The United Kingdom stayed in the
+EU zone under a transition arrangement that ended on 30 April 2026 (A3).
+Switzerland, the United States and Turkey are ROW.
+
+### F.3 Why records are re-sent
+
+The mediation platform receives call detail records from the host network.
+When a switch restarts, records of calls in progress can be cut short or
+duplicated; the platform re-sends the corrected record later under the same
+identifier. Only the latest version reflects the call as it happened.
+
+### F.4 Reading the questions
+
+Every question names a billing month (B.3). A question about "subscribers"
+counts subscriber numbers (MSISDNs) billed for that month, not accounts.
+When a question asks for an average over subscribers, divide the total by
+the number of subscribers billed for the month in the group, including those
+with no usage at all. Amounts are rounded to cents only in the final answer.
+
+### F.5 Checklist
+
+Before reporting a figure, check that you have: kept only the latest
+version of each record; dropped test SIMs and records outside the service
+period; moved every timestamp to local time; found the zone valid on the
+local event date; rounded each call under the rule of its local date;
+rounded data per subscriber and month, not per session; looked up the plan
+valid on the last day of the month (or the deactivation date); treated -1
+as unlimited; and applied the business discount only to June fees.
+
+### F.6 Units
+
+Seconds for calls in usage.csv, minutes for allowances and rates; kilobytes
+for data in usage.csv, megabytes (1 MB = 1024 KB) for allowances and rates.
+Messages are counted, not characters.
+
+---
+
+## Part G. A complete walk-through
+
+Take a fictitious consumer subscriber 31600000001, on plan `P-S` until
+17 May 2026 and on `P-M` from 18 May, and its May 2026 records:
+
+1. a 61-second call at 2026-04-30T21:50:00Z (local 23:50 on 30 April): it
+   belongs to April, not May (B.3), and is rated per minute (2 minutes);
+2. a 61-second call at 2026-05-02T08:00:00Z, in the Netherlands: local date
+   2 May, so A2 applies: ceil(61 / 30) / 2 = 1.5 minutes, HOME;
+3. a call of 200 seconds in Germany on 10 May: ceil(200 / 30) / 2 = 3.5
+   minutes, EU, so it consumes the allowance like a home call;
+4. a call of 200 seconds in the United Kingdom on 12 May: 3.5 minutes, ROW
+   (A3), charged at the ROW voice rate and not counted against the allowance;
+5. data sessions of 600,000 KB at home and 500,000 KB in Germany: HOME+EU
+   data of 1,100,000 KB / 1024 = 1,074.2 MB, rounded up to 1,075 MB;
+6. a data session of 3,000 KB in the United States: ROW data, 3,000 / 1024 =
+   2.93 MB, rounded up to 3 MB at the ROW data rate;
+7. a record of the same call as record 2, re-sent later with a duration of
+   59 seconds: only the re-sent version counts, so record 2 bills
+   ceil(59 / 30) / 2 = 1.0 minute instead of 1.5.
+
+The plan of the May billing month is `P-M`, the plan valid on 31 May (B.4):
+its fee of EUR 20.00, its allowances (300 minutes, unlimited messages,
+8,192 MB) and its overage rates apply to the whole month. The subscriber's
+HOME+EU minutes (1.0 + 3.5 + any other calls) are compared with 300 minutes;
+its 1,075 MB with 8,192 MB. Its ROW charge is 3.5 x the ROW voice rate plus
+3 x the ROW data rate. The invoice total is fee + overage + roaming (B.10).
+
+If the subscriber were in the `business` segment, its June fee would be
+P-M's fee x 0.8 (A4); its May fee would not be discounted.
+
+### G.1 Common mistakes seen in earlier re-ratings
+
+- Using UTC dates for the billing month or for the A2/A3 switch dates.
+- Treating -1 as a negative allowance (which makes every unit overage) or
+  as zero.
+- Rounding data per session instead of per subscriber and month.
+- Treating United Kingdom usage in May as EU usage.
+- Taking the plan valid on the first day of the month.
+- Discounting overage or roaming for business customers.
+- Billing records of test SIMs or records after deactivation.
+"""
+
+
+def ld09():
+    files = ld09_generate()
+    emit_stub("ld09", files)
+    data = load("ld09", list(files))
+    a = ld09_compute(data, set())
+    qs = [
+        dict(text="How many billed HOME and EU voice minutes were there in billing month May "
+                  "2026, over all subscribers?",
+             fmt="minutes with 1 decimal, e.g. `Q1: 1234.5`.", match="number", expect=a["Q1"],
+             tol=0.05, dec=1,
+             desc="May minutes: half-minute rounding from 05-01 (A2), UK is ROW from May (A3), local month, re-sent records, test/inactive out"),
+        dict(text="What was the total overage charge in EUR in billing month April 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q2"], tol=0.01, dec=2,
+             desc="April overage: per-minute rounding, unlimited -1, plan on last day of month, data MB rounded up per month, UK still EU"),
+        dict(text="What was the total roaming charge in EUR in billing month May 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q3"], tol=0.01, dec=2,
+             desc="May roaming: zone by event date incl. UK->ROW, ROW MB rounded up separately, half-minute rounding"),
+        dict(text="How many subscribers exceeded their data allowance in billing month June 2026?",
+             fmt="an integer.", match="number", expect=a["Q4"], tol=0,
+             desc="June data overage count: plan on 06-30 (or deactivation date), HOME+EU KB only, ceil per month"),
+        dict(text="What was the total of monthly fees in EUR in billing month June 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q5"], tol=0.01, dec=2,
+             desc="June fees: business 20% discount (A4), plan on last day, mid-month activations pay full fee, test SIMs out"),
+        dict(text="What was the average invoice total in EUR of the business-segment subscribers "
+                  "billed for May 2026?",
+             fmt="EUR with 2 decimals.", match="number", expect=a["Q6"], tol=0.01, dec=2,
+             desc="May business invoice: fee (no discount yet) + overage + roaming over billed business subscribers"),
+        dict(text="How many overage megabytes were billed in total in billing month June 2026?",
+             fmt="an integer.", match="number", expect=a["Q7"], tol=0,
+             desc="June overage MB: ceil(KB/1024) per subscriber-month, plan allowance by last-day rule"),
+        dict(text="How many messages were charged in billing month April 2026: out-of-allowance "
+                  "HOME/EU messages plus all ROW messages?",
+             fmt="an integer.", match="number", expect=a["Q8"], tol=0,
+             desc="April SMS: multipart quantity, unlimited plans, data-only plan has 0 SMS allowance, UK still EU in April"),
+    ]
+    emit("ld09", "Mobile usage re-rating audit", "mobile usage billing", files, LD09_README, qs,
+         "All questions use README.md including its changelog (part D) and footnotes. Months "
+         "are billing months (B.3).")
+    trap_report("ld09", ld09_compute, data,
+                ["dedup", "test", "tz", "active", "zone", "rounding", "plan", "unlimited", "discount"])
+
+
 # ===================================================================== main
 
+ALL = ["ld01", "ld02", "ld03", "ld04", "ld05", "ld06", "ld07", "ld08", "ld09"]
+
+
 def main():
+    """`gen_data.py [ldNN ...] [--traps]`: the named tasks, default all."""
     os.makedirs(TASKS, exist_ok=True)
-    for fn in (ld01, ld02, ld03, ld04, ld05, ld06):
-        fn()
+    names = [a for a in sys.argv[1:] if not a.startswith("--")] or ALL
+    for name in names:
+        globals()[name]()
     print("wrote", ", ".join(sorted(n for n in os.listdir(TASKS) if n.startswith("ld"))))
 
 

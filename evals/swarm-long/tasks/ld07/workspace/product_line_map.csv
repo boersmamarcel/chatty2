@@ -1,0 +1,8 @@
+product_code,line_of_business,valid_from,valid_to
+MOT-STD,motor,2020-01-01,
+MOT-FLEET,motor,2020-01-01,2026-03-31
+MOT-FLEET,commercial_motor,2026-04-01,
+HM-BASIC,home,2020-01-01,
+HM-PLUS,home,2021-06-01,2026-03-31
+HM-PLUS,home_premium,2026-04-01,
+TRV-ANN,travel,2022-01-01,

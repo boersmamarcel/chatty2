@@ -1,0 +1,6 @@
+hotel_id,name,country,currency,rooms_total
+H1,Canal House Amsterdam,NL,EUR,60
+H2,Harbour Rotterdam,NL,EUR,42
+H3,Scheldt Antwerp,BE,EUR,40
+H4,Bankside London,GB,GBP,70
+H5,Old Town Edinburgh,GB,GBP,35

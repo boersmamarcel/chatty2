@@ -1,0 +1,6 @@
+plan_id,name,monthly_fee_eur,incl_voice_min,incl_sms,incl_data_mb,voice_eur_per_min,sms_eur_each,data_eur_per_mb
+P-S,Start,10.00,100,100,2048,0.2000,0.1000,0.0200
+P-M,Medium,20.00,300,-1,8192,0.1500,0.0800,0.0150
+P-L,Large,35.00,-1,-1,20480,0.1000,0.0500,0.0100
+P-B,Business Pro,45.00,-1,-1,30720,0.1000,0.0500,0.0080
+P-D,Data only,15.00,0,0,10240,0.2500,0.1200,0.0100

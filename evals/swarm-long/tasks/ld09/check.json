@@ -1,0 +1,78 @@
+{
+  "type": "parts",
+  "deliverable": "report.md",
+  "parts": [
+    {
+      "id": "Q1",
+      "kind": "answer",
+      "key": "Q1",
+      "match": "number",
+      "desc": "May minutes: half-minute rounding from 05-01 (A2), UK is ROW from May (A3), local month, re-sent records, test/inactive out",
+      "expect": 3234.5,
+      "tol": 0.05
+    },
+    {
+      "id": "Q2",
+      "kind": "answer",
+      "key": "Q2",
+      "match": "number",
+      "desc": "April overage: per-minute rounding, unlimited -1, plan on last day of month, data MB rounded up per month, UK still EU",
+      "expect": 1531.47,
+      "tol": 0.01
+    },
+    {
+      "id": "Q3",
+      "kind": "answer",
+      "key": "Q3",
+      "match": "number",
+      "desc": "May roaming: zone by event date incl. UK->ROW, ROW MB rounded up separately, half-minute rounding",
+      "expect": 14904.22,
+      "tol": 0.01
+    },
+    {
+      "id": "Q4",
+      "kind": "answer",
+      "key": "Q4",
+      "match": "number",
+      "desc": "June data overage count: plan on 06-30 (or deactivation date), HOME+EU KB only, ceil per month",
+      "expect": 34,
+      "tol": 0
+    },
+    {
+      "id": "Q5",
+      "kind": "answer",
+      "key": "Q5",
+      "match": "number",
+      "desc": "June fees: business 20% discount (A4), plan on last day, mid-month activations pay full fee, test SIMs out",
+      "expect": 2334.0,
+      "tol": 0.01
+    },
+    {
+      "id": "Q6",
+      "kind": "answer",
+      "key": "Q6",
+      "match": "number",
+      "desc": "May business invoice: fee (no discount yet) + overage + roaming over billed business subscribers",
+      "expect": 354.12,
+      "tol": 0.01
+    },
+    {
+      "id": "Q7",
+      "kind": "answer",
+      "key": "Q7",
+      "match": "number",
+      "desc": "June overage MB: ceil(KB/1024) per subscriber-month, plan allowance by last-day rule",
+      "expect": 214966,
+      "tol": 0
+    },
+    {
+      "id": "Q8",
+      "kind": "answer",
+      "key": "Q8",
+      "match": "number",
+      "desc": "April SMS: multipart quantity, unlimited plans, data-only plan has 0 SMS allowance, UK still EU in April",
+      "expect": 41,
+      "tol": 0
+    }
+  ]
+}

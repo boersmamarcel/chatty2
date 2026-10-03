@@ -1,0 +1,9 @@
+rate_plan,description,refundable,breakfast_included,breakfast_value_per_room_night,commission_pct
+BAR,"Best available rate, room only",1,0,0.00,0.0
+BB,Bed and breakfast,1,1,18.00,0.0
+NRF,"Non-refundable, room only",0,0,0.00,0.0
+OTA,"Online travel agency, flexible",1,0,0.00,15.0
+OTA-NRF,"Online travel agency, non-refundable",0,0,0.00,15.0
+CORP,Corporate contract incl. breakfast,1,1,15.00,0.0
+PKG,Tour operator package incl. breakfast,0,1,18.00,10.0
+HOLD,Group allotment hold (not a sale),1,0,0.00,0.0

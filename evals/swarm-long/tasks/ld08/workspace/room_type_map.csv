@@ -1,0 +1,17 @@
+hotel_id,room_type_code,room_category,valid_from,valid_to
+H1,STD,standard,2020-01-01,
+H1,DLX,deluxe,2020-01-01,
+H1,EXEC,deluxe,2020-01-01,2026-04-14
+H1,EXEC,suite,2026-04-15,
+H1,STE,suite,2020-01-01,
+H2,STD,standard,2020-01-01,
+H2,FAM,deluxe,2020-01-01,
+H3,STD,standard,2020-01-01,
+H3,DLX,deluxe,2020-01-01,
+H3,STE,suite,2020-01-01,
+H4,STD,standard,2020-01-01,
+H4,KNG,standard,2020-01-01,2026-04-30
+H4,KNG,deluxe,2026-05-01,
+H4,STE,suite,2020-01-01,
+H5,STD,standard,2020-01-01,
+H5,DLX,deluxe,2020-01-01,
