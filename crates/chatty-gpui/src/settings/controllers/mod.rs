@@ -8,6 +8,7 @@ pub mod module_settings_controller;
 pub mod providers_controller;
 pub mod search_settings_controller;
 pub mod settings_controller;
+pub mod teams_controller;
 pub mod training_settings_controller;
 pub mod user_secrets_controller;
 

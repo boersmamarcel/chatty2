@@ -19,6 +19,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`terminal-dock.md`](../docs-site/src/user/terminal-dock.md) | The desktop's terminal panel under the chat: Ctrl/Cmd+J, tabs, sharing a tab with the agent, where it starts, settings |
 | [`agents-and-tools.md`](../docs-site/src/user/agents-and-tools.md) | The agent loop and what the agent can do |
 | [`extensions.md`](../docs-site/src/user/extensions.md) | Hive marketplace, built-in integrations, custom MCP servers |
+| [`install-team.md`](../docs-site/src/user/install-team.md) | Install a published team from the marketplace (verify, install, run, uninstall) |
 | [`memory-and-skills.md`](../docs-site/src/user/memory-and-skills.md) | Persistent memory and saved skills |
 | [`sub-agents.md`](../docs-site/src/user/sub-agents.md) | Headless child agents, named workers and roles, teams |
 | [`tutorial-named-worker.md`](../docs-site/src/user/tutorial-named-worker.md) | Tutorial: declare one named worker with a role and watch it delegate |

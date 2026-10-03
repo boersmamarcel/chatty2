@@ -1,9 +1,11 @@
 use crate::chatty::views::footer::progress_circle::ProgressCircle;
-use crate::settings::controllers::extensions_controller;
+use crate::settings::controllers::{extensions_controller, teams_controller};
 use crate::settings::models::extensions_store::{ExtensionKind, ExtensionsModel};
 use crate::settings::models::hive_settings::HiveSettingsModel;
-use crate::settings::models::marketplace_state::MarketplaceState;
+use crate::settings::models::marketplace_state::{MarketplaceState, MarketplaceTab};
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
+use chatty_core::hive::models::AgentSpecListing;
+use chatty_core::team_install::TeamRecord;
 use chatty_module_registry::TrustLevel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -416,6 +418,14 @@ fn marketplace_group() -> SettingGroup {
             let error = state.error.clone();
             let results = state.search_results.clone();
             let featured = state.featured.clone();
+            let tab = state.tab;
+            let team_notice = state.team_notice.clone();
+            // The Teams tab lists teams instead (team_rows).
+            let (results, featured) = if tab == MarketplaceTab::Teams {
+                (Vec::new(), Vec::new())
+            } else {
+                (results, featured)
+            };
             let installed = cx.global::<ExtensionsModel>().clone();
 
             // use_keyed_state persists the InputState entity across re-renders
@@ -425,9 +435,43 @@ fn marketplace_group() -> SettingGroup {
                     InputState::new(window, cx).placeholder("Search extensions...")
                 });
 
+            let tab_button = |id: &'static str, label: &'static str, this: MarketplaceTab| {
+                Button::new(id)
+                    .small()
+                    .label(label)
+                    .when(tab == this, |b| b.primary())
+                    .when(tab != this, |b| b.ghost())
+                    .on_click({
+                        let search_input = search_input.clone();
+                        move |_, _window, cx| {
+                            cx.global_mut::<MarketplaceState>().tab = this;
+                            if this == MarketplaceTab::Teams {
+                                let query = search_input.read(cx).value().trim().to_string();
+                                teams_controller::search_teams(query, cx);
+                            }
+                            cx.refresh_windows();
+                        }
+                    })
+            };
+
             v_flex()
                 .w_full()
                 .gap_3()
+                // Plugins | Teams (MK-T2)
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(tab_button(
+                            "marketplace-tab-plugins",
+                            "Plugins",
+                            MarketplaceTab::Plugins,
+                        ))
+                        .child(tab_button(
+                            "marketplace-tab-teams",
+                            "Teams",
+                            MarketplaceTab::Teams,
+                        )),
+                )
                 // Search bar
                 .child(
                     h_flex()
@@ -445,7 +489,13 @@ fn marketplace_group() -> SettingGroup {
                                     move |_, _window, cx| {
                                         let query =
                                             search_input.read(cx).value().trim().to_string();
-                                        extensions_controller::search_marketplace(query, cx);
+                                        if cx.global::<MarketplaceState>().tab
+                                            == MarketplaceTab::Teams
+                                        {
+                                            teams_controller::search_teams(query, cx);
+                                        } else {
+                                            extensions_controller::search_marketplace(query, cx);
+                                        }
                                     }
                                 }),
                         ),
@@ -458,6 +508,19 @@ fn marketplace_group() -> SettingGroup {
                             state.error = None;
                         },
                     ))
+                })
+                .when_some(
+                    team_notice.filter(|_| tab == MarketplaceTab::Teams),
+                    |this, notice| {
+                        this.child(Alert::success("team-notice", notice).small().on_close(
+                            |_event, _window, cx| {
+                                cx.global_mut::<MarketplaceState>().team_notice = None;
+                            },
+                        ))
+                    },
+                )
+                .when(tab == MarketplaceTab::Teams, |this| {
+                    this.children(team_rows(cx))
                 })
                 // Results or featured
                 .children({
@@ -595,6 +658,181 @@ fn marketplace_group() -> SettingGroup {
                 })
                 .into_any_element()
         })])
+}
+
+// ── Teams (MK-T2, AGE-841) ─────────────────────────────────────────────────
+
+/// One row per published team: who made it, its version and installs, the
+/// plugins it locks, its members and example prompt, and Install team /
+/// Update / Uninstall.
+fn team_rows(cx: &App) -> Vec<AnyElement> {
+    let state = cx.global::<MarketplaceState>();
+    if state.team_results.is_empty() && !state.loading {
+        return vec![
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("No published teams match. Search by name, publisher or task.")
+                .into_any_element(),
+        ];
+    }
+    state
+        .team_results
+        .iter()
+        .map(|listing| {
+            let installed = state
+                .installed_teams
+                .iter()
+                .find(|team| team.leader == listing.name);
+            let installing = state.installing_team.as_deref() == Some(listing.name.as_str());
+            team_row(listing, installed, installing, cx)
+        })
+        .collect()
+}
+
+fn team_row(
+    listing: &AgentSpecListing,
+    installed: Option<&TeamRecord>,
+    installing: bool,
+    cx: &App,
+) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let line = |text: String| div().text_xs().text_color(muted).child(text);
+    let badge = |text: &'static str| {
+        div()
+            .text_xs()
+            .px_1()
+            .rounded_sm()
+            .bg(gpui::rgb(0xFEF3C7))
+            .text_color(gpui::rgb(0x92400E))
+            .child(text)
+    };
+    let name = listing.name.clone();
+    let members: Vec<String> = listing
+        .members
+        .iter()
+        .map(|m| format!("{} {}", m.name, m.version))
+        .collect();
+
+    let action = if installing {
+        Button::new(SharedString::from(format!("team-installing-{name}")))
+            .small()
+            .label("Verifying…")
+            .loading(true)
+            .disabled(true)
+            .into_any_element()
+    } else {
+        let install_label = match installed {
+            Some(team) if team.version == listing.latest_version => None,
+            Some(_) => Some("Update team"),
+            None => Some("Install team"),
+        };
+        h_flex()
+            .gap_1()
+            .when_some(install_label, |row, label| {
+                row.child(
+                    Button::new(SharedString::from(format!("install-team-{name}")))
+                        .small()
+                        .label(label)
+                        .when(listing.pricing_model != "free", |b| b.disabled(true))
+                        .on_click({
+                            let listing = listing.clone();
+                            move |_, _window, cx| {
+                                teams_controller::install_team(listing.clone(), cx);
+                            }
+                        }),
+                )
+            })
+            .when(installed.is_some(), |row| {
+                row.child(
+                    Button::new(SharedString::from(format!("uninstall-team-{name}")))
+                        .small()
+                        .ghost()
+                        .label("Uninstall")
+                        .on_click({
+                            let name = name.clone();
+                            move |_, _window, cx| {
+                                teams_controller::uninstall_team(name.clone(), cx);
+                            }
+                        }),
+                )
+            })
+            .into_any_element()
+    };
+
+    h_flex()
+        .w_full()
+        .items_start()
+        .justify_between()
+        .gap_3()
+        .py_1p5()
+        .border_b_1()
+        .border_color(cx.theme().border)
+        .child(
+            v_flex()
+                .flex_1()
+                .gap_0p5()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(cx.theme().foreground)
+                                .child(name.clone()),
+                        )
+                        .when(listing.pricing_model != "free", |el| {
+                            el.child(badge("Paid team · not available yet"))
+                        })
+                        .when_some(installed, |el, team| {
+                            el.child(line(format!("installed {}", team.version)))
+                        }),
+                )
+                .when_some(listing.description.clone(), |el, desc| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().foreground)
+                            .child(desc),
+                    )
+                })
+                .child(line(format!(
+                    "by {} · v{} · {} install{}",
+                    listing.author_username,
+                    listing.latest_version,
+                    listing.install_count,
+                    if listing.install_count == 1 { "" } else { "s" }
+                )))
+                .when(!members.is_empty(), |el| {
+                    el.child(line(format!("Team: {}", members.join(", "))))
+                })
+                .when(!listing.lockfile.is_empty(), |el| {
+                    el.child(
+                        h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .child(line("Plugins (locked):".to_string()))
+                            .children(listing.lockfile.iter().map(|plugin| {
+                                h_flex()
+                                    .gap_1()
+                                    .child(line(format!(
+                                        "{} {}",
+                                        plugin.locked.module, plugin.locked.version
+                                    )))
+                                    .when(plugin.pricing_model != "free", |el| {
+                                        el.child(badge("Paid"))
+                                    })
+                            })),
+                    )
+                })
+                .when_some(listing.example_prompt.clone(), |el, prompt| {
+                    el.child(line(format!("Try: “{prompt}”")).italic())
+                }),
+        )
+        .child(action)
+        .into_any_element()
 }
 
 // ── Add Custom Extension ───────────────────────────────────────────────────
