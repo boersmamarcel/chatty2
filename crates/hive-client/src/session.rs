@@ -154,7 +154,11 @@ impl HiveSession {
 /// Send the request `build` makes with the session's Bearer token; on a 401,
 /// refresh once and send it once more. Without a session the request goes
 /// out unauthenticated, as it did before sign-in existed.
-pub(crate) async fn send_authed(
+///
+/// Public because the registry is not the only server that takes this
+/// token: a `chatty-server` validates the same login session (CX-0), so a
+/// hosted conversation's client authenticates through here too (AGE-835).
+pub async fn send_authed(
     session: Option<&HiveSession>,
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, reqwest::Error> {

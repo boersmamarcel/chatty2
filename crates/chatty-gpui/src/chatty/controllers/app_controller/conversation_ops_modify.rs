@@ -479,6 +479,7 @@ impl ChattyApp {
                     conversation.mode().clone(),
                 )
             });
+        let auth = cx.global::<ConversationsStore>().hosted_auth();
         let Some((title, messages, mode)) = loaded else {
             // The confirm opened before the load that the dialog started had
             // finished; nothing has moved, so saying so is the whole recovery.
@@ -495,14 +496,14 @@ impl ChattyApp {
 
         cx.spawn(async move |weak, cx| {
             let outcome = match &target {
-                Some(server_url) => take_online(server_url, &title, &messages)
+                Some(server_url) => take_online(server_url, &title, &messages, auth.as_deref())
                     .await
                     .map(MoveOutcome::WentOnline),
                 None => {
                     let Some((server_url, remote_id)) = mode.hosted_on() else {
                         return Ok(());
                     };
-                    fetch_hosted(server_url, remote_id)
+                    fetch_hosted(server_url, remote_id, auth.as_deref())
                         .await
                         .map(|remote| MoveOutcome::CameBack(remote.messages))
                 }

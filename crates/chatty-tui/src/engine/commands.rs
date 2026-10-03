@@ -1,6 +1,7 @@
 //! Slash command parsing and handling for the TUI chat engine.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -9,6 +10,7 @@ use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
 use chatty_core::agent_spec::{SpecListing, SpecSource};
+use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationMode;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
 use chatty_core::session::{
@@ -182,6 +184,22 @@ pub enum Command {
 
 /// How `/msg` is used.
 pub const MSG_USAGE: &str = "Usage: /msg <agent> <text> (/swarm shows the running agents' names)";
+
+/// The Hive sign-in a `chatty-server` checks (AGE-835), borrowed from the
+/// desktop's persisted pair like the plugin meter's: this process must not
+/// rotate a refresh token the desktop holds, so once the borrowed access
+/// token expires the server answers 401 and the user signs in again there.
+async fn hosted_auth() -> Option<Arc<HiveSession>> {
+    let hive = chatty_core::hive_settings_repository()
+        .load()
+        .await
+        .unwrap_or_default();
+    let pair = hive.token_pair()?;
+    Some(Arc::new(HiveSession::borrowed(
+        hive.registry_url,
+        Some(pair),
+    )))
+}
 
 impl ChatEngine {
     pub fn try_handle_command(&self, input: &str) -> Option<Command> {
@@ -487,18 +505,23 @@ impl ChatEngine {
             return Ok(());
         };
 
+        let auth = hosted_auth().await;
         match target {
             Some(server_url) => {
-                let new_mode =
-                    take_online(&server_url, conversation.title(), &conversation.messages())
-                        .await
-                        .context("Failed to take the conversation online")?;
+                let new_mode = take_online(
+                    &server_url,
+                    conversation.title(),
+                    &conversation.messages(),
+                    auth.as_deref(),
+                )
+                .await
+                .context("Failed to take the conversation online")?;
                 let (url, remote_id) = new_mode
                     .hosted_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
                     .expect("take_online returns a hosted mode");
 
-                self.hosted = Some(HostedSession::new(&url, &remote_id));
+                self.hosted = Some(HostedSession::new(&url, &remote_id).with_auth(auth));
                 if let Some(conv) = self.session.conversation_mut() {
                     conv.set_mode(new_mode);
                 }
@@ -511,7 +534,7 @@ impl ChatEngine {
                     .hosted_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
                     .expect("refuse_reason rejected a local conversation already");
-                let remote = fetch_hosted(&server_url, &remote_id)
+                let remote = fetch_hosted(&server_url, &remote_id, auth.as_deref())
                     .await
                     .context("Failed to read the hosted conversation back")?;
 
