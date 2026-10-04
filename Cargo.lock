@@ -2033,6 +2033,7 @@ dependencies = [
  "hive-client",
  "libc",
  "reqwest 0.13.2",
+ "rig-agent",
  "rig-core",
  "rmcp",
  "serde",

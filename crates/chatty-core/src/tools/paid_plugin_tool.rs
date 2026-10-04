@@ -263,7 +263,10 @@ mod tests {
             "m".into(),
         );
         assert!(
-            load_plugins(&specs, &host, &model).await.unwrap().is_empty(),
+            load_plugins(&specs, &host, &model)
+                .await
+                .unwrap()
+                .is_empty(),
             "a paid plugin is never loaded from disk"
         );
         assert_eq!(

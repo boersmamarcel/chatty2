@@ -50,6 +50,9 @@ chatty-wasm-runtime = { path = "../chatty-wasm-runtime", features = ["test-suppo
 # `Message` literals for `TurnMessages` events (RC-0, AGE-649): the mapper's
 # capture tests build the same rig type `SessionEvent::TurnMessages` carries.
 rig-core = { workspace = true }
+# `fee_refused_surfaces_to_root` (MK-2) calls chatty-core's `invoke_agent`
+# tool as a caller up the tree does: through rig's `Tool` trait.
+rig-agent = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "test-util"] }
 tower = "0.5"
 axum = { version = "0.8", features = ["macros"] }

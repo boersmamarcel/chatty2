@@ -234,6 +234,12 @@ pub enum InvokeAgentError {
         chatty_fabric::worker_start_failed(&.0.agent, &.0.reason)
     )]
     WorkerStartFailed(WorkerStartFailure),
+    /// A paid call here or anywhere below the callee was refused for money
+    /// (`needs_acceptance` or `fee_refused`; ADR-0024, MK-2): the user's
+    /// to resolve, outside the run. Terminal: the model sees the typed
+    /// line unchanged, and does not retry it.
+    #[error("{0}")]
+    PaidRefused(String),
 }
 
 /// The line a delegation the user stopped finishes with, in its
@@ -539,15 +545,17 @@ impl Tool for InvokeAgentTool {
     /// Keep the real failure text in front of the user and the model:
     /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
     fn map_error(&self, error: Self::Error) -> ToolExecutionError {
-        // A worker that never started is not the model's to retry (AGE-822).
-        let terminal = matches!(error, InvokeAgentError::WorkerStartFailed(_));
+        // A worker that never started is not the model's to retry (AGE-822),
+        // nor is a paid call the ledger refused (MK-2).
+        let code = match &error {
+            InvokeAgentError::WorkerStartFailed(_) => Some(chatty_fabric::WORKER_START_FAILED),
+            InvokeAgentError::PaidRefused(_) => Some(chatty_fabric::FEE_REFUSED),
+            _ => None,
+        };
         let mapped = crate::tools::map_tool_error(Self::NAME, error);
-        if terminal {
-            mapped
-                .with_retryable(false)
-                .with_code(chatty_fabric::WORKER_START_FAILED)
-        } else {
-            mapped
+        match code {
+            Some(code) => mapped.with_retryable(false).with_code(code),
+            None => mapped,
         }
     }
 
@@ -1013,6 +1021,20 @@ impl InvokeAgentTool {
                     usage,
                 });
                 return Err(InvokeAgentError::WorkerStartFailed(failure));
+            }
+            // A paid call refused for money: shown to the user as is, and
+            // passed up unchanged (MK-2).
+            if let Some(refusal) = error_msg
+                .as_deref()
+                .and_then(chatty_fabric::find_money_refusal)
+            {
+                let refusal = refusal.to_string();
+                self.send_progress(InvokeAgentProgress::Finished {
+                    success: false,
+                    result: Some(format!("\u{26d4} {refusal}")),
+                    usage,
+                });
+                return Err(InvokeAgentError::PaidRefused(refusal));
             }
             let err_text = error_msg
                 .as_ref()

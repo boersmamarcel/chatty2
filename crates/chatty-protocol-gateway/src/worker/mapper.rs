@@ -376,8 +376,10 @@ pub struct TaskMapper {
     tool_names: HashMap<String, String>,
     state: TaskState,
     failure: Option<String>,
-    /// The typed failure of a worker under this one that never started
-    /// (AGE-822): when set, the terminal status fails with it.
+    /// The typed failure only the user can resolve: a worker under this
+    /// one that never started (AGE-822), or a paid call the ledger refused
+    /// (`needs_acceptance`, `fee_refused`; ADR-0024, MK-2). When set, the
+    /// terminal status fails with it.
     start_failure: Option<String>,
     /// What this task spent, its own turns and everything its delegations
     /// reported (AGE-415), one line per model (AGE-682).
@@ -588,6 +590,13 @@ impl TaskMapper {
                     && let Some((agent, reason)) = chatty_fabric::find_worker_start_failure(error)
                 {
                     self.start_failure = Some(chatty_fabric::worker_start_failed(agent, reason));
+                }
+                // A paid call refused for money, here or anywhere below:
+                // this task fails with it unchanged, up to the root.
+                if self.start_failure.is_none()
+                    && let Some(refusal) = chatty_fabric::find_money_refusal(error)
+                {
+                    self.start_failure = Some(refusal.to_string());
                 }
             }
             _ => {}
@@ -1665,5 +1674,136 @@ mod tests {
                 .contains("### read_file (ok)"),
             "everything else is exactly what it was before this feature existed: {metadata}"
         );
+    }
+}
+
+/// MK-2 (ADR-0024 § 7): a paid call the ledger refused is the user's to
+/// resolve, so it reaches the root unchanged however deep it happened.
+#[cfg(test)]
+mod money_refusal_tests {
+    use std::sync::Arc;
+
+    use chatty_core::tools::invoke_agent_tool::{
+        InvokeAgentArgs, InvokeAgentError, InvokeAgentTool,
+    };
+    use chatty_fabric::{
+        CallError, CallEvent, CallRequest, CallResult, FeeRefusalReason, InvokeAgentOutcome,
+        ItemKind, ItemRef, Transport,
+    };
+    use futures::StreamExt;
+    use rig_agent::tool::{Tool, ToolContext};
+
+    use super::*;
+
+    /// A broker whose every `agent.invoke` ends as the callee's task did:
+    /// failed, with `error`.
+    struct CalleeFailed(String);
+
+    #[async_trait::async_trait]
+    impl Transport for CalleeFailed {
+        async fn call(&self, _req: CallRequest) -> Result<chatty_fabric::CallStream, CallError> {
+            let outcome = InvokeAgentOutcome {
+                success: false,
+                response: String::new(),
+                error: Some(self.0.clone()),
+                metadata: None,
+                messages: Vec::new(),
+                cancelled_by_user: false,
+            };
+            Ok(
+                futures::stream::iter([Ok(CallEvent::Result(CallResult::Invoked(outcome)))])
+                    .boxed(),
+            )
+        }
+    }
+
+    /// How a node's task ends after one of its tools failed with `error`
+    /// and its model carried on as if nothing happened.
+    fn task_failing_on(error: &str) -> (TaskState, Option<String>) {
+        let mut mapper = TaskMapper::new("task-1");
+        mapper.map(&SessionEvent::TurnStarted);
+        mapper.map(&SessionEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "tool".into(),
+        });
+        mapper.map(&SessionEvent::ToolCallError {
+            id: "c1".into(),
+            error: error.to_string(),
+        });
+        mapper.map(&SessionEvent::Text("I'll work around it.".into()));
+        mapper.map(&SessionEvent::TurnEnded);
+        match mapper.terminal() {
+            ParticipantFrame::Status { state, message, .. } => (state, message),
+            other => panic!("a status, not {other:?}"),
+        }
+    }
+
+    /// What a caller's `invoke_agent` gives its model when the callee's
+    /// task failed with `error`: the tool's model feedback, and whether it
+    /// is terminal.
+    async fn caller_reads(error: String) -> (String, Option<String>) {
+        let tool = InvokeAgentTool::new(vec![])
+            .with_local_agents(["below".to_string()])
+            .with_transport(Arc::new(CalleeFailed(error)));
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "below".into(),
+                    prompt: "go".into(),
+                    include_trace: false,
+                },
+            )
+            .await
+            .expect_err("the callee failed");
+        let InvokeAgentError::PaidRefused(line) = &err else {
+            panic!("a typed paid refusal, not {err:?}");
+        };
+        let line = line.clone();
+        let mapped = tool.map_error(err);
+        assert_eq!(mapped.code(), Some(chatty_fabric::FEE_REFUSED));
+        (
+            mapped.model_feedback().unwrap_or_default().to_string(),
+            Some(line),
+        )
+    }
+
+    /// A leaf worker's paid tool is refused (`fee_refused`, cap): its task
+    /// fails with the typed line though its model carried on; the
+    /// sub-leader that called it gets a terminal `invoke_agent` error and
+    /// its own task fails with the same line; the root's `invoke_agent`
+    /// ends with it, word for word.
+    #[tokio::test]
+    async fn fee_refused_surfaces_to_root() {
+        let refused = CallError::FeeRefused {
+            item: ItemRef {
+                kind: ItemKind::Plugin,
+                name: "ocr".into(),
+                version: "1.2.0".into(),
+            },
+            reason: FeeRefusalReason::Cap,
+            resets_at: Some("2026-11-01T00:00:00Z".into()),
+        }
+        .to_string();
+        // What the leaf's model reads from its paid tool.
+        let leaf_tool_error = format!("Error: ocr__read: {refused}");
+
+        let (state, leaf_end) = task_failing_on(&leaf_tool_error);
+        assert_eq!(state, TaskState::Failed);
+        assert_eq!(leaf_end.as_deref(), Some(refused.as_str()));
+
+        let (sub_leader_feedback, line) = caller_reads(leaf_end.unwrap()).await;
+        assert_eq!(line.as_deref(), Some(refused.as_str()));
+        assert_eq!(
+            sub_leader_feedback,
+            format!("Error: invoke_agent: {refused}")
+        );
+
+        let (state, sub_leader_end) = task_failing_on(&sub_leader_feedback);
+        assert_eq!(state, TaskState::Failed);
+        assert_eq!(sub_leader_end.as_deref(), Some(refused.as_str()));
+
+        let (_, at_root) = caller_reads(sub_leader_end.unwrap()).await;
+        assert_eq!(at_root.as_deref(), Some(refused.as_str()));
     }
 }
