@@ -1,0 +1,54 @@
+{
+ "type": "parts",
+ "deliverable": "report.md",
+ "parts": [
+  {
+   "id": "Q1",
+   "kind": "answer",
+   "key": "Q1",
+   "match": "text",
+   "expect": "weighted_sum_inventory",
+   "desc": "seeded flaw in inventory.py"
+  },
+  {
+   "id": "Q2",
+   "kind": "answer",
+   "key": "Q2",
+   "match": "text",
+   "expect": "count_inclusive_quota",
+   "desc": "seeded flaw in quota.py"
+  },
+  {
+   "id": "Q3",
+   "kind": "answer",
+   "key": "Q3",
+   "match": "text",
+   "expect": "running_total_audit",
+   "desc": "seeded flaw in audit.py"
+  },
+  {
+   "id": "Q4",
+   "kind": "answer",
+   "key": "Q4",
+   "match": "text",
+   "expect": "word_count_sync",
+   "desc": "seeded flaw in sync.py"
+  },
+  {
+   "id": "Q5",
+   "kind": "answer",
+   "key": "Q5",
+   "match": "text",
+   "expect": "chunk_invoices",
+   "desc": "seeded flaw in invoices.py"
+  },
+  {
+   "id": "Q6",
+   "kind": "answer",
+   "key": "Q6",
+   "match": "text",
+   "expect": "dedupe_reports",
+   "desc": "seeded flaw in reports.py"
+  }
+ ]
+}

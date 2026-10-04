@@ -1,0 +1,6 @@
+{
+  "family": "research-write",
+  "title": "Service documentation lookups (56 docs)",
+  "prompt": "Answer the 9 independent questions in QUESTIONS.md using the 56 service documents in services/ and registry.md (corpus only, no web). Write report.md in the working directory. It must START with one line per question, in order, exactly `Qn: <answer>` (for example `Q1: 1234`), followed by your working notes (do not start any other line with `Qn:`; the last such line is the one that counts). End your final chat answer with the same Q lines.",
+  "deliverable": "report.md"
+}

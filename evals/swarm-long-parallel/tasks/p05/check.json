@@ -1,0 +1,78 @@
+{
+ "type": "parts",
+ "deliverable": "report.md",
+ "parts": [
+  {
+   "id": "Q1",
+   "kind": "answer",
+   "key": "Q1",
+   "match": "number",
+   "expect": 36042.55,
+   "tol": 0.01,
+   "desc": "one computation on east.csv"
+  },
+  {
+   "id": "Q2",
+   "kind": "answer",
+   "key": "Q2",
+   "match": "number",
+   "expect": 181,
+   "tol": 0,
+   "desc": "one computation on coastal.csv"
+  },
+  {
+   "id": "Q3",
+   "kind": "answer",
+   "key": "Q3",
+   "match": "number",
+   "expect": 890.1,
+   "tol": 0.01,
+   "desc": "one computation on south.csv"
+  },
+  {
+   "id": "Q4",
+   "kind": "answer",
+   "key": "Q4",
+   "match": "number",
+   "expect": 34212.54,
+   "tol": 0.01,
+   "desc": "one computation on central.csv"
+  },
+  {
+   "id": "Q5",
+   "kind": "answer",
+   "key": "Q5",
+   "match": "number",
+   "expect": 160,
+   "tol": 0,
+   "desc": "one computation on island.csv"
+  },
+  {
+   "id": "Q6",
+   "kind": "answer",
+   "key": "Q6",
+   "match": "number",
+   "expect": 891.0,
+   "tol": 0.01,
+   "desc": "one computation on alpine.csv"
+  },
+  {
+   "id": "Q7",
+   "kind": "answer",
+   "key": "Q7",
+   "match": "number",
+   "expect": 38781.52,
+   "tol": 0.01,
+   "desc": "one computation on west.csv"
+  },
+  {
+   "id": "Q8",
+   "kind": "answer",
+   "key": "Q8",
+   "match": "number",
+   "expect": 165,
+   "tol": 0,
+   "desc": "one computation on north.csv"
+  }
+ ]
+}

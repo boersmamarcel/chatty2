@@ -1,0 +1,6 @@
+{
+  "family": "code-fix",
+  "title": "Audit 6 modules for a seeded flaw each",
+  "prompt": "The working directory holds 6 independent Python modules (*.py) with docstring specs. Audit them: in each module exactly one function contradicts its docstring. Answer the questions in QUESTIONS.md (read the code and try the functions with python3). Do not edit the modules. Write report.md in the working directory. It must START with one line per question, in order, exactly `Qn: <answer>` (for example `Q1: 1234`), followed by your working notes (do not start any other line with `Qn:`; the last such line is the one that counts). End your final chat answer with the same Q lines.",
+  "deliverable": "report.md"
+}

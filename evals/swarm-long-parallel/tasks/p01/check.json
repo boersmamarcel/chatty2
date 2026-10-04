@@ -1,0 +1,78 @@
+{
+ "type": "parts",
+ "deliverable": "report.md",
+ "parts": [
+  {
+   "id": "Q1",
+   "kind": "answer",
+   "key": "Q1",
+   "match": "number",
+   "expect": 185,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  },
+  {
+   "id": "Q2",
+   "kind": "answer",
+   "key": "Q2",
+   "match": "number",
+   "expect": 163,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  },
+  {
+   "id": "Q3",
+   "kind": "answer",
+   "key": "Q3",
+   "match": "number",
+   "expect": 25,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  },
+  {
+   "id": "Q4",
+   "kind": "answer",
+   "key": "Q4",
+   "match": "number",
+   "expect": 300,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  },
+  {
+   "id": "Q5",
+   "kind": "answer",
+   "key": "Q5",
+   "match": "number",
+   "expect": 54,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  },
+  {
+   "id": "Q6",
+   "kind": "answer",
+   "key": "Q6",
+   "match": "number",
+   "expect": 4,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  },
+  {
+   "id": "Q7",
+   "kind": "answer",
+   "key": "Q7",
+   "match": "number",
+   "expect": 95,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  },
+  {
+   "id": "Q8",
+   "kind": "answer",
+   "key": "Q8",
+   "match": "number",
+   "expect": 201,
+   "tol": 0,
+   "desc": "registry hop then service doc"
+  }
+ ]
+}

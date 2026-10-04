@@ -1,0 +1,70 @@
+{
+ "type": "parts",
+ "deliverable": "report.md",
+ "parts": [
+  {
+   "id": "Q1",
+   "kind": "answer",
+   "key": "Q1",
+   "match": "text",
+   "expect": "tidy_name_shipping",
+   "desc": "seeded flaw in shipping.py"
+  },
+  {
+   "id": "Q2",
+   "kind": "answer",
+   "key": "Q2",
+   "match": "text",
+   "expect": "days_apart_quota",
+   "desc": "seeded flaw in quota.py"
+  },
+  {
+   "id": "Q3",
+   "kind": "answer",
+   "key": "Q3",
+   "match": "text",
+   "expect": "chunk_inventory",
+   "desc": "seeded flaw in inventory.py"
+  },
+  {
+   "id": "Q4",
+   "kind": "answer",
+   "key": "Q4",
+   "match": "text",
+   "expect": "days_apart_catalog",
+   "desc": "seeded flaw in catalog.py"
+  },
+  {
+   "id": "Q5",
+   "kind": "answer",
+   "key": "Q5",
+   "match": "text",
+   "expect": "weighted_sum_reports",
+   "desc": "seeded flaw in reports.py"
+  },
+  {
+   "id": "Q6",
+   "kind": "answer",
+   "key": "Q6",
+   "match": "text",
+   "expect": "running_total_search",
+   "desc": "seeded flaw in search.py"
+  },
+  {
+   "id": "Q7",
+   "kind": "answer",
+   "key": "Q7",
+   "match": "text",
+   "expect": "dedupe_invoices",
+   "desc": "seeded flaw in invoices.py"
+  },
+  {
+   "id": "Q8",
+   "kind": "answer",
+   "key": "Q8",
+   "match": "text",
+   "expect": "count_inclusive_payroll",
+   "desc": "seeded flaw in payroll.py"
+  }
+ ]
+}

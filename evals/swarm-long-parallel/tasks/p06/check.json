@@ -1,0 +1,60 @@
+{
+ "type": "parts",
+ "deliverable": "report.md",
+ "parts": [
+  {
+   "id": "Q1",
+   "kind": "answer",
+   "key": "Q1",
+   "match": "number",
+   "expect": 62329.96,
+   "tol": 0.01,
+   "desc": "one computation on coastal.csv"
+  },
+  {
+   "id": "Q2",
+   "kind": "answer",
+   "key": "Q2",
+   "match": "number",
+   "expect": 239,
+   "tol": 0,
+   "desc": "one computation on alpine.csv"
+  },
+  {
+   "id": "Q3",
+   "kind": "answer",
+   "key": "Q3",
+   "match": "number",
+   "expect": 882.09,
+   "tol": 0.01,
+   "desc": "one computation on west.csv"
+  },
+  {
+   "id": "Q4",
+   "kind": "answer",
+   "key": "Q4",
+   "match": "number",
+   "expect": 60092.12,
+   "tol": 0.01,
+   "desc": "one computation on south.csv"
+  },
+  {
+   "id": "Q5",
+   "kind": "answer",
+   "key": "Q5",
+   "match": "number",
+   "expect": 277,
+   "tol": 0,
+   "desc": "one computation on north.csv"
+  },
+  {
+   "id": "Q6",
+   "kind": "answer",
+   "key": "Q6",
+   "match": "number",
+   "expect": 889.56,
+   "tol": 0.01,
+   "desc": "one computation on delta.csv"
+  }
+ ]
+}

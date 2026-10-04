@@ -1,0 +1,6 @@
+{
+  "family": "data-audit",
+  "title": "Per-region order files (6 files)",
+  "prompt": "The working directory holds 6 CSV files, one per region, README.md and QUESTIONS.md (6 independent questions). Compute with the query_data tool or python3 scripts. Write report.md in the working directory. It must START with one line per question, in order, exactly `Qn: <answer>` (for example `Q1: 1234`), followed by your working notes (do not start any other line with `Qn:`; the last such line is the one that counts). End your final chat answer with the same Q lines.",
+  "deliverable": "report.md"
+}
