@@ -255,8 +255,11 @@ pub struct TokenUsage {
     /// The agent this usage was spent by on the conversation's behalf, when
     /// it is a delegated line rather than the turn's own requests (AGE-415):
     /// what a worker reported on its terminal status, folded into the
-    /// leader's conversation so the bill follows the bearer. `None` for the
-    /// turn's own usage, which is every record written before this existed.
+    /// leader's conversation so the bill follows the bearer. A path from
+    /// this agent down the tree (TB-3): `"reviewer"` is the reviewer's own
+    /// spend, `"reviewer/local-coder"` is what the reviewer's coder spent,
+    /// so the root has one line per agent in the tree. `None` for the
+    /// turn's own usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_to: Option<String>,
 
@@ -314,6 +317,17 @@ impl TokenUsage {
             output_tokens,
             ..Default::default()
         }
+    }
+
+    /// This line as the caller of `agent` books it (TB-3): `agent`'s own
+    /// spend is named `agent`, and a line `agent` forwarded from below it
+    /// keeps its path under `agent/`.
+    pub fn delegated_by(mut self, agent: &str) -> Self {
+        self.delegated_to = Some(match self.delegated_to.take() {
+            Some(below) => format!("{agent}/{below}"),
+            None => agent.to_string(),
+        });
+        self
     }
 
     /// Create a new TokenUsage with an explicit turn count.
@@ -444,6 +458,23 @@ pub fn format_hit_rate(rate: f64) -> String {
     format!("{:.0}%", (rate * 100.0).clamp(0.0, 100.0))
 }
 
+/// One agent's share of a conversation's bill (TB-3): its lines summed.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AgentSpend {
+    /// The agent's path down the tree from the conversation's own agent
+    /// (`"reviewer"`, `"reviewer/local-coder"`); `None` is the
+    /// conversation's agent itself, its plugins included.
+    pub agent: Option<String>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    /// What the agent's priced lines cost, from each line's cached price.
+    pub cost_usd: f64,
+    /// The agent's lines that could not be priced (see [`price`]).
+    pub unpriced_lines: usize,
+}
+
 impl ConversationTokenUsage {
     pub fn new() -> Self {
         Self::default()
@@ -458,6 +489,38 @@ impl ConversationTokenUsage {
             self.total_estimated_cost_usd += cost;
         }
         self.message_usages.push(usage);
+    }
+
+    /// The bill per agent in the tree (TB-3): the conversation's own agent
+    /// first, then each delegated path in the order it first spent. The
+    /// rows sum to the totals.
+    pub fn by_agent(&self) -> Vec<AgentSpend> {
+        let mut rows = vec![AgentSpend::default()];
+        for line in &self.message_usages {
+            let index = match rows.iter().position(|r| r.agent == line.delegated_to) {
+                Some(index) => index,
+                None => {
+                    rows.push(AgentSpend {
+                        agent: line.delegated_to.clone(),
+                        ..AgentSpend::default()
+                    });
+                    rows.len() - 1
+                }
+            };
+            let row = &mut rows[index];
+            row.input_tokens += u64::from(line.input_tokens);
+            row.output_tokens += u64::from(line.output_tokens);
+            row.cache_read_tokens += u64::from(line.cache_read_tokens);
+            row.cache_write_tokens += u64::from(line.cache_write_tokens);
+            match line.estimated_cost_usd {
+                Some(cost) => row.cost_usd += cost,
+                None => row.unpriced_lines += 1,
+            }
+        }
+        if rows[0] == AgentSpend::default() {
+            rows.remove(0);
+        }
+        rows
     }
 
     /// The most recent exchange's usage.
@@ -714,6 +777,62 @@ mod tests {
 
         conv.recalculate_totals();
         assert_eq!(conv.total_cache_read_tokens, 900);
+    }
+
+    /// TB-3: a line forwarded from below an agent keeps its path under that
+    /// agent's name, one level per hop.
+    #[test]
+    fn delegated_by_prefixes_the_path() {
+        let own = TokenUsage::new(1, 1).delegated_by("local-coder");
+        assert_eq!(own.delegated_to.as_deref(), Some("local-coder"));
+        let two_up = own.delegated_by("reviewer").delegated_by("planner");
+        assert_eq!(
+            two_up.delegated_to.as_deref(),
+            Some("planner/reviewer/local-coder")
+        );
+    }
+
+    /// TB-3: the bill per agent is the conversation's own agent first, then
+    /// each path in the order it first spent, and the rows sum to the
+    /// totals; an unpriced line is counted, not read as $0.
+    #[test]
+    fn by_agent_rows_sum_to_the_totals() {
+        let line = |agent: Option<&str>, input: u32, cost: Option<f64>| TokenUsage {
+            delegated_to: agent.map(str::to_string),
+            estimated_cost_usd: cost,
+            ..TokenUsage::new(input, input / 10)
+        };
+        let mut conv = ConversationTokenUsage::new();
+        conv.add_usage(line(Some("reviewer"), 300, Some(0.3)));
+        conv.add_usage(line(Some("reviewer/coder"), 200, None));
+        conv.add_usage(line(None, 100, Some(0.1)));
+        conv.add_usage(line(Some("reviewer"), 50, Some(0.05)));
+        conv.add_usage(line(None, 10, Some(0.01)));
+
+        let rows = conv.by_agent();
+        let named: Vec<(Option<&str>, u64, usize)> = rows
+            .iter()
+            .map(|r| (r.agent.as_deref(), r.input_tokens, r.unpriced_lines))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                (None, 110, 0),
+                (Some("reviewer"), 350, 0),
+                (Some("reviewer/coder"), 200, 1),
+            ]
+        );
+        let input: u64 = rows.iter().map(|r| r.input_tokens).sum();
+        let output: u64 = rows.iter().map(|r| r.output_tokens).sum();
+        let cost: f64 = rows.iter().map(|r| r.cost_usd).sum();
+        assert_eq!(input, u64::from(conv.total_input_tokens));
+        assert_eq!(output, u64::from(conv.total_output_tokens));
+        assert!((cost - conv.total_estimated_cost_usd).abs() < 1e-12);
+
+        // A conversation that only delegated has no row for itself.
+        let mut only = ConversationTokenUsage::new();
+        only.add_usage(line(Some("coder"), 5, Some(0.0)));
+        assert_eq!(only.by_agent().len(), 1);
     }
 
     /// AGE-415: a delegated line names its agent and round-trips; the turn's

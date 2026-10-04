@@ -78,9 +78,11 @@
 //! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it. It goes
 //! as lines, one per model, each naming its model and carrying tokens and
 //! time but never a price (AGE-682): whoever reads a line prices it. What
-//! this worker's own delegations spent is forwarded with it (AGE-415), and
-//! lines merge only when they share a model, so the root sees one line per
-//! model however deep the tree below it, and its lines carry the whole tree.
+//! this worker's own delegations spent is forwarded with it (AGE-415), each
+//! line still naming the agent below this one that spent it (TB-3), and
+//! lines merge only when they share both agent and model. So the root sees
+//! one line per agent and model however deep the tree below it, and its
+//! lines carry the whole tree. Nothing is both forwarded and folded.
 //!
 //! # A nested run's events (TB-1, AGE-663)
 //!
@@ -659,7 +661,8 @@ impl TaskMapper {
                 }
                 None
             }
-            // A grandchild's spend is forwarded with this task's.
+            // A grandchild's spend is forwarded with this task's, each line
+            // under the path to the agent that spent it (TB-3).
             SessionEvent::Delegation(InvokeAgentProgress::Finished { usage, .. })
                 if !usage.is_empty() =>
             {
@@ -798,13 +801,15 @@ impl TaskMapper {
     }
 }
 
-/// Fold `line` into `lines`: onto the line with the same model when there
-/// is one, as a line of its own otherwise (AGE-682). Which agent spent it is
-/// not kept: a parent is told what was spent on which model.
+/// Fold `line` into `lines`: onto the line with the same agent and model
+/// when there is one, as a line of its own otherwise (AGE-682, TB-3). A
+/// parent is told what was spent on which model, and by whom below it.
 fn merge_line(lines: &mut Vec<TokenUsage>, line: TokenUsage) {
-    let Some(total) = lines.iter_mut().find(|known| known.model == line.model) else {
+    let Some(total) = lines
+        .iter_mut()
+        .find(|known| known.model == line.model && known.delegated_to == line.delegated_to)
+    else {
         lines.push(TokenUsage {
-            delegated_to: None,
             plugin: None,
             calls: Vec::new(),
             estimated_cost_usd: None,

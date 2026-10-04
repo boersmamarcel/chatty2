@@ -1057,6 +1057,7 @@ fn task_metadata_roundtrips_every_worker_key() {
     let (broker, worker) = connected();
     let everything = TaskMetadata {
         usage: Some(WireUsage::from_lines(vec![WireUsageLine {
+            agent: Some("kit-reviewer-0/kit-coder-0".into()),
             model: Some(WireModelRef {
                 provider: "open_router".into(),
                 model_id: "kit/coder".into(),

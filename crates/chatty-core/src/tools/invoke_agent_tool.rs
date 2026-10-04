@@ -63,8 +63,9 @@ pub enum InvokeAgentProgress {
         success: bool,
         result: Option<String>,
         /// What the agent spent, as reported on its terminal status: one
-        /// line per model, each naming its model, with `delegated_to`
-        /// naming the agent (AGE-415, AGE-682). The session folds them into
+        /// line per agent in its subtree and model, each naming its model,
+        /// with `delegated_to` the path to the agent that spent it —
+        /// `"reviewer"`, `"reviewer/local-coder"` (AGE-415, AGE-682, TB-3). The session folds them into
         /// the conversation's usage as delegated lines, so the leader's
         /// totals include what its workers spent. Empty when the agent
         /// reported nothing — a remote agent that does not say, or a task
@@ -705,10 +706,7 @@ impl InvokeAgentTool {
                     if !reported.is_empty() {
                         usage = reported
                             .into_iter()
-                            .map(|line| TokenUsage {
-                                delegated_to: Some(config.name.clone()),
-                                ..line
-                            })
+                            .map(|line| line.delegated_by(&config.name))
                             .collect();
                     }
                     if state == "failed" || state == "completed" {
@@ -943,10 +941,7 @@ impl InvokeAgentTool {
             .map(usage_from_wire)
             .unwrap_or_default()
             .into_iter()
-            .map(|line| TokenUsage {
-                delegated_to: Some(agent.to_string()),
-                ..line
-            })
+            .map(|line| line.delegated_by(agent))
             .collect();
         let (trace, conversation) = if outcome.success {
             (

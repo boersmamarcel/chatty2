@@ -330,3 +330,153 @@ async fn swarm_atif_round_trip() {
     let back = swarm_tree_from_atif(&parsed).expect("a swarm export");
     assert_eq!(&back, tree);
 }
+
+/// TB-3, invariant 3: the leader → reviewer → coder run leaves one bill
+/// line per agent on the root's conversation, each `delegated_to` its path
+/// from the root, and the totals are AGE-682's priced view of the same
+/// spend — the lines the reviewer used to fold into one per model. Nothing
+/// is counted twice: the reviewer's line is only its own.
+#[tokio::test]
+async fn per_agent_bill_lines_total_unchanged() {
+    use chatty_core::models::token_usage::{
+        ConversationTokenUsage, PriceBook, TokenPricing, price,
+    };
+
+    let run = leader_reviewer_coder().await;
+    for (got, scripted) in run.requests {
+        assert_eq!(got, scripted, "every scripted answer was served");
+    }
+    let delegated: Vec<TokenUsage> = run
+        .events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::Delegation(InvokeAgentProgress::Finished { usage, .. }) => {
+                Some(usage.clone())
+            }
+            _ => None,
+        })
+        .expect("the delegation finished");
+
+    let reviewer_path = REVIEWER.to_string();
+    let coder_path = format!("{REVIEWER}/{CODER}");
+    let lines: Vec<(Option<&str>, &str, (u32, u32, u32))> = delegated
+        .iter()
+        .map(|l| {
+            (
+                l.delegated_to.as_deref(),
+                l.model.as_ref().expect("a line names its model").model_id.as_str(),
+                (l.input_tokens, l.output_tokens, l.cache_read_tokens),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            (
+                Some(coder_path.as_str()),
+                CODER_MODEL,
+                served(&CODER_USAGE)
+            ),
+            (
+                Some(reviewer_path.as_str()),
+                REVIEWER_MODEL,
+                served(&REVIEWER_USAGE)
+            ),
+        ],
+        "the coder's line is forwarded under the reviewer, not folded into it"
+    );
+
+    // Each model at its own rate, so a line priced at the wrong model shows.
+    let mut book = PriceBook::default();
+    let mut root_own: Vec<TokenUsage> = Vec::new();
+    for event in &run.events {
+        match event {
+            SessionEvent::TokenUsage(u) | SessionEvent::PluginUsage(u) => root_own.push(u.clone()),
+            _ => {}
+        }
+    }
+    for line in delegated.iter().chain(&root_own) {
+        let model = line.model.clone().expect("a line names its model");
+        let rate = match model.model_id.as_str() {
+            CODER_MODEL => 15.0,
+            REVIEWER_MODEL => 3.0,
+            _ => 1.0,
+        };
+        book.insert(
+            model,
+            TokenPricing {
+                input_per_million: rate,
+                output_per_million: rate * 4.0,
+                cache_read_per_million: Some(rate / 10.0),
+                cache_write_per_million: None,
+            },
+        );
+    }
+
+    // The root's conversation, as `AgentSession::finish_turn` books the
+    // turn: each delegated and plugin line priced and added, then its own.
+    let mut bill = ConversationTokenUsage::new();
+    let (plugin, own): (Vec<_>, Vec<_>) = root_own.into_iter().partition(|u| u.plugin.is_some());
+    for mut line in delegated.iter().cloned().chain(plugin).chain(own) {
+        line.price(&book);
+        bill.add_usage(line);
+    }
+
+    let rows = bill.by_agent();
+    let agents: Vec<Option<&str>> = rows.iter().map(|r| r.agent.as_deref()).collect();
+    assert_eq!(
+        agents,
+        [None, Some(reviewer_path.as_str()), Some(coder_path.as_str())],
+        "one row per agent in the tree"
+    );
+    assert_eq!(
+        bill.last_usage().and_then(|u| u.delegated_to.as_deref()),
+        None,
+        "last_usage stays the root's own"
+    );
+
+    // AGE-682's priced view of the same spend: the reviewer's report as it
+    // was, its own and the coder's lines folded into one per model.
+    let folded: Vec<TokenUsage> = bill
+        .message_usages
+        .iter()
+        .fold(Vec::<TokenUsage>::new(), |mut acc, line| {
+            match acc.iter_mut().find(|l| l.model == line.model) {
+                Some(l) => {
+                    l.input_tokens += line.input_tokens;
+                    l.output_tokens += line.output_tokens;
+                    l.cache_read_tokens += line.cache_read_tokens;
+                    l.cache_write_tokens += line.cache_write_tokens;
+                }
+                None => acc.push(TokenUsage {
+                    delegated_to: None,
+                    plugin: None,
+                    estimated_cost_usd: None,
+                    calls: Vec::new(),
+                    ..line.clone()
+                }),
+            }
+            acc
+        });
+    let per_agent = price(&bill.message_usages, &book);
+    let per_model = price(&folded, &book);
+    assert_eq!(per_agent.unpriced_lines, 0);
+    assert_eq!(per_model.unpriced_lines, 0);
+    assert!(per_agent.usd > 0.0);
+    assert!(
+        (per_agent.usd - per_model.usd).abs() < 1e-12,
+        "{} vs {}",
+        per_agent.usd,
+        per_model.usd
+    );
+    assert!((bill.total_estimated_cost_usd - per_model.usd).abs() < 1e-12);
+
+    let (ri, ro, rc) = served(&REVIEWER_USAGE);
+    let (ci, co, cc) = served(&CODER_USAGE);
+    let (li, lo) = (LEADER_LINE.0 + PLUGIN_LINE.0, LEADER_LINE.1 + PLUGIN_LINE.1);
+    assert_eq!(bill.total_input_tokens, li + ri + ci);
+    assert_eq!(bill.total_output_tokens, lo + ro + co);
+    assert_eq!(bill.total_cache_read_tokens, rc + cc);
+    let row_cost: f64 = rows.iter().map(|r| r.cost_usd).sum();
+    assert!((row_cost - bill.total_estimated_cost_usd).abs() < 1e-12);
+}
