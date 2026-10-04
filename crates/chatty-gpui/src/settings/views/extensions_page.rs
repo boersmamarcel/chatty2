@@ -827,6 +827,12 @@ fn team_row(
                             })),
                     )
                 })
+                .when_some(listing.changelog.clone(), |el, changes| {
+                    el.child(line(format!(
+                        "New in v{}: {changes}",
+                        listing.latest_version
+                    )))
+                })
                 .when_some(listing.example_prompt.clone(), |el, prompt| {
                     el.child(line(format!("Try: “{prompt}”")).italic())
                 }),

@@ -230,7 +230,11 @@ async fn payments_team(registry: &mut Registry) {
     registry
         .spec(
             json!({
-                "agent": {"name": "payments-lead", "example_prompt": "Check vendors.csv"},
+                "agent": {
+                    "name": "payments-lead",
+                    "example_prompt": "Check vendors.csv",
+                    "changelog": "First release",
+                },
                 "tools": {"profile": "coordinator"},
                 "swarm": {"delegates_to": ["iban-checker", "reviewer"]},
             }),
@@ -295,10 +299,12 @@ async fn install_team_verifies_every_spec_and_plugin() {
         assert!(matches!(loaded.source, SpecSource::DataDir(_)), "{name}");
     }
     let lead = load_agent_spec_from("payments-lead", None, Some(dirs.data.path())).unwrap();
+    // The dashboard's listing keys are part of the spec (AGE-842).
     assert_eq!(
         lead.spec.agent.example_prompt.as_deref(),
         Some("Check vendors.csv")
     );
+    assert_eq!(lead.spec.agent.changelog.as_deref(), Some("First release"));
     // The plugin went through the signed install path, at the locked bytes.
     let installed = InstallRecord::read(&dirs.modules.path().join("iban-check"))
         .unwrap()

@@ -473,6 +473,9 @@ pub struct AgentSpecListing {
     pub description: Option<String>,
     #[serde(default)]
     pub example_prompt: Option<String>,
+    /// What changed in the latest version.
+    #[serde(default)]
+    pub changelog: Option<String>,
     #[serde(default)]
     pub lockfile: Vec<ListedPlugin>,
     #[serde(default)]
