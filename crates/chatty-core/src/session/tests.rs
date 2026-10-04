@@ -69,8 +69,8 @@ async fn session_with_conversation() -> AgentSession {
 /// turn costs, AGE-351).
 async fn session_with_model(model_config: &ModelConfig) -> AgentSession {
     // Agent construction resolves the MCP repository (for the always-on
-    // list_mcp tool); `init_repositories()` only resolves paths and is a
-    // no-op after the first call.
+    // list_mcp tool); `init_repositories()` resolves paths, picks the secret
+    // store (AGE-741) and is a no-op after the first call.
     let _ = crate::init_repositories();
 
     let mut session = AgentSession::new(config());

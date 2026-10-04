@@ -11,6 +11,7 @@ pub mod module_settings_repository;
 pub mod oauth_credential_json_repository;
 pub mod oauth_credential_repository;
 pub mod provider_repository;
+pub mod secret_json_repository;
 
 // Re-export shared error infrastructure.
 pub use provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
@@ -164,6 +165,183 @@ macro_rules! define_list_json_repository {
     };
 }
 
+/// Like [`define_single_json_repository`], for a file with secret fields:
+/// the secrets live in a [`SecretStore`](crate::settings::secret_store::SecretStore)
+/// and the file keeps references (AGE-741).
+macro_rules! define_single_secret_json_repository {
+    (
+        trait $TraitName:ident,
+        struct $StructName:ident,
+        model = $Model:ty,
+        filename = $filename:expr,
+        secrets = $secrets:expr $(,)?
+    ) => {
+        pub trait $TraitName: Send + Sync + 'static {
+            fn load(
+                &self,
+            ) -> provider_repository::BoxFuture<
+                'static,
+                provider_repository::RepositoryResult<$Model>,
+            >;
+            fn save(
+                &self,
+                value: $Model,
+            ) -> provider_repository::BoxFuture<'static, provider_repository::RepositoryResult<()>>;
+        }
+
+        pub struct $StructName {
+            inner: secret_json_repository::SecretJsonRepository<$Model>,
+        }
+
+        impl $StructName {
+            /// Persist to `<config_dir>/chatty/<filename>`, secrets to `store`.
+            pub fn new(
+                store: std::sync::Arc<dyn crate::settings::secret_store::SecretStore>,
+            ) -> provider_repository::RepositoryResult<Self> {
+                Ok(Self {
+                    inner: secret_json_repository::SecretJsonRepository::with_store(
+                        generic_json_repository::chatty_config_dir()?.join($filename),
+                        store,
+                        $secrets,
+                    ),
+                })
+            }
+        }
+
+        /// Test-only constructors for a custom file path.
+        #[cfg(any(test, feature = "test-support"))]
+        impl $StructName {
+            /// Secrets go to a `secrets.json` file store beside `file_path`,
+            /// so repositories built on one path share them.
+            pub fn with_path(file_path: std::path::PathBuf) -> Self {
+                let store =
+                    std::sync::Arc::new(crate::settings::secret_store::FileSecretStore::new(
+                        file_path.with_file_name(crate::settings::secret_store::SECRETS_FILE_NAME),
+                    ));
+                Self::with_path_and_store(file_path, store)
+            }
+
+            pub fn with_path_and_store(
+                file_path: std::path::PathBuf,
+                store: std::sync::Arc<dyn crate::settings::secret_store::SecretStore>,
+            ) -> Self {
+                Self {
+                    inner: secret_json_repository::SecretJsonRepository::with_store(
+                        file_path, store, $secrets,
+                    ),
+                }
+            }
+        }
+
+        impl $TraitName for $StructName {
+            fn load(
+                &self,
+            ) -> provider_repository::BoxFuture<
+                'static,
+                provider_repository::RepositoryResult<$Model>,
+            > {
+                self.inner.load()
+            }
+
+            fn save(
+                &self,
+                value: $Model,
+            ) -> provider_repository::BoxFuture<'static, provider_repository::RepositoryResult<()>>
+            {
+                self.inner.save(value)
+            }
+        }
+    };
+}
+
+/// Like [`define_list_json_repository`], for a file with secret fields
+/// (AGE-741).
+macro_rules! define_list_secret_json_repository {
+    (
+        trait $TraitName:ident,
+        struct $StructName:ident,
+        model = $Model:ty,
+        filename = $filename:expr,
+        secrets = $secrets:expr $(,)?
+    ) => {
+        pub trait $TraitName: Send + Sync + 'static {
+            fn load_all(
+                &self,
+            ) -> provider_repository::BoxFuture<
+                'static,
+                provider_repository::RepositoryResult<Vec<$Model>>,
+            >;
+            fn save_all(
+                &self,
+                items: Vec<$Model>,
+            ) -> provider_repository::BoxFuture<'static, provider_repository::RepositoryResult<()>>;
+        }
+
+        pub struct $StructName {
+            inner: secret_json_repository::SecretJsonListRepository<$Model>,
+        }
+
+        impl $StructName {
+            /// Persist to `<config_dir>/chatty/<filename>`, secrets to `store`.
+            pub fn new(
+                store: std::sync::Arc<dyn crate::settings::secret_store::SecretStore>,
+            ) -> provider_repository::RepositoryResult<Self> {
+                Ok(Self {
+                    inner: secret_json_repository::SecretJsonListRepository::with_store(
+                        generic_json_repository::chatty_config_dir()?.join($filename),
+                        store,
+                        $secrets,
+                    ),
+                })
+            }
+        }
+
+        /// Test-only constructors for a custom file path.
+        #[cfg(any(test, feature = "test-support"))]
+        impl $StructName {
+            /// Secrets go to a `secrets.json` file store beside `file_path`,
+            /// so repositories built on one path share them.
+            pub fn with_path(file_path: std::path::PathBuf) -> Self {
+                let store =
+                    std::sync::Arc::new(crate::settings::secret_store::FileSecretStore::new(
+                        file_path.with_file_name(crate::settings::secret_store::SECRETS_FILE_NAME),
+                    ));
+                Self::with_path_and_store(file_path, store)
+            }
+
+            pub fn with_path_and_store(
+                file_path: std::path::PathBuf,
+                store: std::sync::Arc<dyn crate::settings::secret_store::SecretStore>,
+            ) -> Self {
+                Self {
+                    inner: secret_json_repository::SecretJsonListRepository::with_store(
+                        file_path, store, $secrets,
+                    ),
+                }
+            }
+        }
+
+        impl $TraitName for $StructName {
+            fn load_all(
+                &self,
+            ) -> provider_repository::BoxFuture<
+                'static,
+                provider_repository::RepositoryResult<Vec<$Model>>,
+            > {
+                self.inner.load_all()
+            }
+
+            fn save_all(
+                &self,
+                items: Vec<$Model>,
+            ) -> provider_repository::BoxFuture<'static, provider_repository::RepositoryResult<()>>
+            {
+                self.inner.save_all(items)
+            }
+        }
+    };
+}
+
 // ── Single-object repositories (load/save) ───────────────────────────────────
 
 define_single_json_repository!(
@@ -201,11 +379,12 @@ define_single_json_repository!(
     filename = "user_secrets.json",
 );
 
-define_single_json_repository!(
+define_single_secret_json_repository!(
     trait HiveSettingsRepository,
     struct HiveSettingsJsonRepository,
     model = crate::settings::models::hive_settings::HiveSettingsModel,
     filename = "hive_settings.json",
+    secrets = secret_json_repository::HIVE_SECRETS,
 );
 
 define_single_json_repository!(
@@ -224,11 +403,12 @@ define_single_json_repository!(
 
 // ── List-based repositories (load_all/save_all) ─────────────────────────────
 
-define_list_json_repository!(
+define_list_secret_json_repository!(
     trait ProviderRepository,
     struct JsonFileRepository,
     model = crate::settings::models::providers_store::ProviderConfig,
     filename = "providers.json",
+    secrets = secret_json_repository::PROVIDER_SECRETS,
 );
 
 define_list_json_repository!(
@@ -238,18 +418,20 @@ define_list_json_repository!(
     filename = "models.json",
 );
 
-define_list_json_repository!(
+define_list_secret_json_repository!(
     trait McpRepository,
     struct JsonMcpRepository,
     model = crate::settings::models::mcp_store::McpServerConfig,
     filename = "mcp_servers.json",
+    secrets = secret_json_repository::MCP_SECRETS,
 );
 
-define_list_json_repository!(
+define_list_secret_json_repository!(
     trait A2aRepository,
     struct A2aJsonRepository,
     model = crate::settings::models::a2a_store::A2aAgentConfig,
     filename = "a2a_agents.json",
+    secrets = secret_json_repository::A2A_SECRETS,
 );
 
 // ── Tests ────────────────────────────────────────────────────────────────────
