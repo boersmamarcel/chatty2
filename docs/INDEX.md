@@ -96,6 +96,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/swarm-vs-single-prereg.md`](research/swarm-vs-single-prereg.md) | Running or reading the swarm-vs-single benchmark | The frozen pre-registration: arms, the 30-task set, n = 30, MDE, analysis and decision rule; runner in `scripts/swarm-bench/` (AGE-670) |
 | [`research/swarm-vs-single-2026-10-02.md`](research/swarm-vs-single-2026-10-02.md) | Claiming a team beats one agent | EV-4: shipped team presets vs one agent on the 30-task benchmark; both 30/30, team 3.3x tokens and 6.9x wall time; teams stay experimental (AGE-671) |
 | [`research/plugin-perf-2026-09-27.md`](research/plugin-perf-2026-09-27.md) | PL-H4, PL-U2, or re-checking PL-H1 | S7 baseline: cold load, per-protocol overhead, concurrency, 1-hour soak (AGE-603) |
+| [`research/resume-spike-2026-10-04.md`](research/resume-spike-2026-10-04.md) | Deciding whether conversation handles get built | RC-2 cold run on local Qwen3.8 (24 pairs): resume costs 25.3 % less per solved task, wall-clock 0.9 % worse, pass rate +4.2 points; PASS pending Marcel's sign-off (AGE-651) |
 | [`research/resume-spike-template.md`](research/resume-spike-template.md) | Running or analysing the resume spike | The frozen re-brief and resume prompts both arms get; runner in `scripts/resume-spike/` (AGE-650) |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
 | [`research/modules/m0-trace.md`](research/modules/m0-trace.md) | chatty-trace | Trace contract |
