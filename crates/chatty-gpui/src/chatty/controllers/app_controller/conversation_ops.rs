@@ -268,6 +268,10 @@ impl ChattyApp {
                         // selection, so the starting model has to be set
                         // explicitly or a new chat inherits the last one.
                         state.set_selected_model_id(model_config.id.clone());
+                        // A new chat is local, whatever was on screen before.
+                        state.set_conversation_mode(
+                            &chatty_core::models::conversation::ConversationMode::Local,
+                        );
                         state.set_capabilities(
                             model_config.supports_images,
                             model_config.supports_pdf,
@@ -661,6 +665,7 @@ impl ChattyApp {
                     conv.streaming_delegation_trace().cloned(),
                     conv.working_dir().cloned(),
                     conv.agent_task_snapshot().cloned(),
+                    conv.mode().clone(),
                 )
             });
 
@@ -671,6 +676,7 @@ impl ChattyApp {
             streaming_delegation_trace,
             conversation_working_dir,
             agent_task_snapshot,
+            conversation_mode,
         )) = minimal_data
         {
             // Check if this conversation has an active stream via StreamManager
@@ -713,6 +719,7 @@ impl ChattyApp {
                 // Update the selected model and capabilities in the chat input
                 view.chat_input_state().update(cx, |state, cx| {
                     state.set_selected_model_id(model_id);
+                    state.set_conversation_mode(&conversation_mode);
                     state.set_capabilities(model_capabilities.0, model_capabilities.1);
 
                     // Restore streaming state if conversation has active stream
