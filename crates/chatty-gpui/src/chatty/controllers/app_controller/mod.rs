@@ -473,7 +473,14 @@ impl ChattyApp {
         crate::boot_timing::checkpoint("chattyapp_new_start");
         // Initialize global conversations model if not already done
         if !cx.has_global::<ConversationsStore>() {
-            cx.set_global(ConversationsStore::new());
+            let mut store = ConversationsStore::new();
+            // Hosted conversations authenticate as the Hive sign-in (AGE-835).
+            // A session installed later reaches the store from
+            // `install_hive_session` instead.
+            store.set_hosted_auth(
+                crate::settings::controllers::extensions_controller::hive_session(cx),
+            );
+            cx.set_global(store);
         }
 
         // Create views

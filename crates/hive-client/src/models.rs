@@ -319,6 +319,20 @@ pub struct ModulePricingInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// `GET /api/usage/me/modules`: the signed-in user's usage per module.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MyModuleUsageList {
+    pub items: Vec<MyModuleUsage>,
+}
+
+/// One module's line in [`MyModuleUsageList`]: what the registry has
+/// recorded of this user's calls to it, across versions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MyModuleUsage {
+    pub module_name: String,
+    pub total_invocations: i64,
+}
+
 // ── Billing session (Phase 3b) ─────────────────────────────────────────────
 
 /// Request to acquire a billing session.
@@ -426,4 +440,70 @@ mod tests {
         let body = read_capped(&mut stream, 10, 10, |_| {}).await.unwrap();
         assert_eq!(body.len(), 10);
     }
+}
+
+// ── Agent specs and teams (HS-3, MK-T2) ────────────────────────────────────
+
+/// A lockfile entry as the marketplace lists it: the locked plugin and its
+/// module's pricing model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListedPlugin {
+    #[serde(flatten)]
+    pub locked: crate::verify::LockedPlugin,
+    #[serde(default = "free")]
+    pub pricing_model: String,
+}
+
+/// A spec a listed one delegates to that its publisher published too: a
+/// member of the team, installed with it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TeamMember {
+    pub name: String,
+    pub version: String,
+}
+
+/// One published spec in the marketplace (`GET /api/agents?q=`); a team
+/// when it has `members`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSpecListing {
+    pub name: String,
+    pub latest_version: String,
+    pub author_username: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub example_prompt: Option<String>,
+    /// What changed in the latest version.
+    #[serde(default)]
+    pub changelog: Option<String>,
+    #[serde(default)]
+    pub lockfile: Vec<ListedPlugin>,
+    #[serde(default)]
+    pub members: Vec<TeamMember>,
+    #[serde(default)]
+    pub install_count: i64,
+    #[serde(default = "free")]
+    pub pricing_model: String,
+}
+
+fn free() -> String {
+    "free".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentSpecList {
+    pub items: Vec<AgentSpecListing>,
+    pub page: i64,
+    pub per_page: i64,
+    pub total: i64,
+}
+
+/// `GET /api/agents/{name}/{version}`: a consumer verifies `signed` and uses
+/// `signed.spec`, the exact bytes the signature covers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishedSpec {
+    pub name: String,
+    pub version: String,
+    pub author_username: String,
+    pub signed: crate::verify::SpecChain,
 }

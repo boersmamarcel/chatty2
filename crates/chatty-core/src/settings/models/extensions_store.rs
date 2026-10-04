@@ -84,6 +84,22 @@ pub struct ExtensionsModel {
 }
 
 impl ExtensionsModel {
+    /// The module names of the installed Hive WASM modules priced `paid`:
+    /// the modules a [`ModuleMeter`](hive_client::ModuleMeter) bills.
+    pub fn paid_wasm_modules(&self) -> std::collections::HashSet<String> {
+        self.extensions
+            .iter()
+            .filter(|e| {
+                matches!(e.kind, ExtensionKind::WasmModule)
+                    && e.pricing_model.as_deref() == Some("paid")
+            })
+            .filter_map(|e| match &e.source {
+                ExtensionSource::Hive { module_name, .. } => Some(module_name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Return all enabled MCP server configs (borrowed).
     pub fn mcp_servers(&self) -> Vec<&McpServerConfig> {
         self.extensions

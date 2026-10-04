@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
 use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
+use chatty_core::hive::ModuleMeter;
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
@@ -27,7 +28,7 @@ use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
-use chatty_core::tools::plugin_tool::PluginHost;
+use chatty_core::tools::plugin_tool::{PluginHost, borrowed_meter};
 
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -473,8 +474,28 @@ pub struct ChatEngine {
     init_generation: u64,
 }
 
+/// This process's plugin meter, installed once at start-up.
+static PLUGIN_METER: OnceLock<Arc<ModuleMeter>> = OnceLock::new();
+
+/// Build this process's plugin meter from the installed extensions and the
+/// Hive sign-in (AGE-837): a spec's paid plugin is admitted and reported
+/// exactly like a call through the desktop's gateway. Later calls are
+/// no-ops.
+pub(crate) async fn install_plugin_meter() {
+    if PLUGIN_METER.get().is_some() {
+        return;
+    }
+    let (extensions, hive) = tokio::join!(
+        chatty_core::extensions_repository().load(),
+        chatty_core::hive_settings_repository().load(),
+    );
+    let meter = borrowed_meter(&extensions.unwrap_or_default(), &hive.unwrap_or_default()).await;
+    let _ = PLUGIN_METER.set(Arc::new(meter));
+}
+
 /// Where a spec's plugins are found (PL-U2, AGE-616): the module
-/// directory, and the configured models their `llm::complete` may name.
+/// directory, the configured models their `llm::complete` may name, and the
+/// meter their calls go through.
 pub(crate) fn plugin_host(
     module_settings: &ModuleSettingsModel,
     models: &ModelsModel,
@@ -484,6 +505,7 @@ pub(crate) fn plugin_host(
         module_roots: vec![PathBuf::from(&module_settings.module_dir)],
         models: models.models().to_vec(),
         providers: providers.to_vec(),
+        meter: PLUGIN_METER.get().cloned().unwrap_or_default(),
     }
 }
 

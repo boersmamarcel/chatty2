@@ -24,7 +24,10 @@ pub enum AgentCommandTarget {
     },
     /// A spec on the local roster, run as a turn of the conversation handed
     /// to that agent through its own broker (AGE-744/AGE-747).
-    Spec { spec: AgentSpec, prompt: String },
+    Spec {
+        spec: Box<AgentSpec>,
+        prompt: String,
+    },
     /// The default sub-agent, with the whole text as its prompt.
     Default { prompt: String },
 }
@@ -65,7 +68,7 @@ pub fn resolve_agent_command(
     }
     if let Some(spec) = roster.iter().find(|spec| spec.agent.name == first) {
         return AgentCommandTarget::Spec {
-            spec: spec.clone(),
+            spec: Box::new(spec.clone()),
             prompt: rest.to_string(),
         };
     }

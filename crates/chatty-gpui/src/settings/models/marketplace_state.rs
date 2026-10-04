@@ -1,7 +1,17 @@
 use std::collections::HashMap;
 
-use chatty_core::hive::models::{Category, ModuleMetadata};
+use chatty_core::hive::models::{AgentSpecListing, Category, ModuleMetadata};
+use chatty_core::team_install::TeamRecord;
 use gpui::Global;
+
+/// Which listing the marketplace shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarketplaceTab {
+    #[default]
+    Plugins,
+    /// Published agent teams (MK-T2, AGE-841).
+    Teams,
+}
 
 /// Ephemeral UI state for the Extensions marketplace browser.
 /// Not persisted — rebuilt every time the page is opened.
@@ -23,6 +33,15 @@ pub struct MarketplaceState {
     /// The registry rejected the refresh token, so the Hive session ended
     /// without the user signing out. Cleared by the next sign-in.
     pub signed_out_of_hive: bool,
+    pub tab: MarketplaceTab,
+    /// The last team search's results.
+    pub team_results: Vec<AgentSpecListing>,
+    /// The teams installed on this machine, as last read from disk.
+    pub installed_teams: Vec<TeamRecord>,
+    /// The team being fetched and verified, while it is.
+    pub installing_team: Option<String>,
+    /// What the last team install or uninstall did.
+    pub team_notice: Option<String>,
 }
 
 impl MarketplaceState {

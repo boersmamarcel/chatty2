@@ -19,6 +19,10 @@ Hive is the registry Chatty installs extensions from; the address it is talking 
 | **Paid** | Not free — check the pricing before enabling |
 | **Trust: signed** / **Trust: local** | Where a loaded module's code comes from: signed by its publisher and installed from Hive, or copied in by hand |
 
+**Paid** plugins are metered wherever they run, including when an agent spec lists them and when a delegated worker calls them. Each module's free calls are used first (the count comes from Hive); after that a call needs a positive credit balance, and every call is reported to Hive. If Chatty cannot read your balance — you are signed out, your sign-in has expired, or Hive is unreachable — a paid call is refused with "Cannot verify credits … sign in to Hive" rather than run unbilled. Delegated workers reuse the sign-in the desktop app saved, so if the app has been idle for over an hour, open it once to refresh the session.
+
+The **Teams** tab next to the plugin listing finds published agent teams and installs them with one click; see [Install a team from the marketplace](./install-team.md).
+
 Each row has **Enable** / **Disable** (🟢 enabled, ⏸ disabled), and modules that support both modes offer **Switch to Local** / **Switch to Cloud**.
 
 ## Built-in catalog

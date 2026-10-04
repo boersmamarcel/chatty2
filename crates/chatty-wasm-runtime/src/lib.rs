@@ -83,6 +83,6 @@ pub(crate) mod bindings {
         path: "../../wit",
         // `config::get` has no error channel, so an ungranted one traps
         // (`grants::Refused`).
-        trappable_imports: ["get"],
+        imports: { "chatty:plugin/config.get": trappable },
     });
 }
