@@ -22,6 +22,8 @@
 mod approval_relay;
 pub mod broker;
 #[cfg(test)]
+mod best_of;
+#[cfg(test)]
 mod broker_delegation;
 #[cfg(test)]
 mod budget_propagation;

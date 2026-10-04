@@ -179,7 +179,7 @@ impl SwarmKit {
         sse: Script,
         ndjson: Script,
     ) -> Self {
-        Self::start_opts(None, roster, sse, ndjson, false, false, budget).await
+        Self::start_opts(None, roster, sse, ndjson, false, false, budget, None).await
     }
 
     /// As [`start`](Self::start), with the root running as `leader` — a
@@ -213,6 +213,31 @@ impl SwarmKit {
             false,
             true,
             ModuleSettingsModel::default().default_endpoint_budget,
+            None,
+        )
+        .await
+    }
+
+    /// As [`start_in_repo`](Self::start_in_repo), with the team's
+    /// verification command set to `verification` and every endpoint's
+    /// budget raised to `budget`: each worker's evidence carries the
+    /// command's exit code in its tree (AGE-406, AGE-853).
+    pub async fn start_verified(
+        verification: &str,
+        budget: usize,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_opts(
+            None,
+            roster,
+            sse,
+            ndjson,
+            true,
+            false,
+            budget,
+            Some(verification.to_string()),
         )
         .await
     }
@@ -232,6 +257,7 @@ impl SwarmKit {
             repo,
             false,
             ModuleSettingsModel::default().default_endpoint_budget,
+            None,
         )
         .await
     }
@@ -245,6 +271,7 @@ impl SwarmKit {
         repo: bool,
         asking: bool,
         endpoint_budget: usize,
+        verification: Option<String>,
     ) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
@@ -337,6 +364,7 @@ impl SwarmKit {
             ..ModuleSettingsModel::default()
         };
         module_settings.team.isolate = repo;
+        module_settings.team.verification = verification;
         let execution = ExecutionSettingsModel {
             enabled: true,
             workspace_dir: Some(workspace.to_string_lossy().into_owned()),
