@@ -125,10 +125,15 @@ Each release includes:
 - **macOS**: `chatty-macos-aarch64.dmg` (ARM, code-signed if secrets configured)
 - **Windows**: `chatty-windows-x86_64.exe` (Inno Setup installer)
 - **Checksums**: `checksums.txt` (SHA-256 for all files)
+- **Release signature**: `checksums.txt.sig`, an Ed25519 (minisign) signature over
+  `checksums.txt`, once `RELEASE_SIGNING_ENABLED` is on — see
+  [`release-signing.md`](release-signing.md)
 
 The desktop app's auto-updater (`crates/chatty-gpui/src/auto_updater/`) polls the
 GitHub releases API for these assets, so a published release reaches existing
-installs without any further step.
+installs without any further step. It verifies `checksums.txt.sig` against the
+release keys compiled into it before it trusts a hash, and on macOS checks the new
+bundle's code signature and Team ID before the swap.
 
 ## Version Validation
 

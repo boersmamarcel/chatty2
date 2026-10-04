@@ -1,8 +1,10 @@
 //! GitHub release-feed network glue for the auto-updater.
 //!
 //! `fetch_latest_release` hits the GitHub Releases API and selects a
-//! per-OS/arch asset. Pure I/O + parsing — no UI, no install side effects.
+//! per-OS/arch asset, and authenticates the release's `checksums.txt` (AGE-817).
+//! Pure I/O + parsing — no UI, no install side effects.
 
+use super::signature;
 use super::*;
 
 pub(super) async fn fetch_latest_release(
@@ -59,8 +61,23 @@ pub(super) async fn fetch_latest_release(
 
         // Try to find matching asset using simple convention
         if let Some(asset) = find_matching_asset(&release.assets, os, arch) {
-            // Fetch checksums for this release
-            let checksums = AutoUpdater::fetch_checksums(client, &release).await;
+            // Authenticate checksums.txt against the pinned release keys
+            // before trusting any hash in it.
+            let checksums_text =
+                AutoUpdater::fetch_release_text(client, &release, signature::CHECKSUMS_ASSET)
+                    .await
+                    .unwrap_or_default();
+            let checksums_signature = AutoUpdater::fetch_release_text(
+                client,
+                &release,
+                signature::CHECKSUMS_SIGNATURE_ASSET,
+            )
+            .await;
+            let checksums = signature::trusted_checksums(
+                &checksums_text,
+                checksums_signature.as_deref(),
+                &signature::pinned_release_keys(),
+            )?;
             let sha256 = checksums.get(&asset.name).cloned();
 
             if sha256.is_none() {

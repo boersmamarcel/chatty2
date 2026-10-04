@@ -69,6 +69,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`wit-reference.md`](wit-reference.md) | Authoring WASM modules | WIT interface schemas (reference) |
 | [`curated-mcp-catalog.md`](curated-mcp-catalog.md) | Built-in MCP servers | Seeded catalog and community servers (reference) |
 | [`RELEASE_PROCESS.md`](RELEASE_PROCESS.md) | Cutting a release | Labels, version bump, changelog, GitHub Release |
+| [`release-signing.md`](release-signing.md) | Release key, signed updates | Ed25519 `checksums.txt.sig`, macOS Team-ID check, key runbook and rotation |
 | [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, pruning |
 | [`team-smoke-test.md`](team-smoke-test.md) | Touching the broker, `--team` or the worker tree | One-command local run of the `coder-reviewer` test-fixture team against Ollama, with the verifier's reward |
 | [`swarm-test-kit.md`](swarm-test-kit.md) | Writing a test that spans a leader, its broker and real workers | The scriptable fake model server and the multi-process swarm harness; the pre-fabric goldens |
