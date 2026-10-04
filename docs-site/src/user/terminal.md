@@ -183,6 +183,10 @@ Open the ACP panel in the Activity Bar and click **Chatty** to connect. Keep `ac
 
 Other ACP editors should work the same way — JetBrains IDEs and Neovim (CodeCompanion, avante.nvim) among them — but only Zed and VS Code are described here.
 
+## Install a team
+
+`chatty-tui --install-team NAME[@VERSION]` installs a published team from the Hive marketplace, with every spec and locked plugin signature-checked, then exits. See [Install a team from the marketplace](./install-team.md).
+
 ## Shared configuration
 
 `chatty-tui` reads the same settings as the desktop app — providers, models, tools, secrets and memory — so run the desktop app once to set things up, or skip that entirely with `--ollama` / `--openai-compat-url`. Where the files live: [Advanced](./advanced.md).
