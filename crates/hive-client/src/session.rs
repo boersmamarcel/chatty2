@@ -36,6 +36,9 @@ pub struct HiveSession {
     registry: HiveRegistryClient,
     pair: Mutex<Option<TokenPair>>,
     state: watch::Sender<SessionState>,
+    /// `false` for a [`borrowed`](Self::borrowed) session, which never
+    /// spends the refresh token.
+    refreshes: bool,
 }
 
 impl HiveSession {
@@ -50,6 +53,19 @@ impl HiveSession {
             registry: HiveRegistryClient::new(base_url),
             pair: Mutex::new(pair),
             state: watch::Sender::new(state),
+            refreshes: true,
+        }
+    }
+
+    /// A session that uses `pair`'s access token as it is and never
+    /// refreshes it: for a process that reads the pair another process owns
+    /// (a desktop worker reads the desktop's). Refresh tokens rotate on use
+    /// and a reused one revokes the whole family, so only the owner may
+    /// spend it; once the borrowed access token expires, calls answer 401.
+    pub fn borrowed(base_url: impl Into<String>, pair: Option<TokenPair>) -> Self {
+        Self {
+            refreshes: false,
+            ..Self::new(base_url, pair)
         }
     }
 
@@ -115,6 +131,9 @@ impl HiveSession {
         let Some(current) = guard.as_ref() else {
             return;
         };
+        if !self.refreshes {
+            return;
+        }
         match self.registry.refresh(&current.refresh_token).await {
             Ok(pair) => {
                 *guard = Some(pair.clone());
@@ -135,7 +154,11 @@ impl HiveSession {
 /// Send the request `build` makes with the session's Bearer token; on a 401,
 /// refresh once and send it once more. Without a session the request goes
 /// out unauthenticated, as it did before sign-in existed.
-pub(crate) async fn send_authed(
+///
+/// Public because the registry is not the only server that takes this
+/// token: a `chatty-server` validates the same login session (CX-0), so a
+/// hosted conversation's client authenticates through here too (AGE-835).
+pub async fn send_authed(
     session: Option<&HiveSession>,
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, reqwest::Error> {

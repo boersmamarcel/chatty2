@@ -2683,6 +2683,7 @@ impl ChatView {
             .blocks
             .iter()
             .filter(|block| block_visible_in_turn(&turn, block))
+            .filter(|block| !self.is_floating_approval_copy(block))
         {
             let is_plan = matches!(block, Block::Plan { .. });
             if is_plan && !plan_has_todos {
@@ -2978,6 +2979,20 @@ impl ChatView {
                 questions: pending.questions.clone(),
                 choices: pending.choices.clone(),
             })
+    }
+
+    /// True for a transcript card that repeats the request the floating card
+    /// is already asking, matched by the broker-assigned request id. The
+    /// floating card is the live one (AGE-828): the transcript keeps the
+    /// record only once the request is decided.
+    fn is_floating_approval_copy(&self, block: &Block) -> bool {
+        let Block::Approval { approval, .. } = block else {
+            return false;
+        };
+        approval.state == ApprovalState::Pending
+            && self
+                .active_approval_for_display()
+                .is_some_and(|live| live.id == approval.id)
     }
 
     /// Return the pending approval if it belongs to the current conversation.
@@ -4723,6 +4738,55 @@ mod delegation_run_tests {
             });
             let idx = view.read(cx).delegation_progress_msg_idx.unwrap();
             assert_eq!(view.read(cx).delegation_run_name(idx), None);
+        });
+    }
+    /// AGE-828: the pending approval is one card, however often the reader
+    /// leaves the conversation and comes back mid-stream.
+    #[gpui::test]
+    fn switching_back_shows_one_pending_approval_card(cx: &mut gpui::TestAppContext) {
+        let (view, _window) = harness(cx);
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_conversation_id("conv-a".into(), cx);
+                v.start_assistant_message(cx);
+                v.handle_approval_requested("req-1".into(), "ls".into(), false, None, cx);
+            });
+        });
+        // Away and back: the controller reloads history, restarts the
+        // streaming bubble and restores the trace it kept on the model.
+        for _ in 0..2 {
+            cx.update(|cx| {
+                view.update(cx, |v, cx| {
+                    let trace = v
+                        .messages
+                        .iter()
+                        .find_map(|m| m.live_trace.clone())
+                        .expect("live trace");
+                    v.set_conversation_id("conv-b".into(), cx);
+                    v.load_history(&[], cx);
+                    v.set_conversation_id("conv-a".into(), cx);
+                    v.start_assistant_message(cx);
+                    v.restore_live_trace(trace, cx);
+                });
+            });
+        }
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.refresh_turns(cx);
+                let in_transcript = v
+                    .turns
+                    .shared()
+                    .iter()
+                    .flat_map(|t| t.blocks.iter())
+                    .filter(|b| matches!(b, crate::chatty::views::transcript::Block::Approval { approval, .. } if approval.id == "req-1"))
+                    .filter(|b| !v.is_floating_approval_copy(b))
+                    .count();
+                let floating = usize::from(
+                    v.active_approval_for_display()
+                        .is_some_and(|p| p.id == "req-1"),
+                );
+                assert_eq!((in_transcript, floating), (0, 1), "one card for one request");
+            });
         });
     }
 }

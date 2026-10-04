@@ -17,12 +17,24 @@
 //! agent was built with. That is why the turn future and the resolve calls
 //! are independent here, mirroring the local session where the owner resolves
 //! through the store handles rather than through the turn.
+//!
+//! # Who the server thinks is asking
+//!
+//! A `chatty-server` answers every `/api` route with 401 unless the request
+//! carries a bearer for a live login session (AGE-350, CX-0). The token is
+//! the Hive sign-in's: the registry is the only issuer, and the server asks
+//! it whose session a token belongs to. So a hosted conversation borrows the
+//! process's [`HiveSession`] and every request here goes through
+//! [`send_to_server`], which attaches its access token and retries once with
+//! a refreshed one after a 401 (AGE-835). Signed out, the request goes out
+//! bare and the 401 is reported as "sign in to Hive", not as a dead server.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use futures::StreamExt;
+use hive_client::HiveSession;
 
 use super::event::SessionEvent;
 use super::{TurnInput, TurnKind};
@@ -58,6 +70,10 @@ pub struct HostedSession {
     /// second. The future clears it, which is why it is shared and not a
     /// `bool` — nothing holds `&mut self` by the time a turn ends.
     turn_active: Arc<AtomicBool>,
+    /// The Hive sign-in whose access token authenticates every request, or
+    /// `None` to send them bare (signed out, or a test against a server
+    /// that does not check).
+    auth: Option<Arc<HiveSession>>,
 }
 
 impl HostedSession {
@@ -76,7 +92,20 @@ impl HostedSession {
             remote_id: remote_id.into(),
             cancel_flag: None,
             turn_active: Arc::new(AtomicBool::new(false)),
+            auth: None,
         }
+    }
+
+    /// Authenticate every request as the user signed in to `auth`.
+    pub fn with_auth(mut self, auth: Option<Arc<HiveSession>>) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    /// Replace the sign-in requests authenticate with: a later sign-in, or a
+    /// sign-out, applies to a conversation that is already hosted.
+    pub fn set_auth(&mut self, auth: Option<Arc<HiveSession>>) {
+        self.auth = auth;
     }
 
     pub fn server_url(&self) -> &str {
@@ -137,13 +166,15 @@ impl HostedSession {
             self.server_url, self.remote_id
         );
         let http = self.http.clone();
+        let auth = self.auth.clone();
         self.cancel_flag = Some(cancel_flag.clone());
         self.turn_active.store(true, Ordering::Relaxed);
         let turn_active = self.turn_active.clone();
 
         Ok(async move {
             emit(SessionEvent::TurnStarted);
-            if let Err(error) = drive_turn(&http, &url, body, &cancel_flag, &mut emit).await {
+            let sent = drive_turn(&http, auth.as_deref(), &url, body, &cancel_flag, &mut emit);
+            if let Err(error) = sent.await {
                 emit(SessionEvent::Error(error));
             }
             // Released before `TurnEnded`, so an owner that starts the next
@@ -166,12 +197,13 @@ impl HostedSession {
             flag.store(true, Ordering::Relaxed);
         }
         let http = self.http.clone();
+        let auth = self.auth.clone();
         let url = format!(
             "{}/api/conversations/{}/cancel",
             self.server_url, self.remote_id
         );
         async move {
-            if let Err(error) = http.post(&url).send().await {
+            if let Err(error) = send_to_server(auth.as_deref(), &url, || http.post(&url)).await {
                 tracing::warn!(?error, "failed to cancel a hosted turn");
             }
         }
@@ -180,16 +212,14 @@ impl HostedSession {
     /// Answer an `ApprovalRequested` raised by the turn in flight.
     pub fn resolve_approval(&self, id: &str, approved: bool) -> impl Future<Output = ()> + use<> {
         let http = self.http.clone();
+        let auth = self.auth.clone();
         let url = format!(
             "{}/api/conversations/{}/approvals/{}",
             self.server_url, self.remote_id, id
         );
         async move {
-            let sent = http
-                .post(&url)
-                .json(&serde_json::json!({ "approved": approved }))
-                .send()
-                .await;
+            let body = serde_json::json!({ "approved": approved });
+            let sent = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await;
             if let Err(error) = sent {
                 tracing::warn!(?error, "failed to resolve a hosted approval");
             }
@@ -203,16 +233,14 @@ impl HostedSession {
         answers: Vec<ClarificationAnswer>,
     ) -> impl Future<Output = ()> + use<> {
         let http = self.http.clone();
+        let auth = self.auth.clone();
         let url = format!(
             "{}/api/conversations/{}/clarifications/{}",
             self.server_url, self.remote_id, id
         );
         async move {
-            let sent = http
-                .post(&url)
-                .json(&serde_json::json!({ "answers": answers }))
-                .send()
-                .await;
+            let body = serde_json::json!({ "answers": answers });
+            let sent = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await;
             if let Err(error) = sent {
                 tracing::warn!(?error, "failed to answer a hosted clarification");
             }
@@ -230,23 +258,17 @@ impl HostedSession {
 /// is the thing that failed.
 async fn drive_turn<F: FnMut(SessionEvent)>(
     http: &reqwest::Client,
+    auth: Option<&HiveSession>,
     url: &str,
     body: serde_json::Value,
     cancel_flag: &Arc<AtomicBool>,
     emit: &mut F,
 ) -> std::result::Result<(), StreamError> {
-    let response = http
-        .post(url)
-        .timeout(CONNECT_TIMEOUT)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| {
-            StreamError::new(
-                StreamErrorKind::Transport,
-                format!("could not reach the server at {url}: {error}"),
-            )
-        })?;
+    let response = send_to_server(auth, url, || {
+        http.post(url).timeout(CONNECT_TIMEOUT).json(&body)
+    })
+    .await
+    .map_err(|error| StreamError::new(StreamErrorKind::Transport, format!("{error:#}")))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -258,10 +280,12 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
             429 => StreamErrorKind::RateLimited,
             code => StreamErrorKind::ProviderStatus(code),
         };
-        return Err(StreamError::new(
-            kind,
-            format!("the server refused the turn ({status}): {}", detail.trim()),
-        ));
+        let message = if status == reqwest::StatusCode::UNAUTHORIZED {
+            SIGN_IN_TO_HIVE.to_string()
+        } else {
+            format!("the server refused the turn ({status}): {}", detail.trim())
+        };
+        return Err(StreamError::new(kind, message));
     }
 
     let mut frames = SseFrames::default();
@@ -292,6 +316,32 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
         }
     }
     Ok(())
+}
+
+/// What a 401 from a `chatty-server` means to the user: the server checks
+/// the Hive sign-in, and this process has none it would accept.
+pub const SIGN_IN_TO_HIVE: &str = "The server needs you signed in to Hive (Settings → Extensions → \
+     Hive, against the registry this server uses). Sign in, then try again.";
+
+/// Send one request to a `chatty-server` as the user signed in to `auth`.
+///
+/// Every hosted request goes through here, so none can forget the bearer.
+/// The URL must be `https://`, or `http://` to a loopback or private-LAN
+/// address ([`hive_client::ensure_secure_url`]): the request carries the
+/// user's Hive token and the conversation's history, and neither may cross
+/// a network in clear text. The 401 retry with a refreshed token is
+/// [`hive_client::send_authed`]'s, shared with the registry client, so a
+/// hosted turn and a registry call never race each other into the
+/// registry's refresh-token reuse detection.
+pub(crate) async fn send_to_server(
+    auth: Option<&HiveSession>,
+    url: &str,
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response> {
+    hive_client::ensure_secure_url(url).map_err(anyhow::Error::msg)?;
+    hive_client::send_authed(auth, build)
+        .await
+        .with_context(|| format!("could not reach the server at {url}"))
 }
 
 /// One `event:`/`data:` frame off the wire, as a [`SessionEvent`].
@@ -544,5 +594,133 @@ mod tests {
         );
         assert_eq!(wire_turn_kind(TurnKind::Human), "human");
         assert_eq!(wire_turn_kind(TurnKind::Regenerate), "regenerate");
+    }
+
+    fn token_pair(token: &str, refresh_token: &str) -> hive_client::TokenPair {
+        hive_client::TokenPair {
+            token: token.to_string(),
+            refresh_token: refresh_token.to_string(),
+            expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+        }
+    }
+
+    /// Run one turn against `session` and collect what it emitted.
+    async fn run_turn(session: &mut HostedSession) -> Vec<SessionEvent> {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        session
+            .begin_turn(&TurnInput::text("hello"), move |event| {
+                sink.borrow_mut().push(event)
+            })
+            .expect("the turn starts")
+            .await;
+        seen.take()
+    }
+
+    /// AGE-835: a chatty-server answers every `/api` route with 401 unless
+    /// the request carries the Hive sign-in's bearer. The turn sends it, and
+    /// when the server rejects a stale one, the turn refreshes once through
+    /// the registry and is sent again — the user never sees the 401.
+    #[tokio::test]
+    async fn a_hosted_turn_sends_the_hive_bearer_and_retries_once_after_a_refresh() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let turns = "/api/conversations/c-1/turns";
+        Mock::given(method("POST"))
+            .and(path(turns))
+            .and(header("authorization", "Bearer stale"))
+            .respond_with(ResponseTemplate::new(401))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let text = serde_json::to_string(&SessionEvent::Text("hosted hello".into())).unwrap();
+        Mock::given(method("POST"))
+            .and(path(turns))
+            .and(header("authorization", "Bearer fresh"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("event: text\ndata: {text}\n\n")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "fresh",
+                "refresh_token": "r-2",
+                "expires_at": (chrono::Utc::now() + chrono::TimeDelta::hours(1)).to_rfc3339(),
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let hive = Arc::new(HiveSession::new(
+            server.uri(),
+            Some(token_pair("stale", "r-1")),
+        ));
+        let mut session = HostedSession::new(server.uri(), "c-1").with_auth(Some(hive));
+        let events = run_turn(&mut session).await;
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Text(t) if t == "hosted hello")),
+            "the authenticated turn's text must arrive: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, SessionEvent::Error(_))),
+            "no error after the refresh: {events:?}"
+        );
+    }
+
+    /// Signed out, the server's 401 is reported as "sign in to Hive" with
+    /// the `Auth` kind, not as an unreachable or broken server.
+    #[tokio::test]
+    async fn a_401_from_the_server_tells_the_user_to_sign_in_to_hive() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/c-1/turns"))
+            .respond_with(ResponseTemplate::new(401).set_body_string(r#"{"error":"unauthorized"}"#))
+            .mount(&server)
+            .await;
+
+        let mut session = HostedSession::new(server.uri(), "c-1");
+        let events = run_turn(&mut session).await;
+        let error = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .expect("a refused turn reports an error");
+        assert_eq!(error.kind, StreamErrorKind::Auth);
+        assert_eq!(error.message, SIGN_IN_TO_HIVE);
+    }
+
+    /// The bearer and the history never go over plain http to a host off
+    /// this machine's network.
+    #[tokio::test]
+    async fn a_plain_http_server_off_the_local_network_is_never_sent_the_bearer() {
+        let hive = Arc::new(HiveSession::new(
+            "http://127.0.0.1:1",
+            Some(token_pair("secret", "r-1")),
+        ));
+        let mut session = HostedSession::new("http://93.184.216.34", "c-1").with_auth(Some(hive));
+        let events = run_turn(&mut session).await;
+        let error = events
+            .iter()
+            .find_map(|e| match e {
+                SessionEvent::Error(error) => Some(error),
+                _ => None,
+            })
+            .expect("the turn is refused");
+        assert!(error.message.contains("plain http://"), "{}", error.message);
     }
 }

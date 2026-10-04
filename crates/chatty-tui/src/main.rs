@@ -528,6 +528,8 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // `virtual_agents`, AGE-614) is an error to fix, not a default to run.
     let module_settings = module_settings_result.context("Failed to load module settings")?;
     let remote_agents = a2a_agents_result.unwrap_or_default();
+    // Before any agent is built: every spec plugin call is metered (AGE-837).
+    engine::install_plugin_meter().await;
 
     // --ollama / --openai-compat-url: auto-discover models from a running server
     // and inject ephemeral provider + model configs so no pre-configuration is needed.

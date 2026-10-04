@@ -110,6 +110,7 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
         });
     };
 
+    let mut seen_approvals = std::collections::HashSet::new();
     for (idx, item) in trace.items.iter().enumerate() {
         match item {
             TraceItem::Thinking(thinking) => {
@@ -120,6 +121,11 @@ fn push_trace_blocks(blocks: &mut Vec<Block>, namespace: u64, trace: &SystemTrac
                 });
             }
             TraceItem::ApprovalPrompt(approval) => {
+                // One card per broker-assigned request id, however many
+                // times the trace was replayed into this one (AGE-828).
+                if !seen_approvals.insert(approval.id.as_str()) {
+                    continue;
+                }
                 flush_activity(blocks, &mut activity_tools);
                 blocks.push(Block::Approval {
                     id: BlockId::from_parts(namespace, &approval.id),
