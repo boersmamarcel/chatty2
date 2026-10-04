@@ -32,6 +32,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+pub mod agent_eval;
 pub mod agent_spec;
 pub mod at_mention;
 pub mod auth;

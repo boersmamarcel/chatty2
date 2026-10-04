@@ -3,6 +3,7 @@ mod app;
 mod engine;
 mod events;
 mod headless;
+mod eval_team;
 mod install_team;
 // Participant mode reaches the broker over a Unix socket; there is no Windows
 // equivalent yet, and `chatty_protocol_gateway::worker`'s server half is
@@ -431,6 +432,27 @@ struct Cli {
     #[arg(long, value_name = "NAME[@VERSION]", conflicts_with_all = ["headless", "pipe", "participant_fd", "team", "agent"])]
     install_team: Option<String>,
 
+    /// Measure a team on the tasks of its spec's `[eval]` section, then exit
+    /// (MK-T6): each task runs --runs times headless, each run in a fresh
+    /// workspace holding the task's files, and the task's verifier decides
+    /// pass or fail. Writes one JSON result (per-task pass/fail, tokens,
+    /// wall-clock, the model, the harness version and the bundle hash) to
+    /// --eval-out, for the registry's `POST /api/agents/{name}/{version}/evals`.
+    /// --model, the provider flags and the budgets apply to every run.
+    ///
+    /// Example: --eval-team payments-lead@1.0.0 --runs 3 --openai-compat-url http://localhost:8000/v1
+    #[arg(long, value_name = "NAME@VERSION", conflicts_with_all = ["headless", "pipe", "participant_fd", "team", "agent", "agent_json", "install_team", "message", "broker"])]
+    eval_team: Option<String>,
+
+    /// Runs per task for --eval-team (k): a score is always shown with it.
+    #[arg(long, value_name = "K", default_value_t = 1, requires = "eval_team")]
+    runs: u32,
+
+    /// Where --eval-team writes its result (default:
+    /// `eval-<name>-<version>.json` in the current directory).
+    #[arg(long, value_name = "PATH", requires = "eval_team")]
+    eval_out: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -521,6 +543,16 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
 
     if let Some(team) = &cli.install_team {
         return install_team::run(team).await;
+    }
+    if let Some(team) = &cli.eval_team {
+        return eval_team::run(eval_team::EvalOptions {
+            team_ref: team.clone(),
+            runs: cli.runs,
+            out: cli.eval_out.clone(),
+            forward: eval_forwarded_flags(&cli),
+            max_duration: cli.max_duration,
+        })
+        .await;
     }
 
     // Load providers, models, execution settings, module settings, and A2A agents
@@ -976,6 +1008,29 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     }
 
     result
+}
+
+/// The flags every `--eval-team` run is started with: the model, the
+/// provider and the budgets this process was given.
+fn eval_forwarded_flags(cli: &Cli) -> Vec<String> {
+    let mut flags = Vec::new();
+    let mut pass = |flag: &str, value: Option<String>| {
+        if let Some(value) = value {
+            flags.push(flag.to_string());
+            flags.push(value);
+        }
+    };
+    pass("--model", cli.model.clone());
+    pass("--openai-compat-url", cli.openai_compat_url.clone());
+    pass("--api-key", cli.api_key.clone());
+    pass("--ollama", cli.ollama.clone());
+    pass("--think", cli.think.map(|b| b.to_string()));
+    pass("--max-agent-turns", cli.max_agent_turns.map(|n| n.to_string()));
+    pass(
+        "--max-duration",
+        cli.max_duration.map(|d| d.as_secs().max(1).to_string()),
+    );
+    flags
 }
 
 /// Whether this process starts a broker: a root run with `--broker` or

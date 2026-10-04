@@ -32,6 +32,11 @@
 //! max_agent_turns = 0           # 0 = uncapped, the deadline applies
 //! max_duration = "30m"
 //! cap_usd = 2.0                 # per task, feeds the spend gate
+//!
+//! [[eval.tasks]]                # optional: what the team is measured on
+//! id = "smoke"                  # (MK-T6, crate::agent_eval)
+//! prompt = "Review the branch fix/login"
+//! verify = "test -s \"$CHATTY_EVAL_ANSWER\""
 //! ```
 //!
 //! TOML on disk, the same shape as JSON on the wire. Unknown fields are an
@@ -51,6 +56,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_eval::EvalSection;
 use crate::factories::agent_factory::{tool_profile, tool_profile_names};
 use crate::services::turn_budget::parse_duration;
 use crate::settings::models::execution_settings::{
@@ -132,6 +138,10 @@ pub struct AgentSpec {
     pub swarm: SwarmSection,
     #[serde(default, skip_serializing_if = "BudgetSection::is_empty")]
     pub budget: BudgetSection,
+    /// `[eval]`: the tasks a published team is measured on (MK-T6,
+    /// [`crate::agent_eval`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eval: Option<EvalSection>,
 }
 
 /// `[agent]`: who it is and what it runs.
@@ -453,6 +463,8 @@ pub enum SpecError {
     UnrequestedGrant(String),
     BadDuration(String),
     BadCap(f64),
+    /// A problem with the `[eval]` bundle.
+    BadEval(String),
 }
 
 impl std::fmt::Display for SpecError {
@@ -484,6 +496,7 @@ impl std::fmt::Display for SpecError {
             Self::UnrequestedGrant(why) => write!(f, "plugins: {why}"),
             Self::BadDuration(why) => write!(f, "budget.max_duration: {why}"),
             Self::BadCap(cap) => write!(f, "budget.cap_usd {cap} is not a positive amount"),
+            Self::BadEval(why) => write!(f, "{why}"),
         }
     }
 }
@@ -606,6 +619,9 @@ impl AgentSpec {
             && !(cap.is_finite() && cap > 0.0)
         {
             errors.push(SpecError::BadCap(cap));
+        }
+        if let Some(eval) = &self.eval {
+            errors.extend(eval.problems().into_iter().map(SpecError::BadEval));
         }
         if errors.is_empty() {
             Ok(())
@@ -1268,6 +1284,7 @@ cap_usd = 2.0
                 cap_usd: Some(-1.0),
                 ..BudgetSection::default()
             },
+            eval: None,
         };
         let models = [ModelConfig::new(
             "qwen3:4b".to_string(),
