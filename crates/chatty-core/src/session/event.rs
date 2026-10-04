@@ -116,5 +116,25 @@ pub enum SessionEvent {
     /// The turn is over; the frontend finalizes it now.
     TurnEnded,
     /// A prompt to send as the next turn, after finalizing this one.
-    FollowUp(String),
+    FollowUp(FollowUp),
+}
+
+/// A follow-up the session asks for: the prompt, and the id it is known by
+/// (ADR-0024 § 1). A hosted client sends back only the id — the server
+/// injects the text it recorded under it — so a follow-up turn cannot
+/// carry text the session never emitted.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FollowUp {
+    pub id: String,
+    pub prompt: String,
+}
+
+impl FollowUp {
+    /// `prompt`, under a fresh id.
+    pub fn new(prompt: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            prompt: prompt.into(),
+        }
+    }
 }

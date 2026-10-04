@@ -19,7 +19,7 @@ use chatty_core::services::{
     AgentTaskSnapshot, McpService, MemoryService, StreamSurface, is_agent_todo_tool,
 };
 use chatty_core::session::{
-    AgentSession, AgentSessionConfig, Delegation, HostedSession, TurnInput, TurnKind,
+    AgentSession, AgentSessionConfig, Delegation, FollowUp, HostedSession, TurnInput, TurnKind,
     turn_transport,
 };
 use chatty_core::session::{Arrival, Decision, Mailbox, TurnEnd};
@@ -350,6 +350,9 @@ pub enum EngineAction {
 pub(crate) struct QueuedSend {
     pub message: String,
     pub delegation: Option<Delegation>,
+    /// The id of the session's follow-up this sends back, which is all a
+    /// hosted conversation sends of it (ADR-0024 § 1).
+    pub follow_up: Option<String>,
 }
 
 impl QueuedSend {
@@ -357,6 +360,14 @@ impl QueuedSend {
         Self {
             message,
             delegation: None,
+            follow_up: None,
+        }
+    }
+
+    fn follow_up(follow_up: FollowUp) -> Self {
+        Self {
+            follow_up: Some(follow_up.id),
+            ..Self::message(follow_up.prompt)
         }
     }
 }
@@ -506,6 +517,7 @@ pub(crate) fn plugin_host(
         models: models.models().to_vec(),
         providers: providers.to_vec(),
         meter: PLUGIN_METER.get().cloned().unwrap_or_default(),
+        paid: Vec::new(),
     }
 }
 
@@ -926,6 +938,7 @@ impl ChatEngine {
         let send = QueuedSend {
             message: text.clone(),
             delegation: Some(delegation),
+            follow_up: None,
         };
         let decision = self
             .mailbox
@@ -993,8 +1006,8 @@ impl ChatEngine {
     /// bubble — the earlier system line (`Agent protocol follow-up: …`, or
     /// the loop-guard/deadline `eprintln!` in headless) is the only visible
     /// signal (AGE-242 / D3, mirrors the desktop's `send_protocol_follow_up`).
-    pub fn send_protocol_follow_up(&mut self, message: String) {
-        self.send_message_inner(QueuedSend::message(message), false);
+    pub(crate) fn send_protocol_follow_up(&mut self, send: QueuedSend) {
+        self.send_message_inner(send, false);
     }
 
     fn send_message_inner(&mut self, send: QueuedSend, show_in_transcript: bool) {
@@ -1035,6 +1048,7 @@ impl ChatEngine {
         let QueuedSend {
             message,
             delegation,
+            follow_up,
         } = send;
 
         // Injected protocol follow-ups re-enter here; only a real human turn
@@ -1090,6 +1104,7 @@ impl ChatEngine {
         Some(TurnInput {
             kind,
             delegation,
+            follow_up,
             ..TurnInput::text(self.pastes.expand(&message))
         })
     }
@@ -1225,15 +1240,15 @@ impl ChatEngine {
                 self.drain_mailbox(TurnEnd::Error);
                 EngineAction::Redraw
             }
-            AppEvent::AgentProtocolFollowUp(prompt) => {
-                self.add_system_message(format!("Agent protocol follow-up: {}", prompt));
+            AppEvent::AgentProtocolFollowUp(follow_up) => {
+                self.add_system_message(format!("Agent protocol follow-up: {}", follow_up.prompt));
                 // Queued rather than dropped while a turn streams (AGE-242 /
                 // D3); the mailbox keeps the loop's one-slot rule.
                 match self.mailbox.arrive(
-                    Arrival::FollowUp(QueuedSend::message(prompt)),
+                    Arrival::FollowUp(QueuedSend::follow_up(follow_up)),
                     self.is_streaming,
                 ) {
-                    Decision::Dispatch(next) => self.send_protocol_follow_up(next.message.message),
+                    Decision::Dispatch(next) => self.send_protocol_follow_up(next.message),
                     Decision::Refused(refusal) => {
                         warn!(%refusal, "Dropping a later agent protocol follow-up");
                     }

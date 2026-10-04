@@ -86,7 +86,8 @@ fn describe(event: &AppEvent) -> String {
         AppEvent::StreamCompleted => "StreamCompleted".to_string(),
         AppEvent::StreamCancelled => "StreamCancelled".to_string(),
         AppEvent::StreamError(error) => format!("StreamError(kind={:?})", error.kind),
-        AppEvent::AgentProtocolFollowUp(prompt) => {
+        AppEvent::AgentProtocolFollowUp(follow_up) => {
+            let prompt = &follow_up.prompt;
             // The prompt text is long and tuned often; the golden pins that a
             // follow-up was injected and which protocol asked for it, not its
             // exact wording.

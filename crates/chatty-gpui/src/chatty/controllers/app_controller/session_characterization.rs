@@ -168,8 +168,8 @@ async fn record(scenario: Scenario, cx: &mut gpui::TestAppContext) -> Vec<String
     cx.update(|cx| {
         stream_manager.update(cx, |manager: &mut StreamManager, cx| {
             for event in session_events {
-                if let chatty_core::session::SessionEvent::FollowUp(prompt) = &event {
-                    follow_up = Some(prompt.clone());
+                if let chatty_core::session::SessionEvent::FollowUp(next) = &event {
+                    follow_up = Some(next.prompt.clone());
                 }
                 manager.handle_session_event(&conv_id, event, cx);
             }

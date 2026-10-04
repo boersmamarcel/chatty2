@@ -535,7 +535,7 @@ impl TaskMapper {
             | SessionEvent::ToolCallStarted { .. }
             | SessionEvent::ToolCallResult { .. }
             | SessionEvent::ToolCallError { .. } => self.final_text.clear(),
-            SessionEvent::FollowUp(prompt) if handoff::is_follow_up(prompt) => {
+            SessionEvent::FollowUp(follow_up) if handoff::is_follow_up(&follow_up.prompt) => {
                 self.handoff_follow_ups += 1;
             }
             _ => {}
@@ -928,7 +928,9 @@ mod tests {
         assert!(mapper.map(&SessionEvent::TurnEnded).is_none());
         assert!(
             mapper
-                .map(&SessionEvent::FollowUp("again".into()))
+                .map(&SessionEvent::FollowUp(
+                    chatty_core::session::FollowUp::new("again")
+                ))
                 .is_none()
         );
         assert!(

@@ -157,10 +157,7 @@ impl HostedSession {
             bail!("a hosted turn needs text; attachments do not cross the wire yet");
         }
 
-        let body = serde_json::json!({
-            "text": text,
-            "kind": wire_turn_kind(input.kind),
-        });
+        let body = turn_body(input, &text);
         let url = format!(
             "{}/api/conversations/{}/turns",
             self.server_url, self.remote_id
@@ -408,6 +405,27 @@ impl SseFrames {
     }
 }
 
+/// What a turn sends (ADR-0024 § 1): a follow-up the session emitted only
+/// its id, under which the server recorded its text; anything else its
+/// text. A follow-up without an id is the client's own text, so it goes as
+/// a human turn.
+fn turn_body(input: &TurnInput, text: &str) -> serde_json::Value {
+    match (input.kind, input.follow_up.as_deref()) {
+        (TurnKind::ProtocolFollowUp, Some(id)) => serde_json::json!({
+            "kind": wire_turn_kind(TurnKind::ProtocolFollowUp),
+            "follow_up": id,
+        }),
+        (TurnKind::ProtocolFollowUp, None) => serde_json::json!({
+            "text": text,
+            "kind": wire_turn_kind(TurnKind::Human),
+        }),
+        (kind @ (TurnKind::Human | TurnKind::Regenerate), _) => serde_json::json!({
+            "text": text,
+            "kind": wire_turn_kind(kind),
+        }),
+    }
+}
+
 /// The `kind` a [`TurnKind`] is called on the wire (AGE-281).
 ///
 /// A client echoing a `FollowUp` back **must** say `protocol_follow_up`: a
@@ -428,6 +446,7 @@ fn normalize_base_url(url: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::FollowUp;
 
     fn drain(frames: &mut SseFrames, chunk: &str) -> Vec<(String, String)> {
         frames.push(chunk.as_bytes())
@@ -487,7 +506,7 @@ mod tests {
             },
             SessionEvent::Cancelled,
             SessionEvent::TurnEnded,
-            SessionEvent::FollowUp("next".into()),
+            SessionEvent::FollowUp(FollowUp::new("next")),
         ] {
             let data = serde_json::to_string(&event).unwrap();
             let decoded = decode_frame("whatever", &data).unwrap();
@@ -594,6 +613,29 @@ mod tests {
         );
         assert_eq!(wire_turn_kind(TurnKind::Human), "human");
         assert_eq!(wire_turn_kind(TurnKind::Regenerate), "regenerate");
+    }
+
+    /// ADR-0024 § 1: a follow-up the session emitted goes back as its id
+    /// alone, never its text; one with no id is the client's own words, a
+    /// human turn.
+    #[test]
+    fn a_follow_up_is_sent_back_by_its_id_alone() {
+        let follow_up = FollowUp::new("call the todo tool");
+        let id = follow_up.id.clone();
+        let input = TurnInput::follow_up(follow_up);
+        assert_eq!(
+            turn_body(&input, "call the todo tool"),
+            serde_json::json!({"kind": "protocol_follow_up", "follow_up": id})
+        );
+        let own = TurnInput::protocol_follow_up("continue");
+        assert_eq!(
+            turn_body(&own, "continue"),
+            serde_json::json!({"kind": "human", "text": "continue"})
+        );
+        assert_eq!(
+            turn_body(&TurnInput::text("hi"), "hi"),
+            serde_json::json!({"kind": "human", "text": "hi"})
+        );
     }
 
     fn token_pair(token: &str, refresh_token: &str) -> hive_client::TokenPair {

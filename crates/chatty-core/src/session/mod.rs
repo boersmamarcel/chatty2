@@ -81,7 +81,7 @@ use crate::settings::models::providers_store::ProviderConfig;
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentProgressSlot};
 
 pub use delegation::Delegation;
-pub use event::SessionEvent;
+pub use event::{FollowUp, SessionEvent};
 pub use handler::{
     BREVITY_FOLLOW_UP, MALFORMED_TOOL_CALL_FOLLOW_UP, SessionStreamHandler, TurnPolicy,
     is_agent_todo_tool,
@@ -148,6 +148,9 @@ pub struct TurnInput {
     /// Hand the turn straight to a named agent instead of asking the model
     /// (`/agent <name> <prompt>`, AGE-744).
     pub delegation: Option<Delegation>,
+    /// For a follow-up the session emitted: its id ([`FollowUp::id`]),
+    /// which is all a hosted session sends for it (ADR-0024 § 1).
+    pub follow_up: Option<String>,
 }
 
 impl TurnInput {
@@ -160,6 +163,7 @@ impl TurnInput {
             kind: TurnKind::Human,
             turn_budget: None,
             delegation: None,
+            follow_up: None,
         }
     }
 
@@ -179,6 +183,15 @@ impl TurnInput {
         }
     }
 
+    /// The follow-up the session emitted as `follow_up`, sent back under
+    /// its id.
+    pub fn follow_up(follow_up: FollowUp) -> Self {
+        Self {
+            follow_up: Some(follow_up.id),
+            ..Self::protocol_follow_up(follow_up.prompt)
+        }
+    }
+
     /// Re-run the last user message (see [`TurnKind::Regenerate`]).
     pub fn regenerate() -> Self {
         Self {
@@ -188,6 +201,7 @@ impl TurnInput {
             kind: TurnKind::Regenerate,
             turn_budget: None,
             delegation: None,
+            follow_up: None,
         }
     }
 }
@@ -499,6 +513,8 @@ impl AgentSession {
             bail!("no conversation");
         };
 
+        // A local session runs the follow-up's text itself; its id is the
+        // hosted wire's.
         let TurnInput {
             contents,
             llm_only_contents,
@@ -506,6 +522,7 @@ impl AgentSession {
             kind,
             turn_budget,
             delegation,
+            follow_up: _,
         } = input;
 
         // Snapshot BEFORE committing the new message: `stream_prompt` appends

@@ -241,7 +241,7 @@ impl DesktopSink {
                 self.on_progress(progress.clone());
                 self.forward(SessionEvent::Delegation(progress));
             }
-            SessionEvent::FollowUp(prompt) => self.inject_follow_up(prompt),
+            SessionEvent::FollowUp(follow_up) => self.inject_follow_up(follow_up),
             SessionEvent::Error(_) => {
                 // The manager drops the stream on an error, so the trace has
                 // to be attached first or the failed turn loses its tool calls.
@@ -318,7 +318,7 @@ impl DesktopSink {
     /// Protocol / loop-guard follow-up: sent after the turn is finalized so
     /// the UI shows the previous response first. Hidden from the transcript
     /// bubble list.
-    fn inject_follow_up(&mut self, prompt: String) {
+    fn inject_follow_up(&mut self, follow_up: chatty_core::session::FollowUp) {
         let conv_id = self.conv_id.clone();
         debug!(conv_id = %conv_id, "Injecting protocol follow-up after stream");
         // A follow-up that never reaches the model looks exactly like a hung
@@ -326,7 +326,7 @@ impl DesktopSink {
         // (AGE-151).
         self.weak_ctrl
             .update(&mut self.cx, |app, cx| {
-                app.send_protocol_follow_up(prompt, cx);
+                app.send_protocol_follow_up(follow_up, cx);
             })
             .map_err(|e| {
                 warn!(

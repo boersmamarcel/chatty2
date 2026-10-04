@@ -367,7 +367,7 @@ mod tests {
             SessionEvent::TurnStarted,
             SessionEvent::TurnEnded,
             SessionEvent::Cancelled,
-            SessionEvent::FollowUp("next".into()),
+            SessionEvent::FollowUp(chatty_core::session::FollowUp::new("next")),
         ] {
             assert!(m.map(&event).is_empty(), "{event:?}");
         }

@@ -24,7 +24,7 @@ use crate::services::{
 };
 use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
-use super::SessionEvent;
+use super::{FollowUp, SessionEvent};
 
 /// Injected once when a provider rejects a tool call for malformed JSON.
 ///
@@ -476,7 +476,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
         }
         (self.emit)(SessionEvent::TurnEnded);
         if let Some(prompt) = self.pending_follow_up.take() {
-            (self.emit)(SessionEvent::FollowUp(prompt));
+            (self.emit)(SessionEvent::FollowUp(FollowUp::new(prompt)));
         }
     }
 }
@@ -622,7 +622,7 @@ mod tests {
         let follow_up = events
             .iter()
             .find_map(|event| match event {
-                SessionEvent::FollowUp(prompt) => Some(prompt.clone()),
+                SessionEvent::FollowUp(follow_up) => Some(follow_up.prompt.clone()),
                 _ => None,
             })
             .expect("an unknown-tool-call error must queue a corrective follow-up, not just stop");

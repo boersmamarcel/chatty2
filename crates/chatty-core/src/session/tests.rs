@@ -237,7 +237,7 @@ async fn a_finished_plan_without_verification_is_nudged_after_the_turn() {
     let events = events.borrow();
     assert!(matches!(
         events.last(),
-        Some(SessionEvent::FollowUp(prompt)) if prompt.contains("verify_completion")
+        Some(SessionEvent::FollowUp(follow_up)) if follow_up.prompt.contains("verify_completion")
     ));
 }
 
@@ -499,11 +499,9 @@ async fn a_malformed_tool_call_is_retried_once() {
     };
 
     let first = replay_scenario(malformed(), policy()).await;
-    assert!(
-        first
-            .iter()
-            .any(|e| matches!(e, SessionEvent::FollowUp(p) if p == MALFORMED_TOOL_CALL_FOLLOW_UP))
-    );
+    assert!(first.iter().any(
+        |e| matches!(e, SessionEvent::FollowUp(f) if f.prompt == MALFORMED_TOOL_CALL_FOLLOW_UP)
+    ));
 
     let retried = replay_scenario(
         malformed(),
@@ -537,15 +535,18 @@ async fn the_retry_turn_itself_does_not_nudge_again() {
 
     let first = run_turn(&mut session, TurnInput::text("do it"), malformed()).await;
     let nudge = first.iter().find_map(|e| match e {
-        SessionEvent::FollowUp(prompt) => Some(prompt.clone()),
+        SessionEvent::FollowUp(follow_up) => Some(follow_up.clone()),
         _ => None,
     });
-    assert_eq!(nudge.as_deref(), Some(MALFORMED_TOOL_CALL_FOLLOW_UP));
+    assert_eq!(
+        nudge.as_ref().map(|f| f.prompt.as_str()),
+        Some(MALFORMED_TOOL_CALL_FOLLOW_UP)
+    );
     session.finish_turn(None, vec![]);
 
     let retried = run_turn(
         &mut session,
-        TurnInput::protocol_follow_up(nudge.unwrap()),
+        TurnInput::follow_up(nudge.unwrap()),
         malformed(),
     )
     .await;
@@ -836,7 +837,8 @@ fn describe(event: &SessionEvent) -> String {
         SessionEvent::Error(error) => format!("Error(kind={:?}, {:?})", error.kind, error.message),
         SessionEvent::Cancelled => "Cancelled".to_string(),
         SessionEvent::TurnEnded => "TurnEnded".to_string(),
-        SessionEvent::FollowUp(prompt) => {
+        SessionEvent::FollowUp(follow_up) => {
+            let prompt = &follow_up.prompt;
             let kind = if prompt.contains("write_todos") {
                 "write_todos"
             } else if prompt.contains("verify_completion") {

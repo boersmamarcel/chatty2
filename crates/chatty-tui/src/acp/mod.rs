@@ -362,10 +362,10 @@ async fn run_prompt(
                 }
                 SessionEvent::Error(e) => error = Some(e.to_string()),
                 SessionEvent::Cancelled => stop_reason = StopReason::Cancelled,
-                SessionEvent::FollowUp(prompt)
+                SessionEvent::FollowUp(follow_up)
                     if error.is_none() && stop_reason != StopReason::Cancelled =>
                 {
-                    next = Some(TurnInput::protocol_follow_up(prompt));
+                    next = Some(TurnInput::follow_up(follow_up));
                 }
                 _ => {}
             }

@@ -35,7 +35,7 @@ use super::message_ops_internals::{
 };
 use super::*;
 use crate::chatty::views::transcript::inline_chat_attachments;
-use chatty_core::session::{Arrival, Decision, Delegation, QueuedId, TurnEnd};
+use chatty_core::session::{Arrival, Decision, Delegation, FollowUp, QueuedId, TurnEnd};
 
 /// What the composer sends, as the mailbox holds it while a turn streams
 /// (AGE-482). The `TurnInput` is built at dispatch, where the attachment
@@ -51,6 +51,9 @@ pub(super) struct QueuedSend {
     /// conversation's broker instead of asking the model (AGE-744).
     /// `message` is then the command as typed.
     pub delegation: Option<Delegation>,
+    /// The id of the session's follow-up this sends back, which is all a
+    /// hosted conversation sends of it (ADR-0024 § 1).
+    pub follow_up: Option<String>,
 }
 
 impl ChattyApp {
@@ -81,6 +84,7 @@ impl ChattyApp {
                 attachments,
                 terminal_context,
                 delegation: None,
+                follow_up: None,
             },
             cx,
         );
@@ -109,6 +113,7 @@ impl ChattyApp {
                 attachments: Vec::new(),
                 terminal_context: None,
                 delegation: Some(delegation),
+                follow_up: None,
             },
             cx,
         );
@@ -153,12 +158,13 @@ impl ChattyApp {
     /// showing a user bubble. The plan UI (To-dos card / strip) is the only
     /// visible signal for todo-protocol nudges. Queued behind the streaming
     /// turn if there is one (AGE-242 / D3; one slot).
-    pub(super) fn send_protocol_follow_up(&mut self, message: String, cx: &mut Context<Self>) {
+    pub(super) fn send_protocol_follow_up(&mut self, follow_up: FollowUp, cx: &mut Context<Self>) {
         let send = QueuedSend {
-            message,
+            message: follow_up.prompt,
             attachments: vec![],
             terminal_context: None,
             delegation: None,
+            follow_up: Some(follow_up.id),
         };
         let Some(conv_id) = self.active_conversation_id(cx) else {
             self.send_message_inner(send, false, cx);
@@ -248,6 +254,7 @@ impl ChattyApp {
             attachments,
             terminal_context,
             delegation,
+            follow_up,
         } = send;
         debug!(
             message = %message,
@@ -541,6 +548,7 @@ impl ChattyApp {
                             },
                             turn_budget: None,
                             delegation,
+                            follow_up,
                         },
                         chat_view,
                         stream_manager,

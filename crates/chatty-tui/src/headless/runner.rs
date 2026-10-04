@@ -289,7 +289,9 @@ impl HeadlessRunner {
     /// answer, and the model gets the errors as a protocol turn.
     pub(super) fn send_handoff_follow_up(&mut self, prompt: String) {
         if let Some(observer) = self.event_observer.as_ref() {
-            observer(&SessionEvent::FollowUp(prompt.clone()));
+            observer(&SessionEvent::FollowUp(
+                chatty_core::session::FollowUp::new(prompt.clone()),
+            ));
         }
         let Some(input) = self.prepare_send(prompt, false) else {
             return;
@@ -812,7 +814,8 @@ impl HeadlessRunner {
                 self.usage.checkpoint();
                 self.drain_mailbox(TurnEnd::Cancelled);
             }
-            AppEvent::AgentProtocolFollowUp(prompt) => {
+            AppEvent::AgentProtocolFollowUp(follow_up) => {
+                let prompt = follow_up.prompt;
                 self.transcript
                     .add_system(format!("Agent protocol follow-up: {prompt}"));
                 match self

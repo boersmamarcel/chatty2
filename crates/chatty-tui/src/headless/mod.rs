@@ -758,7 +758,8 @@ pub async fn run_headless(
                 }
                 break;
             }
-            AppEvent::AgentProtocolFollowUp(prompt) => {
+            AppEvent::AgentProtocolFollowUp(follow_up) => {
+                let prompt = follow_up.prompt;
                 // The session's own next-turn prompt (the todo protocol's
                 // verify_completion reminder, a retry after a malformed or
                 // unknown tool call), emitted after `StreamCompleted`. That
