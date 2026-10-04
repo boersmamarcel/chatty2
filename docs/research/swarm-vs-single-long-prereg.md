@@ -1,4 +1,3 @@
-<!-- DRAFT (AGE-826, parked 2026-10-04): fill <freeze date>, delete this line, pin its sha256 in swarm_bench.rs, commit and push BEFORE any swarm run. -->
 # Pre-registration: swarm vs single agent on long multi-part tasks (EV-7)
 
 **When to read this:** you are about to run, or read the result of, the
@@ -14,7 +13,7 @@ either is not pre-registered. The format follows EV-3's
 [`swarm-vs-single-prereg.md`](./swarm-vs-single-prereg.md); where this file
 is silent, that one applies.
 
-Committed on <freeze date>, after the single-arm calibration
+Committed on 2026-10-04 (revised that day, before any swarm-arm run: k = 3 replicates, shared seeds, mixed-model analysis; the earlier draft was n = 15 pairs, k = 1), after the single-arm calibration
 ([`swarm-vs-single-long-calibration.md`](./swarm-vs-single-long-calibration.md))
 and before any swarm-arm run of any task in `evals/swarm-long/`.
 
@@ -145,11 +144,12 @@ the same tasks.
 | Model | `RedHatAI/Qwen3.8-27B-INT4` on the local vLLM (`http://172.17.0.1:8000/v1`), 32,768-token context |
 | Thinking | off (`--think false`) |
 | Temperature | 0.3 |
-| Trials | one run per task and arm |
-| Order | the order above; even positions run `single` first, odd positions `swarm` first |
+| Trials | **k = 3** runs per task and arm (replicates 1, 2, 3) |
+| Shared randomness | run i of a task uses the same per-request sampling `seed` in both arms: `seed = int(sha256("ev7:<task>:<i>")[:8], 16) mod 2^31` (`bench.py seed_for`). The bench's metering proxy injects it into every `/chat/completions` body (chatty-tui itself cannot pass one); every call of the run, of every team agent, carries it, and `result.json` records the seed and `meter.calls_with_seed`. Temperature stays 0.3 in both arms. vLLM seeds sampling per request, so the arms differ in the agent loop, not in the dice of equal prompts |
+| Order | the order above, replicate 1, then 2, then 3 (`--rep i`, run ids `ev7-run-<stream>-r<i>`); even positions run `single` first, odd positions `swarm` first |
 | Per-run cap | `--max-duration 45m`; hard kill at 50 min |
 | Shared server | at most 2 running + waiting requests on the server before a request is sent; the check is serialised host-wide (`--throttle-lock`), and a request waits at most 150 s for a slot (`--hold-max-s 150`, under Chatty's 180 s stall watchdog). Wall time includes these waits |
-| Streams | two: the ordered list split by position (odd → stream a, even → stream b), run ids `ev7-run-a` and `ev7-run-b`; within a stream the pairs run one after the other |
+| Streams | two: the ordered list split by position (odd → stream a, even → stream b), within a stream the pairs run one after the other |
 
 ```bash
 python3 scripts/swarm-bench/bench.py --provider openai-compat \
@@ -157,28 +157,27 @@ python3 scripts/swarm-bench/bench.py --provider openai-compat \
   --tasks evals/swarm-long/tasks --only ld01,lc07,lr01,ld03,lc08,lr03,ld04,lc09,lr06,ld06,lc10,lr08,ld07,ld08,ld09 \
   --max-turns 100 --max-duration 45m --run-timeout 3000 --hold-max-s 150 \
   --prereg docs/research/swarm-vs-single-long-prereg.md \
-  --chatty-tui <release chatty-tui> --out <results root> --run-id ev7-run
-python3 scripts/swarm-bench/report_long.py <results root>/ev7-run \
+  --chatty-tui <release chatty-tui> --out <results root> --rep <1|2|3> --run-id ev7-run-<a|b>-r<i>
+# the stream a/b task lists are the odd/even positions of the order above
+/media/marcel/data/rust/swarm-results/ev7-venv/bin/python scripts/swarm-bench/analyze.py <results root>/ev7-run-*-r* \
   --out <report> --json <numbers.json>
 ```
 
 ## n and the minimum detectable effects
 
-**n = 15 pairs.** Every task the calibration kept. In calibration a single-arm run took 27
-minutes on average; a team run is assumed to take about 45 (capped at 50), so
-15 pairs need about 18 GPU-stream-hours: about 9–10 hours of wall time on
-two streams, inside the 14-hour budget.
+**n = 15 tasks, k = 3 replicates per arm = 90 runs, about 6 sub-parts each.**
+A single-arm run took 27 minutes on average in calibration; a team run is
+assumed to take about 45 (capped at 50), so 45 pairs need about 54
+GPU-stream-hours: about 27 hours of wall time on two streams.
 
-| Endpoint | Test | MDE (α = 0.05 two-sided, power 0.80) |
-|---|---|---|
-| Sub-part score | sign-flip permutation (≈ paired t), SD of the per-task difference 0.68 (from the calibration replicates) | **53 pp** |
-| Full pass | exact McNemar, q = 0 / 0.05 / 0.10 | 48 / 58 / 67 pp |
-
-The SD is large because a single run of a kept task tends to score near 0 or
-near 1; it comes from `scripts/swarm-bench/mde_long.py --n 15 --sd 0.68`.
-
-**This benchmark detects only large effects.** An effect under these MDEs can
-be neither shown nor excluded.
+**Smallest effect of interest: 25 points** of sub-part pass rate. Replicate
+noise was large in calibration (SD of the difference between two runs 0.68),
+which is why k = 3 and a mixed model on sub-parts rather than a test on 15
+task means. `scripts/swarm-bench/mde_long.py` (k = 1, task means) gave an MDE
+of 53 pp; with k = 3 and sub-part rows the MDE is smaller but is not
+recomputed here; the report states the interval and whether it rules a
+25-point effect in or out. An interval that straddles 25 points can be
+neither shown nor excluded.
 
 ## Metrics
 
@@ -199,43 +198,49 @@ be neither shown nor excluded.
 
 ## Analysis
 
-- **Primary.** Δ = mean over tasks of (swarm score − single score). The 95 %
-  CI is a paired bootstrap (10,000 resamples, seed 670); the test is the
-  exact two-sided sign-flip permutation test on the per-task differences
-  (all 2ⁿ sign patterns).
-- **Full pass.** The paired difference with a bootstrap CI and the exact
-  McNemar test on the discordant pairs.
-- **Cost and time.** The geometric mean over tasks of the swarm ÷ single
-  ratio, with a paired-bootstrap 95 % CI; tokens per solved sub-part as a
-  plain ratio of the two arms.
-- `scripts/swarm-bench/report_long.py` computes all of it.
+- **Primary.** A logistic mixed model on sub-part rows,
+  `part_pass ~ arm` with a random intercept per task
+  (`statsmodels` `BinomialBayesMixedGLM`, variational Bayes). Reported: the
+  log-odds ratio swarm vs single with a 95 % interval (posterior mean ± 1.96
+  SD), the implied difference in points at the average task. Sensitivity: a
+  logistic GEE clustered on task.
+- **Secondary.** The paired task-mean score difference (swarm − single, mean
+  over the three replicates and over sub-parts, then over tasks) with a
+  bootstrap 95 % CI over tasks (10,000 resamples, seed 826), compared with
+  the 25-point smallest effect of interest.
+- **Cost.** Tokens (input + output, every agent) per solved sub-part, per
+  arm, and their ratio; mean wall time per run.
+- `scripts/swarm-bench/analyze.py` computes all of it (`--selftest` checks it
+  on fake data); it also checks that both arms of each (task, replicate) used
+  one seed. `report_long.py` (k = 1 pair tables, failure tags) may be used
+  for the descriptive per-task tables.
 - **Every finished run counts.** A timeout, a crash or a missing
   deliverable scores what the verifier finds (usually 0).
 - **The one exception.** If the model server itself fails (connection
   refused, HTTP 5xx, a restart) or the host reboots during a run, that run
-  is re-run once and the report says so. No run is re-run because of its
+  is re-run once with the same seed and the report says so. No run is re-run because of its
   outcome.
 
 ## Decision rule
 
-- **`SWARM_BETTER`:** Δ > 0 and permutation p < 0.05.
-- **`SINGLE_BETTER`:** Δ < 0 and permutation p < 0.05.
-- **`NO_DETECTABLE_DIFFERENCE`:** otherwise, read together with the MDE.
+- **`SWARM_BETTER`:** the primary 95 % interval is above 0.
+- **`SINGLE_BETTER`:** the primary 95 % interval is below 0.
+- **`NO_DETECTABLE_DIFFERENCE`:** otherwise, read together with the paired
+  CI and the 25-point smallest effect of interest.
 - **Worth its cost:** only `SWARM_BETTER` with tokens per solved sub-part at
   most 2× the single agent's. Anything else: no evidence that the swarm is
   worth its cost on long tasks, and teams stay experimental.
-- **Full pass** is reported with its McNemar p but does not decide the
-  verdict (it is underpowered at this n, see the MDE).
+- Full-task pass is reported descriptively and does not decide the verdict.
 - **Agreement with the prior:** *agrees* when Δ ≤ 0 and the swarm's tokens
   per solved sub-part are higher; *contradicts* it on `SWARM_BETTER`;
   otherwise neither.
 
 ## Stopping rule
 
-- **Runtime budget: 14 hours** of wall time from the first run, not counting
+- **Runtime budget: 40 hours** of wall time from the first run, not counting
   time the host or the server was down. If it runs out, the run stops after
-  the last complete pair and that prefix is analysed, labelled
-  "pre-registered subset, k of n", with the MDE for k.
+  the last complete replicate round (all 15 tasks, both arms, replicate i)
+  and those complete replicates are analysed, labelled "k = i of 3".
 - A container, server or host restart is not a stop: the run resumes with
   the same run id (finished runs are kept).
 
@@ -245,3 +250,11 @@ be neither shown nor excluded.
 - Dropping or adding tasks after the run starts.
 - Reporting a family alone as the headline result.
 - Re-using calibration runs in the analysis.
+
+## Addendum
+
+The "parallel" task family (six new tasks that reward broad parallel work) is
+pre-registered separately in
+[`swarm-vs-single-long-prereg-addendum-parallel.md`](./swarm-vs-single-long-prereg-addendum-parallel.md),
+frozen before that family's calibration. Its results are reported as a second
+family and never pooled into the headline result of this file.

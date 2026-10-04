@@ -74,7 +74,7 @@ fn prereg_exists_and_is_frozen() {
 /// SHA-256 of `docs/research/swarm-vs-single-long-prereg.md`, the long
 /// multi-part benchmark's pre-registration (EV-7, AGE-826). Frozen before its
 /// first swarm-arm run, like `PREREG_SHA256`.
-const LONG_PREREG_SHA256: &str = "__LONG_PREREG_SHA__";
+const LONG_PREREG_SHA256: &str = "cf523495ab64ec4e28fe3b3b196d41183029fd031beeb0cfe3cdd5b64341536c";
 
 /// `bench.py`'s `sha256_tree` over `evals/swarm-long/tasks/`: the long task
 /// set, frozen with its pre-registration (which records the same hash).
@@ -93,6 +93,26 @@ fn long_prereg_exists_and_is_frozen() {
         "docs/research/swarm-vs-single-long-prereg.md changed. It is frozen: \
          a run under a changed protocol is not pre-registered. Change it only \
          on purpose, and update this pin in the same PR."
+    );
+}
+
+/// SHA-256 of the parallel-family addendum, frozen before that family's
+/// tasks are written or calibrated.
+const LONG_PARALLEL_ADDENDUM_SHA256: &str = "5fff1fd002beb37cb9d45da6dd1388c8011e16c7f506925820d23e4f3d886820";
+
+#[test]
+fn long_parallel_addendum_is_frozen() {
+    let bytes = std::fs::read(
+        repo_root().join("docs/research/swarm-vs-single-long-prereg-addendum-parallel.md"),
+    )
+    .expect("the parallel addendum exists");
+    let hash: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(
+        hash, LONG_PARALLEL_ADDENDUM_SHA256,
+        "the parallel-family addendum changed. It is frozen."
     );
 }
 

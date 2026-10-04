@@ -210,6 +210,7 @@ class Meter(object):
         # lock, so two of them cannot both see a free slot and both take it.
         self.lock_path = lock_path
         self.records = []
+        self.seed = None
         self.lock = threading.Lock()
         meter = self
 
@@ -244,18 +245,27 @@ class Meter(object):
         length = int(handler.headers.get("Content-Length") or 0)
         body = handler.rfile.read(length) if length else None
         is_chat = handler.path.endswith("/chat/completions")
+        seed = self.seed if is_chat else None
+        if seed is not None and body:
+            # Shared randomness (EV-7): the same per-request seed in both arms.
+            try:
+                request = json.loads(body.decode("utf-8"))
+                request["seed"] = seed
+                body = json.dumps(request).encode("utf-8")
+            except ValueError:
+                seed = None
         slot = None
         if is_chat and self.metrics_url and self.lock_path:
             slot = open(self.lock_path, "a")
             fcntl.flock(slot, fcntl.LOCK_EX)
         try:
             held = self.hold() if is_chat else 0.0
-            self._forward(handler, body, is_chat, held, slot)
+            self._forward(handler, body, is_chat, held, slot, seed)
         finally:
             if slot is not None:
                 slot.close()
 
-    def _forward(self, handler, body, is_chat, held, slot):
+    def _forward(self, handler, body, is_chat, held, slot, seed=None):
         path = handler.path
         if path.startswith("/v1"):
             path = self.prefix + path[3:]
@@ -310,7 +320,7 @@ class Meter(object):
                 error = b"".join(whole)[:400].decode("utf-8", "replace")
             with self.lock:
                 self.records.append({
-                    "error": error,
+                    "error": error, "seed": seed,
                     "start": started, "end": time.time(), "held_s": held,
                     "status": response.status,
                     "input": (usage or {}).get("prompt_tokens"),
@@ -341,6 +351,8 @@ class Meter(object):
 
         return {
             "calls": len(calls),
+            "seeds": sorted(set(r.get("seed") for r in calls if r.get("seed") is not None)),
+            "calls_with_seed": sum(1 for r in calls if r.get("seed") is not None),
             "calls_without_usage": sum(1 for r in calls if r["input"] is None),
             "failed_calls": sum(1 for r in calls if r["status"] >= 400),
             "input_tokens": total("input"),
@@ -426,6 +438,12 @@ def wait_for_server(args):
         time.sleep(5)
 
 
+def seed_for(task, rep):
+    """The per-request sampling seed of replicate `rep` of `task`: the same in both arms."""
+    digest = hashlib.sha256(("ev7:%s:%d" % (task, rep)).encode()).hexdigest()
+    return int(digest[:8], 16) % (2 ** 31)
+
+
 def run_one(args, task, arm, env, meter, scratch, out_dir):
     workspace = os.path.join(scratch, "%s-%s" % (task["name"], arm))
     if os.path.exists(workspace):
@@ -436,6 +454,8 @@ def run_one(args, task, arm, env, meter, scratch, out_dir):
     if os.path.exists(usage_path):
         os.remove(usage_path)
     cmd = command(args, task, arm, workspace, usage_path)
+    seed = seed_for(task["name"], args.rep) if args.rep else None
+    meter.seed = seed
     waited = wait_for_server(args)
     started_at = now_iso()
     start = time.time()
@@ -493,6 +513,7 @@ def run_one(args, task, arm, env, meter, scratch, out_dir):
         "wall_ms": int(round((end - start) * 1000)), "waited_before_s": round(waited, 1),
         "pass": bool(check.get("pass")), "check": check,
         "score": check.get("score", 1.0 if check.get("pass") else 0.0),
+        "rep": args.rep, "seed": seed, "temperature": args.temperature,
         "usage": usage, "meter": meter.between(start, end),
         "worker_branches": sorted(b for b in branches if b.startswith("sub-agent/")),
         "complete": True,
@@ -515,6 +536,9 @@ def parse_args(argv):
     p.add_argument("--base-url", help="the provider's URL (required for --provider fake)")
     p.add_argument("--think", choices=("true", "false"))
     p.add_argument("--temperature", type=float, default=0.3)
+    p.add_argument("--rep", type=int, default=0,
+                   help="replicate index i (1..k): run i of a task uses seed_for(task, i) in both arms; "
+                        "0 = no seed (older runs)")
     p.add_argument("--only", help="comma-separated task names (a pre-registered subset)")
     p.add_argument("--limit", type=int, help="the first N tasks of the interleaved order")
     p.add_argument("--out", default=DEFAULT_OUT)
@@ -560,7 +584,7 @@ def main(argv):
 
     meta = {
         "schema": 1, "run_id": run_id, "provider": args.provider, "model": args.model,
-        "think": args.think, "temperature": args.temperature,
+        "think": args.think, "temperature": args.temperature, "rep": args.rep,
         "max_turns_single": args.max_turns, "max_duration": args.max_duration,
         "family_preset": FAMILY_PRESET,
         "tasks": [t["name"] for t in tasks], "arms": list(arms),
@@ -579,7 +603,7 @@ def main(argv):
     meta_path = os.path.join(run_dir, "meta.json")
     if os.path.isfile(meta_path):
         old = json.load(open(meta_path))
-        for key in ("provider", "model", "think", "tasks_sha256", "prereg_sha256"):
+        for key in ("provider", "model", "think", "tasks_sha256", "prereg_sha256", "rep"):
             if old.get(key) != meta.get(key):
                 die("%s exists with %s=%r; use another --run-id" % (run_dir, key, old.get(key)))
         meta["started_at"] = old.get("started_at")
@@ -621,11 +645,11 @@ def main(argv):
                     continue
                 log("%s/%s: running" % (task["name"], arm))
                 result = run_one(args, task, arm, env, meter, scratch, out_dir)
-                log("%s/%s: %s (score %.2f) in %.0f s, %d calls, %d+%d tokens (%s)" % (
+                log("%s/%s: %s (score %.2f) in %.0f s, %d calls, %d+%d tokens, seed %s on %d calls (%s)" % (
                     task["name"], arm, "PASS" if result["pass"] else "fail", result["score"],
                     result["wall_ms"] / 1000.0, result["meter"]["calls"],
                     result["meter"]["input_tokens"], result["meter"]["output_tokens"],
-                    result["check"].get("reason", "")[:80]))
+                    result["seed"], result["meter"]["calls_with_seed"], result["check"].get("reason", "")[:80]))
     finally:
         meta["finished_at"] = now_iso()
         with open(meta_path, "w") as f:
