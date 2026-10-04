@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chatty_fabric::wire::AgentEntry;
 use chatty_fabric::{
-    AgentOrigin, CallEvent, CallRequest, CallResult, ConversationScope, Directory, Node,
-    NodeState, Transport,
+    AgentOrigin, CallEvent, CallRequest, CallResult, ConversationScope, Directory, Node, NodeState,
+    Transport,
 };
 use serde::Serialize;
 
@@ -159,7 +159,11 @@ impl RosterCard {
             agent_origin: entry.origin,
             url: None,
             enabled: true,
-            skills: entry.skills.iter().map(|skill| skill.name.clone()).collect(),
+            skills: entry
+                .skills
+                .iter()
+                .map(|skill| skill.name.clone())
+                .collect(),
             has_api_key: false,
             plugins: Vec::new(),
         }
@@ -341,15 +345,15 @@ async fn directory_over(transport: &dyn Transport) -> Result<Vec<AgentEntry>, Fe
         match event {
             Ok(CallEvent::Result(CallResult::Agents(agents))) => return Ok(agents),
             Ok(CallEvent::Result(other)) => {
-                return Err(FetchError::NoAnswer(format!(
-                    "not a directory: {other:?}"
-                )));
+                return Err(FetchError::NoAnswer(format!("not a directory: {other:?}")));
             }
             Ok(_) => {}
             Err(error) => return Err(FetchError::NoAnswer(error.to_string())),
         }
     }
-    Err(FetchError::NoAnswer("the call ended without a result".into()))
+    Err(FetchError::NoAnswer(
+        "the call ended without a result".into(),
+    ))
 }
 
 type CachedCards = Result<Arc<Vec<AgentEntry>>, FetchError>;
@@ -408,8 +412,7 @@ impl LiveCards {
 // ── Sources ─────────────────────────────────────────────────────────────────
 
 /// The stand-in description of a local agent whose spec says none.
-const LOCAL_STAND_IN: &str =
-    "A chatty agent in its own process and its own workspace. Delegate a self-contained task to it.";
+const LOCAL_STAND_IN: &str = "A chatty agent in its own process and its own workspace. Delegate a self-contained task to it.";
 
 /// Agent specs this machine can start (PL-U1's loader). Listed whether or
 /// not a broker runs: a startable spec needs no process.
@@ -436,10 +439,12 @@ impl LocalSpecSource {
     ) -> Self {
         let specs = names
             .iter()
-            .map(|name| match load_agent_spec_from(name, workspace, data_dir) {
-                Ok(loaded) => loaded.spec,
-                Err(_) => AgentSpec::named(name),
-            })
+            .map(
+                |name| match load_agent_spec_from(name, workspace, data_dir) {
+                    Ok(loaded) => loaded.spec,
+                    Err(_) => AgentSpec::named(name),
+                },
+            )
             .collect();
         Self::new(specs, cards)
     }
@@ -523,7 +528,11 @@ impl DirectorySource {
         self
     }
 
-    async fn from_table(&self, table: &dyn NodeTable, scope: &ConversationScope) -> Vec<RosterEntry> {
+    async fn from_table(
+        &self,
+        table: &dyn NodeTable,
+        scope: &ConversationScope,
+    ) -> Vec<RosterEntry> {
         let fetched = self.cards.get().await;
         table
             .in_scope(scope)

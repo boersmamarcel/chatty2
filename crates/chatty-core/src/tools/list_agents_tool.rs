@@ -20,8 +20,8 @@ use std::sync::Arc;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
-pub use crate::services::roster::PluginGrants;
 use crate::services::lazy_broker::LazyBroker;
+pub use crate::services::roster::PluginGrants;
 use crate::services::roster::{
     CallerView, CardFetch, DirectorySource, FetchError, HostedSource, LazyBrokerCards, LiveCards,
     LocalSpecSource, Origin, RemoteSource, Roster, RosterEntry, RosterSource, TransportCards,
@@ -252,7 +252,10 @@ impl Tool for ListAgentsTool {
         // root's conversation as the broker knows it (RO-3 threads the
         // conversation through).
         let scope = ConversationScope::new(ROOT_SCOPE);
-        let entries = self.roster().for_caller(&CallerView { scope: &scope }).await;
+        let entries = self
+            .roster()
+            .for_caller(&CallerView { scope: &scope })
+            .await;
         let agents: Vec<AgentListing> = entries.into_iter().map(AgentListing::from).collect();
         tracing::info!(
             agent_count = agents.len(),

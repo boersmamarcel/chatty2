@@ -172,9 +172,16 @@ async fn roster_lists_every_origin() {
         parked("local-coder-0"),
     )])));
     let roster = Roster::new(vec![
-        Arc::new(RemoteSource::new(vec![remote("voucher", true), remote("off", false)])),
+        Arc::new(RemoteSource::new(vec![
+            remote("voucher", true),
+            remote("off", false),
+        ])),
         Arc::new(HostedSource),
-        Arc::new(Fixed(vec![fixed("hosted-analyst", Origin::Hosted, Reach::Live)])),
+        Arc::new(Fixed(vec![fixed(
+            "hosted-analyst",
+            Origin::Hosted,
+            Reach::Live,
+        )])),
         Arc::new(local),
         Arc::new(nodes),
         Arc::new(handles),
@@ -214,7 +221,10 @@ async fn roster_lists_every_origin() {
         "the broker's card says what the spec resolved to"
     );
     assert_eq!(
-        entries.iter().filter(|entry| entry.name == "analyst").count(),
+        entries
+            .iter()
+            .filter(|entry| entry.name == "analyst")
+            .count(),
         1,
         "the broker's runner for a spec is the spec, not a node"
     );
@@ -271,7 +281,11 @@ async fn name_collision_shadows_not_hides() {
             parked("root"),
         )])))),
         // A name only one origin has is nobody's loser.
-        Arc::new(Fixed(vec![fixed("coder", Origin::LocalSpec, Reach::Startable)])),
+        Arc::new(Fixed(vec![fixed(
+            "coder",
+            Origin::LocalSpec,
+            Reach::Startable,
+        )])),
     ]);
 
     let entries = roster.for_caller(&CallerView { scope: &scope() }).await;
@@ -295,7 +309,10 @@ async fn name_collision_shadows_not_hides() {
     // Without the handle, the node owns the name; a remote under a local
     // spec is shadowed by the spec.
     let roster = Roster::new(vec![
-        Arc::new(RemoteSource::new(vec![remote("reviewer", true), remote("coder", true)])),
+        Arc::new(RemoteSource::new(vec![
+            remote("reviewer", true),
+            remote("coder", true),
+        ])),
         Arc::new(Fixed(vec![
             fixed("reviewer", Origin::Node, Reach::Live),
             fixed("reviewer", Origin::LocalSpec, Reach::Startable),
@@ -316,7 +333,10 @@ async fn name_collision_shadows_not_hides() {
         Some(Origin::LocalSpec)
     );
     let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-    assert_eq!(names, ["coder", "coder", "reviewer", "reviewer", "reviewer"]);
+    assert_eq!(
+        names,
+        ["coder", "coder", "reviewer", "reviewer", "reviewer"]
+    );
 }
 
 /// Invariant 8: a live card is fetched at most once per TTL, and a node
@@ -343,7 +363,10 @@ async fn live_card_ttl() {
     // Within the TTL, however many reads: one fetch.
     for _ in 0..5 {
         let entries = read().await;
-        assert_eq!(find(&entries, "local-coder-0", Origin::Node).reach, Reach::Idle);
+        assert_eq!(
+            find(&entries, "local-coder-0", Origin::Node).reach,
+            Reach::Idle
+        );
         clock.advance(Duration::from_secs(5));
     }
     assert_eq!(broker.fetches(), 1);

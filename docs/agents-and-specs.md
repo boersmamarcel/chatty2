@@ -418,13 +418,26 @@ One flat list of everything addressable, each entry saying whose machine it runs
 }
 ```
 
-Two sources feed it. **Settings** give the configured remotes and the roster's specs
-(names only, as a stand-in until the broker answers). The **broker's aggregated card** gives whatever registered since — a worker
-spawned a minute ago is addressable, and only the broker knows it exists. A name in both
-keeps the settings label, because what the user configured is the more informative
-answer. A gateway that is off or slow to answer is not an error: the list is then what
-settings know. API key values are **never exposed** to the LLM — only
-`has_api_key: true/false`.
+The list is the **roster** (`chatty_core::services::roster`, PL-S1 RO-1): one read
+model fed by five sources, one `RosterSource` each.
+
+| Roster origin | Source | Reach |
+|:--|:--|:--|
+| `handle` | resumable handles in the caller's swarm (none until RC-3) | `live` or `idle` |
+| `node` | running nodes: `Directory::in_scope(caller.scope)`, or the broker's own directory answer | `live`, `idle`, `unreachable` |
+| `local_spec` | the agent specs the broker serves, from the spec loader | `startable` |
+| `hosted` | the user's hosted agents (none until PL-S6) | — |
+| `remote` | Settings → A2A Agents | `live`, or `unreachable` when disabled |
+
+A startable spec needs no running process to be listed; when the broker serves a card for
+it, that card says what it resolved to (model, tools). A worker spawned a minute ago is
+addressable, and only the broker knows it exists. A name two origins share goes to the
+higher one, **`handle > node > local_spec > hosted > remote`** (PL-D4); the loser is
+still listed, with `shadowed_by` naming the origin that owns the name. The broker's cards
+are cached for 30 s (`LiveCards::TTL`), failures included: after one failed fetch a node
+that needs its card is `unreachable` until the next one. A gateway that is off or slow to
+answer is not an error: the list is then what settings and the spec loader know. API key
+values are **never exposed** to the LLM — only `has_api_key: true/false`.
 
 #### `origin` — whose machine it runs on (ADR-0011 C5)
 
