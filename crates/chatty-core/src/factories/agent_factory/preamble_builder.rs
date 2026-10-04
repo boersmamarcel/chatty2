@@ -39,6 +39,9 @@ pub(super) fn build_preamble(
     if tools.fetch || tools.search_web {
         let has_search_api = tools.search_web
             && search_settings.as_ref().is_some_and(|s| {
+                if s.managed.as_ref().is_some_and(|m| m.usable().is_some()) {
+                    return true;
+                }
                 use crate::settings::models::search_settings::SearchProvider;
                 let key = match s.active_provider {
                     SearchProvider::Tavily => &s.tavily_api_key,

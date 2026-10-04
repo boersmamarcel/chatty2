@@ -1,9 +1,8 @@
 //! Messages waiting for their recipient (tree messages, TM-1).
 //!
-//! `send_message` never starts a run and is never delivered mid-run: a
-//! message waits on its recipient's [`PendingList`] until a delivery point
-//! takes it. The list is bounded twice, and an over-limit message is refused
-//! whole, never truncated:
+//! `send_message` never starts a run: a message waits on its recipient's
+//! [`PendingList`] until a delivery point takes it. The list is bounded
+//! twice, and an over-limit message is refused whole, never truncated:
 //!
 //! - at most [`PENDING_LIST_BYTES`] wait for one recipient at a time, and
 //! - one sender may add at most [`SENDER_ALLOWANCE_BYTES`] per run of the
@@ -13,15 +12,26 @@
 //!
 //! # Delivery (TM-2)
 //!
-//! There are two delivery points and no others: the next `invoke_agent`
-//! result the recipient receives, and the start of the recipient's next run.
+//! A message up the tree has two delivery points and no others: the next
+//! `invoke_agent` result the recipient receives, and the start of the
+//! recipient's next run.
+//!
+//! # Mid-run delivery (TM-5)
+//!
+//! Two senders reach a running recipient sooner: the human (the root) to
+//! any node, and a node to its own child. Their messages wait on the
+//! recipient's mid-run list, a second [`PendingList`] with the same bounds,
+//! which the recipient's next tool round takes (`mailbox.take`); what no
+//! tool round took opens its next run instead. Everyone else keeps the two
+//! points above.
+//!
 //! Either way the recipient gets each message once, as untrusted data in a
 //! [`wrap_message`] wrapper, and it grants nothing: no tools, no budget, no
 //! approval. A recipient that ends drops what is still waiting for it.
 
 use std::collections::{HashMap, VecDeque};
 
-use crate::directory::{NodeId, NodeName};
+use crate::directory::NodeId;
 use crate::transport::RefusalReason;
 
 /// What may wait for one recipient at once: 64 KB.
@@ -31,14 +41,22 @@ pub const PENDING_LIST_BYTES: usize = 64 * 1024;
 /// recipient: 8 KB.
 pub const SENDER_ALLOWANCE_BYTES: usize = 8 * 1024;
 
+/// Who sent a message: the root (the human, TM-5) or a node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Sender {
+    Root,
+    Node(NodeId),
+}
+
 /// One message waiting for delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     /// The broker-assigned id `send_message` returned for it.
     pub id: String,
-    pub from: NodeId,
-    /// The sender's broker-assigned name, which delivery shows the recipient.
-    pub from_name: NodeName,
+    pub from: Sender,
+    /// The sender's broker-assigned name ([`ROOT_NAME`](crate::ROOT_NAME)
+    /// for the root), which delivery shows the recipient.
+    pub from_name: String,
     pub text: String,
 }
 
@@ -50,7 +68,7 @@ impl Message {
 
     /// The message as its recipient reads it: see [`wrap_message`].
     pub fn wrapped(&self) -> String {
-        wrap_message(self.from_name.as_str(), &self.text)
+        wrap_message(&self.from_name, &self.text)
     }
 }
 
@@ -70,7 +88,7 @@ pub struct PendingList {
     /// The bytes of `items`.
     bytes: usize,
     /// The bytes each sender added during the recipient's current run.
-    per_sender: HashMap<NodeId, usize>,
+    per_sender: HashMap<Sender, usize>,
     items: VecDeque<Message>,
 }
 
@@ -134,8 +152,8 @@ mod tests {
     fn message(from: &crate::directory::Node, n: usize, size: usize) -> Message {
         Message {
             id: format!("msg-{n}"),
-            from: from.id(),
-            from_name: from.name().clone(),
+            from: Sender::Node(from.id()),
+            from_name: from.name().to_string(),
             text: "x".repeat(size),
         }
     }

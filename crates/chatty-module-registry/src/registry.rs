@@ -43,7 +43,7 @@ use tracing::{debug, info, warn};
 use chatty_wasm_runtime::ModuleManifest as RuntimeManifest;
 use chatty_wasm_runtime::{Capability, Engine, LlmProvider, ResourceLimits, WasmModule};
 
-use crate::install_record::verify_installed;
+use crate::install_record::{ModuleGrants, verify_installed};
 use crate::manifest::ModuleManifest;
 use hive_client::TrustLevel;
 
@@ -396,14 +396,18 @@ impl ModuleRegistry {
         // The runtime's manifest carries what the guest sees: `[config]`
         // through `config::get`, `[files].root` through `file::read-bytes`.
         // A module served here has no agent spec to grant from: installing
-        // it granted what its `metadata` requests (PL-U4).
+        // it gets `config` by default; `llm`, `file` and `billing` link only
+        // when the user granted them in Settings (SEC-11, AGE-815).
+        let approved = ModuleGrants::read(module_dir)
+            .with_context(|| format!("failed to read grants of '{}'", manifest.name))?
+            .capabilities();
         let mut runtime_manifest = manifest
             .config
             .iter()
             .fold(RuntimeManifest::new(&manifest.name), |m, (key, value)| {
                 m.with_config(key, value)
             })
-            .with_requested_grants();
+            .with_specless_grants(approved);
         if let Some(root) = &manifest.files_root {
             runtime_manifest = runtime_manifest.with_weights_root(root);
         }

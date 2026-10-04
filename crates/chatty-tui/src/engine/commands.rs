@@ -1,6 +1,7 @@
 //! Slash command parsing and handling for the TUI chat engine.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use futures::StreamExt;
@@ -9,6 +10,7 @@ use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
 use chatty_core::agent_spec::{SpecListing, SpecSource};
+use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationMode;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
 use chatty_core::session::{
@@ -142,11 +144,17 @@ pub enum Command {
     Agent(Option<String>),
     /// /agents — list the agents /agent and invoke_agent can reach
     Agents,
+    /// /agents running — every live agent of this conversation's swarm,
+    /// with its status, elapsed time and spend (TB-6, AGE-748)
+    AgentsRunning,
     /// /swarm — print this conversation's latest swarm tree (TB-5, AGE-667)
     Swarm,
     /// /stop <agent> — stop one agent of the swarm and everything it
     /// started, while the rest keeps running (TB-7, AGE-749)
     Stop(Option<String>),
+    /// /msg <agent> <text> — message a running agent; it reads the
+    /// message at its next tool round (TM-5, AGE-750)
+    Msg(Option<String>),
     /// /clear, /new — clear conversation and start fresh
     Clear,
     /// /compact — summarize older conversation turns
@@ -174,6 +182,25 @@ pub enum Command {
     Quit,
 }
 
+/// How `/msg` is used.
+pub const MSG_USAGE: &str = "Usage: /msg <agent> <text> (/swarm shows the running agents' names)";
+
+/// The Hive sign-in a `chatty-server` checks (AGE-835), borrowed from the
+/// desktop's persisted pair like the plugin meter's: this process must not
+/// rotate a refresh token the desktop holds, so once the borrowed access
+/// token expires the server answers 401 and the user signs in again there.
+async fn hosted_auth() -> Option<Arc<HiveSession>> {
+    let hive = chatty_core::hive_settings_repository()
+        .load()
+        .await
+        .unwrap_or_default();
+    let pair = hive.token_pair()?;
+    Some(Arc::new(HiveSession::borrowed(
+        hive.registry_url,
+        Some(pair),
+    )))
+}
+
 impl ChatEngine {
     pub fn try_handle_command(&self, input: &str) -> Option<Command> {
         Self::parse_command(input)
@@ -196,9 +223,11 @@ impl ChatEngine {
             "/modules" => Some(Command::Modules(arg)),
             "/add-dir" => Some(Command::AddDir(arg)),
             "/agent" => Some(Command::Agent(arg)),
+            "/agents" if arg.as_deref() == Some("running") => Some(Command::AgentsRunning),
             "/agents" => Some(Command::Agents),
             "/swarm" => Some(Command::Swarm),
             "/stop" => Some(Command::Stop(arg)),
+            "/msg" => Some(Command::Msg(arg)),
             "/clear" | "/new" => Some(Command::Clear),
             "/compact" => Some(Command::Compact),
             "/context" => Some(Command::Context),
@@ -242,6 +271,20 @@ impl ChatEngine {
         crate::ui::swarm::render(&self.swarm_trace)
     }
 
+    /// `/agents running`: the live agents of this conversation's swarm —
+    /// agent, chain, running or waiting on you, elapsed, spend — the same
+    /// rows as the desktop's overview (TB-6, AGE-748). `/stop <agent>`
+    /// takes the first column.
+    pub fn running_agents_summary(&self) -> String {
+        use chatty_core::services::running_agents::{render_text, rows_of};
+        let rows = rows_of("", &self.title, &self.swarm_trace);
+        render_text(
+            &rows,
+            std::time::SystemTime::now(),
+            Some(self.session.price_book()),
+        )
+    }
+
     /// `/stop <agent>`: stop that agent — the name `/swarm` shows — and
     /// everything under it; the turn that delegated to it carries on
     /// without it (TB-7, AGE-749). What happened, as a system line.
@@ -252,6 +295,31 @@ impl ChatEngine {
         match broker.cancel(agent) {
             Ok(()) => format!("Stopped {agent} and everything it started."),
             Err(error) => format!("Could not stop {agent}: {error}"),
+        }
+    }
+
+    /// `/msg <agent> <text>`: send `text` from the human to the running
+    /// agent `agent` (TM-5). It reaches that agent at its next tool round,
+    /// wrapped as untrusted data, and grants it nothing.
+    pub async fn message_agent(&self, arg: &str) -> String {
+        let Some((agent, text)) = arg
+            .split_once(char::is_whitespace)
+            .map(|(agent, text)| (agent, text.trim()))
+            .filter(|(_, text)| !text.is_empty())
+        else {
+            return MSG_USAGE.to_string();
+        };
+        let Some(broker) = self.broker.as_ref() else {
+            return "No agents are running: this session has no broker.".to_string();
+        };
+        match broker.post_message(agent, text.to_string()).await {
+            Ok(chatty_fabric::MessageStatus::Pending { .. }) => {
+                format!("Sent to {agent}: it reads it at its next tool call.")
+            }
+            Ok(chatty_fabric::MessageStatus::Refused { reason }) => {
+                format!("{agent} did not take the message: {reason}.")
+            }
+            Err(error) => format!("Could not message {agent}: {error}"),
         }
     }
 
@@ -398,6 +466,7 @@ impl ChatEngine {
             ConversationMode::Hosted {
                 server_url,
                 remote_id,
+                ..
             } => {
                 out.push_str(&format!(
                     "This conversation runs on {server_url} (as {remote_id}).\n"
@@ -437,18 +506,23 @@ impl ChatEngine {
             return Ok(());
         };
 
+        let auth = hosted_auth().await;
         match target {
             Some(server_url) => {
-                let new_mode =
-                    take_online(&server_url, conversation.title(), &conversation.messages())
-                        .await
-                        .context("Failed to take the conversation online")?;
+                let new_mode = take_online(
+                    &server_url,
+                    conversation.title(),
+                    &conversation.messages(),
+                    auth.as_deref(),
+                )
+                .await
+                .context("Failed to take the conversation online")?;
                 let (url, remote_id) = new_mode
                     .hosted_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
                     .expect("take_online returns a hosted mode");
 
-                self.hosted = Some(HostedSession::new(&url, &remote_id));
+                self.hosted = Some(HostedSession::new(&url, &remote_id).with_auth(auth));
                 if let Some(conv) = self.session.conversation_mut() {
                     conv.set_mode(new_mode);
                 }
@@ -461,7 +535,7 @@ impl ChatEngine {
                     .hosted_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
                     .expect("refuse_reason rejected a local conversation already");
-                let remote = fetch_hosted(&server_url, &remote_id)
+                let remote = fetch_hosted(&server_url, &remote_id, auth.as_deref())
                     .await
                     .context("Failed to read the hosted conversation back")?;
 
@@ -1128,6 +1202,10 @@ mod tests {
     #[test]
     fn agents_lists_the_roster_and_what_it_leaves_out() {
         assert_eq!(ChatEngine::parse_command("/agents"), Some(Command::Agents));
+        assert_eq!(
+            ChatEngine::parse_command("/agents running"),
+            Some(Command::AgentsRunning)
+        );
 
         let workspace = tempfile::tempdir().unwrap();
         let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);

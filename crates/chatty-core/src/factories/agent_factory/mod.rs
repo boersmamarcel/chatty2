@@ -323,6 +323,8 @@ impl AgentClient {
             plugin_host,
         } = ctx;
         let run_inbox = lazy_broker.clone();
+        // A worker's mid-run messages (TM-5) come over its connection.
+        let mid_run_inbox = fabric_transport.clone();
 
         // The spec's plugins (PL-U2): one instance each for this agent, on
         // this agent's model. A plugin that does not load fails the build —
@@ -737,6 +739,16 @@ impl AgentClient {
             use crate::settings::models::search_settings::SearchProvider;
             let max_results = search_settings.as_ref().map(|s| s.max_results).unwrap_or(5);
             let api_tool = search_settings.as_ref().and_then(|search_cfg| {
+                if let Some((endpoint, token)) =
+                    search_cfg.managed.as_ref().and_then(|m| m.usable())
+                {
+                    let provider = search_cfg.managed.as_ref().map(|m| m.provider.clone())?;
+                    tracing::info!(%provider, "Search web tool enabled through a managed endpoint");
+                    return Some(
+                        SearchWebTool::new(provider, token.to_string(), max_results)
+                            .with_endpoint(endpoint),
+                    );
+                }
                 let api_key = match search_cfg.active_provider {
                     SearchProvider::Tavily => search_cfg.tavily_api_key.clone(),
                     SearchProvider::Brave => search_cfg.brave_api_key.clone(),
@@ -1586,6 +1598,9 @@ impl AgentClient {
         )
         .await?;
         agent.run_inbox = run_inbox;
+        if let Some(transport) = mid_run_inbox {
+            agent.context_shaper.deliver_mid_run_messages(transport);
+        }
         agent.delegator = delegator;
         agent.plugin_usage = plugins
             .iter()

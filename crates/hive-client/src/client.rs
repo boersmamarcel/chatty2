@@ -10,8 +10,8 @@ use crate::{
     cache::Cache,
     error::ClientError,
     models::{
-        BegunDownload, CategoryList, CreditBalance, DownloadResult, ListParams, ModuleList,
-        ModuleMetadata, ModulePricingInfo, TokenPair, VersionList,
+        AgentSpecList, BegunDownload, CategoryList, CreditBalance, DownloadResult, ListParams,
+        ModuleList, ModuleMetadata, ModulePricingInfo, PublishedSpec, TokenPair, VersionList,
     },
     secure_url::ensure_secure_url,
     session::{HiveSession, send_authed},
@@ -253,6 +253,48 @@ impl HiveRegistryClient {
         }
     }
 
+    // ── Agent specs (HS-3, MK-T2) ──────────────────────────────────────────
+
+    /// Search the published agent specs (the marketplace's Teams tab); an
+    /// empty `query` lists them all.
+    pub async fn search_agents(&self, query: &str) -> Result<AgentSpecList, ClientError> {
+        #[derive(Serialize)]
+        struct SearchParams<'a> {
+            q: &'a str,
+        }
+        self.get_json("/api/agents", &SearchParams { q: query })
+            .await
+    }
+
+    /// One published spec version with its signed chain. Not verified here:
+    /// see [`verify::verify_spec_any`] with [`root_keys`](Self::root_keys).
+    pub async fn get_agent_spec(
+        &self,
+        name: &str,
+        version: &str,
+    ) -> Result<PublishedSpec, ClientError> {
+        self.get_json(
+            &format!("/api/agents/{}/{}", urlencoded(name), urlencoded(version)),
+            &(),
+        )
+        .await
+    }
+
+    /// Count an install of `name@version` (once per user and spec).
+    pub async fn record_agent_install(&self, name: &str, version: &str) -> Result<(), ClientError> {
+        let url = format!(
+            "{}/api/agents/{}/{}/install",
+            self.base_url,
+            urlencoded(name),
+            urlencoded(version)
+        );
+        let response = self.send_authed(|| self.http.post(&url)).await?;
+        if !response.status().is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        Ok(())
+    }
+
     // ── Get module ─────────────────────────────────────────────────────────
 
     /// Fetch metadata for a single module by name.
@@ -469,6 +511,14 @@ impl HiveRegistryClient {
             &(),
         )
         .await
+    }
+
+    /// The signed-in user's recorded calls per module: what a publisher's
+    /// free tier is counted against.
+    pub async fn get_my_modules_usage(
+        &self,
+    ) -> Result<crate::models::MyModuleUsageList, ClientError> {
+        self.get_json("/api/usage/me/modules", &()).await
     }
 
     // ── Billing sessions (Phase 3b) ────────────────────────────────────────

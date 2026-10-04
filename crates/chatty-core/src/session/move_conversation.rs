@@ -16,8 +16,11 @@
 //! use the server's own egress (AGE-284).
 
 use anyhow::{Context, Result, bail};
+use hive_client::HiveSession;
 use rig_core::completion::Message;
 use serde::Deserialize;
+
+use super::hosted::{SIGN_IN_TO_HIVE, send_to_server};
 
 use crate::models::conversation::ConversationMode;
 
@@ -91,10 +94,14 @@ pub struct RemoteConversation {
 /// pending approval or clarification lives in the stores of the session that
 /// raised it, and moving would orphan it with no address any answer could
 /// name.
+///
+/// `auth` is the Hive sign-in the server checks (AGE-835); `None` sends the
+/// import bare, which a server with auth on refuses with 401.
 pub async fn take_online(
     server_url: &str,
     title: &str,
     messages: &[Message],
+    auth: Option<&HiveSession>,
 ) -> Result<ConversationMode> {
     let http = reqwest::Client::new();
     let server_url = server_url.trim_end_matches('/');
@@ -102,13 +109,12 @@ pub async fn take_online(
 
     // One route, carrying the history it should start from: AGE-281's route
     // table stays as it is rather than growing an import verb beside it.
-    let response = http
-        .post(&url)
-        .json(&serde_json::json!({ "title": title, "messages": messages }))
-        .send()
-        .await
-        .with_context(|| format!("could not reach the server at {url}"))?;
+    let body = serde_json::json!({ "title": title, "messages": messages });
+    let response = send_to_server(auth, &url, || http.post(&url).json(&body)).await?;
 
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        bail!(SIGN_IN_TO_HIVE);
+    }
     if !response.status().is_success() {
         let status = response.status();
         let detail = response.text().await.unwrap_or_default();
@@ -126,6 +132,7 @@ pub async fn take_online(
     Ok(ConversationMode::Hosted {
         server_url: server_url.to_string(),
         remote_id: created.id,
+        model_id: Some(created.model_id),
     })
 }
 
@@ -134,17 +141,20 @@ pub async fn take_online(
 ///
 /// The reverse direction is cheaper because the server already exposes the
 /// history: there is nothing to upload, only to read back.
-pub async fn fetch_hosted(server_url: &str, remote_id: &str) -> Result<RemoteConversation> {
+pub async fn fetch_hosted(
+    server_url: &str,
+    remote_id: &str,
+    auth: Option<&HiveSession>,
+) -> Result<RemoteConversation> {
     let http = reqwest::Client::new();
     let server_url = server_url.trim_end_matches('/');
     let url = format!("{server_url}/api/conversations/{remote_id}");
 
-    let response = http
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("could not reach the server at {url}"))?;
+    let response = send_to_server(auth, &url, || http.get(&url)).await?;
 
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        bail!(SIGN_IN_TO_HIVE);
+    }
     if !response.status().is_success() {
         let status = response.status();
         bail!("the server would not return the conversation ({status})");
@@ -197,6 +207,7 @@ mod tests {
         let hosted = ConversationMode::Hosted {
             server_url: "http://localhost:8081".into(),
             remote_id: "r-1".into(),
+            model_id: None,
         };
         assert!(
             refuse_reason(true, &hosted, false)
@@ -212,6 +223,7 @@ mod tests {
         let hosted = ConversationMode::Hosted {
             server_url: "http://localhost:8081".into(),
             remote_id: "r-1".into(),
+            model_id: None,
         };
         assert!(refuse_reason(false, &hosted, true).is_some());
         assert!(refuse_reason(false, &ConversationMode::Local, false).is_some());
@@ -222,6 +234,7 @@ mod tests {
         let hosted = ConversationMode::Hosted {
             server_url: "http://localhost:8081".into(),
             remote_id: "r-1".into(),
+            model_id: None,
         };
         assert!(refuse_reason(false, &ConversationMode::Local, true).is_none());
         assert!(refuse_reason(false, &hosted, false).is_none());
@@ -243,5 +256,62 @@ mod tests {
                 .iter()
                 .any(|(what, _)| what.contains("Workspace files"))
         );
+    }
+
+    /// AGE-835: the import carries the Hive sign-in's bearer, which is what
+    /// the server checks; without it the move was a 401.
+    #[tokio::test]
+    async fn taking_a_conversation_online_sends_the_hive_bearer() {
+        use std::sync::Arc;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "r-9", "title": "t", "messages": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let hive = Arc::new(HiveSession::new(
+            server.uri(),
+            Some(hive_client::TokenPair {
+                token: "tok".into(),
+                refresh_token: "r".into(),
+                expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
+            }),
+        ));
+
+        let mode = take_online(&server.uri(), "t", &[], Some(&hive))
+            .await
+            .expect("the server accepts an authenticated import");
+        assert_eq!(mode.hosted_on().map(|(_, id)| id), Some("r-9"));
+    }
+
+    /// Signed out, the move fails with the instruction that fixes it.
+    #[tokio::test]
+    async fn a_move_refused_with_401_says_to_sign_in_to_hive() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let online = take_online(&server.uri(), "t", &[], None)
+            .await
+            .unwrap_err();
+        assert_eq!(online.to_string(), SIGN_IN_TO_HIVE);
+        let back = fetch_hosted(&server.uri(), "r-1", None).await.unwrap_err();
+        assert_eq!(back.to_string(), SIGN_IN_TO_HIVE);
     }
 }

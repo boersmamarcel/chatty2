@@ -33,6 +33,9 @@ pub struct DiscoveredModuleEntry {
     /// What its `metadata` requests (PL-U4), by capability name. `None`
     /// unless it loaded.
     pub requested: Option<Vec<String>>,
+    /// What the user granted it in Settings → Plugins (SEC-11, AGE-815),
+    /// by capability name: `llm`, `file`, `billing` link only when listed.
+    pub granted: Vec<String>,
 }
 
 pub struct DiscoveredModulesModel {

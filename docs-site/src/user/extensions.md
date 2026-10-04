@@ -19,6 +19,10 @@ Hive is the registry Chatty installs extensions from; the address it is talking 
 | **Paid** | Not free — check the pricing before enabling |
 | **Trust: signed** / **Trust: local** | Where a loaded module's code comes from: signed by its publisher and installed from Hive, or copied in by hand |
 
+**Paid** plugins are metered wherever they run, including when an agent spec lists them and when a delegated worker calls them. Each module's free calls are used first (the count comes from Hive); after that a call needs a positive credit balance, and every call is reported to Hive. If Chatty cannot read your balance — you are signed out, your sign-in has expired, or Hive is unreachable — a paid call is refused with "Cannot verify credits … sign in to Hive" rather than run unbilled. Delegated workers reuse the sign-in the desktop app saved, so if the app has been idle for over an hour, open it once to refresh the session.
+
+The **Teams** tab next to the plugin listing finds published agent teams and installs them with one click; see [Install a team from the marketplace](./install-team.md).
+
 Each row has **Enable** / **Disable** (🟢 enabled, ⏸ disabled), and modules that support both modes offer **Switch to Local** / **Switch to Cloud**.
 
 ## Built-in catalog
@@ -65,7 +69,7 @@ If a module fails to load — an invalid `module.toml`, a missing `.wasm` file, 
 
 ## Use a plugin from another MCP client
 
-A plugin whose `module.toml` sets `[protocols] mcp = true` is also served to MCP clients outside Chatty, by the desktop's module gateway (**Enable module runtime** in **Settings → Plugins**). The gateway starts the first time an agent delegates, and **Settings → Plugins** then shows where it runs.
+A plugin whose `module.toml` sets `[protocols] mcp = true` is also served to MCP clients outside Chatty, by the desktop's module gateway (**Enable module runtime** in **Settings → Plugins**). Served that way there is no agent spec to grant from, so a plugin gets only logging and config by default. If it asks for an LLM call, a file read or billing, its row in **Settings → Plugins** shows a switch for each, off until you turn it on; switching one on reloads the gateway. The gateway starts the first time an agent delegates, and **Settings → Plugins** then shows where it runs.
 
 The gateway has no network port. It listens on a Unix socket in a folder only you can open, and answers only a caller that sends the token Chatty writes there each time it starts the gateway:
 

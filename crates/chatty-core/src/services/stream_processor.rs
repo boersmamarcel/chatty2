@@ -943,6 +943,8 @@ mod tests {
                 InvokeAgentProgress::Finished { .. } => "Finished",
                 InvokeAgentProgress::Swarm(_) => "Swarm",
                 InvokeAgentProgress::Admitted(_) => "Admitted",
+                InvokeAgentProgress::Waiting { .. } => "Waiting",
+                InvokeAgentProgress::Resumed { .. } => "Resumed",
             };
             self.calls.push(format!("on_progress({name})"));
         }

@@ -17,6 +17,29 @@ impl std::fmt::Display for SearchProvider {
     }
 }
 
+/// A search endpoint that is not the provider's public API, with the bearer
+/// token it takes in place of the user's key. A hosted guest gets the lease
+/// proxy here (AGE-819/AGE-825), which holds the platform's key.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ManagedSearch {
+    /// Which provider's request shape the endpoint speaks.
+    pub provider: SearchProvider,
+    /// Base URL; the provider's own path (`/search` for Tavily,
+    /// `/res/v1/web/search` for Brave) is appended to it.
+    pub endpoint: String,
+    /// Sent where the provider's key would go.
+    pub token: String,
+}
+
+impl ManagedSearch {
+    /// The endpoint and token, when both are non-empty.
+    pub fn usable(&self) -> Option<(&str, &str)> {
+        let endpoint = self.endpoint.trim().trim_end_matches('/');
+        let token = self.token.trim();
+        (!endpoint.is_empty() && !token.is_empty()).then_some((endpoint, token))
+    }
+}
+
 /// Settings for the web search tool and other external services
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchSettingsModel {
@@ -60,6 +83,10 @@ pub struct SearchSettingsModel {
     /// Model name sent to `rerank_url`, e.g. `BAAI/bge-reranker-v2-m3`.
     #[serde(default)]
     pub rerank_model: Option<String>,
+    /// Search through this endpoint and token instead of the public provider
+    /// API and the user's key. Unset (the desktop default) changes nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedSearch>,
 }
 
 impl SearchSettingsModel {
@@ -93,6 +120,7 @@ impl Default for SearchSettingsModel {
             daytona_api_key: None,
             rerank_url: None,
             rerank_model: None,
+            managed: None,
         }
     }
 }
@@ -108,6 +136,24 @@ mod tests {
         assert_eq!(loaded.rerank_url, None);
         assert_eq!(loaded.rerank_model, None);
         assert_eq!(loaded.reranker(), None);
+    }
+
+    #[test]
+    fn managed_block_loads_and_unset_is_not_written() {
+        let loaded: SearchSettingsModel = serde_json::from_str(
+            r#"{"enabled":true,"managed":{"provider":"Tavily","endpoint":"http://172.16.0.1:8080/api/egress/managed/tavily_search/","token":"t"}}"#,
+        )
+        .unwrap();
+        let managed = loaded.managed.unwrap();
+        assert_eq!(
+            managed.usable(),
+            Some((
+                "http://172.16.0.1:8080/api/egress/managed/tavily_search",
+                "t"
+            ))
+        );
+        let json = serde_json::to_value(SearchSettingsModel::default()).unwrap();
+        assert!(json.get("managed").is_none());
     }
 
     #[test]

@@ -96,6 +96,15 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         tui: true,
     },
     SlashCommandSpec {
+        command: "/msg",
+        description: "Message a running agent: /msg <agent> <text>, read at its next tool call",
+        insert_text: "/msg ",
+        execute_immediately: false,
+        // The desktop's transcript sheet has a message box (TM-5).
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
         command: "/clear",
         description: "Clear conversation history",
         insert_text: "/clear",

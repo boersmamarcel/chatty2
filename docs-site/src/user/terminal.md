@@ -108,15 +108,19 @@ keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
 answered one at a time; press `Esc` while typing a custom answer to go back
 to the options.
 
-The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/swarm`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
+The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/swarm`, `/msg`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 
 `/swarm` prints the agent tree for the conversation's latest delegation as an indented list, one row per agent: name, model, status (running, done or failed) and spend. With no delegation yet, it says so.
 
+`/msg <agent> <text>` sends a message to a running agent, by the name `/swarm` shows. The agent reads it at its next tool call rather than waiting for its run to end.
+
 `/stop <agent>` stops one agent of the running swarm, by the name `/swarm` shows, and every agent it started. The rest keeps running, and the agent that called it carries on without it.
+
+`/agents running` lists only the agents still running, one per line: name, conversation, the agents above it, whether it is working or waiting on you (for an approval or an answer), how long it has run, and what it has spent so far. The desktop shows the same list across all conversations (see [sub-agents](sub-agents.md)).
 
 Sending a message while a reply is still streaming doesn't get refused — press `Enter` as usual and it queues, showing up in the transcript as `Queued #1: <text>`, `Queued #2: <text>` and so on, and runs as its own turn once the current one ends. `/now <text>` instead cancels the running turn right away and sends `<text>` next. `/unqueue` takes back the message queued last. Up to 5 messages can wait; a sixth is refused. `Ctrl+C` cancels the current turn but leaves the queue as it is — nothing runs until you send (or `/now`) again, which then runs the queue's front first.
 
-`/online` is an unfinished feature, off by default: it only does anything once **Settings → Execution → Developer → Hosted Conversations** is on (a moved conversation carries its transcript and nothing else yet). With it on, `/online` shows where the current conversation runs and, before anything moves, a table of what a move would and would not carry. `/online <server-url>` uploads the conversation's history to that `chatty-server` and continues it there; `/online off` brings it back to this machine. Workspace files, attachments, MCP servers, memory, skills and provider API keys never leave this machine.
+`/online` is an unfinished feature, off by default: it only does anything once **Settings → Execution → Developer → Hosted Conversations** is on (a moved conversation carries its transcript and nothing else yet). With it on, `/online` shows where the current conversation runs and, before anything moves, a table of what a move would and would not carry. `/online <server-url>` uploads the conversation's history to that `chatty-server` and continues it there; `/online off` brings it back to this machine. Workspace files, attachments, MCP servers, memory, skills and provider API keys never leave this machine. The server needs a Hive sign-in: `/online` reuses the one saved by the desktop app (**Settings → Extensions → Hive**) without refreshing it, so sign in there first.
 
 Pasting more than 6 lines or 800 characters replaces the pasted text in the input box with a short reference, `[Pasted text #1 +45 lines]`, so a stack trace or log dump doesn't fill the screen — shorter pastes (a URL, a path, a one-line error) are inserted as-is. The model still receives the full text when you send the message. Run `/paste 1` to print a reference's full text back to the transcript. The reference acts as a single character: the cursor steps over it, and backspace at its edge removes the whole thing.
 
@@ -178,6 +182,10 @@ Open the ACP panel in the Activity Bar and click **Chatty** to connect. Keep `ac
 - `--team`.
 
 Other ACP editors should work the same way — JetBrains IDEs and Neovim (CodeCompanion, avante.nvim) among them — but only Zed and VS Code are described here.
+
+## Install a team
+
+`chatty-tui --install-team NAME[@VERSION]` installs a published team from the Hive marketplace, with every spec and locked plugin signature-checked, then exits. See [Install a team from the marketplace](./install-team.md).
 
 ## Shared configuration
 

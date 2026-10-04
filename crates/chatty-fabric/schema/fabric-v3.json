@@ -1504,6 +1504,12 @@
     "mailbox.post#result": {
       "$ref": "#/$defs/MessageStatus"
     },
+    "mailbox.take#result": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
     "req.cancel": {
       "$ref": "#/$defs/IdParams"
     },
@@ -1534,6 +1540,7 @@
     "agent.list#result",
     "mailbox.post",
     "mailbox.post#result",
+    "mailbox.take#result",
     "human.approve",
     "human.approve#result",
     "human.ask",

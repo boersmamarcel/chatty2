@@ -459,6 +459,9 @@ pub struct ChattyApp {
     /// run one turn at a time once it ends (AGE-482).
     mailboxes:
         std::collections::HashMap<String, chatty_core::session::Mailbox<message_ops::QueuedSend>>,
+    /// Every live agent across conversations, for the footer chip and its
+    /// panel (TB-6, AGE-748).
+    pub running_agents: Entity<crate::chatty::views::running_agents::RunningAgentsModel>,
 }
 
 impl ChattyApp {
@@ -470,7 +473,14 @@ impl ChattyApp {
         crate::boot_timing::checkpoint("chattyapp_new_start");
         // Initialize global conversations model if not already done
         if !cx.has_global::<ConversationsStore>() {
-            cx.set_global(ConversationsStore::new());
+            let mut store = ConversationsStore::new();
+            // Hosted conversations authenticate as the Hive sign-in (AGE-835).
+            // A session installed later reaches the store from
+            // `install_hive_session` instead.
+            store.set_hosted_auth(
+                crate::settings::controllers::extensions_controller::hive_session(cx),
+            );
+            cx.set_global(store);
         }
 
         // Create views
@@ -482,7 +492,14 @@ impl ChattyApp {
         let mcp_notifier = cx.new(|_cx| AgentConfigNotifier::new());
         cx.set_global(GlobalAgentConfigNotifier::new(mcp_notifier.downgrade()));
 
+        // The overview listens to the StreamManager itself; the app redraws
+        // only when the footer chip's numbers move (TB-6).
+        let running_agents = cx.new(crate::chatty::views::running_agents::RunningAgentsModel::new);
+        cx.subscribe(&running_agents, |_, _, _event, cx| cx.notify())
+            .detach();
+
         let app = Self {
+            running_agents,
             chat_view,
             sidebar_view,
             sidebar_split: cx.new(|_| ResizableState::default()),

@@ -18,7 +18,10 @@
 //! its sockets, without triggering a start itself.
 
 use async_trait::async_trait;
-use chatty_fabric::Transport;
+use chatty_fabric::{
+    CallError, CallEvent, CallRequest, CallResult, MessageStatus, SendMessageParams, Transport,
+};
+use futures::StreamExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -57,8 +60,40 @@ pub trait LazyBroker: Send + Sync {
         anyhow::bail!("no broker is running '{node}'")
     }
 
+    /// Send `text` from the human to the running agent `to` (TM-5): it
+    /// reaches that agent at its next tool round, wrapped as untrusted
+    /// data, and grants it nothing. Never starts the broker: one that has
+    /// not started runs nobody to message.
+    async fn post_message(&self, to: &str, _text: String) -> anyhow::Result<MessageStatus> {
+        anyhow::bail!("no broker is running '{to}'")
+    }
+
     /// Stop serving, if this ever started. A no-op otherwise (nothing to
     /// stop) — the default for a host whose lifecycle already tears the
     /// underlying gateway down some other way.
     fn shutdown(&self) {}
+}
+
+/// `text` from the human, posted to `to` through the root's direct
+/// `transport` (TM-5): what [`LazyBroker::post_message`] does once the
+/// broker has started.
+pub async fn post_as_root(
+    transport: &dyn Transport,
+    to: &str,
+    text: String,
+) -> Result<MessageStatus, CallError> {
+    let mut stream = transport
+        .call(CallRequest::SendMessage(SendMessageParams {
+            to: to.to_string(),
+            text,
+        }))
+        .await?;
+    while let Some(event) = stream.next().await {
+        if let CallEvent::Result(CallResult::Posted(status)) = event? {
+            return Ok(status);
+        }
+    }
+    Err(CallError::Failed(
+        "the broker answered mailbox.post with no status".to_string(),
+    ))
 }

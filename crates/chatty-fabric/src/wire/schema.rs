@@ -65,6 +65,8 @@ struct Catalog {
     mailbox_post: SendMessageParams,
     #[schemars(rename = "mailbox.post#result")]
     mailbox_post_result: MessageStatus,
+    #[schemars(rename = "mailbox.take#result")]
+    mailbox_take_result: Vec<String>,
     #[schemars(rename = "human.approve")]
     human_approve: ApprovalRequest,
     #[schemars(rename = "human.approve#result")]

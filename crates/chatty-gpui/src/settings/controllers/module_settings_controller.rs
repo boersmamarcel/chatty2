@@ -9,22 +9,21 @@ use crate::settings::models::{
 use anyhow::{Context, Result};
 #[cfg(unix)]
 use chatty_core::agent_spec::load_roster;
-use chatty_core::hive::{CreditGuard, HiveRegistryClient, UsageCollector, UsageCollectorConfig};
+use chatty_core::hive::{
+    CreditGuard, HiveRegistryClient, ModuleMeter, UsageCollector, UsageCollectorConfig,
+};
 use chatty_core::services::plugin_llm::PluginLlmProvider;
 #[cfg(unix)]
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
-use chatty_core::settings::models::extensions_store::{
-    ExtensionKind, ExtensionSource, ExtensionsModel,
-};
+use chatty_core::settings::models::extensions_store::ExtensionsModel;
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::models_store::{ModelsModel, resolve_model_query};
 use chatty_core::settings::models::providers_store::ProviderModel;
-use chatty_module_registry::{ModuleManifest, ModuleRegistry};
+use chatty_module_registry::{ModuleGrants, ModuleManifest, ModuleRegistry};
 use chatty_protocol_gateway::ProtocolGateway;
-use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
+use chatty_wasm_runtime::{Capability, CompletionResponse, LlmProvider, Message, ResourceLimits};
 use gpui::{App, AsyncApp};
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tracing::{error, info, warn};
@@ -144,9 +143,13 @@ fn scan_modules(module_dir: &str) -> ScanSnapshot {
         let requested = validation_registry
             .requested_capabilities(&manifest.name)
             .map(|caps| caps.iter().map(|c| c.name().to_string()).collect());
+        let granted = ModuleGrants::read(&dir)
+            .map(|g| g.granted)
+            .unwrap_or_default();
         DiscoveredModuleEntry {
             trust_level,
             requested,
+            granted,
             ..discovered_entry(&dir, manifest, ModuleLoadStatus::Loaded)
         }
     });
@@ -208,6 +211,7 @@ fn discovered_entry(
         execution_mode: manifest.execution_mode.to_string(),
         trust_level: None,
         requested: None,
+        granted: Vec::new(),
     }
 }
 
@@ -225,6 +229,7 @@ fn invalid_manifest_entry(dir: &Path, status: ModuleLoadStatus) -> DiscoveredMod
         execution_mode: "local".to_string(),
         trust_level: None,
         requested: None,
+        granted: Vec::new(),
     }
 }
 
@@ -365,6 +370,29 @@ pub fn toggle_module_runtime(cx: &mut App) {
     .detach();
 }
 
+/// Grant or revoke `capability` (`llm`, `file`, `billing`) for the module in
+/// `directory_name` (Settings → Plugins, SEC-11, AGE-815), then rescan so the
+/// gateway links the module against the new set. A module served with no
+/// agent spec gets nothing gated until it is granted here.
+pub fn set_module_grant(directory_name: &str, capability: &str, on: bool, cx: &mut App) {
+    let Some(capability) = Capability::from_name(capability) else {
+        error!(capability, "Unknown capability in a module grant");
+        return;
+    };
+    let dir = Path::new(&cx.global::<ModuleSettingsModel>().module_dir).join(directory_name);
+    let result = ModuleGrants::read(&dir).and_then(|mut grants| {
+        grants.set(capability, on);
+        grants.write(&dir).map_err(Into::into)
+    });
+    match result {
+        Ok(()) => {
+            info!(module = directory_name, %capability, on, "Module grant changed");
+            refresh_runtime(cx);
+        }
+        Err(e) => error!(error = ?e, module = directory_name, "Failed to save module grant"),
+    }
+}
+
 pub fn refresh_runtime(cx: &mut App) {
     let settings = cx.global::<ModuleSettingsModel>().clone();
     let llm_provider = build_llm_provider(cx).unwrap_or_else(|| {
@@ -471,22 +499,8 @@ pub fn refresh_runtime(cx: &mut App) {
                     // Attach hive client and runner URL for remote execution support
                     let hive_settings_result = cx.update(|cx| {
                         let hive = cx.global::<HiveSettingsModel>();
-                        let ext = cx.global::<ExtensionsModel>();
-                        // Collect module names of paid Hive WASM modules
-                        let paid_modules: HashSet<String> = ext
-                            .extensions
-                            .iter()
-                            .filter(|e| {
-                                matches!(e.kind, ExtensionKind::WasmModule)
-                                    && matches!(e.pricing_model.as_deref(), Some("paid"))
-                            })
-                            .filter_map(|e| match &e.source {
-                                ExtensionSource::Hive { module_name, .. } => {
-                                    Some(module_name.clone())
-                                }
-                                _ => None,
-                            })
-                            .collect();
+                        let paid_modules =
+                            cx.global::<ExtensionsModel>().paid_wasm_modules();
                         let session = super::extensions_controller::hive_session(cx);
                         (hive.clone(), session, paid_modules)
                     });
@@ -525,12 +539,16 @@ pub fn refresh_runtime(cx: &mut App) {
                         // increment.
                         usage_collector.start_background_flush();
 
+                        // The same meter a worker's spec plugins are
+                        // called through (AGE-837), on the desktop's own
+                        // session.
+                        let meter = ModuleMeter::new(paid_modules)
+                            .with_credit_guard(credit_guard)
+                            .with_usage_collector(usage_collector);
                         gateway = gateway
                             .with_hive_client(hive_client)
                             .with_runner_url(hive_settings.runner_url)
-                            .with_credit_guard(credit_guard)
-                            .with_usage_collector(usage_collector)
-                            .with_paid_modules(paid_modules);
+                            .with_meter(Arc::new(meter));
                     }
 
                     // ADR-0011 C2: the gateway is also the fleet broker.
@@ -675,6 +693,7 @@ mod refresh_runtime_tests {
             execution_mode: "local".to_string(),
             trust_level: None,
             requested: None,
+            granted: Vec::new(),
         }
     }
 

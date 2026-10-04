@@ -15,10 +15,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chatty_module_registry::{ModuleManifest, ModuleRegistry, ScanReport};
+use chatty_module_registry::{ModuleGrants, ModuleManifest, ModuleRegistry, ScanReport};
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
 use chatty_wasm_runtime::{
-    CompletionResponse, LlmProvider, Message, ResourceLimits, ToolCallRequest, WasmModule,
+    Capability, CompletionResponse, LlmProvider, Message, ResourceLimits, ToolCallRequest,
+    WasmModule,
 };
 
 struct NoopLlm;
@@ -298,6 +299,7 @@ fn sandbox_2_5_resources_time_reaches_the_runtime() {
          [resources]\nmax_execution_ms = 300\n",
     );
 
+    grant(&dir, Capability::Llm);
     let llm = Arc::new(FakeLlm::new([FakeResponse::Delay(
         Duration::from_secs(2),
         "late".to_string(),
@@ -473,11 +475,13 @@ fn sandbox_1_9_registry_passes_config_and_files_root() {
     );
     std::fs::create_dir(files.join("weights")).unwrap();
     std::fs::write(files.join("weights/w.bin"), b"weights").unwrap();
+    // `file` is not a default for a module with no spec: the user granted it.
+    grant(&files, Capability::File);
 
     let mut reg = registry();
     let report = reg.scan_directory(tmp.path()).expect("scan_directory");
     assert!(report.failed.is_empty(), "{:?}", report.failed);
-    // Served on its own, a module is granted what it requests (PL-U4).
+    // Served on its own, a module requests what it needs (PL-U4).
     assert_eq!(
         reg.requested_capabilities("config-reader"),
         Some(&[chatty_wasm_runtime::Capability::Config][..])
@@ -510,6 +514,7 @@ fn sandbox_1_9_no_files_section_grants_no_files() {
          [config]\nweights_root = \"/\"\n",
     );
     std::fs::write(dir.join("w.bin"), b"x").unwrap();
+    grant(&dir, Capability::File);
 
     let mut reg = registry();
     reg.load(&dir).expect("file-reader loads");
@@ -588,14 +593,103 @@ fn staged_fixtures_scan_with_only_the_unloadable_ones_failing() {
     assert!(report.remote.is_empty());
     assert!(report.loaded_names().contains(&"echo"));
 
-    // The file-reader fixture's `[files] root = "weights"` is staged with it.
+    // The file-reader fixture's `[files] root = "weights"` is staged with it,
+    // but a module with no spec has not been granted `file` (SEC-11).
     let reader = reg.get("file-reader").expect("file-reader loaded");
     let mut reader = reader.blocking_lock();
-    assert_eq!(tool_text(&mut reader, "read", "fixture.bin").unwrap(), "12");
+    let refused = tool_text(&mut reader, "read", "fixture.bin").expect_err("not granted");
+    assert!(refused.contains("capability file not granted"), "{refused}");
     let config = reg.get("config-reader").expect("config-reader loaded");
     let mut config = config.blocking_lock();
     assert_eq!(
         tool_text(&mut config, "get", "greeting").unwrap(),
         r#"Some("hello from module.toml")"#
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SEC-11 (AGE-815): a module served with no agent spec gets `logging` and
+// `config`; `llm`, `file` and `billing` need the user's grant.
+// ---------------------------------------------------------------------------
+
+/// Record the user's grant of `capability` for the module in `dir`.
+fn grant(dir: &Path, capability: Capability) {
+    let mut grants = ModuleGrants::read(dir).unwrap();
+    grants.set(capability, true);
+    grants.write(dir).unwrap();
+}
+
+fn stage_simple(root: &Path, fixture: &str) -> PathBuf {
+    stage(
+        root,
+        fixture,
+        fixture,
+        &format!("[module]\nname = \"{fixture}\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n"),
+    )
+}
+
+#[test]
+fn specless_module_gets_logging_and_config_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = stage_simple(tmp.path(), "config-reader");
+    let mut reg = registry();
+    reg.load(&dir).unwrap();
+    let m = reg.get("config-reader").unwrap();
+    assert_eq!(
+        m.blocking_lock().granted_capabilities(),
+        [Capability::Config, Capability::Logging]
+    );
+    for fixture in ["slow-host", "file-reader", "billing"] {
+        let dir = stage_simple(tmp.path(), fixture);
+        reg.load(&dir).unwrap();
+        let m = reg.get(fixture).unwrap();
+        assert_eq!(
+            m.blocking_lock().granted_capabilities(),
+            [Capability::Logging],
+            "{fixture} requests a gated capability and got none"
+        );
+    }
+}
+
+#[test]
+fn granting_llm_in_settings_links_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = stage_simple(tmp.path(), "slow-host");
+    let mut reg = registry();
+    reg.load(&dir).unwrap();
+    let before = reg.get("slow-host").unwrap();
+    assert_eq!(
+        before.blocking_lock().granted_capabilities(),
+        [Capability::Logging]
+    );
+
+    grant(&dir, Capability::Llm);
+    reg.reload("slow-host").unwrap();
+    let after = reg.get("slow-host").unwrap();
+    assert_eq!(
+        after.blocking_lock().granted_capabilities(),
+        [Capability::Llm, Capability::Logging]
+    );
+}
+
+#[test]
+fn ungranted_file_import_returns_the_refusal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = stage(
+        tmp.path(),
+        "file-reader",
+        "file-reader",
+        "[module]\nname = \"file-reader\"\nversion = \"1.0.0\"\nwasm = \"mod.wasm\"\n\n\
+         [files]\nroot = \"weights\"\n",
+    );
+    std::fs::create_dir(dir.join("weights")).unwrap();
+    std::fs::write(dir.join("weights/w.bin"), b"weights").unwrap();
+    let mut reg = registry();
+    reg.load(&dir).unwrap();
+    let reader = reg.get("file-reader").unwrap();
+    let err = tool_text(&mut reader.blocking_lock(), "read", "w.bin").expect_err("not granted");
+    assert!(
+        err.contains("capability file not granted to this agent"),
+        "{err}"
     );
 }

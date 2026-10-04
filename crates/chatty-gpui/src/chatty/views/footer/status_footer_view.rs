@@ -5,6 +5,7 @@ use crate::chatty::views::footer::{
     AgentIndicatorView, AutoUpdateView, ErrorIndicatorView, FetchIndicatorView, McpIndicatorView,
     NetworkIndicatorView, TokenContextBarView, ToolsIndicatorView,
 };
+use crate::chatty::views::running_agents::{RunningAgentsChip, RunningAgentsModel};
 use crate::settings::models::general_model::SidebarMode;
 use gpui::*;
 use gpui_component::ActiveTheme as _;
@@ -16,11 +17,15 @@ use gpui_component::{
 #[derive(IntoElement)]
 pub struct StatusFooterView {
     sidebar: Entity<SidebarView>,
+    running_agents: Entity<RunningAgentsModel>,
 }
 
 impl StatusFooterView {
-    pub fn new(sidebar: Entity<SidebarView>) -> Self {
-        Self { sidebar }
+    pub fn new(sidebar: Entity<SidebarView>, running_agents: Entity<RunningAgentsModel>) -> Self {
+        Self {
+            sidebar,
+            running_agents,
+        }
     }
 }
 
@@ -118,6 +123,7 @@ impl RenderOnce for StatusFooterView {
                     .child(NetworkIndicatorView::new())
                     .child(ToolsIndicatorView::new())
                     .child(McpIndicatorView::new())
+                    .child(RunningAgentsChip::new(self.running_agents.clone()))
                     .child(AgentIndicatorView::new()),
             )
     }

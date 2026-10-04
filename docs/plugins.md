@@ -242,6 +242,17 @@ plugin that does not load fails the agent's build. The desktop runs spec agents 
 `chatty-tui` workers, which load their plugins the same way; it no longer adds its modules
 to the MCP server list — `/mcp/{module}` is for MCP clients outside chatty.
 
+A paid plugin (one installed from Hive with `pricing_model = "paid"`) is metered the same
+way whichever path calls it, a spec's `<module>__<tool>` or the gateway's `/mcp/{module}`:
+one `ModuleMeter` (`hive-client`) admits the call before the guest runs and reports it to
+Hive after it answers. The publisher's free calls (`free_tier_calls`, counted against the
+calls Hive has on record for the user) run at any balance; after those the balance must
+be positive, and a balance that cannot be read (signed out, sign-in expired, registry
+down) refuses the call. A worker uses the desktop's sign-in without refreshing it, and
+sends each paid call's report before it answers. The `billing` capability's host import
+is not wired yet: `acquire-session` answers "billing not configured on host" until
+ADR-0024 settles how a plugin-driven session is priced.
+
 A spec opts in by listing the plugin; nothing else does. Installing a plugin from the
 Hive marketplace puts it in the module directory and nothing more: it is not an agent
 and joins no agent until a spec names it.
@@ -252,7 +263,9 @@ The desktop's **Plugins** page lists every module in the module directory: versi
 directory, whether it came from Hive or was copied in by hand, its trust level
 (PL-H5a), its tools, whether it runs locally and is served over MCP, a load failure if
 any, and **which agent specs use it with the capabilities each one grants**. The spec is
-where a plugin is granted anything; the page is read-only.
+where an agent's plugin is granted anything. For a module the gateway serves with no spec (SEC-11, AGE-815) the page is where the user grants: each requested capability has a row, `config` on by default and `llm`, `file` and `billing` as switches that are off until turned on. The grants live in `.chatty-grants.json` beside `.chatty-install.json` (`ModuleGrants`) and are read at every load; a switch rewrites the file and rescans. A module installed before this has no file, so it simply starts with the defaults.
+
+**Security note.** A plugin served on its own is untrusted code with no human-written spec vouching for it. It can always log and read its own `[config]`; it can spend your LLM quota (`llm`), read files under its `[files] root` (`file`) or bill (`billing`) only after you grant that capability for that module. Ungranted imports refuse with `capability <x> not granted to this agent`; they do not trap.
 
 ## Serving a plugin over MCP
 

@@ -17,7 +17,7 @@ mod module;
 pub mod test_support;
 
 pub use error::{CallError, ToolFailure};
-pub use grants::{Grants, NotGranted, UnrequestedGrant};
+pub use grants::{Grants, NotGranted, SPECLESS_DEFAULTS, UnrequestedGrant};
 pub use host::{BillingProvider, LlmProvider, ModuleManifest};
 pub use limits::{
     EPOCH_TICK, MAX_EXECUTION_MS_CEILING, MAX_FILE_READ_BYTES, MAX_FUEL_CEILING,
@@ -83,6 +83,6 @@ pub(crate) mod bindings {
         path: "../../wit",
         // `config::get` has no error channel, so an ungranted one traps
         // (`grants::Refused`).
-        trappable_imports: ["get"],
+        imports: { "chatty:plugin/config.get": trappable },
     });
 }

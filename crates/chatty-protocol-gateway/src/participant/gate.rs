@@ -32,13 +32,13 @@
 //!
 //! # Rows
 //!
-//! | Caller | `agent.invoke` | `agent.list` | `mailbox.post` | `human.approve`, `human.ask` | Local root requests |
-//! |---|---|---|---|---|---|
-//! | `Root` | Root policy, chain, budget, then (spawning) roster and spawn context | Granted | Refused (`not_on_tree`: no owner) | Answers its pending ones | Granted |
-//! | `Node` | The named run must be its own open run; `may_call` from its admitted spec, chain, budget, then (spawning) roster and spawn context | Granted | Owner only | Raises one from the task it serves (its open run) | Refused |
-//! | `Remote` | Refused | Refused | Refused | Refused | Refused |
-//! | `External` | Refused | Refused | Refused | Refused | Refused |
-//! | hosted `Root` | As `Root` | Granted | Refused (`not_on_tree`) | Answers its pending ones, each with its nonce | Cancel, read, and conversation create, list and delete |
+//! | Caller | `agent.invoke` | `agent.list` | `mailbox.post` | `mailbox.take` | `human.approve`, `human.ask` | Local root requests |
+//! |---|---|---|---|---|---|---|
+//! | `Root` | Root policy, chain, budget, then (spawning) roster and spawn context | Granted | Any live node, at its next tool round (TM-5) | Refused (its messages open its next run) | Answers its pending ones | Granted |
+//! | `Node` | The named run must be its own open run; `may_call` from its admitted spec, chain, budget, then (spawning) roster and spawn context | Granted | Its owner (TM-2's delivery points), or its own live child at the child's next tool round (TM-5) | Granted: its own mid-run list | Raises one from the task it serves (its open run) | Refused |
+//! | `Remote` | Refused | Refused | Refused | Refused | Refused | Refused |
+//! | `External` | Refused | Refused | Refused | Refused | Refused | Refused |
+//! | hosted `Root` | As `Root` | Granted | Refused (`not_on_tree`) | Refused | Answers its pending ones, each with its nonce | Cancel, read, and conversation create, list and delete |
 //!
 //! On a typed-root broker the hosted client may only cancel and read
 //! (take its run messages); every other row refuses it.
@@ -46,6 +46,11 @@
 //! matches the broker's [`Binding`] (and, on an `External`-rooted broker,
 //! the key's owner). A local `Root` on a broker with a binding is refused:
 //! a hosted broker's only root is its hosted client (ADR-0023 § 3).
+//!
+//! A mid-run message (TM-5) is the human's (the local root's, to any node
+//! of its broker: a local broker serves one user) or an owner's, to its own
+//! child; every other sender keeps TM-2's delivery points, and a sibling is
+//! still `not_on_tree`. Whoever sent it, it grants nothing.
 //!
 //! The local root requests are its own: answering a question or an
 //! approval the broker delivered to it, stopping one run, and taking its
@@ -251,6 +256,8 @@ pub enum Request<'a> {
     List,
     /// `mailbox.post`.
     Post(&'a SendMessageParams),
+    /// `mailbox.take` (TM-5): a node takes its mid-run messages.
+    Take,
     /// `human.approve`, raised (EN-2a).
     Approve(&'a ApprovalRequest),
     /// The root answers the approval it was handed under `id`. `nonce` is
@@ -286,6 +293,7 @@ impl Request<'_> {
             Self::Invoke(_) => Method::Invoke,
             Self::List => Method::List,
             Self::Post(_) => Method::Post,
+            Self::Take => Method::Take,
             Self::Approve(_) => Method::Approve,
             Self::AnswerApproval { .. } => Method::AnswerApproval,
             Self::Ask(_) => Method::Ask,
@@ -305,6 +313,7 @@ pub enum Method {
     Invoke,
     List,
     Post,
+    Take,
     Approve,
     AnswerApproval,
     Ask,
@@ -322,6 +331,7 @@ impl Method {
             Self::Invoke => "agent.invoke",
             Self::List => "agent.list",
             Self::Post => "mailbox.post",
+            Self::Take => "mailbox.take",
             Self::Approve => "human.approve",
             Self::AnswerApproval => "root.answer_approval",
             Self::Ask => "human.ask",
@@ -361,6 +371,8 @@ pub struct Snapshot<'a> {
     pub callee: Callee,
     /// The sender's owner, for a `mailbox.post`.
     pub owner: Owner,
+    /// The node a `mailbox.post` names, for a mid-run message (TM-5).
+    pub addressee: Addressee,
     /// The hosted binding, on a hosted broker; `None` on a local one.
     pub binding: Option<&'a Binding>,
     /// For an answer: the nonce the broker gave the hosted client with
@@ -414,6 +426,19 @@ pub enum Owner {
     },
 }
 
+/// The node a `mailbox.post` names, as the directory has it (TM-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Addressee {
+    /// The request is not a post, or no node goes by the name it names.
+    None,
+    Node {
+        id: NodeId,
+        /// Its owner's name; `None` when the root owns it.
+        owner: Option<String>,
+        ended: bool,
+    },
+}
+
 /// What the gate decided, and the row it matched.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
@@ -430,10 +455,14 @@ pub enum Grant {
         stamp: CallStamp,
     },
     List,
-    /// Queue the message on `to`'s pending list, within its bounds.
+    /// Queue the message for `to`, within its list's bounds, for delivery
+    /// `at`.
     Post {
         to: PostTo,
+        at: Delivery,
     },
+    /// Take the caller's mid-run messages (TM-5).
+    Take,
     /// Raise the approval with the root, its asker stamped with `chain`:
     /// the chain of the run it was raised from.
     Approve {
@@ -469,6 +498,16 @@ pub enum InvokeTarget {
 pub enum PostTo {
     Root,
     Node(NodeId),
+}
+
+/// When a granted message reaches its recipient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    /// At TM-2's delivery points: the recipient's next `invoke_agent`
+    /// result, or its next run.
+    Run,
+    /// At the recipient's next tool round, or else its next run (TM-5).
+    ToolRound,
 }
 
 /// Why a request was refused. Each keeps the shape that request was
@@ -544,8 +583,12 @@ fn decide_row(
             invoke(caller, params, snapshot)
         }
         (Caller::Root | Caller::Node(_), Request::List) => Ok(Grant::List),
-        (Caller::Root, Request::Post(_)) => Err(Refused::Message(RefusalReason::NotOnTree)),
-        (Caller::Node(_), Request::Post(params)) => post(params, &snapshot.owner),
+        (Caller::Root, Request::Post(_)) => human_post(&snapshot.addressee),
+        (Caller::Node(node), Request::Post(params)) => post(node, params, snapshot),
+        (Caller::Node(_), Request::Take) => Ok(Grant::Take),
+        (Caller::Root, Request::Take) => Err(Refused::Caller(
+            "the root's messages open its next run; it takes none mid-run".to_string(),
+        )),
         (Caller::Node(node), Request::Approve(_)) => approve(node),
         (Caller::Root, Request::Approve(_)) => Err(Refused::Caller(
             "the root answers approvals; it raises none through its broker".to_string(),
@@ -582,6 +625,7 @@ fn decide_row(
             Caller::Remote(_) | Caller::External(_),
             Request::Invoke(_)
             | Request::List
+            | Request::Take
             | Request::Approve(_)
             | Request::AnswerApproval { .. }
             | Request::Ask(_)
@@ -638,6 +682,9 @@ fn hosted(
         Request::Invoke(params) => invoke(caller, params, snapshot),
         Request::List => Ok(Grant::List),
         Request::Post(_) => Err(Refused::Message(RefusalReason::NotOnTree)),
+        Request::Take => Err(Refused::Caller(format!(
+            "{caller} may not {method}: the root takes no mid-run messages"
+        ))),
         Request::Approve(_) | Request::Ask(_) => Err(Refused::Caller(format!(
             "{caller} may not {method}: the root answers, it raises none through its broker"
         ))),
@@ -828,21 +875,60 @@ fn approve(node: &NodeCaller) -> Result<Grant, Refused> {
     }
 }
 
-/// `mailbox.post` from a node: only to its owner, while the owner is live
-/// (TM-1). The pending list's bounds are the effect's quota.
-fn post(params: &SendMessageParams, owner: &Owner) -> Result<Grant, Refused> {
-    let (to, name, ended) = match owner {
-        Owner::Root => (PostTo::Root, ROOT_NAME, false),
-        Owner::Node { id, name, ended } => (PostTo::Node(*id), name.as_str(), *ended),
-        Owner::None => return Err(Refused::Message(RefusalReason::NotOnTree)),
+/// `mailbox.post` from a node: to its owner, while the owner is live, at
+/// TM-2's delivery points (TM-1); or to its own live child, at the child's
+/// next tool round (TM-5). Anyone else — a sibling, itself, a grandchild,
+/// a name nobody has — is not on the tree. The list's bounds are the
+/// effect's quota.
+fn post(
+    node: &NodeCaller,
+    params: &SendMessageParams,
+    snapshot: &Snapshot<'_>,
+) -> Result<Grant, Refused> {
+    let owner = match &snapshot.owner {
+        Owner::Root => Some((PostTo::Root, ROOT_NAME, false)),
+        Owner::Node { id, name, ended } => Some((PostTo::Node(*id), name.as_str(), *ended)),
+        Owner::None => None,
     };
-    if params.to != name {
-        return Err(Refused::Message(RefusalReason::NotOnTree));
+    if let Some((to, name, ended)) = owner
+        && params.to == name
+    {
+        if ended {
+            return Err(Refused::Message(RefusalReason::RecipientEnded));
+        }
+        return Ok(Grant::Post {
+            to,
+            at: Delivery::Run,
+        });
     }
+    match &snapshot.addressee {
+        Addressee::Node {
+            id,
+            owner: Some(owner),
+            ended,
+        } if *owner == node.name => mid_run(*id, *ended),
+        Addressee::Node { .. } | Addressee::None => Err(Refused::Message(RefusalReason::NotOnTree)),
+    }
+}
+
+/// `mailbox.post` from the human, through the local root: to any live node
+/// of its broker, at that node's next tool round (TM-5).
+fn human_post(addressee: &Addressee) -> Result<Grant, Refused> {
+    match addressee {
+        Addressee::Node { id, ended, .. } => mid_run(*id, *ended),
+        Addressee::None => Err(Refused::Message(RefusalReason::NotOnTree)),
+    }
+}
+
+/// A mid-run message to the node `id`, unless it has ended.
+fn mid_run(id: NodeId, ended: bool) -> Result<Grant, Refused> {
     if ended {
         return Err(Refused::Message(RefusalReason::RecipientEnded));
     }
-    Ok(Grant::Post { to })
+    Ok(Grant::Post {
+        to: PostTo::Node(id),
+        at: Delivery::ToolRound,
+    })
 }
 
 #[cfg(test)]
