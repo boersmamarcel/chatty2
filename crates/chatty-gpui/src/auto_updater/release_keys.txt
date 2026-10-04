@@ -1,0 +1,10 @@
+# Release signing public keys (AGE-817, SEC-10).
+#
+# One minisign public key per line (the base64 line of a `minisign.pub`,
+# starting with `RW`). The auto-updater trusts a `checksums.txt.sig` signed by
+# ANY key listed here; `release.yml` checks each release signature against the
+# same list. Rotation (SEC-3's two-key window): add the new key, release, move
+# the release secret to the new key, release, then drop the old key.
+#
+# While this list is empty the updater skips the signature check and logs
+# that it did. See docs/release-signing.md for the runbook.

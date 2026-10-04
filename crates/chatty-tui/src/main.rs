@@ -3,6 +3,7 @@ mod app;
 mod engine;
 mod events;
 mod headless;
+mod install_team;
 // Participant mode reaches the broker over a Unix socket; there is no Windows
 // equivalent yet, and `chatty_protocol_gateway::worker`'s server half is
 // `#[cfg(unix)]` too.
@@ -418,6 +419,18 @@ struct Cli {
     #[arg(long, value_name = "JSON", hide = true, conflicts_with = "team")]
     agent_json: Option<String>,
 
+    /// Install a published team from the Hive marketplace, then exit
+    /// (MK-T1): the leader's spec and its members', each signature-checked
+    /// against the trusted registry root, and every plugin they lock at its
+    /// exact version and hash. The specs go to the data directory's
+    /// `chatty/agents/`, so the leader joins the roster. Installing again
+    /// updates to the given (default: latest) version. Needs a Hive
+    /// sign-in; paid teams are refused for now.
+    ///
+    /// Example: --install-team payments-lead@1.0.0
+    #[arg(long, value_name = "NAME[@VERSION]", conflicts_with_all = ["headless", "pipe", "participant_fd", "team", "agent"])]
+    install_team: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -505,6 +518,10 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // Initialize repositories
     chatty_core::init_repositories()
         .context("Failed to initialize settings repositories (is HOME set?)")?;
+
+    if let Some(team) = &cli.install_team {
+        return install_team::run(team).await;
+    }
 
     // Load providers, models, execution settings, module settings, and A2A agents
     let (

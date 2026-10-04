@@ -49,6 +49,7 @@ pub mod session;
 pub mod settings;
 pub mod settings_snapshot;
 pub mod slash_commands;
+pub mod team_install;
 /// Test kits shared across crates: the scriptable fake model server (AGE-632).
 /// Test-only: enable `chatty-core/test-support` from a dev-dependency.
 #[cfg(any(test, feature = "test-support"))]
@@ -102,18 +103,29 @@ static REPOSITORY_REGISTRY: OnceLock<RepositoryRegistry> = OnceLock::new();
 pub fn init_repositories() -> anyhow::Result<()> {
     use settings::repositories::*;
 
+    if is_initialized() {
+        return Ok(());
+    }
+
+    // Provider keys, MCP/A2A tokens and the Hive tokens go to the OS
+    // keychain (or its announced file fallback); the JSON keeps references
+    // (AGE-741).
+    let secrets = settings::secret_store::select_secret_store(
+        &generic_json_repository::chatty_config_dir()?,
+    )?;
+
     let registry = RepositoryRegistry {
-        providers: Arc::new(JsonFileRepository::new()?),
+        providers: Arc::new(JsonFileRepository::new(secrets.clone())?),
         general_settings: Arc::new(GeneralSettingsJsonRepository::new()?),
         models: Arc::new(JsonModelsRepository::new()?),
-        mcp: Arc::new(JsonMcpRepository::new()?),
-        a2a: Arc::new(A2aJsonRepository::new()?),
+        mcp: Arc::new(JsonMcpRepository::new(secrets.clone())?),
+        a2a: Arc::new(A2aJsonRepository::new(secrets.clone())?),
         execution_settings: Arc::new(ExecutionSettingsJsonRepository::new()?),
         search_settings: Arc::new(SearchSettingsJsonRepository::new()?),
         training_settings: Arc::new(TrainingSettingsJsonRepository::new()?),
         user_secrets: Arc::new(UserSecretsJsonRepository::new()?),
         module_settings: Arc::new(ModuleSettingsJsonRepository::new()?),
-        hive_settings: Arc::new(HiveSettingsJsonRepository::new()?),
+        hive_settings: Arc::new(HiveSettingsJsonRepository::new(secrets)?),
         extensions: Arc::new(ExtensionsJsonRepository::new()?),
         token_tracking: Arc::new(TokenTrackingJsonRepository::new()?),
     };

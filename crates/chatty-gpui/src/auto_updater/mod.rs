@@ -4,6 +4,8 @@
 //! - Background polling for new releases from GitHub
 //! - Version comparison using semver
 //! - Binary downloading with progress tracking
+//! - Release authenticity: a signed `checksums.txt` (see `signature`) and, on
+//!   macOS, a code-signature and Team-ID check before the swap
 //! - OS-specific installation (macOS, Linux, Windows)
 //!
 //! Simplified architecture: direct GitHub API integration, no trait abstraction.
@@ -138,69 +140,43 @@ impl AutoUpdater {
         }
     }
 
-    /// Fetch and parse checksums from the release
-    async fn fetch_checksums(
+    /// Download the text of the release asset called `name`, if the release
+    /// has one. Used for `checksums.txt` and its `checksums.txt.sig`.
+    async fn fetch_release_text(
         client: &reqwest::Client,
         release: &GitHubRelease,
-    ) -> std::collections::HashMap<String, String> {
-        let checksum_patterns = [
-            "checksums.txt",
-            "checksums.sha256",
-            "SHA256SUMS",
-            "CHECKSUMS",
-        ];
+        name: &str,
+    ) -> Option<String> {
+        let Some(asset) = release.assets.iter().find(|a| a.name == name) else {
+            let available_assets: Vec<&str> =
+                release.assets.iter().map(|a| a.name.as_str()).collect();
+            warn!(asset = name, available_assets = ?available_assets, "Release asset not found");
+            return None;
+        };
 
-        info!("Looking for checksums file in release");
-
-        for pattern in &checksum_patterns {
-            if let Some(checksum_asset) = release
-                .assets
-                .iter()
-                .find(|a| a.name.to_lowercase() == pattern.to_lowercase())
-            {
-                info!(
-                    pattern = pattern,
-                    url = &checksum_asset.browser_download_url,
-                    "Found checksums file, downloading..."
-                );
-
-                match client
-                    .get(&checksum_asset.browser_download_url)
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        let status = response.status();
-                        debug!(status = ?status, "Received response for checksums file");
-
-                        match response.text().await {
-                            Ok(text) => {
-                                debug!(
-                                    length = text.len(),
-                                    preview = &text.chars().take(100).collect::<String>(),
-                                    "Successfully downloaded checksums file"
-                                );
-                                return Self::parse_checksums(&text);
-                            }
-                            Err(e) => {
-                                warn!(error = ?e, "Failed to read checksums response body");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = ?e, "Failed to fetch checksums file");
-                    }
-                }
+        debug!(
+            asset = name,
+            url = &asset.browser_download_url,
+            "Downloading release asset"
+        );
+        let response = match client.get(&asset.browser_download_url).send().await {
+            Ok(response) => response,
+            Err(e) => {
+                warn!(asset = name, error = ?e, "Failed to fetch release asset");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            warn!(asset = name, status = ?response.status(), "Release asset download failed");
+            return None;
+        }
+        match response.text().await {
+            Ok(text) => Some(text),
+            Err(e) => {
+                warn!(asset = name, error = ?e, "Failed to read release asset body");
+                None
             }
         }
-
-        let available_assets: Vec<&str> = release.assets.iter().map(|a| a.name.as_str()).collect();
-        warn!(
-            available_assets = ?available_assets,
-            "No checksums file found in release assets"
-        );
-
-        std::collections::HashMap::new()
     }
 
     /// Parse checksums from text format
@@ -671,6 +647,7 @@ impl AutoUpdater {
 mod download;
 mod network;
 mod platform;
+mod signature;
 
 use download::download_update;
 use network::fetch_latest_release;

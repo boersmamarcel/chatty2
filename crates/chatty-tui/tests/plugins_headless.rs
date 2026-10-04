@@ -93,6 +93,8 @@ fn chatty_tui(home: &Path, args: &[&str]) -> std::process::Output {
         .env("XDG_CACHE_HOME", base.join("cache"))
         .env("XDG_STATE_HOME", base.join("state"))
         .env("XDG_RUNTIME_DIR", base.join("run"))
+        // Keys stay in the throwaway home, never in the developer's keychain.
+        .env("CHATTY_SECRET_STORE", "file")
         .output()
         .expect("chatty-tui runs")
 }

@@ -21,7 +21,8 @@ Nothing leaves your machine unless a provider, extension or website you use rece
 
 | What | macOS | Linux | Windows |
 |------|-------|-------|---------|
-| Settings, provider keys, extensions | `~/Library/Application Support/chatty/` | `~/.config/chatty/` | `%APPDATA%\chatty\` |
+| Settings, extensions | `~/Library/Application Support/chatty/` | `~/.config/chatty/` | `%APPDATA%\chatty\` |
+| Provider API keys, MCP and A2A tokens, Hive sign-in | Keychain (login keychain) | Secret Service (GNOME Keyring, KWallet) | Credential Manager |
 | Conversations (`conversations.db`) | same folder | `~/.config/chatty/` | same folder |
 | Training exports | `~/Library/Application Support/chatty/exports/` | `~/.config/chatty/exports/` | `%APPDATA%\chatty\exports\` |
 | Catalog extension sign-in tokens | same folder | `~/.config/chatty/` | same folder |
@@ -39,6 +40,19 @@ Nothing leaves your machine unless a provider, extension or website you use rece
 | Terminal app binary | `/usr/local/bin/chatty-tui` | `~/.local/bin/chatty-tui` | the app's install folder |
 
 The caches can be deleted at any time; they are rebuilt on demand (the first browser call after deleting the Chrome cache downloads it again). Settings and conversations are plain files, so back them up by copying the folder.
+
+### API keys and sign-in tokens
+
+Provider API keys, MCP and A2A tokens and your Hive sign-in are kept in the operating system's keychain, filed under `chatty:<settings folder>`. The settings files only name them (`"api_key_ref": "provider/OpenRouter"`), so copying or syncing the settings folder does not copy a key. On a new machine, enter the keys again in **Settings**.
+
+When you first start this version, any key still written in `providers.json`, `mcp_servers.json`, `a2a_agents.json` or `hive_settings.json` is moved into the keychain and removed from the file.
+
+A Linux machine without a Secret Service (a server, a container) has no keychain. Chatty then keeps the keys in `secrets.json` in the settings folder, readable only by you, and logs one warning saying so. To control this, set `CHATTY_SECRET_STORE`:
+
+- `keychain` — use the keychain or refuse to start; never write `secrets.json`.
+- `file` — always use `secrets.json`, without touching the keychain.
+
+Environment variables and command-line flags that pass a key to `chatty-tui` (for example `--api-key`) work as before and are never stored.
 
 ## Auto-update
 
