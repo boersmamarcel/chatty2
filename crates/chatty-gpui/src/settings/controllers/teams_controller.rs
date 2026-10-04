@@ -133,6 +133,9 @@ pub fn install_team(listing: AgentSpecListing, cx: &mut App) {
             warn!(error = %e, "Could not count the team install");
         }
         cx.update(|cx| {
+            // Re-list, so the install count includes this one.
+            let query = cx.global::<MarketplaceState>().search_query.clone();
+            search_teams(query, cx);
             cx.global_mut::<MarketplaceState>().team_notice = Some(notice(&record));
             cx.refresh_windows();
         })
@@ -201,12 +204,8 @@ fn after_change(roster: Vec<String>, cx: &mut App) {
 /// What the Teams tab says after an install.
 fn notice(record: &TeamRecord) -> String {
     let mut text = format!(
-        "Installed {} {} by {} (signature verified): {}. Try `/agent {} …` in a chat.",
-        record.leader,
-        record.version,
-        record.author,
-        record.specs.join(", "),
-        record.leader
+        "Installed {} {} (signatures verified). Try /agent {} in a chat.",
+        record.leader, record.version, record.leader
     );
     for module in &record.paid_plugins {
         text += &format!(

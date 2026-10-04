@@ -432,7 +432,7 @@ fn marketplace_group() -> SettingGroup {
             // so the input keeps focus and typed text between frames.
             let search_input =
                 window.use_keyed_state("marketplace-search-input", cx, |window, cx| {
-                    InputState::new(window, cx).placeholder("Search extensions...")
+                    InputState::new(window, cx).placeholder("Search the marketplace...")
                 });
 
             let tab_button = |id: &'static str, label: &'static str, this: MarketplaceTab| {
@@ -512,10 +512,14 @@ fn marketplace_group() -> SettingGroup {
                 .when_some(
                     team_notice.filter(|_| tab == MarketplaceTab::Teams),
                     |this, notice| {
-                        this.child(Alert::success("team-notice", notice).small().on_close(
-                            |_event, _window, cx| {
-                                cx.global_mut::<MarketplaceState>().team_notice = None;
-                            },
+                        // In a sized box: unwrapped, a long notice widens
+                        // the column and squeezes the search field.
+                        this.child(div().w_full().overflow_hidden().child(
+                            Alert::success("team-notice", notice).small().on_close(
+                                |_event, _window, cx| {
+                                    cx.global_mut::<MarketplaceState>().team_notice = None;
+                                },
+                            ),
                         ))
                     },
                 )
@@ -684,8 +688,14 @@ fn team_rows(cx: &App) -> Vec<AnyElement> {
                 .installed_teams
                 .iter()
                 .find(|team| team.leader == listing.name);
+            // A member of an installed team came with it and goes with it.
+            let member_of = state
+                .installed_teams
+                .iter()
+                .find(|team| team.leader != listing.name && team.specs.contains(&listing.name))
+                .map(|team| team.leader.clone());
             let installing = state.installing_team.as_deref() == Some(listing.name.as_str());
-            team_row(listing, installed, installing, cx)
+            team_row(listing, installed, member_of, installing, cx)
         })
         .collect()
 }
@@ -693,6 +703,7 @@ fn team_rows(cx: &App) -> Vec<AnyElement> {
 fn team_row(
     listing: &AgentSpecListing,
     installed: Option<&TeamRecord>,
+    member_of: Option<String>,
     installing: bool,
     cx: &App,
 ) -> AnyElement {
@@ -714,7 +725,9 @@ fn team_row(
         .map(|m| format!("{} {}", m.name, m.version))
         .collect();
 
-    let action = if installing {
+    let action = if let Some(leader) = member_of.filter(|_| installed.is_none()) {
+        line(format!("installed with {leader}")).into_any_element()
+    } else if installing {
         Button::new(SharedString::from(format!("team-installing-{name}")))
             .small()
             .label("Verifying…")
