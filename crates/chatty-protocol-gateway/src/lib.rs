@@ -14,7 +14,7 @@
 //! | `GET`  | `/a2a/{agent}/.well-known/agent.json` | Per-agent A2A card |
 //! | `POST` | `/a2a/{agent}` | A2A JSON-RPC (`message/send`, `message/stream`, `tasks/get`) |
 //!
-//! A `chatty:plugin@0.3.0` plugin contributes tools and never runs a loop of
+//! A `chatty:plugin@0.4.0` plugin contributes tools and never runs a loop of
 //! its own (PL-D1 option B), so it is served over MCP only, and only when its
 //! `[protocols] mcp` flag is set; otherwise it answers 404. There is no
 //! OpenAI route and no module A2A route (PL-U3). Every route refuses a

@@ -13,7 +13,7 @@
 
 .PHONY: help setup build build-release test test-fast test-tui test-gpui \
         test-gateway lint fmt fmt-check typecheck wasm-modules wasm-template \
-        test-benford lint-module-sdk test-billing-sdk example-plugin-benford \
+        test-benford lint-module-sdk example-plugin-benford \
         run-gpui run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
         docs-check-nav docs-check-frontmatter docs-check-leakage \
         docs-check-reference docs-check animations
@@ -37,7 +37,6 @@ help:
 	@echo "  make test-benford  the benford plugin's own unit tests, on the host target"
 	@echo "  make example-plugin-benford  Build the benford example plugin and install it (one command; MODULE_DIR overrides where)"
 	@echo "  make lint-module-sdk  clippy chatty-module-sdk for wasm32-wasip2"
-	@echo "  make test-billing-sdk  hive-billing-sdk's tests, on the host target"
 	@echo "  make run-gpui      cargo run -p chatty-gpui"
 	@echo "  make run-tui       cargo run -p chatty-tui"
 	@echo "  make docs-gen      Generate docs/generated reference pages"
@@ -120,9 +119,9 @@ wasm-template:
 	cargo build --manifest-path modules/ci-generated/Cargo.toml \
 		--target wasm32-wasip2 --release
 
-# benford, chatty-module-sdk and hive-billing-sdk are standalone crates
-# (their own `[workspace]`), so `make test`/`make lint` above never touch
-# them. Both test crates default to `wasm32-wasip2` via their own
+# benford and chatty-module-sdk are standalone crates (their own
+# `[workspace]`), so `make test`/`make lint` above never touch them. The
+# benford crate defaults to `wasm32-wasip2` via its own
 # `.cargo/config.toml`, which has no libtest runner, so the host target must
 # be explicit (AGE-600).
 test-benford:
@@ -145,9 +144,6 @@ example-plugin-benford:
 lint-module-sdk:
 	cargo clippy --manifest-path crates/chatty-module-sdk/Cargo.toml --target wasm32-wasip2 -- -D warnings
 
-test-billing-sdk:
-	cargo test --manifest-path crates/hive-billing-sdk/Cargo.toml --target x86_64-unknown-linux-gnu
-
 run-gpui:
 	cargo run -p chatty-gpui
 
@@ -156,7 +152,7 @@ run-tui:
 
 # Mirrors the Rust path in .github/workflows/ci.yml.
 # GitHub skips this compile/test path when a PR only touches docs.
-ci: wasm-modules wasm-template test test-benford lint-module-sdk test-billing-sdk
+ci: wasm-modules wasm-template test test-benford lint-module-sdk
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	bash scripts/check-reserved.sh

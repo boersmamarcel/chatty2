@@ -93,7 +93,7 @@ jobs:
           echo "$CHANGED"
 
           # Patterns that must never ride a privileged release path.
-          DENY_REGEX='^(RESERVED\.md|\.cursor/rules/ownership\.mdc|crates/chatty-trace/|crates/chatty-playbook/|crates/chatty-flow/|crates/chatty-optimize/|crates/hive-billing-sdk/|crates/chatty-core/src/auth/|crates/chatty-core/src/settings/models/providers_store\.rs|crates/chatty-gpui/src/settings/.*auth|crates/chatty-tui/src/.*auth)'
+          DENY_REGEX='^(RESERVED\.md|\.cursor/rules/ownership\.mdc|crates/chatty-trace/|crates/chatty-playbook/|crates/chatty-flow/|crates/chatty-optimize/|crates/chatty-core/src/auth/|crates/chatty-core/src/settings/models/providers_store\.rs|crates/chatty-gpui/src/settings/.*auth|crates/chatty-tui/src/.*auth)'
 
           VIOLATIONS="$(echo "$CHANGED" | grep -E "$DENY_REGEX" || true)"
           if [ -n "$VIOLATIONS" ]; then

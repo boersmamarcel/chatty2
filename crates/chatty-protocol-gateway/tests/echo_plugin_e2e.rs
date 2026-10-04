@@ -1,5 +1,5 @@
 //! End-to-end integration tests for the `echo` reference plugin
-//! (`chatty:plugin@0.3.0`).
+//! (`chatty:plugin@0.4.0`).
 //!
 //! These tests exercise every layer of the chatty plugin pipeline:
 //!

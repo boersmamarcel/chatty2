@@ -1,5 +1,5 @@
 [package]
-name = "fixture-billing"
+name = "fixture-wit-0-3"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -7,10 +7,10 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+# Not on chatty-module-sdk: the SDK only speaks today's world. This crate
+# generates its own guest bindings for the older world in ./wit.
 [dependencies]
-chatty-module-sdk = { path = "../../../crates/chatty-module-sdk" }
-hive-billing-sdk = { path = "../../../crates/hive-billing-sdk" }
-serde_json = "1"
+wit-bindgen = "0.51.0"
 
 # Standalone crate targeting wasm32-wasip2, outside the main workspace.
 # Built by scripts/build-wasm-fixtures.sh.

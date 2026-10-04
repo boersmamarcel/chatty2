@@ -121,7 +121,7 @@ async fn aggregated_agent_card_returns_200() {
 // OpenAI routes: gone with 0.2.0's `chat` export (PL-U3)
 // ---------------------------------------------------------------------------
 
-/// A `chatty:plugin@0.3.0` plugin has tools and no loop, so there is nothing
+/// A `chatty:plugin@0.4.0` plugin has tools and no loop, so there is nothing
 /// for an OpenAI chat completion to call: neither route exists any more.
 #[tokio::test]
 async fn openai_routes_are_gone() {

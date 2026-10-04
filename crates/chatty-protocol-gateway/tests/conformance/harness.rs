@@ -57,7 +57,7 @@ impl Module {
         self
     }
 
-    /// The user granted this module `capability` (`llm`, `file`, `billing`):
+    /// The user granted this module `capability` (`llm`, `file`):
     /// a module served with no spec gets none of them otherwise (SEC-11).
     pub fn granted(mut self, capability: &'static str) -> Self {
         self.grants.push(capability);

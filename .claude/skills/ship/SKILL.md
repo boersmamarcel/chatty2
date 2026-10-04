@@ -29,7 +29,7 @@ optionally the word `release`.
   ```
 - `release` was asked but the diff touches release-guarded paths (`RESERVED.md`,
   `.cursor/rules/ownership.mdc`, `crates/chatty-trace/`, `chatty-playbook`,
-  `chatty-flow`, `chatty-optimize`, `hive-billing-sdk`, auth or provider-key
+  `chatty-flow`, `chatty-optimize`, auth or provider-key
   code). `ship-auto-guard.yml` fails those; do not try.
 
 Say which rule refused and stop.

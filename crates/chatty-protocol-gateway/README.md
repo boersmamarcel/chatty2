@@ -3,7 +3,7 @@
 HTTP server with two protocol surfaces, both **plain HTTP + JSON over TCP** —
 there is no gRPC, no WebSocket (except MCP SSE), and no binary framing:
 
-- **MCP** serves the tools of each loaded WASM plugin (`chatty:plugin@0.3.0`)
+- **MCP** serves the tools of each loaded WASM plugin (`chatty:plugin@0.4.0`)
   to external MCP clients. A plugin has tools and no loop of its own, so it
   is never an agent and has no other route (PL-U3).
 - **A2A** serves agents: **local participants** (worker processes the broker

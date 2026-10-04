@@ -28,7 +28,7 @@ listed or invoked as an agent itself.
 │            llm::complete, config::get, log::info, etc.   │
 ├──────────────────────────────────────────────────────────┤
 │                   chatty-wasm-runtime                     │
-│  (Wasmtime-based host: loads chatty:plugin@0.3.0 .wasm,  │
+│  (Wasmtime-based host: loads chatty:plugin@0.4.0 .wasm,  │
 │   implements imports, calls guest exports with           │
 │   fuel/memory/timeout limits)                            │
 ├──────────────────────────────────────────────────────────┤
@@ -45,7 +45,7 @@ listed or invoked as an agent itself.
 | Crate | Role |
 |:------|:-----|
 | `chatty-module-sdk` | Guest-side SDK for plugin authors: the WIT types, one module per host capability, and wit-bindgen's own `Plugin` trait and `export!` macro |
-| `chatty-wasm-runtime` | Wasmtime host: loads `chatty:plugin@0.3.0` components (and refuses every other world), implements the host imports (`llm`, `config`, `logging`, `file`, `billing`), enforces resource limits |
+| `chatty-wasm-runtime` | Wasmtime host: loads `chatty:plugin@0.4.0` components (and refuses every other world), implements the host imports (`llm`, `config`, `logging`, `file`, `billing`), enforces resource limits |
 | `chatty-module-registry` | Discovery (`scan_directory`), lifecycle (`load`/`unload`/`reload`), manifest parsing |
 | `chatty-core` | `tools::plugin_tool` (a spec's plugins as rig tools), `PluginLlmProvider` (a plugin's `llm::complete` on the agent's provider), the A2A client and agent tools |
 | `chatty-protocol-gateway` | HTTP server (axum) serving plugin tools over MCP, and local participants and virtual agents over A2A |
@@ -54,10 +54,10 @@ listed or invoked as an agent itself.
 
 The host–guest interface is
 [`wit/chatty-plugin.wit`](https://github.com/boersmamarcel/chatty2/blob/main/wit/chatty-plugin.wit)
-(package `chatty:plugin@0.3.0`); [wit-reference.md](wit-reference.md) has the full
+(package `chatty:plugin@0.4.0`); [wit-reference.md](wit-reference.md) has the full
 type reference. A component targeting any other world (the old agent-shaped
 `chatty:module@0.2.0` included) is refused at load with `module targets …; this
-chatty supports chatty:plugin@0.3.0 — rebuild it with the current SDK`.
+chatty supports chatty:plugin@0.4.0 — rebuild it with the current SDK`.
 
 **Host imports**, one interface per capability (a plugin lists the ones it
 needs in `metadata().requested-capabilities`; the host links only what the agent's

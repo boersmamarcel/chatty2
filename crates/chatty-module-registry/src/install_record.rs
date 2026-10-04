@@ -182,14 +182,14 @@ mod tests {
             ModuleGrants::default()
         );
         let mut grants = ModuleGrants::default();
-        grants.set(Capability::Billing, true);
+        grants.set(Capability::File, true);
         grants.set(Capability::Llm, true);
         grants.write(dir.path()).unwrap();
         let read = ModuleGrants::read(dir.path()).unwrap();
-        assert_eq!(read.capabilities(), [Capability::Llm, Capability::Billing]);
-        assert!(read.allows(Capability::Llm) && !read.allows(Capability::File));
+        assert_eq!(read.capabilities(), [Capability::Llm, Capability::File]);
+        assert!(read.allows(Capability::Llm) && !read.allows(Capability::Config));
         grants.set(Capability::Llm, false);
-        assert_eq!(grants.capabilities(), [Capability::Billing]);
+        assert_eq!(grants.capabilities(), [Capability::File]);
     }
 
     #[test]

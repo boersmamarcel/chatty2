@@ -134,9 +134,8 @@ jobs:
           # of clippy's. Bump again if the cache ever needs to be rebuilt.
           prefix-key: v1-rust
           shared-key: linux-ci
-          # `modules/benford`, `crates/chatty-module-sdk` and
-          # `crates/hive-billing-sdk` each declare their own `[workspace]`
-          # (AGE-600): they are not workspace members, so their `target/`
+          # `modules/benford` and `crates/chatty-module-sdk` each declare
+          # their own `[workspace]` (AGE-600): they are not workspace members, so their `target/`
           # dirs live outside `.` and need their own cache entries. The
           # fixtures under `modules/fixtures/*` build into the main
           # workspace's `target/wasm-fixtures/` (see
@@ -145,7 +144,6 @@ jobs:
             .
             modules/benford
             crates/chatty-module-sdk
-            crates/hive-billing-sdk
           # Deliberately no `cache-on-failure: true`: it also saves on
           # cancelled jobs, and cancel-in-progress above cancels main runs
           # whenever two pushes land close together.
@@ -213,10 +211,6 @@ jobs:
       - name: Clippy chatty-module-sdk for wasm32-wasip2
         if: needs.changes.outputs.rust == 'true'
         run: cargo clippy --manifest-path crates/chatty-module-sdk/Cargo.toml --target wasm32-wasip2 -- -D warnings
-
-      - name: Test hive-billing-sdk on the host target
-        if: needs.changes.outputs.rust == 'true'
-        run: cargo test --manifest-path crates/hive-billing-sdk/Cargo.toml --target x86_64-unknown-linux-gnu
 
       # The gateway conformance suite (AGE-599) drives a real third-party
       # client: the MCP Inspector through `npx`, which needs Node >= 22.19.

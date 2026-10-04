@@ -8,7 +8,7 @@
 //! module's `llm::complete`. Where a row can be driven by a real client it
 //! is: rmcp and the MCP Inspector CLI (3.6).
 //!
-//! PL-U3 (`chatty:plugin@0.3.0`) removed `chat`: a plugin has tools and no
+//! PL-U3 (`chatty:plugin@0.4.0`) removed `chat`: a plugin has tools and no
 //! loop, so it is served over MCP only. Rows 3.1–3.4 (the OpenAI routes) and
 //! 3.8–3.9 (a module's A2A stream and disconnect) tested a concept that no
 //! longer exists and were removed. BI-7 (AGE-639) retired the A2A route's

@@ -9,7 +9,7 @@
 //! `capability <x> not granted to this agent` ([`NotGranted`]), so
 //! instantiation succeeds and the refusal reaches the model through the
 //! tool result. `logging` is always linked. A module served with no agent
-//! spec also gets `config` by default; `llm`, `file` and `billing` need the
+//! spec also gets `config` by default; `llm` and `file` need the
 //! user's grant ([`Grants::Specless`]).
 //!
 //! A grant the plugin did not request is refused at load
@@ -22,31 +22,27 @@ use std::fmt;
 use tracing::warn;
 use wasmtime::component::{HasData, HasSelf, Linker};
 
-use crate::bindings::chatty::plugin::billing::SessionInfo;
 use crate::bindings::chatty::plugin::types::{CompletionResponse, Message};
-use crate::bindings::chatty::plugin::{billing, config, file, llm, logging, types};
+use crate::bindings::chatty::plugin::{config, file, llm, logging, types};
 use crate::bindings::exports::chatty::plugin::plugin::Capability;
 use crate::host::ModuleState;
 
 impl Capability {
     /// Every capability, in WIT order.
-    pub const ALL: [Capability; 5] = [
+    pub const ALL: [Capability; 4] = [
         Capability::Llm,
         Capability::Config,
         Capability::Logging,
         Capability::File,
-        Capability::Billing,
     ];
 
-    /// The capability's WIT name (`llm`, `config`, `logging`, `file`,
-    /// `billing`).
+    /// The capability's WIT name (`llm`, `config`, `logging`, `file`).
     pub fn name(self) -> &'static str {
         match self {
             Capability::Llm => "llm",
             Capability::Config => "config",
             Capability::Logging => "logging",
             Capability::File => "file",
-            Capability::Billing => "billing",
         }
     }
 
@@ -80,7 +76,7 @@ pub enum Grants {
 }
 
 /// What a module served with no agent spec gets without a grant from the
-/// user, besides `logging`: `llm`, `file` and `billing` need one.
+/// user, besides `logging`: `llm` and `file` need one.
 pub const SPECLESS_DEFAULTS: [Capability; 1] = [Capability::Config];
 
 impl Default for Grants {
@@ -203,11 +199,6 @@ pub(crate) fn add_to_linker(
     } else {
         file::add_to_linker::<_, Refusing>(linker, refused)?;
     }
-    if real(Capability::Billing) {
-        billing::add_to_linker::<_, HasSelf<ModuleState>>(linker, |s| s)?;
-    } else {
-        billing::add_to_linker::<_, Refusing>(linker, refused)?;
-    }
     Ok(())
 }
 
@@ -261,16 +252,6 @@ impl file::Host for Refused<'_> {
     }
 }
 
-impl billing::Host for Refused<'_> {
-    fn acquire_session(&mut self, _estimated_tokens: i64) -> Result<SessionInfo, String> {
-        Err(self.refuse(Capability::Billing).to_string())
-    }
-
-    fn report_usage(&mut self, _input_tokens: i64, _output_tokens: i64) -> Result<(), String> {
-        Err(self.refuse(Capability::Billing).to_string())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,11 +272,16 @@ mod tests {
 
     #[test]
     fn specless_links_config_and_what_the_user_approved() {
-        let requested = [Capability::Billing, Capability::Config, Capability::Llm];
+        let requested = [Capability::Config, Capability::Llm];
         let none = Grants::Specless { approved: vec![] };
         assert_eq!(
             resolve("m", &none, &requested).unwrap(),
             [Capability::Config, Capability::Logging]
+        );
+        assert_eq!(
+            resolve("m", &none, &[Capability::File, Capability::Llm]).unwrap(),
+            [Capability::Logging],
+            "`llm` and `file` need the user's approval"
         );
         let llm = Grants::Specless {
             approved: vec![Capability::Llm, Capability::File],

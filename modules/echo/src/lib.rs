@@ -1,4 +1,4 @@
-//! Echo — the reference chatty plugin (`chatty:plugin@0.3.0`).
+//! Echo — the reference chatty plugin (`chatty:plugin@0.4.0`).
 //!
 //! Three tools, each taking `{"input": string}`:
 //!

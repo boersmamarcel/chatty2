@@ -1,5 +1,5 @@
 //! Fixture `wit-0.1`: a component built against `chatty:module@0.1.0`, which
-//! the host (`chatty:plugin@0.3.0` only) must refuse to load with the
+//! the host (`chatty:plugin@0.4.0` only) must refuse to load with the
 //! rebuild message.
 wit_bindgen::generate!({ world: "module", path: "wit" });
 

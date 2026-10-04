@@ -1,7 +1,7 @@
 //! S7 §2: per-call overhead of the gateway's MCP route vs a direct
 //! in-process call (AGE-603, plugin evaluation plan §3 S7).
 //!
-//! A `chatty:plugin@0.3.0` plugin is served over MCP only (PL-U3): the
+//! A `chatty:plugin@0.4.0` plugin is served over MCP only (PL-U3): the
 //! `chat`-shaped group (direct `chat`, OpenAI, A2A) went with the `chat`
 //! export. What remains is the `invoke_tool`-shaped pairing: direct
 //! `WasmModule::invoke_tool` against MCP `tools/call`, both on `echo`.

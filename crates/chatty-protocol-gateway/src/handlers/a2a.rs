@@ -1,7 +1,7 @@
 //! A2A (Agent-to-Agent) protocol handlers.
 //!
 //! The agents served here are local participants and virtual agents (the
-//! broker's workers). A WASM plugin is never an agent (`chatty:plugin@0.3.0`
+//! broker's workers). A WASM plugin is never an agent (`chatty:plugin@0.4.0`
 //! has no `chat` export, PL-U3), so no module is served over A2A; a module
 //! whose registry metadata says `remote` is still forwarded to the Hive
 //! runner until PL-H8b removes that path.

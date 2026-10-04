@@ -53,7 +53,7 @@ build() {
   need_hive
   # Neither binary links chatty2 code since PL-H8 (hive-runner's module routes
   # are gone); the chatty2 side of the contract is the fixtures this checkout
-  # builds and the registry's `chatty:plugin@0.3.0` export check at publish.
+  # builds and the registry's `chatty:plugin@0.4.0` export check at publish.
   (
     cd "$HIVE_DIR"
     CARGO_TARGET_DIR="$hive_target" cargo build -p hive-registry -p hive-runner

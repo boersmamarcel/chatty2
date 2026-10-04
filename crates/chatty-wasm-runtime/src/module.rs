@@ -18,10 +18,10 @@ use crate::bindings::exports::chatty::plugin::plugin::Capability;
 use crate::bindings::exports::chatty::plugin::plugin::{
     PluginMetadata, ToolCallRequest, ToolResult,
 };
-use crate::error::{CallError, ToolFailure};
+use crate::error::{CallError, ToolFailure, UnsupportedWorld};
 use crate::grants::{self, NotGranted};
 use crate::host::{
-    BillingProvider, LlmProvider, ModuleManifest, ModuleState, add_deadline_clock_to_linker,
+    LlmProvider, ModuleManifest, ModuleState, add_deadline_clock_to_linker,
 };
 use crate::limits::{EPOCH_TICK, MAX_OUTPUT_BYTES_CEILING, METADATA_CALL_MS, ResourceLimits};
 
@@ -87,7 +87,7 @@ struct Instance {
     bindings: PluginWorld,
 }
 
-/// A loaded WASM plugin: a component exporting `chatty:plugin/plugin@0.3.0`.
+/// A loaded WASM plugin: a component exporting `chatty:plugin/plugin@0.4.0`.
 ///
 /// Every export call runs under the per-call [`ResourceLimits`]: fuel is
 /// refilled and an epoch deadline is set before each call, and the call runs
@@ -104,7 +104,6 @@ pub struct WasmModule {
     linker: Linker<ModuleState>,
     manifest: ModuleManifest,
     llm_provider: Arc<dyn LlmProvider>,
-    billing_provider: Option<Arc<dyn BillingProvider>>,
     /// Per-call limits.
     limits: ResourceLimits,
     /// What the plugin's `metadata` requests.
@@ -160,32 +159,13 @@ impl WasmModule {
         llm_provider: Arc<dyn LlmProvider>,
         limits: ResourceLimits,
     ) -> Result<Self> {
-        Self::from_file_with_billing(engine, path, manifest, llm_provider, None, limits)
-    }
-
-    /// Load a WASM component from `path` with optional billing provider.
-    pub fn from_file_with_billing(
-        engine: &Engine,
-        path: &Path,
-        manifest: ModuleManifest,
-        llm_provider: Arc<dyn LlmProvider>,
-        billing_provider: Option<Arc<dyn BillingProvider>>,
-        limits: ResourceLimits,
-    ) -> Result<Self> {
         info!(path = %path.display(), module = %manifest.name, "loading WASM module");
 
         let component = Component::from_file(engine, path)
             .map_err(anyhow::Error::from)
             .context("failed to load WASM component")?;
 
-        Self::from_component(
-            engine,
-            component,
-            manifest,
-            llm_provider,
-            billing_provider,
-            limits,
-        )
+        Self::from_component(engine, component, manifest, llm_provider, limits)
     }
 
     /// Load a WASM component from raw bytes and instantiate it.
@@ -198,30 +178,11 @@ impl WasmModule {
         llm_provider: Arc<dyn LlmProvider>,
         limits: ResourceLimits,
     ) -> Result<Self> {
-        Self::from_bytes_with_billing(engine, bytes, manifest, llm_provider, None, limits)
-    }
-
-    /// Load a WASM component from raw bytes with optional billing provider.
-    pub fn from_bytes_with_billing(
-        engine: &Engine,
-        bytes: &[u8],
-        manifest: ModuleManifest,
-        llm_provider: Arc<dyn LlmProvider>,
-        billing_provider: Option<Arc<dyn BillingProvider>>,
-        limits: ResourceLimits,
-    ) -> Result<Self> {
         let component = Component::from_binary(engine, bytes)
             .map_err(anyhow::Error::from)
             .context("failed to parse WASM component")?;
 
-        Self::from_component(
-            engine,
-            component,
-            manifest,
-            llm_provider,
-            billing_provider,
-            limits,
-        )
+        Self::from_component(engine, component, manifest, llm_provider, limits)
     }
 
     fn from_component(
@@ -229,7 +190,6 @@ impl WasmModule {
         component: Component,
         manifest: ModuleManifest,
         llm_provider: Arc<dyn LlmProvider>,
-        billing_provider: Option<Arc<dyn BillingProvider>>,
         limits: ResourceLimits,
     ) -> Result<Self> {
         check_world(engine, &component)?;
@@ -242,7 +202,6 @@ impl WasmModule {
             linker: build_linker(engine, &[Capability::Logging])?,
             manifest,
             llm_provider,
-            billing_provider,
             limits,
             requested: Vec::new(),
             granted: vec![Capability::Logging],
@@ -292,7 +251,6 @@ impl WasmModule {
         let state = ModuleState::new(
             self.manifest.clone(),
             Arc::clone(&self.llm_provider),
-            self.billing_provider.clone(),
             &self.limits,
         );
         let mut store = Store::new(&self.engine, state);
@@ -516,7 +474,7 @@ fn build_linker(engine: &Engine, granted: &[Capability]) -> Result<Linker<Module
     Ok(linker)
 }
 
-/// Refuse a component that does not export `chatty:plugin/plugin@0.3.0`,
+/// Refuse a component that does not export `chatty:plugin/plugin@0.4.0`,
 /// naming the world it does target (PL-D1: no older world is adapted).
 fn check_world(engine: &Engine, component: &Component) -> Result<()> {
     let ty = component.component_type();
@@ -531,10 +489,7 @@ fn check_world(engine: &Engine, component: &Component) -> Result<()> {
         .iter()
         .find_map(|name| world_package(name))
         .unwrap_or_else(|| "no chatty world".to_string());
-    anyhow::bail!(
-        "module targets {found}; this chatty supports {} — rebuild it with the current SDK",
-        crate::WIT_PACKAGE
-    )
+    Err(UnsupportedWorld { found }.into())
 }
 
 /// The package an export belongs to, `chatty:module@0.2.0` for

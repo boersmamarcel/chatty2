@@ -76,7 +76,7 @@ pub struct ResourceLimits {
 
     /// Wall-clock limit for one `chat` / `invoke-tool` call, in
     /// milliseconds, including time spent in host imports (`llm::complete`,
-    /// `file::read-bytes`, billing). Enforced by epoch interruption, so it
+    /// `file::read-bytes`). Enforced by epoch interruption, so it
     /// fires even when the guest never yields; the call fails with
     /// `deadline exceeded`.
     ///

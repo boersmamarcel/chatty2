@@ -105,3 +105,27 @@ impl fmt::Display for ToolFailure {
 }
 
 impl std::error::Error for ToolFailure {}
+
+/// A component built against a world this host does not load — an older
+/// `chatty:plugin` (0.3.x), the retired `chatty:module` worlds, or none —
+/// refused at load, never adapted (PL-D1): its publisher rebuilds it with
+/// the current SDK and republishes. Reach it with
+/// `err.downcast_ref::<UnsupportedWorld>()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedWorld {
+    /// The world the component targets, e.g. `chatty:plugin@0.3.0`.
+    pub found: String,
+}
+
+impl fmt::Display for UnsupportedWorld {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "module targets {}; this chatty supports {} — rebuild it with the current SDK",
+            self.found,
+            crate::WIT_PACKAGE
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedWorld {}

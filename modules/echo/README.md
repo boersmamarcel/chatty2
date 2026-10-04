@@ -1,6 +1,6 @@
 # echo
 
-Reference chatty plugin (`chatty:plugin@0.3.0`), the canonical quickstart for
+Reference chatty plugin (`chatty:plugin@0.4.0`), the canonical quickstart for
 plugin authors.
 
 **Tutorial:** [write a plugin](https://boersmamarcel.github.io/chatty2/dev/start/tutorial-echo-agent.html)
@@ -57,7 +57,7 @@ cp target/wasm32-wasip2/release/echo.wasm .
 
 ```sh
 # Inspect the component's exports (requires wasm-tools): it exports
-# chatty:plugin/plugin@0.3.0 and imports only what it uses.
+# chatty:plugin/plugin@0.4.0 and imports only what it uses.
 wasm-tools component wit echo.wasm
 ```
 

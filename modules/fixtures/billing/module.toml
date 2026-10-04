@@ -1,8 +1,0 @@
-[module]
-name = "billing"
-version = "0.1.0"
-description = "Adversarial test fixture: billing"
-wasm = "billing.wasm"
-
-[capabilities]
-tools = ["settle"]

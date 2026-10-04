@@ -1,6 +1,6 @@
 # benford
 
-Benford's Law plugin (`chatty:plugin@0.3.0`): the two tools of a forensic
+Benford's Law plugin (`chatty:plugin@0.4.0`): the two tools of a forensic
 Benford audit. The auditing agent is a spec, not this module: chatty's own
 harness with a forensic-auditor preamble that lists this plugin. The
 tutorial below writes one, `auditor`; no preset ships it.

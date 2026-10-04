@@ -50,7 +50,7 @@
 
 **A2A.** Agent-to-Agent protocol. Remote agents configured in settings and the local agent specs the broker serves are both reached with `invoke_agent` over A2A, the latter through the protocol gateway on `localhost:8420`. Owning page: [Agents and specs](./architecture/agents-and-specs.md).
 
-**WASM module (plugin).** A sandboxed `wasm32-wasip2` component targeting `chatty:plugin@0.3.0` (the SDK's `Plugin` trait), with a `module.toml`, run by `chatty-wasm-runtime` and discovered by `chatty-module-registry`. It contributes tools to the agent specs that list it and is never an agent itself. It can call the host LLM but never sees API keys. Owning pages: [Build a WASM plugin](./guides/build-wasm-module.md), [WIT interface](./architecture/wit-reference.md).
+**WASM module (plugin).** A sandboxed `wasm32-wasip2` component targeting `chatty:plugin@0.4.0` (the SDK's `Plugin` trait), with a `module.toml`, run by `chatty-wasm-runtime` and discovered by `chatty-module-registry`. It contributes tools to the agent specs that list it and is never an agent itself. It can call the host LLM but never sees API keys. Owning pages: [Build a WASM plugin](./guides/build-wasm-module.md), [WIT interface](./architecture/wit-reference.md).
 
 ## Research
 

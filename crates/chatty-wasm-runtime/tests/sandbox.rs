@@ -1,5 +1,5 @@
-//! Sandbox suite (S1, AGE-597): fuel, wall-clock, memory, traps, file/config/
-//! billing imports, and the WASI surface — against real fixture `.wasm`
+//! Sandbox suite (S1, AGE-597): fuel, wall-clock, memory, traps, file/config
+//! imports, and the WASI surface — against real fixture `.wasm`
 //! components (built by `scripts/build-wasm-fixtures.sh`, AGE-596).
 //!
 //! One test per row of the evaluation plan's §3 S1 table (rows 1.1-1.14).
@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use chatty_wasm_runtime::test_support::{FakeLlm, FakeResponse, fixture_path};
 use chatty_wasm_runtime::{
-    BillingProvider, CallError, Capability, ModuleManifest, ResourceLimits, SessionInfo,
-    ToolCallRequest, ToolErrorKind, ToolFailure, UnrequestedGrant, WasmModule,
+    CallError, Capability, ModuleManifest, ResourceLimits, ToolCallRequest, ToolErrorKind,
+    ToolFailure, UnrequestedGrant, UnsupportedWorld, WasmModule,
 };
 
 /// 2x the plan's floor tolerance for timing assertions (plan: +/- 200 ms).
@@ -815,64 +815,6 @@ async fn sandbox_1_9_config_reader_with_and_without_config() {
 }
 
 // ---------------------------------------------------------------------------
-// 1.10 - billing import with and without a `BillingProvider`.
-//
-// The `billing` fixture reports usage through `hive-billing-sdk`, which now
-// calls chatty-module-sdk's `billing` imports instead of generating bindings
-// of its own: the two crates link into one component (PL-E7 S8.5, PL-U3).
-// ---------------------------------------------------------------------------
-
-/// Records every `report-usage` it receives.
-#[derive(Default)]
-struct RecordingBilling(std::sync::Mutex<Vec<(i64, i64)>>);
-
-impl BillingProvider for RecordingBilling {
-    fn acquire_session(&self, _estimated_tokens: i64) -> Result<SessionInfo, String> {
-        Err("not used by this fixture".to_string())
-    }
-
-    fn report_usage(&self, input_tokens: i64, output_tokens: i64) -> Result<(), String> {
-        self.0.lock().unwrap().push((input_tokens, output_tokens));
-        Ok(())
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn sandbox_1_10_billing_with_and_without_provider() {
-    let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
-
-    // With a provider: the guest's report reaches it.
-    let billing = Arc::new(RecordingBilling::default());
-    let mut with = WasmModule::from_file_with_billing(
-        &engine,
-        &fixture_path("billing"),
-        ModuleManifest::new("billing").with_grants([Capability::Billing]),
-        Arc::new(FakeLlm::default()),
-        Some(billing.clone()),
-        ResourceLimits::default(),
-    )
-    .expect("the billing fixture loads");
-    assert_eq!(with.run("settle", "3 4").await.expect("settle"), "settled");
-    assert_eq!(*billing.0.lock().unwrap(), [(3, 4)]);
-
-    // Without a provider: it loads, and the import refuses the call, which
-    // the tool reports as `denied`.
-    let mut without = WasmModule::from_file(
-        &engine,
-        &fixture_path("billing"),
-        ModuleManifest::new("billing").with_grants([Capability::Billing]),
-        Arc::new(FakeLlm::default()),
-        ResourceLimits::default(),
-    )
-    .expect("loading without a billing provider must succeed");
-    let err = without.run("settle", "3 4").await.expect_err("no provider");
-    let failure = err
-        .downcast_ref::<ToolFailure>()
-        .expect("a guest tool error");
-    assert_eq!(failure.kind, ToolErrorKind::Denied, "{failure}");
-}
-
-// ---------------------------------------------------------------------------
 // 1.11 - `log-flood`: bounded memory, or a documented drop-vs-backpressure
 // decision. Decided by PL-U3: guest logs go to the host's `tracing`
 // subscriber only. The progress channel that queued every line for the
@@ -895,7 +837,7 @@ async fn sandbox_1_11_log_flood_is_not_queued_on_the_host() {
 // ---------------------------------------------------------------------------
 // 1.12 - `wit-0.1`, `wit-0.2`, `core-module`, and truncated bytes: load
 // fails with an error that names the cause. A component on any world but
-// `chatty:plugin@0.3.0` gets the rebuild message (PL-U3: no adapter).
+// `chatty:plugin@0.4.0` gets the rebuild message (PL-U3: no adapter).
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -916,7 +858,7 @@ async fn sandbox_1_12_bad_components_fail_to_load_with_a_named_cause() {
     );
     assert_eq!(
         message,
-        "module targets chatty:module@0.1.0; this chatty supports chatty:plugin@0.3.0 \
+        "module targets chatty:module@0.1.0; this chatty supports chatty:plugin@0.4.0 \
          — rebuild it with the current SDK"
     );
 
@@ -973,7 +915,37 @@ async fn sandbox_1_12_wit_0_2_module_is_refused_with_the_rebuild_message() {
     );
     assert_eq!(
         message,
-        "module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.3.0 \
+        "module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.4.0 \
+         — rebuild it with the current SDK"
+    );
+}
+
+/// MK-2 (ADR-0024): 0.4.0 took `billing` out of the plugin world, and a
+/// component built on 0.3.x is refused at load with the named error — not
+/// a link failure over the import it may still carry — so its publisher
+/// knows to rebuild with the current SDK and republish.
+#[tokio::test(flavor = "multi_thread")]
+async fn wit_030_component_refused_with_named_error() {
+    let engine = WasmModule::build_engine(&ResourceLimits::default()).unwrap();
+    let err = WasmModule::from_file(
+        &engine,
+        &fixture_path("wit-0.3"),
+        ModuleManifest::new("wit-0.3"),
+        Arc::new(FakeLlm::default()),
+        ResourceLimits::default(),
+    )
+    .err()
+    .expect("a 0.3.0 component must fail to load");
+    assert_eq!(
+        err.downcast_ref::<UnsupportedWorld>(),
+        Some(&UnsupportedWorld {
+            found: "chatty:plugin@0.3.0".to_string()
+        }),
+        "{err:#}"
+    );
+    assert_eq!(
+        format!("{err:#}"),
+        "module targets chatty:plugin@0.3.0; this chatty supports chatty:plugin@0.4.0 \
          — rebuild it with the current SDK"
     );
 }
@@ -1097,7 +1069,7 @@ async fn sandbox_1_14_config_reader_not_granted_config_is_refused() {
 }
 
 /// An ungranted import with an error channel hands the guest the refusal
-/// as its `Err`: `file`, `llm` and `billing` each reach the caller as the
+/// as its `Err`: `file` and `llm` each reach the caller as the
 /// guest's own tool error carrying the refusal text.
 #[tokio::test(flavor = "multi_thread")]
 async fn sandbox_1_14_ungranted_imports_refuse_through_the_guest() {
@@ -1120,22 +1092,13 @@ async fn sandbox_1_14_ungranted_imports_refuse_through_the_guest() {
             ModuleManifest::new("slow-host"),
             "llm",
         ),
-        (
-            "billing",
-            "settle",
-            "3 4",
-            ModuleManifest::new("billing"),
-            "billing",
-        ),
     ];
     for (name, tool, input, manifest, capability) in cases {
-        let billing: Arc<dyn BillingProvider> = Arc::new(RecordingBilling::default());
-        let mut m = WasmModule::from_file_with_billing(
+        let mut m = WasmModule::from_file(
             &engine,
             &fixture_path(name),
             manifest,
             Arc::new(FakeLlm::default()),
-            Some(billing),
             ResourceLimits::default(),
         )
         .unwrap_or_else(|e| panic!("`{name}` loads with nothing granted: {e:#}"));

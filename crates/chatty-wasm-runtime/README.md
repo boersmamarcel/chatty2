@@ -3,7 +3,7 @@
 Wasmtime embedding and host-side WIT interface for chatty WASM plugins.
 
 This crate wraps `wasmtime` 30 with the component model enabled, loads
-WASM components compiled to `wasm32-wasip2` against `chatty:plugin@0.3.0`,
+WASM components compiled to `wasm32-wasip2` against `chatty:plugin@0.4.0`,
 applies resource limits, and provides the host side of the plugin imports
 (`llm`, `config`, `logging`, `file`, `billing`, one interface per
 capability).
@@ -23,11 +23,11 @@ instead of this crate directly.
 ## WIT versioning
 
 A single `bindgen!` invocation lives in `lib.rs`: `bindings`, generated from
-the repo-root `wit/` directory, which is `chatty:plugin@0.3.0` (`WIT_PACKAGE`).
+the repo-root `wit/` directory, which is `chatty:plugin@0.4.0` (`WIT_PACKAGE`).
 
 Only that package is loaded. A component that does not export
-`chatty:plugin/plugin@0.3.0` is refused at load with
-`module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.3.0
+`chatty:plugin/plugin@0.4.0` is refused at load with
+`module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.4.0
 — rebuild it with the current SDK` (naming whatever world it does target):
 there is no adapter for an older world (PL-D1). The build fails if the WIT
 file declares another package until `WIT_PACKAGE`/`PLUGIN_EXPORT` (and the

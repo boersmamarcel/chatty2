@@ -167,4 +167,4 @@ this spec against a scripted model and checks the verdict the plugin hands back.
 - [Build a WASM plugin](../guides/build-wasm-module.md) — quick start,
   project layout, testing your plugin
 - [WIT reference](../architecture/wit-reference.md) — the
-  `chatty:plugin@0.3.0` contract
+  `chatty:plugin@0.4.0` contract

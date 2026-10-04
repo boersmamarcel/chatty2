@@ -1,6 +1,6 @@
 # chatty-module-sdk
 
-SDK for authoring chatty WASM plugins against `chatty:plugin@0.3.0`.
+SDK for authoring chatty WASM plugins against `chatty:plugin@0.4.0`.
 **Compile target: `wasm32-wasip2`.**
 
 A plugin contributes tools to a chatty agent and never runs a loop of its
@@ -18,16 +18,13 @@ project rooted at the plugin directory.
   `Capability`, `ToolDefinition`, `ToolCallRequest`, `ToolResult`,
   `ToolError`, `Message`, `Role`, …
 - **Host imports**, one module per capability: `llm::complete`,
-  `config::get`, `log::info`/`warn`/…, `file::read_bytes`, `billing::*`. A
+  `config::get`, `log::info`/`warn`/…, `file::read_bytes`. A
   plugin lists the capabilities it uses in `metadata().requested_capabilities`;
   `logging` is always granted.
 - **`Plugin`**, the trait a plugin implements (`metadata`, `list_tools`,
   `invoke_tool`), and **`export!`**, which wires it to the component's
   exports. Both are wit-bindgen's own generated code, so the export names
   always match the WIT.
-
-`hive-billing-sdk` uses this crate's `billing` imports, so a paid plugin can
-depend on both (the `billing` test fixture links them together).
 
 ## Quick start
 
@@ -50,7 +47,7 @@ The output `.wasm` lives under
 
 ## WIT version
 
-`WIT_PACKAGE` is `chatty:plugin@0.3.0`. The build fails if
+`WIT_PACKAGE` is `chatty:plugin@0.4.0`. The build fails if
 `wit/chatty-plugin.wit` declares any other package: a WIT version bump has
 to update `WIT_PACKAGE` here and in `chatty-wasm-runtime` deliberately, since
 the host refuses every other world with "rebuild it with the current SDK".

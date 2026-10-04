@@ -1,6 +1,6 @@
 # WIT Interface Reference
 
-> **Package**: `chatty:plugin@0.3.0`\
+> **Package**: `chatty:plugin@0.4.0`\
 > **Source**: [`wit/chatty-plugin.wit`](../wit/chatty-plugin.wit)
 
 This document describes the WIT (WebAssembly Interface Types) contract between chatty (the host) and WASM plugins (guests). Every chatty plugin targets the `plugin-world` world defined here.
@@ -412,10 +412,10 @@ clock: it is refilled per call, and a manifest may still only lower it.
 
 ## Versioning
 
-The package is `chatty:plugin@MAJOR.MINOR.PATCH`, and the host loads **exactly one** version: `chatty:plugin@0.3.0` today. A component that does not export `chatty:plugin/plugin@0.3.0` is refused at load with
+The package is `chatty:plugin@MAJOR.MINOR.PATCH`, and the host loads **exactly one** version: `chatty:plugin@0.4.0` today. A component that does not export `chatty:plugin/plugin@0.4.0` is refused at load with
 
 ```
-module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.3.0 — rebuild it with the current SDK
+module targets chatty:module@0.2.0; this chatty supports chatty:plugin@0.4.0 — rebuild it with the current SDK
 ```
 
 naming whatever world it does target. There is no adapter for an older world and no deprecation window (PL-D1): a version change means rebuilding every plugin against the new SDK.

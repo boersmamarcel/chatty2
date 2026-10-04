@@ -194,7 +194,7 @@ pub struct PluginSpec {
 }
 
 /// A capability a spec grants a plugin (PL-D3, PL-U4). Written as its WIT
-/// name — `llm`, `config`, `logging`, `file`, `billing` — or `file:<root>`.
+/// name — `llm`, `config`, `logging`, `file` — or `file:<root>`.
 ///
 /// * `llm` runs completions on the calling agent's model. It costs money, so
 ///   its usage counts against the turn's budget, but it asks no approval.
@@ -203,7 +203,6 @@ pub struct PluginSpec {
 /// * `logging` is always granted; listing it changes nothing.
 /// * `file` reads below the module's own `[files] root`; `file:<root>` reads
 ///   below `<root>` (an absolute path) instead. Read-only either way.
-/// * `billing` reserves and settles Hive credits.
 ///
 /// No v1 capability is side-effecting ([`Grant::side_effecting`]); `http` is
 /// not a capability in v1 (PL-D3).
@@ -217,11 +216,10 @@ pub enum Grant {
     File {
         root: Option<PathBuf>,
     },
-    Billing,
 }
 
 /// The grants a spec may write, for error messages.
-const GRANT_NAMES: &str = "llm, config, logging, file, file:<root>, billing";
+const GRANT_NAMES: &str = "llm, config, logging, file, file:<root>";
 
 impl Grant {
     /// The WIT capability this grant links.
@@ -232,18 +230,17 @@ impl Grant {
             Self::Config => Capability::Config,
             Self::Logging => Capability::Logging,
             Self::File { .. } => Capability::File,
-            Self::Billing => Capability::Billing,
         }
     }
 
     /// Whether using it changes something outside the plugin, so each call
     /// needs the user's approval under the agent's approval mode (PL-U4 §4).
-    /// None of v1's does: `file` is read-only, and `llm` and `billing` cost
-    /// money but are counted against the budget instead. A future `http` or
+    /// None of v1's does: `file` is read-only, and `llm` costs money but is
+    /// counted against the budget instead. A future `http` or
     /// `file-write` would be.
     pub fn side_effecting(&self) -> bool {
         match self {
-            Self::Llm | Self::Config | Self::Logging | Self::File { .. } | Self::Billing => false,
+            Self::Llm | Self::Config | Self::Logging | Self::File { .. } => false,
         }
     }
 }
@@ -266,7 +263,6 @@ impl std::str::FromStr for Grant {
             "config" => Ok(Self::Config),
             "logging" => Ok(Self::Logging),
             "file" => Ok(Self::File { root: None }),
-            "billing" => Ok(Self::Billing),
             other => Err(format!(
                 "`{other}` is not a capability a plugin can be granted (valid: {GRANT_NAMES})"
             )),
@@ -1123,7 +1119,7 @@ cap_usd = 2.0
         let file_root = format!("file:{}", root.display());
         let spec = AgentSpec::from_toml(&format!(
             "[agent]\nname = \"a\"\n[[plugins]]\nmodule = \"m\"\n\
-             grants = [\"llm\", \"config\", \"logging\", \"billing\", {file_root:?}]\n"
+             grants = [\"llm\", \"config\", \"logging\", {file_root:?}]\n"
         ))
         .expect("every v1 capability parses");
         assert_eq!(
@@ -1132,7 +1128,6 @@ cap_usd = 2.0
                 Grant::Llm,
                 Grant::Config,
                 Grant::Logging,
-                Grant::Billing,
                 Grant::File { root: Some(root) },
             ]
         );
@@ -1141,6 +1136,7 @@ cap_usd = 2.0
 
         for (grant, why) in [
             ("http", "`http` is not a capability a plugin can be granted"),
+            ("billing", "`billing` is not a capability a plugin can be granted"),
             ("file:weights", "must be an absolute path"),
         ] {
             let err = AgentSpec::from_toml(&format!(

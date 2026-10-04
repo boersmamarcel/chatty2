@@ -1,0 +1,11 @@
+// The export a `chatty:plugin@0.3.0` plugin was recognised by, and nothing
+// else: the host refuses the world by its export name, before linking.
+package chatty:plugin@0.3.0;
+
+interface plugin {
+    list-tools: func() -> list<string>;
+}
+
+world plugin-world {
+    export plugin;
+}

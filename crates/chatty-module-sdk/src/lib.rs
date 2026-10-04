@@ -1,4 +1,4 @@
-//! `chatty-module-sdk` — the SDK for chatty WASM plugins (`chatty:plugin@0.3.0`).
+//! `chatty-module-sdk` — the SDK for chatty WASM plugins (`chatty:plugin@0.4.0`).
 //!
 //! A plugin contributes tools to a chatty agent; the agent's own loop decides
 //! when to call them (PL-D1 option B). Compile to `wasm32-wasip2`.
@@ -6,7 +6,7 @@
 //! - **Types** generated from `wit/chatty-plugin.wit` ([`ToolDefinition`],
 //!   [`ToolCallRequest`], [`ToolResult`], [`ToolError`], [`PluginMetadata`], …)
 //! - **Host imports**, one module per capability: [`llm`], [`config`],
-//!   [`log`], [`file`], [`billing`]
+//!   [`log`], [`file`]
 //! - **[`Plugin`]**, the trait a plugin implements, and **[`export!`]**,
 //!   which wires it to the component's exports. Both come from wit-bindgen's
 //!   own generator, so the export names always match the WIT.
@@ -63,7 +63,7 @@ wit_bindgen::generate!({
 });
 
 /// The WIT package this SDK builds plugins for. The host refuses any other.
-pub const WIT_PACKAGE: &str = "chatty:plugin@0.3.0";
+pub const WIT_PACKAGE: &str = "chatty:plugin@0.4.0";
 
 // A WIT version bump must be deliberate: it changes what every host accepts,
 // so it has to update `WIT_PACKAGE` here and in chatty-wasm-runtime too. The
@@ -71,9 +71,9 @@ pub const WIT_PACKAGE: &str = "chatty:plugin@0.3.0";
 const _: () = assert!(
     declares_package(
         include_str!("../../../wit/chatty-plugin.wit"),
-        "package chatty:plugin@0.3.0;"
+        "package chatty:plugin@0.4.0;"
     ),
-    "wit/chatty-plugin.wit no longer declares `package chatty:plugin@0.3.0;`: \
+    "wit/chatty-plugin.wit no longer declares `package chatty:plugin@0.4.0;`: \
      a WIT version bump must also update WIT_PACKAGE in chatty-module-sdk and \
      chatty-wasm-runtime"
 );
@@ -235,21 +235,5 @@ pub mod log {
     /// Log at **error** level.
     pub fn error(message: &str) {
         super::chatty::plugin::logging::log("error", message);
-    }
-}
-
-/// Capability `billing`: the raw Hive billing imports. Paid plugins use them
-/// through `hive-billing-sdk`, which verifies the session token.
-pub mod billing {
-    pub use super::chatty::plugin::billing::SessionInfo;
-
-    /// Reserve `estimated_tokens` credits before doing work.
-    pub fn acquire_session(estimated_tokens: i64) -> Result<SessionInfo, String> {
-        super::chatty::plugin::billing::acquire_session(estimated_tokens)
-    }
-
-    /// Report the actual usage; settles the session.
-    pub fn report_usage(input_tokens: i64, output_tokens: i64) -> Result<(), String> {
-        super::chatty::plugin::billing::report_usage(input_tokens, output_tokens)
     }
 }

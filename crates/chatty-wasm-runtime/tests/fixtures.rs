@@ -10,8 +10,8 @@ use chatty_wasm_runtime::test_support::{FakeLlm, fixture_path};
 use chatty_wasm_runtime::{ModuleManifest, ResourceLimits, WasmModule};
 
 /// Every fixture built on chatty-module-sdk, plus the two real plugins.
-/// `wit-0.1`, `wit-0.2` and `core-module` are built to fail loading, so they
-/// are not here.
+/// `wit-0.1`, `wit-0.2`, `wit-0.3` and `core-module` are built to fail
+/// loading, so they are not here.
 const GOOD_FIXTURES: &[&str] = &[
     "echo",
     "benford",
@@ -29,7 +29,6 @@ const GOOD_FIXTURES: &[&str] = &[
     "tool-args",
     "threads",
     "padded",
-    "billing",
     "sleep",
 ];
 

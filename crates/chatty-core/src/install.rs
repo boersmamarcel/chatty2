@@ -444,7 +444,7 @@ fn build_module_toml(
     }
 
     // Capabilities — only the tools the Hive manifest declares. A
-    // `chatty:plugin@0.3.0` plugin is never an agent: it has no `chat`
+    // `chatty:plugin@0.4.0` plugin is never an agent: it has no `chat`
     // (PL-U3) and no `agent` (PL-U5), and `module.toml` refuses both keys,
     // so a manifest still carrying them is not copied over.
     if let Some(caps) = manifest.get("capabilities") {

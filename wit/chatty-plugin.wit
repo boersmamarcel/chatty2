@@ -1,4 +1,4 @@
-package chatty:plugin@0.3.0;
+package chatty:plugin@0.4.0;
 
 /// The contract between chatty (host) and a WASM plugin (guest).
 ///
@@ -7,8 +7,8 @@ package chatty:plugin@0.3.0;
 /// model asks for one of the plugin's tools.
 ///
 /// Host imports: one interface per capability (`llm`, `config`, `logging`,
-/// `file`, `billing`), so the host can link a subset (PL-U4). A plugin
-/// declares the ones it needs in `metadata().requested-capabilities`.
+/// `file`), so the host can link a subset (PL-U4). A plugin declares the
+/// ones it needs in `metadata().requested-capabilities`.
 /// Guest export: `plugin` — metadata, tool discovery, tool invocation.
 
 // ---------------------------------------------------------------------------
@@ -119,27 +119,6 @@ interface file {
     read-bytes: func(path: string) -> result<list<u8>, string>;
 }
 
-/// Capability `billing`: paid plugins reserve and settle Hive credits.
-interface billing {
-    /// Information about an acquired billing session.
-    record session-info {
-        /// Hive-signed session token (see `hive-billing-sdk`).
-        token: string,
-        /// User's current credit balance (informational).
-        balance-tokens: s64,
-        /// Tokens reserved for this session.
-        reserved-tokens: s64,
-        /// The plugin's pricing model at session creation.
-        pricing-model: string,
-    }
-
-    /// Reserve credits before doing work. Fails when the user has too few.
-    acquire-session: func(estimated-tokens: s64) -> result<session-info, string>;
-
-    /// Report actual usage after the work; settles the session.
-    report-usage: func(input-tokens: s64, output-tokens: s64) -> result<_, string>;
-}
-
 // ---------------------------------------------------------------------------
 // Guest export
 // ---------------------------------------------------------------------------
@@ -157,7 +136,6 @@ interface plugin {
         logging,
         /// Read access below the file root the host grants.
         file,
-        billing,
     }
 
     /// A `config::get` key the plugin reads.
@@ -206,7 +184,7 @@ interface plugin {
         unknown-tool,
         /// The arguments did not parse or fail the schema.
         invalid-arguments,
-        /// A host capability refused (not granted, no credits, bad path).
+        /// A host capability refused (not granted, bad path).
         denied,
         /// The tool ran and failed.
         failed,
@@ -238,7 +216,6 @@ world plugin-world {
     import config;
     import logging;
     import file;
-    import billing;
 
     export plugin;
 }

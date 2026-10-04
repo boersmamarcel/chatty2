@@ -43,8 +43,7 @@ crates/
 ├── chatty-flow/              # Research: AFlow WorkflowRepr + IR (AGE-13, ships)
 ├── chatty-optimize/          # Research: GEPA/AFlow + paired stats + QA loaders
 ├── hive-client/              # Hive registry client
-├── hive-e2e/                 # Nightly chatty × Hive contract/trust suite (ignored, run by plugin-e2e.yml)
-└── hive-billing-sdk/         # Billing SDK (separate Cargo.lock)
+└── hive-e2e/                 # Nightly chatty × Hive contract/trust suite (ignored, run by plugin-e2e.yml)
 
 modules/                      # Reference WASM agent modules (echo, benford)
 docs/                         # Deep-dive architecture and design docs
@@ -94,7 +93,6 @@ make wasm-modules     # build every WASM module and test fixture (needed by test
 make wasm-template    # cargo-generate a module from templates/module and build it (needs cargo-generate)
 make test-benford     # the benford plugin's own unit tests, on the host target
 make lint-module-sdk  # clippy chatty-module-sdk for wasm32-wasip2
-make test-billing-sdk # hive-billing-sdk's tests, on the host target
 make docs-gen         # regenerate docs/generated reference pages
 make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
@@ -269,15 +267,13 @@ examples.
    machine.
 
 5. **Standalone crates, own lockfiles, wasm32 by default.**
-   `crates/hive-billing-sdk/`, `modules/benford/` and
-   `crates/chatty-module-sdk/` each declare their own `[workspace]` and
-   `Cargo.lock` (intentional) — bump their deps in that lockfile, not the
-   root one. `hive-billing-sdk` and `benford` also default to
-   `wasm32-wasip2` via their own `.cargo/config.toml`, which has no libtest
+   `modules/benford/` and `crates/chatty-module-sdk/` each declare their
+   own `[workspace]` and `Cargo.lock` (intentional) — bump their deps in
+   that lockfile, not the root one. `benford` also defaults to
+   `wasm32-wasip2` via its own `.cargo/config.toml`, which has no libtest
    runner, so `cargo test` there needs an explicit host target:
-   `cargo test --manifest-path <crate>/Cargo.toml --target x86_64-unknown-linux-gnu`
-   (`make test-billing-sdk` / `make test-benford` do this; CI runs the same,
-   AGE-600).
+   `cargo test --manifest-path modules/benford/Cargo.toml --target x86_64-unknown-linux-gnu`
+   (`make test-benford` does this; CI runs the same, AGE-600).
 
 6. **The `gpui-globals` feature.** chatty-core types implement
    `gpui::Global` only when this feature is enabled. chatty-gpui enables

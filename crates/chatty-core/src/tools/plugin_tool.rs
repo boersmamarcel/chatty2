@@ -714,7 +714,7 @@ mod tests {
         };
         assert!(!plugin_needs_approval(&grants(&[])));
         assert!(!plugin_needs_approval(&grants(&[
-            "llm", "config", "logging", "file", "billing"
+            "llm", "config", "logging", "file"
         ])));
     }
 

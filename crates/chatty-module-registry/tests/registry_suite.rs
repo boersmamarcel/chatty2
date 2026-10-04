@@ -639,7 +639,7 @@ fn specless_module_gets_logging_and_config_only() {
         m.blocking_lock().granted_capabilities(),
         [Capability::Config, Capability::Logging]
     );
-    for fixture in ["slow-host", "file-reader", "billing"] {
+    for fixture in ["slow-host", "file-reader"] {
         let dir = stage_simple(tmp.path(), fixture);
         reg.load(&dir).unwrap();
         let m = reg.get(fixture).unwrap();

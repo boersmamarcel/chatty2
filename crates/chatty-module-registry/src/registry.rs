@@ -396,8 +396,8 @@ impl ModuleRegistry {
         // The runtime's manifest carries what the guest sees: `[config]`
         // through `config::get`, `[files].root` through `file::read-bytes`.
         // A module served here has no agent spec to grant from: installing
-        // it gets `config` by default; `llm`, `file` and `billing` link only
-        // when the user granted them in Settings (SEC-11, AGE-815).
+        // it gets `config` by default; `llm` and `file` link only when the
+        // user granted them in Settings (SEC-11, AGE-815).
         let approved = ModuleGrants::read(module_dir)
             .with_context(|| format!("failed to read grants of '{}'", manifest.name))?
             .capabilities();

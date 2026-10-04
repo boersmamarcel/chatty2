@@ -4,7 +4,7 @@
 
 ## Goal
 
-A `wasm32-wasip2` component targeting `chatty:plugin@0.3.0`, built from the repo template, installed in the module directory, and listed in an agent spec so the agent's model can call its tools.
+A `wasm32-wasip2` component targeting `chatty:plugin@0.4.0`, built from the repo template, installed in the module directory, and listed in an agent spec so the agent's model can call its tools.
 
 A plugin contributes **tools**; it never runs a loop and is never an agent. It implements the [`Plugin`](https://github.com/boersmamarcel/chatty2/blob/main/crates/chatty-module-sdk/src/lib.rs) trait: `metadata` (name, version, the host capabilities it requests, the config keys it reads), `list_tools` and `invoke_tool`. The host provides one import per capability: `llm::complete` (a completion on the calling agent's model; API keys stay on the host), `config::get` (the manifest's `[config]` table), `logging::log` (always granted), `file::read-bytes` (reads under a manifest-granted root) and `billing` (paid plugins). The host links only the capabilities the agent's spec grants (`[[plugins]].grants`, a subset of what `metadata` requests); an ungranted import answers `capability <x> not granted to this agent`. The contract is in the [WIT reference](../architecture/wit-reference.md).
 
@@ -102,7 +102,7 @@ cargo test -p chatty-tui --test plugins_headless
 
 - `chatty-tui --agent my-agent --headless -m "…"` calls `my-plugin__<tool>`.
 - With the desktop's module gateway on, `tools/list` on `/mcp/my-plugin` over its socket, with its launch token, shows your tools (if `[protocols] mcp = true`; see [Use a plugin from another MCP client](../../user/extensions.md#use-a-plugin-from-another-mcp-client)).
-- A plugin built against another WIT world is refused at load with `module targets …; this chatty supports chatty:plugin@0.3.0 — rebuild it with the current SDK`.
+- A plugin built against another WIT world is refused at load with `module targets …; this chatty supports chatty:plugin@0.4.0 — rebuild it with the current SDK`.
 
 ## Checklist
 

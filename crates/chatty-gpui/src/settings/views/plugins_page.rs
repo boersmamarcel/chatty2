@@ -177,9 +177,9 @@ fn plugins_group() -> SettingGroup {
 }
 
 /// One requested capability of a module served with no agent spec (SEC-11,
-/// AGE-815). `config` and `logging` are on by default; `llm`, `file` and
-/// `billing` are off until the user switches them on, which rescans so the
-/// gateway links the module against the new set.
+/// AGE-815). `config` and `logging` are on by default; `llm` and `file` are
+/// off until the user switches them on, which rescans so the gateway links
+/// the module against the new set.
 fn capability_row(module: &DiscoveredModuleEntry, capability: &str, cx: &App) -> AnyElement {
     let gated =
         !SPECLESS_DEFAULTS.iter().any(|c| c.name() == capability) && capability != "logging";

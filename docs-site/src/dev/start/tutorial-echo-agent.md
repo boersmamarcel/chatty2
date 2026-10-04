@@ -20,7 +20,7 @@ A plugin contributes **tools** to a chatty agent. It never runs a loop of
 its own and is never an agent itself: an agent spec lists it under
 `[[plugins]]`, the agent's model sees its tools as `<plugin>__<tool>`, and
 chatty calls the plugin when the model asks for one. The contract is the WIT
-world `chatty:plugin@0.3.0` ([WIT reference](../architecture/wit-reference.md)).
+world `chatty:plugin@0.4.0` ([WIT reference](../architecture/wit-reference.md)).
 
 | Export | echo's answer |
 |--------|---------------|

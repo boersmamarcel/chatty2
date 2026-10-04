@@ -370,7 +370,7 @@ pub fn toggle_module_runtime(cx: &mut App) {
     .detach();
 }
 
-/// Grant or revoke `capability` (`llm`, `file`, `billing`) for the module in
+/// Grant or revoke `capability` (`llm`, `file`) for the module in
 /// `directory_name` (Settings → Plugins, SEC-11, AGE-815), then rescan so the
 /// gateway links the module against the new set. A module served with no
 /// agent spec gets nothing gated until it is granted here.
