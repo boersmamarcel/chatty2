@@ -1,9 +1,11 @@
-//! Settings → Agents (PL-U5): every agent spec the workspace reaches, read
-//! only. One kind of local agent — a spec, run by the harness — whatever
+//! Settings → Agents (PL-U5): every agent spec the workspace reaches, with
+//! New spec, Edit and Duplicate (PL-U5b, AGE-718; the form is
+//! [`agent_spec_editor`](super::agent_spec_editor)). One kind of local agent — a spec, run by the harness — whatever
 //! file or preset defined it; the broker serves the roster (AGE-760) at
 //! `/a2a/{name}`, and `list_agents`, `invoke_agent` and `/agent` reach them
 //! by name. Remote A2A agents are listed below them.
 
+use crate::settings::views::agent_spec_editor;
 use crate::settings::models::agent_specs::{broker_reachable, served_names};
 use crate::settings::models::extensions_store::ExtensionsModel;
 use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel};
@@ -21,7 +23,9 @@ pub fn agents_page() -> SettingPage {
              <data dir>/chatty/agents/<name>.toml, or a preset. The broker serves \
              local-agent and your own exposed specs; a preset joins when one of them \
              delegates to it or module settings name it. list_agents, invoke_agent and \
-             /agent <name> reach them by name. Edit a spec in its file, then Reload.",
+             /agent <name> reach them by name. New spec, Edit and Duplicate write the file \
+             for you and the broker serves it at once; editing a preset saves a copy in the \
+             workspace that shadows it. A file edited by hand shows after Reload.",
         )
         .resettable(false)
         .groups(vec![specs_group(), remote_agents_group()])
@@ -58,11 +62,24 @@ fn specs_group() -> SettingGroup {
                                 .child(status),
                         )
                         .child(
-                            Button::new("agents-reload")
-                                .small()
-                                .ghost()
-                                .label("Reload")
-                                .on_click(|_, _window, cx| AgentSpecsModel::reload(cx)),
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("agents-new-spec")
+                                        .small()
+                                        .primary()
+                                        .label("New spec")
+                                        .on_click(|_, window, cx| {
+                                            agent_spec_editor::open_new_spec(window, cx)
+                                        }),
+                                )
+                                .child(
+                                    Button::new("agents-reload")
+                                        .small()
+                                        .ghost()
+                                        .label("Reload")
+                                        .on_click(|_, _window, cx| AgentSpecsModel::reload(cx)),
+                                ),
                         ),
                 )
                 .children(
@@ -71,11 +88,9 @@ fn specs_group() -> SettingGroup {
                         .filter(|name| !listings.iter().any(|listing| &listing.name == *name))
                         .map(|name| default_worker_row(name, cx)),
                 )
-                .children(
-                    listings
-                        .iter()
-                        .map(|listing| spec_row(listing, served.contains(&listing.name), cx)),
-                )
+                .children(listings.iter().enumerate().map(|(index, listing)| {
+                    spec_row(index, listing, served.contains(&listing.name), cx)
+                }))
                 .into_any_element()
         })])
 }
@@ -100,7 +115,7 @@ fn default_worker_row(name: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
+fn spec_row(index: usize, listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
     // An experimental team's role joins the roster only when asked for
     // (AGE-760): say so, and how.
     let preset_off = !served
@@ -127,10 +142,12 @@ fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
                 .child(badge(status, color))
                 .child(
                     div()
+                        .flex_1()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(listing.source.label()),
-                ),
+                )
+                .when(listing.spec.is_ok(), |el| el.child(row_actions(index, listing))),
         )
         .when(preset_off, |el| {
             el.child(detail(
@@ -149,6 +166,34 @@ fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
                     .child(error.clone()),
             ),
         })
+        .into_any_element()
+}
+
+/// Edit and Duplicate. A preset is never written: its Edit saves a copy in
+/// the workspace under the same name, which shadows it.
+fn row_actions(index: usize, listing: &SpecListing) -> AnyElement {
+    let edit = listing.clone();
+    let duplicate = listing.clone();
+    h_flex()
+        .gap_1()
+        .child(
+            Button::new(SharedString::from(format!("agents-edit-{index}")))
+                .small()
+                .ghost()
+                .label("Edit")
+                .on_click(move |_, window, cx| {
+                    agent_spec_editor::open_edit_spec(&edit, window, cx)
+                }),
+        )
+        .child(
+            Button::new(SharedString::from(format!("agents-duplicate-{index}")))
+                .small()
+                .ghost()
+                .label("Duplicate")
+                .on_click(move |_, window, cx| {
+                    agent_spec_editor::open_duplicate_spec(&duplicate, window, cx)
+                }),
+        )
         .into_any_element()
 }
 

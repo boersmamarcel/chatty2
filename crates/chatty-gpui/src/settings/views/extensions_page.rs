@@ -6,6 +6,7 @@ use crate::settings::models::marketplace_state::{MarketplaceState, MarketplaceTa
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 use chatty_core::hive::models::AgentSpecListing;
 use chatty_core::team_install::TeamRecord;
+use crate::settings::views::plugins_page::add_to_agent_button;
 use chatty_module_registry::TrustLevel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -600,19 +601,26 @@ fn marketplace_group() -> SettingGroup {
                                     ),
                             )
                             .child(if is_installed {
-                                Button::new(SharedString::from(format!("uninstall-{name}")))
-                                    .small()
-                                    .ghost()
-                                    .label("Uninstall")
-                                    .on_click({
-                                        let name = name.clone();
-                                        move |_, _window, cx| {
-                                            extensions_controller::uninstall_extension(
-                                                name.clone(),
-                                                cx,
-                                            );
-                                        }
-                                    })
+                                // An installed plugin is tools for an agent:
+                                // offer to add it to one (PL-U5b, AGE-718).
+                                h_flex()
+                                    .gap_1()
+                                    .child(add_to_agent_button(&name))
+                                    .child(
+                                        Button::new(SharedString::from(format!("uninstall-{name}")))
+                                            .small()
+                                            .ghost()
+                                            .label("Uninstall")
+                                            .on_click({
+                                                let name = name.clone();
+                                                move |_, _window, cx| {
+                                                    extensions_controller::uninstall_extension(
+                                                        name.clone(),
+                                                        cx,
+                                                    );
+                                                }
+                                            }),
+                                    )
                                     .into_any_element()
                             } else if let Some(pct) = download_pct {
                                 // Download in progress — show animated progress circle + percentage.

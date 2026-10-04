@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 pub mod agent_spec;
+pub mod agent_spec_edit;
 pub mod at_mention;
 pub mod auth;
 pub mod curated_mcp;

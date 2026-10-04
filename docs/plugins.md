@@ -263,7 +263,11 @@ The desktop's **Plugins** page lists every module in the module directory: versi
 directory, whether it came from Hive or was copied in by hand, its trust level
 (PL-H5a), its tools, whether it runs locally and is served over MCP, a load failure if
 any, and **which agent specs use it with the capabilities each one grants**. The spec is
-where an agent's plugin is granted anything. For a module the gateway serves with no spec (SEC-11, AGE-815) the page is where the user grants: each requested capability has a row, `config` on by default and `llm`, `file` and `billing` as switches that are off until turned on. The grants live in `.chatty-grants.json` beside `.chatty-install.json` (`ModuleGrants`) and are read at every load; a switch rewrites the file and rescans. A module installed before this has no file, so it simply starts with the defaults.
+where an agent's plugin is granted anything. Each row's **Add to agent…** (also on an
+installed module in the marketplace) picks a spec, or names a new one, and the grants out
+of what the module requests, then appends a `[[plugins]]` entry through the same save
+path as Settings → Agents' form (`agent_spec_edit::with_plugin` + `save_spec`); a preset
+picked there is saved as a workspace copy that shadows it. For a module the gateway serves with no spec (SEC-11, AGE-815) the page is where the user grants: each requested capability has a row, `config` on by default and `llm`, `file` and `billing` as switches that are off until turned on. The grants live in `.chatty-grants.json` beside `.chatty-install.json` (`ModuleGrants`) and are read at every load; a switch rewrites the file and rescans. A module installed before this has no file, so it simply starts with the defaults.
 
 **Security note.** A plugin served on its own is untrusted code with no human-written spec vouching for it. It can always log and read its own `[config]`; it can spend your LLM quota (`llm`), read files under its `[files] root` (`file`) or bill (`billing`) only after you grant that capability for that module. Ungranted imports refuse with `capability <x> not granted to this agent`; they do not trap.
 

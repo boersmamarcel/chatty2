@@ -69,7 +69,17 @@ to it. The desktop's lazy broker hands the root its gateway's direct transport
 (`LazyGatewayBroker::transport`), as a `--broker` chatty-tui root's does. chatty-tui's `/agents` lists the remote
 agents, the roster's specs with model, profile, plugins and grants, and every spec file
 the roster leaves out with the reason; the desktop shows the same on **Settings →
-Agents** (read-only: edit a spec in its TOML file, then Reload).
+Agents**, which also writes specs (PL-U5b, AGE-718): **New spec** (into the workspace's
+`.chatty/agents/` or the data dir's `chatty/agents/`), and **Edit** and **Duplicate** per
+row. The form covers `[agent]`, `[tools]`, `[[plugins]]`, `[swarm]` and `[budget]`; it
+edits the spec it was opened on, so fields it does not show (a plugin's `config` and
+`limits`, the marketplace fields) are written back unchanged. A save goes through
+`chatty_core::agent_spec_edit::save_form`: `AgentSpec::validate` against the configured
+models, then `AgentSpec::to_toml`; every error is shown under its field and nothing is
+written until there are none. A preset is never written: its Edit saves a copy under the
+same name in the workspace, which shadows it; Duplicate picks a free `<name>-copy` name.
+After a save the page re-reads the specs and calls `refresh_runtime`, so the broker
+serves the new spec without a restart. A file edited by hand shows after **Reload**.
 
 ## Remote A2A agents
 

@@ -1,3 +1,4 @@
+pub mod agent_spec_editor;
 pub mod agents_page;
 pub mod execution_settings_page;
 pub mod extensions_page;

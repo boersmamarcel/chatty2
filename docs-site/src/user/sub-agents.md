@@ -26,6 +26,8 @@ Type `/agent <your prompt>` to launch a sub-agent inline and watch its progress 
 
 Every local agent is a spec, whoever wrote it. The desktop lists them all on **Settings → Agents** — name, model, role, the plugins each runs with and what they may do, whether other agents may call it — along with any spec file that doesn't load and why. In the terminal, `/agents` prints the same list.
 
+You can write specs on that page too. **New spec** opens a form for the name, description, model (picked from your configured models), instructions, tool profile, plugins and their grants, who it may call and be called by, and its budget; you choose whether it goes in the workspace (`.chatty/agents/`) or your data folder (`chatty/agents/`). **Edit** and **Duplicate** on a row open the same form on that spec. When you save, Chatty checks the spec and shows each problem under its field — a model you have not configured, an unknown tool profile, a cap that is not a positive amount — and saves nothing until they are fixed. The new spec is available at once, no restart needed. Built-in specs are never changed: editing one saves your copy in the workspace, which then takes its place.
+
 ### The swarm tree (desktop)
 
 When a sub-agent delegates in turn, its row in the desktop transcript opens into a live tree of agents. Each line shows the agent, its model (or the tool it is running right now), its status and its spend.
@@ -115,7 +117,7 @@ preamble = "You are the reviewer. Read the diff, run the tests, and report what 
 profile = "reviewer"
 ```
 
-A spec file is picked up as soon as it exists (on the desktop, **Settings → Agents → Reload**). To narrow the roster to just some of them, list them by name in `module_settings.json`, next to your other settings, and restart. This roster is used by the desktop app and by a terminal leader started with `--broker`:
+A spec file you write by hand is picked up as soon as it exists (on the desktop, **Settings → Agents → Reload**). To narrow the roster to just some of them, list them by name in `module_settings.json`, next to your other settings, and restart. This roster is used by the desktop app and by a terminal leader started with `--broker`:
 
 ```json
 {
