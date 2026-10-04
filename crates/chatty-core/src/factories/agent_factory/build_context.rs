@@ -182,6 +182,9 @@ pub struct AgentRole {
     /// profile; an agent with no role (the desktop's, a hosted one) keeps
     /// them.
     pub delegates: bool,
+    /// The spec's `swarm.best_of` (AGE-853): offered the `best_of` tool
+    /// over its own `invoke_agent`. Only an agent that delegates gets it.
+    pub best_of: Option<crate::agent_spec::BestOfSection>,
 }
 
 impl Default for AgentRole {
@@ -190,6 +193,7 @@ impl Default for AgentRole {
             preamble: None,
             profile: None,
             delegates: true,
+            best_of: None,
         }
     }
 }
@@ -369,6 +373,7 @@ impl AgentBuildContext {
                 preamble: role_preamble(spec),
                 profile: spec.tools.profile.as_deref().and_then(tool_profile),
                 delegates: !spec.swarm.delegates_to.is_empty(),
+                best_of: spec.swarm.best_of.clone(),
             },
             run_budget: Some(run_budget),
             ask_user_enabled: settings.as_ref().is_none_or(|s| s.ask_user_enabled),

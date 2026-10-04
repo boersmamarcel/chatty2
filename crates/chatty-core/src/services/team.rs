@@ -95,6 +95,15 @@ pub const PRESETS: &[TeamPreset] = &[
         ],
     },
     TeamPreset {
+        id: "best-of-3",
+        team_json: include_str!("../../teams/best-of-3/team.json"),
+        skill: None,
+        schemas: &[(
+            "schemas/judge.json",
+            include_str!("../../teams/best-of-3/schemas/judge.json"),
+        )],
+    },
+    TeamPreset {
         id: "architecture-review",
         team_json: include_str!("../../teams/architecture-review/team.json"),
         skill: Some(include_str!("../../teams/architecture-review/SKILL.md")),
@@ -860,6 +869,27 @@ mod tests {
     /// The analyst handoff is what turns a reply cut off mid-sentence into
     /// an invalid handoff (and its one re-prompt) instead of a lost answer;
     /// the adjudicator's names a candidate by number.
+    /// AGE-853: the best-of-3 leader is offered `best_of` over its three
+    /// solvers and its judge, and the judge does not think.
+    #[test]
+    fn the_best_of_3_preset_names_its_solvers_and_a_judge_that_does_not_think() {
+        let team = load_team("best-of-3", None, None).expect("the preset loads");
+        assert_eq!(team.file.leader, "bo3-lead");
+        let best_of = team.leader.swarm.best_of.as_ref().expect("swarm.best_of");
+        assert_eq!(
+            best_of.solvers,
+            ["bo3-solver-direct", "bo3-solver-plan", "bo3-solver-verify"]
+        );
+        assert_eq!(best_of.judge, "bo3-judge");
+        let judge = team
+            .agents
+            .iter()
+            .find(|a| a.agent.name == "bo3-judge")
+            .expect("the judge is on the roster");
+        assert_eq!(judge.agent.think, Some(false));
+        assert!(team.handoffs.contains_key("bo3-judge"));
+    }
+
     #[test]
     fn the_analyst_panel_handoffs_reject_a_truncated_reply() {
         let team = load_team("analyst-panel", None, None).unwrap();

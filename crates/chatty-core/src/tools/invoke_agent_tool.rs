@@ -177,6 +177,11 @@ pub struct InvokeAgentOutput {
     /// JSON when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
+    /// What the callee spent, the same lines [`InvokeAgentProgress::Finished`]
+    /// carries: for a caller that totals a fan-out itself (`best_of`,
+    /// AGE-853). Never in the JSON the model sees.
+    #[serde(skip)]
+    pub usage: Vec<TokenUsage>,
 }
 
 /// Error type for invoke_agent tool
@@ -1048,7 +1053,7 @@ impl InvokeAgentTool {
             } else {
                 Some(response.clone())
             },
-            usage,
+            usage: usage.clone(),
         });
 
         debug!(agent = %agent, response_len = response.len(), "Agent responded");
@@ -1068,6 +1073,7 @@ impl InvokeAgentTool {
             conversation,
             handoff: handoff_value,
             messages,
+            usage,
         })
     }
 }

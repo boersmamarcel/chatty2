@@ -696,6 +696,13 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             .extra_params
             .insert("think".to_string(), think.to_string());
     }
+    // ... and the spec's own `agent.think` over both (AGE-853): a judge
+    // that must not think does not, whatever the run was started with.
+    if let Some(think) = spec.agent.think {
+        model_config
+            .extra_params
+            .insert("think".to_string(), think.to_string());
+    }
 
     // Find the provider config for this model
     let provider_config = providers

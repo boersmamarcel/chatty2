@@ -87,6 +87,12 @@ pub const PRESETS: &[(&str, &str)] = &[
         "arch-verifier",
         include_str!("../agents/arch-verifier.toml"),
     ),
+    ("bo3-judge", include_str!("../agents/bo3-judge.toml")),
+    ("bo3-lead", include_str!("../agents/bo3-lead.toml")),
+    ("bo3-solver-direct", include_str!("../agents/bo3-solver-direct.toml")),
+    ("bo3-solver-plan", include_str!("../agents/bo3-solver-plan.toml")),
+    ("bo3-solver-verify", include_str!("../agents/bo3-solver-verify.toml")),
+    ("bo3-writer", include_str!("../agents/bo3-writer.toml")),
     (
         "code-reviewer",
         include_str!("../agents/code-reviewer.toml"),
@@ -156,6 +162,12 @@ pub struct AgentSection {
     /// listing (the dashboard's Publish team form, AGE-842).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changelog: Option<String>,
+    /// The thinking switch for this agent's model (`extra_params.think`),
+    /// over the run's `--think` (AGE-853): a judge that must not think
+    /// says `false` here, whatever the run was started with. `None` leaves
+    /// the model's own setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub think: Option<bool>,
 }
 
 /// `[tools]`: what it may call.
@@ -388,6 +400,10 @@ pub struct SwarmSection {
     /// When set, only these callers (names or `*` globs) may call it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callers: Option<Vec<String>>,
+    /// Offers this agent the `best_of` tool (AGE-853): one task to every
+    /// solver at once, then the verifier or the judge picks one attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_of: Option<BestOfSection>,
 }
 
 impl Default for SwarmSection {
@@ -396,8 +412,21 @@ impl Default for SwarmSection {
             delegates_to: Vec::new(),
             exposed: exposed_default(),
             callers: None,
+            best_of: None,
         }
     }
+}
+
+/// `[swarm.best_of]`: who attempts, and who picks (AGE-853).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BestOfSection {
+    /// The agents that each attempt the whole task, independently. At
+    /// least two, each named literally in `delegates_to`.
+    pub solvers: Vec<String>,
+    /// The agent that picks one attempt when no verifier decides, named
+    /// literally in `delegates_to`. It selects; it never writes an answer.
+    pub judge: String,
 }
 
 fn exposed_default() -> bool {
@@ -453,6 +482,9 @@ pub enum SpecError {
     UnrequestedGrant(String),
     BadDuration(String),
     BadCap(f64),
+    /// `swarm.best_of` is malformed: too few solvers, or a name not in
+    /// `delegates_to`.
+    BadBestOf(String),
 }
 
 impl std::fmt::Display for SpecError {
@@ -484,6 +516,7 @@ impl std::fmt::Display for SpecError {
             Self::UnrequestedGrant(why) => write!(f, "plugins: {why}"),
             Self::BadDuration(why) => write!(f, "budget.max_duration: {why}"),
             Self::BadCap(cap) => write!(f, "budget.cap_usd {cap} is not a positive amount"),
+            Self::BadBestOf(why) => write!(f, "swarm.best_of: {why}"),
         }
     }
 }
@@ -606,6 +639,20 @@ impl AgentSpec {
             && !(cap.is_finite() && cap > 0.0)
         {
             errors.push(SpecError::BadCap(cap));
+        }
+        if let Some(best_of) = &self.swarm.best_of {
+            if best_of.solvers.len() < 2 {
+                errors.push(SpecError::BadBestOf(
+                    "name at least two solvers".to_string(),
+                ));
+            }
+            for name in best_of.solvers.iter().chain(std::iter::once(&best_of.judge)) {
+                if !self.swarm.delegates_to.contains(name) {
+                    errors.push(SpecError::BadBestOf(format!(
+                        "'{name}' is not named in swarm.delegates_to"
+                    )));
+                }
+            }
         }
         if errors.is_empty() {
             Ok(())
@@ -1763,5 +1810,19 @@ cap_usd = 2.0
             of("root").spec
         );
         assert!(of("helper").spec.is_ok(), "the invalid spec fails alone");
+    }
+
+    /// AGE-853: `swarm.best_of` needs two solvers, and every name it uses
+    /// must be one the agent may delegate to.
+    #[test]
+    fn best_of_names_only_agents_it_delegates_to() {
+        let spec: AgentSpec = toml::from_str(
+            "[agent]\nname = \"lead\"\n\n[swarm]\ndelegates_to = [\"a\", \"b\"]\n\n\
+             [swarm.best_of]\nsolvers = [\"a\", \"c\"]\njudge = \"j\"\n",
+        )
+        .expect("parses");
+        let errors = spec.validate(None).expect_err("c and j are not delegates").0;
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert!(errors.iter().all(|e| matches!(e, SpecError::BadBestOf(_))));
     }
 }

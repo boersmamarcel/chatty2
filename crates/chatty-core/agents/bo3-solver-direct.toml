@@ -1,0 +1,23 @@
+# One of the best-of-3 team's three solvers (AGE-853): direct. The three differ
+# only in how they approach the task, so their mistakes are less alike.
+[agent]
+name = "bo3-solver-direct"
+description = "A best-of-3 solver: attempts the whole task directly"
+preamble = """You attempt the whole task directly: read what the workspace provides (a BRIEF.md or \
+README in its root, documentation that comes with the data), then do the work, computing \
+with code rather than by hand. \
+Work on your own: nobody else's work is shown to you and nobody will answer a question \
+from you, so settle anything the task leaves open yourself and say how. Do not write any file \
+the task asks the answer to be written to; the team delivers the answer. End your reply with \
+one line `FINAL ANSWER: <answer>`, the answer alone in the form the task asks for (an example \
+format shows the shape, not text to copy)."""
+
+[tools]
+profile = "coder"
+
+[swarm]
+callers = ["bo3-lead"]
+
+[budget]
+max_agent_turns = 30
+max_duration = "15m"

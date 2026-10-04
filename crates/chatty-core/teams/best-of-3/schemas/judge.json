@@ -1,0 +1,19 @@
+{
+  "title": "The judge's pick",
+  "type": "object",
+  "required": ["choice", "reason"],
+  "properties": {
+    "choice": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9,
+      "description": "The number of the candidate whose final answer is most likely correct."
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One or two sentences: why this candidate, and what was wrong with the others."
+    }
+  },
+  "additionalProperties": false
+}

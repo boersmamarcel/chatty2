@@ -1,0 +1,14 @@
+{
+  "leader": "bo3-lead",
+  "agents": [
+    "bo3-solver-direct",
+    "bo3-solver-plan",
+    "bo3-solver-verify",
+    "bo3-judge",
+    "bo3-writer"
+  ],
+  "max_agent_turns": 6,
+  "handoffs": {
+    "bo3-judge": "schemas/judge.json"
+  }
+}
