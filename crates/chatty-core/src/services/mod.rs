@@ -65,6 +65,8 @@ pub mod plugin_llm;
 #[cfg(feature = "pptx")]
 pub mod pptx_render;
 pub mod project_instructions;
+/// One read model of every agent a caller can reach (PL-S1 RO-1).
+pub mod roster;
 /// What a run has left to hand its callees: turns, time and dollars
 /// (PL-S2 DP-3).
 pub mod run_budget;

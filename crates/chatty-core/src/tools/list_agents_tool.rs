@@ -1,59 +1,47 @@
 //! What the model can address, and whose machine each one runs on
 //! (ADR-0011 C5).
 //!
-//! Two sources, one list. The static half is settings: remote A2A agents the
-//! user configured, and the agent specs the broker serves (PL-U5: one kind
-//! of local agent, a spec run by the harness; a WASM plugin is a tool inside
-//! one, never an agent). The live half is the broker's own aggregated card,
-//! read over HTTP or the fabric — a worker that registered a minute ago is
+//! The list is the roster's ([`crate::services::roster`], PL-S1 RO-1): remote
+//! A2A agents the user configured, the agent specs the broker serves (PL-U5:
+//! one kind of local agent, a spec run by the harness; a WASM plugin is a
+//! tool inside one, never an agent), the nodes running in the broker's
+//! directory, and hosted agents. A worker that registered a minute ago is
 //! addressable and so belongs here, and only the broker knows it exists.
+//! A name two origins share is listed under both, the lower one marked
+//! `shadowed_by` the origin that owns the name.
 //!
 //! Every entry carries an [`AgentOrigin`], because "voucher-agent" and
 //! "local-agent" read the same to a model and one of them is somebody else's
 //! server.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
-use crate::agent_spec::{AgentSpec, Grant, load_agent_spec_from};
+pub use crate::services::roster::PluginGrants;
 use crate::services::lazy_broker::LazyBroker;
+use crate::services::roster::{
+    CallerView, CardFetch, DirectorySource, FetchError, HostedSource, LazyBrokerCards, LiveCards,
+    LocalSpecSource, Origin, RemoteSource, Roster, RosterEntry, RosterSource, TransportCards,
+};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::ToolError;
-use chatty_fabric::wire::AgentEntry;
-use chatty_fabric::{AgentOrigin, CallEvent, CallRequest, CallResult, Transport};
+use chatty_fabric::{AgentOrigin, ConversationScope, Transport};
+
+/// The conversation the broker files the root's nodes under (the
+/// gateway's `ROOT_SCOPE`).
+const ROOT_SCOPE: &str = "root";
 
 /// Arguments for listing A2A agents (no arguments needed)
 #[derive(Deserialize, Serialize)]
 pub struct ListAgentsToolArgs {}
 
-/// Summary of a single configured remote A2A agent, safe for display to the LLM.
-#[derive(Debug, Serialize, Clone)]
-pub struct A2aAgentSummary {
-    pub name: String,
-    pub url: String,
-    /// `true` if an API key is configured (value is never exposed).
-    pub has_api_key: bool,
-    pub enabled: bool,
-    /// Skills advertised by the agent card (may be empty if not yet fetched).
-    pub skills: Vec<String>,
-}
-
-/// One of the broker's local-worker agents, when the gateway publishes
-/// any (ADR-0011 C2; several, by name, under C10).
-#[derive(Debug, Serialize, Clone)]
-pub struct LocalWorkerAgentSummary {
-    pub name: String,
-    pub description: String,
-}
-
 /// One agent the model can address, with where it runs.
 ///
 /// The shape the model sees is flat and uniform on purpose: the interesting
-/// question about an agent is not which of four buckets it came from, it is
+/// question about an agent is not which of five sources it came from, it is
 /// what it is called, what it does, and whose machine it runs on.
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct AgentListing {
@@ -79,36 +67,29 @@ pub struct AgentListing {
     /// For a local agent with a spec: its plugins and what each may reach.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginGrants>,
+    /// Set when another agent of a higher origin has the same name: a call
+    /// by this name reaches that one, not this.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadowed_by: Option<Origin>,
 }
 
-/// One plugin of a local agent's spec, as its card shows it (PL-U4): what
-/// the agent granted it. A capability it was not granted is refused when
-/// the plugin calls it.
-#[derive(Debug, Serialize, Clone, PartialEq)]
-pub struct PluginGrants {
-    pub module: String,
-    /// Granted capabilities by WIT name (`file:<root>` for a file root),
-    /// always with `logging`.
-    pub grants: Vec<String>,
-}
-
-impl PluginGrants {
-    fn of(spec: &AgentSpec) -> Vec<Self> {
-        spec.plugins
-            .iter()
-            .map(|plugin| {
-                let grants = std::iter::once(Grant::Logging)
-                    .chain(plugin.grants.iter().cloned())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .map(|grant| grant.to_string())
-                    .collect();
-                Self {
-                    module: plugin.module.clone(),
-                    grants,
-                }
-            })
-            .collect()
+impl From<RosterEntry> for AgentListing {
+    fn from(entry: RosterEntry) -> Self {
+        Self {
+            name: entry.name,
+            origin: entry.card.agent_origin,
+            kind: match entry.origin {
+                Origin::Remote => "remote",
+                Origin::Hosted | Origin::LocalSpec | Origin::Node | Origin::Handle => "worker",
+            },
+            description: entry.card.description,
+            url: entry.card.url,
+            enabled: entry.card.enabled,
+            skills: entry.card.skills,
+            has_api_key: entry.card.has_api_key,
+            plugins: entry.card.plugins,
+            shadowed_by: entry.shadowed_by,
+        }
     }
 }
 
@@ -121,8 +102,7 @@ pub struct ListAgentsToolOutput {
     pub note: String,
 }
 
-/// Tool that lists all available agents: remotely configured A2A agents and the
-/// agent specs the broker serves.
+/// Tool that lists all available agents: the roster.
 ///
 /// This gives the LLM visibility into what agents are available, including their
 /// names, URLs/types, and skills. Each agent is invokable via `invoke_agent`
@@ -131,18 +111,18 @@ pub struct ListAgentsToolOutput {
 pub struct ListAgentsTool {
     /// Snapshot of configured remote A2A agents taken at construction time.
     remote_agents: Vec<A2aAgentConfig>,
-    /// The broker's local workers (ADR-0011 C2, named under C10), if the
-    /// gateway is running.
-    local_workers: Vec<LocalWorkerAgentSummary>,
-    /// A broker that has not necessarily started yet (BI-2, AGE-634):
-    /// its live participant table is read through its direct handle
-    /// (ADR-0011 C5, ADR-0020).
+    /// The specs the broker serves (ADR-0011 C2, named under C10), if it
+    /// exists.
+    local_workers: Vec<String>,
+    /// A broker that has not necessarily started yet (BI-2, AGE-634).
     lazy_broker: Option<Arc<dyn LazyBroker>>,
     /// The fabric the broker's directory is read through (ADR-0020, BI-4):
     /// a worker's broker-made connection.
     transport: Option<Arc<dyn Transport>>,
-    /// Where a local agent's spec is looked up for its card's plugins:
-    /// the workspace and the data directory (then the presets).
+    /// The broker's cards, cached for [`LiveCards::TTL`] across calls.
+    cards: Option<Arc<LiveCards>>,
+    /// Where a local agent's spec is looked up for its card: the workspace
+    /// and the data directory (then the presets).
     spec_workspace: Option<PathBuf>,
     spec_data_dir: Option<PathBuf>,
 }
@@ -154,73 +134,79 @@ impl ListAgentsTool {
             local_workers: Vec::new(),
             lazy_broker: None,
             transport: None,
+            cards: None,
             spec_workspace: None,
             spec_data_dir: dirs::data_dir(),
         }
     }
 
     /// Start the broker itself on first use instead of expecting it already
-    /// running (BI-2, AGE-634), and read its live participant table as well
-    /// as settings (ADR-0011 C5).
+    /// running (BI-2, AGE-634), and read its live directory as well as
+    /// settings (ADR-0011 C5).
     pub fn with_lazy_broker(mut self, broker: Arc<dyn LazyBroker>) -> Self {
         self.lazy_broker = Some(broker);
+        self.reset_cards();
         self
     }
 
     /// Read the broker's directory over `transport` (ADR-0020, BI-4).
     pub fn with_transport(mut self, transport: Arc<dyn Transport>) -> Self {
         self.transport = Some(transport);
+        self.reset_cards();
         self
     }
 
     /// Look local agents' specs up under `workspace` and `data_dir` (then
-    /// the presets) for the plugins their cards show. Without it: the
-    /// platform data directory, then the presets.
+    /// the presets). Without it: the platform data directory, then the
+    /// presets.
     pub fn with_spec_dirs(mut self, workspace: Option<PathBuf>, data_dir: Option<PathBuf>) -> Self {
         self.spec_workspace = workspace;
         self.spec_data_dir = data_dir;
         self
     }
 
-    /// The fabric the directory is read through: the one this tool was
-    /// given, else the lazy broker's direct handle (starting it).
-    ///
-    /// `Ok(None)` means no broker is configured at all — nothing to report.
-    /// `Err` means one is configured but failed to start (AGE-746, e.g. its
-    /// gateway socket in use): the caller surfaces this to the user rather than
-    /// treating it the same as "no broker".
-    async fn fabric_transport(&self) -> Result<Option<Arc<dyn Transport>>, String> {
-        if let Some(transport) = &self.transport {
-            return Ok(Some(transport.clone()));
-        }
-        let Some(broker) = self.lazy_broker.as_ref() else {
-            return Ok(None);
-        };
-        broker.transport().await.map_err(|error| {
-            tracing::warn!(%error, "Failed to start the broker for list_agents");
-            error.to_string()
-        })
-    }
-
-    /// Advertise the broker's local workers: chatty agents in their own
-    /// process (ADR-0011 C2), one per name (C10). The live card, when the
-    /// gateway answers, supplies each one's real description — its model
-    /// and tool set — so this is the fallback text for when it does not.
+    /// The specs the broker serves: chatty agents in their own process
+    /// (ADR-0011 C2), one per name (C10). The broker's card, when it
+    /// answers, says what each one runs — its model and tool set.
     pub fn with_local_workers<I, S>(mut self, names: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.local_workers = names
-            .into_iter()
-            .map(|name| LocalWorkerAgentSummary {
-                name: name.into(),
-                description: "A chatty agent in its own process and its own \
-                              workspace. Delegate a self-contained task to it."
-                    .to_string(),
-            })
-            .collect();
+        self.local_workers = names.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// The broker's directory is read through the transport this tool was
+    /// given, else the lazy broker's direct handle (starting it).
+    fn reset_cards(&mut self) {
+        let fetch: Option<Arc<dyn CardFetch>> = match (&self.transport, &self.lazy_broker) {
+            (Some(transport), _) => Some(Arc::new(TransportCards(transport.clone()))),
+            (None, Some(broker)) => Some(Arc::new(LazyBrokerCards(broker.clone()))),
+            (None, None) => None,
+        };
+        self.cards = fetch.map(|fetch| Arc::new(LiveCards::new(fetch)));
+    }
+
+    fn roster(&self) -> Roster {
+        let local = LocalSpecSource::load(
+            &self.local_workers,
+            self.spec_workspace.as_deref(),
+            self.spec_data_dir.as_deref(),
+            self.cards.clone(),
+        );
+        let mut sources: Vec<Arc<dyn RosterSource>> = vec![
+            Arc::new(RemoteSource::new(self.remote_agents.clone())),
+            Arc::new(HostedSource),
+        ];
+        if let Some(cards) = &self.cards {
+            sources.push(Arc::new(DirectorySource::new(
+                cards.clone(),
+                self.local_workers.clone(),
+            )));
+        }
+        sources.push(Arc::new(local));
+        Roster::new(sources)
     }
 }
 
@@ -262,73 +248,15 @@ impl Tool for ListAgentsTool {
         _context: &mut ToolContext,
         _args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        // Name → listing, so the live table can add to what settings knows
-        // without listing the same agent twice, and so the model reads them in
-        // a stable order.
-        let mut listings: BTreeMap<String, AgentListing> = BTreeMap::new();
-
-        for agent in &self.remote_agents {
-            listings.insert(
-                agent.name.clone(),
-                AgentListing {
-                    name: agent.name.clone(),
-                    origin: AgentOrigin::RemoteConfigured,
-                    kind: "remote",
-                    description: format!("Remote A2A agent at {}", agent.url),
-                    url: Some(agent.url.clone()),
-                    enabled: agent.enabled,
-                    skills: agent.skills.clone(),
-                    has_api_key: agent.has_api_key(),
-                    plugins: Vec::new(),
-                },
-            );
-        }
-
-        // The live half. A remote agent the user configured keeps its own
-        // entry: the broker would report it as whatever it is to the broker,
-        // and what the *user* did is the more informative label.
-        let (live, broker_error) = self.live_agents().await;
-        for live in live {
-            listings.entry(live.name.clone()).or_insert(live);
-        }
-
-        // After the live half: the broker's card says what each worker
-        // actually runs (its model, its tool set — ADR-0011 C10), and this
-        // entry only stands in when the broker did not answer.
-        for worker in &self.local_workers {
-            listings
-                .entry(worker.name.clone())
-                .or_insert_with(|| AgentListing {
-                    name: worker.name.clone(),
-                    origin: AgentOrigin::Local,
-                    kind: "worker",
-                    description: worker.description.clone(),
-                    url: None,
-                    enabled: true,
-                    skills: Vec::new(),
-                    has_api_key: false,
-                    plugins: Vec::new(),
-                });
-        }
-
-        // A local agent's card shows its spec's plugins and their grants
-        // (PL-U4): the spec is the authority on what a plugin may reach.
-        for listing in listings.values_mut() {
-            if listing.origin == AgentOrigin::Local
-                && let Ok(loaded) = load_agent_spec_from(
-                    &listing.name,
-                    self.spec_workspace.as_deref(),
-                    self.spec_data_dir.as_deref(),
-                )
-            {
-                listing.plugins = PluginGrants::of(&loaded.spec);
-            }
-        }
-
-        let agents: Vec<AgentListing> = listings.into_values().collect();
+        // The broker scopes its own directory; this tool's caller is the
+        // root's conversation as the broker knows it (RO-3 threads the
+        // conversation through).
+        let scope = ConversationScope::new(ROOT_SCOPE);
+        let entries = self.roster().for_caller(&CallerView { scope: &scope }).await;
+        let agents: Vec<AgentListing> = entries.into_iter().map(AgentListing::from).collect();
         tracing::info!(
             agent_count = agents.len(),
-            live_read = self.lazy_broker.is_some() || self.transport.is_some(),
+            live_read = self.cards.is_some(),
             "list_agents called"
         );
 
@@ -342,15 +270,18 @@ impl Tool for ListAgentsTool {
              `origin` says whose machine it runs on: `local` is this machine, `fleet` is a \
              machine this user leased, `remote_configured` is a third-party URL the user \
              configured, `discovered` is a third party nobody chose. Only enabled agents can be \
-             called."
+             called. An entry with `shadowed_by` shares its name with a higher-precedence agent, \
+             which is the one a call by that name reaches."
                 .to_string()
         };
         // AGE-746: a broker that is configured but failed to start (its
         // gateway socket in use, most often) used to be indistinguishable from one that
-        // was simply never turned on — this tool would list local workers'
-        // static fallback descriptions either way. Say so, so the model can
-        // tell the user rather than reporting local agents as reachable.
-        if let Some(error) = broker_error {
+        // was simply never turned on. Say so, so the model can tell the user
+        // rather than reporting local agents as reachable. The read is the
+        // roster's own, cached: no second fetch.
+        if let Some(cards) = &self.cards
+            && let Err(FetchError::BrokerDidNotStart(error)) = cards.get().await
+        {
             note = format!(
                 "The local broker failed to start ({error}), so live agent data (and any agent \
                  only the broker knows about) is unavailable; entries below may be stale or \
@@ -367,82 +298,13 @@ impl Tool for ListAgentsTool {
     }
 }
 
-impl ListAgentsTool {
-    /// The broker's live participant table, read over its direct handle,
-    /// plus the reason the broker itself could not be reached — not raised
-    /// as an error, since a `list_agents` call must still answer with what
-    /// settings alone can say, but not swallowed either: a broker that is
-    /// merely off is unremarkable, but one that is configured and failed to
-    /// start (AGE-746) is worth telling the user about, so the note carries
-    /// it back to `call`.
-    async fn live_agents(&self) -> (Vec<AgentListing>, Option<String>) {
-        match self.fabric_transport().await {
-            Ok(Some(transport)) => (directory_over(transport.as_ref()).await, None),
-            Ok(None) => (Vec::new(), None),
-            Err(error) => (Vec::new(), Some(error)),
-        }
-    }
-}
-
-/// The broker's directory, read over the fabric: the same card entries its
-/// aggregated card lists, as a `list_agents` call's result. A failed call is
-/// an empty live half.
-async fn directory_over(transport: &dyn Transport) -> Vec<AgentListing> {
-    use futures::StreamExt;
-
-    let mut stream = match transport.call(CallRequest::ListAgents).await {
-        Ok(stream) => stream,
-        Err(error) => {
-            tracing::debug!(%error, "the broker's directory could not be read");
-            return Vec::new();
-        }
-    };
-    while let Some(event) = stream.next().await {
-        match event {
-            Ok(CallEvent::Result(CallResult::Agents(agents))) => {
-                return agents.into_iter().filter_map(listing_from_entry).collect();
-            }
-            Ok(CallEvent::Result(other)) => {
-                tracing::debug!(?other, "the broker's directory is not a list_agents result");
-                return Vec::new();
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::debug!(%error, "the broker's directory could not be read");
-                return Vec::new();
-            }
-        }
-    }
-    Vec::new()
-}
-
-/// One entry of the broker's directory as a listing.
-///
-/// An entry with no name is skipped: it cannot be addressed, so telling the
-/// model about it would only invite a call that fails.
-fn listing_from_entry(entry: AgentEntry) -> Option<AgentListing> {
-    if entry.name.is_empty() {
-        return None;
-    }
-    Some(AgentListing {
-        name: entry.name,
-        origin: entry.origin,
-        kind: "worker",
-        description: entry.description,
-        url: None,
-        enabled: true,
-        skills: entry.skills.into_iter().map(|skill| skill.name).collect(),
-        has_api_key: false,
-        plugins: Vec::new(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::lazy_broker::LazyBroker;
     use crate::settings::models::a2a_store::A2aAgentConfig;
-    use chatty_fabric::wire::{ParticipantCard, ParticipantSkill};
+    use chatty_fabric::wire::{AgentEntry, ParticipantCard, ParticipantSkill};
+    use chatty_fabric::{CallEvent, CallRequest, CallResult};
 
     /// A broker that is configured but never manages to bind its socket —
     /// standing in for the AGE-746 collision case.
@@ -758,11 +620,11 @@ mod tests {
         assert_eq!(find(&output, "local-reviewer").origin, AgentOrigin::Local);
     }
 
-    /// The user's own label wins over the broker's for an agent that is in
-    /// both: what the user configured is the more informative answer.
+    /// PL-D4's precedence: a running node owns its name over a configured
+    /// remote of the same name, and the remote stays listed, shadowed.
     #[tokio::test]
-    async fn a_configured_agent_keeps_its_label_when_the_broker_also_serves_it() {
-        let card = vec![entry("voucher-agent", "", AgentOrigin::Local, &[])];
+    async fn a_node_shadows_a_configured_remote_of_the_same_name() {
+        let card = vec![entry("voucher-agent", "a node", AgentOrigin::Local, &[])];
         let directory = directory(card);
         let tool = ListAgentsTool::new(vec![make_agent(
             "voucher-agent",
@@ -772,11 +634,26 @@ mod tests {
         .with_transport(directory);
 
         let output = list(&tool).await;
-        assert_eq!(output.total, 1);
-        assert_eq!(
-            find(&output, "voucher-agent").origin,
-            AgentOrigin::RemoteConfigured
-        );
+        assert_eq!(output.total, 2);
+        assert_eq!(output.agents[0].origin, AgentOrigin::Local);
+        assert_eq!(output.agents[0].shadowed_by, None);
+        assert_eq!(output.agents[1].origin, AgentOrigin::RemoteConfigured);
+        assert_eq!(output.agents[1].shadowed_by, Some(Origin::Node));
+        let json = serde_json::to_value(&output.agents).unwrap();
+        assert!(json[0].get("shadowed_by").is_none(), "{json}");
+        assert_eq!(json[1]["shadowed_by"], "node");
+    }
+
+    /// The tool's schema and description are constants (C10 rule; RO-3
+    /// owns the byte-stability test across roster sizes).
+    #[test]
+    fn the_tool_definition_does_not_depend_on_the_roster() {
+        let empty = ListAgentsTool::new(vec![]);
+        let full = ListAgentsTool::new(vec![make_agent("a", "https://example.com/a", true)])
+            .with_local_workers(["local-coder", "local-reviewer"])
+            .with_transport(directory(broker_card()));
+        assert_eq!(empty.description(), full.description());
+        assert_eq!(empty.parameters(), full.parameters());
     }
 
     /// A broker that does not answer is not an error: the tool answers with

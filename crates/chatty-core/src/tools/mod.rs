@@ -237,7 +237,7 @@ pub use git_tool::{
     GitStatusTool, GitSwitchBranchTool,
 };
 pub use invoke_agent_tool::{InvokeAgentTool, LOCAL_AGENT_NAME};
-pub use list_agents_tool::{ListAgentsTool, LocalWorkerAgentSummary};
+pub use list_agents_tool::ListAgentsTool;
 pub use list_mcp_tool::ListMcpTool;
 pub use list_tools_tool::ListToolsTool;
 #[cfg(feature = "pdf")]
