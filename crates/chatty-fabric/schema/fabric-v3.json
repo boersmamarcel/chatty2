@@ -1328,6 +1328,12 @@
     "WireUsageLine": {
       "additionalProperties": false,
       "properties": {
+        "agent": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "at": {
           "format": "uint64",
           "minimum": 0,

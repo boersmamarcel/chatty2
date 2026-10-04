@@ -1,5 +1,7 @@
 use crate::chatty::models::conversations_store::ConversationsStore;
-use crate::chatty::models::token_usage::{format_cost, format_hit_rate, format_tokens};
+use crate::chatty::models::token_usage::{
+    AgentSpend, format_cost, format_hit_rate, format_tokens,
+};
 use crate::chatty::token_budget::{ContextStatus, GlobalTokenBudget, TokenBudgetSnapshot};
 use crate::settings::models::token_tracking_settings::TokenTrackingSettings;
 use gpui::prelude::FluentBuilder;
@@ -160,6 +162,27 @@ fn render_empty_trigger(cx: &App) -> impl IntoElement {
         )
 }
 
+/// One per-agent bill row's label and spend (TB-3): the conversation's own
+/// agent is "This agent"; a delegated agent is its path, one `/` per hop.
+fn agent_row_text(row: &AgentSpend) -> (String, String) {
+    let label = row
+        .agent
+        .as_deref()
+        .map(|path| path.replace('/', " / "))
+        .unwrap_or_else(|| "This agent".to_string());
+    let tokens = format!(
+        "{} in \u{00B7} {} out",
+        format_tokens(row.input_tokens.min(u64::from(u32::MAX)) as u32),
+        format_tokens(row.output_tokens.min(u64::from(u32::MAX)) as u32),
+    );
+    let cost = match (row.unpriced_lines, row.cost_usd) {
+        (0, usd) => format_cost(usd),
+        (_, usd) if usd == 0.0 => "unpriced".to_string(),
+        (_, usd) => format!("{} + unpriced", format_cost(usd)),
+    };
+    (label, format!("{tokens} \u{00B7} {cost}"))
+}
+
 // ── RenderOnce implementation ─────────────────────────────────────────────────
 
 impl RenderOnce for TokenContextBarView {
@@ -285,6 +308,17 @@ impl RenderOnce for TokenContextBarView {
                     format_tokens(u.cache_write_tokens),
                 )
             });
+
+        // The bill per agent in the tree (TB-3): shown only once something
+        // was delegated, the conversation's own agent first.
+        let agent_rows: Vec<(String, String)> = store
+            .active_id()
+            .and_then(|id| store.get_conversation(id))
+            .map(|c| c.token_usage().by_agent())
+            .filter(|rows| rows.iter().any(|row| row.agent.is_some()))
+            .map(|rows| rows.iter().map(agent_row_text).collect())
+            .unwrap_or_default();
+        let has_agent_rows = !agent_rows.is_empty();
 
         let (session_input, session_output, session_cache_read, session_cache_write, session_cost) =
             session_totals.unwrap_or((0, 0, 0, 0, 0.0));
@@ -520,6 +554,37 @@ impl RenderOnce for TokenContextBarView {
                                     .when(has_cost, |popover_div| {
                                         popover_div.child(format!("Cost: {}", cost_text))
                                     }),
+                            )
+                        })
+                        // Per-agent bill lines (TB-3)
+                        .when(has_agent_rows, |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .pt_2()
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        div()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
+                                            .child("By agent:"),
+                                    )
+                                    .children(agent_rows.iter().map(|(agent, spend)| {
+                                        h_flex()
+                                            .justify_between()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_color(cx.theme().foreground)
+                                                    .child(agent.clone()),
+                                            )
+                                            .child(spend.clone())
+                                    })),
                             )
                         })
                 }),

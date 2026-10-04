@@ -251,8 +251,14 @@ is the local spend gate's, above, not this one.
 A delegation's spend is part of the conversation's total: `invoke_agent` reads the
 worker's `metadata.usage` lines off the terminal status and `AgentSession` records each
 as a `TokenUsage` line marked `delegated_to`, priced at the model the line names
-(AGE-415, AGE-682). Nested leaders forward their workers' lines with their own, merging
-only lines on the same model. `context_tokens` and `last_usage` stay the leader's own.
+(AGE-415, AGE-682). `delegated_to` is a path from the leader down the tree (TB-3,
+AGE-665): `reviewer` is what the reviewer itself spent, `reviewer/local-coder` what the
+reviewer's coder spent. Nested leaders forward each of their workers' lines with their
+own, under the worker's path, and merge only lines with the same agent and model; each
+caller prefixes the name it called (`TokenUsage::delegated_by`). So the root has one line
+per agent in the tree, nothing is counted twice, and the totals are what they were when a
+sub-leader folded its workers into one line per model. `context_tokens` and `last_usage`
+stay the leader's own.
 Details in
 [agents-and-specs.md](agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
 
@@ -272,7 +278,11 @@ switches to the warning colour at `high_threshold` and the critical colour at
 The popover lists the estimate and utilisation, one row per component, the provider's
 actual counts with the signed estimation delta once the stream has ended, and session
 totals (cumulative input/output/cache tokens and cost from `ConversationTokenUsage`,
-which is separate from the snapshot). Manual summarisation is the `/compact` slash
+which is separate from the snapshot). Once the conversation has delegated, a **By
+agent** section follows: one row per agent in the tree
+(`ConversationTokenUsage::by_agent`) — "This agent" first, then each `delegated_to` path
+— with its input and output tokens and cost, or `unpriced` for lines the price book
+cannot price. The rows sum to the session totals. Manual summarisation is the `/compact` slash
 command, not a button in the bar.
 
 **Stale snapshot guard:** `read_budget_snapshot()` checks
