@@ -37,6 +37,9 @@ pub struct HiveRegistryClient {
     /// construction since the URL never changes afterwards. `None` means
     /// every request may proceed.
     insecure_url: Option<String>,
+    /// The registry's session key, once fetched and verified under
+    /// `root_keys` ([`crate::session_key`]).
+    session_key: tokio::sync::OnceCell<ed25519_dalek::VerifyingKey>,
 }
 
 impl HiveRegistryClient {
@@ -66,6 +69,7 @@ impl HiveRegistryClient {
             http,
             cache: None,
             session: None,
+            session_key: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -83,6 +87,7 @@ impl HiveRegistryClient {
     /// honoured for a local (loopback) registry only.
     pub fn with_local_root_key(mut self, root_public_key_hex: &str) -> Self {
         self.root_keys = trust::trusted_roots(&self.base_url, Some(root_public_key_hex));
+        self.session_key = tokio::sync::OnceCell::new();
         self
     }
 
@@ -553,10 +558,20 @@ impl HiveRegistryClient {
             return Err(Self::api_error(response).await);
         }
 
-        response
+        let session = response
             .json::<crate::models::AcquireSessionResponse>()
             .await
-            .map_err(ClientError::from)
+            .map_err(ClientError::from)?;
+        // Fail closed: a token that does not verify under the registry's
+        // certified session key, or that is for another module, is never
+        // handed to a module (CX-0b).
+        let claims: crate::session_key::BillingClaims = self.verify_token(&session.token).await?;
+        if claims.module_name != module_name || claims.ver != module_version {
+            return Err(ClientError::Token(
+                crate::session_key::TokenError::Malformed("the token is for another module"),
+            ));
+        }
+        Ok(session)
     }
 
     /// Settle a billing session after module execution.
@@ -592,6 +607,182 @@ impl HiveRegistryClient {
             .json::<crate::models::SettleSessionResponse>()
             .await
             .map_err(ClientError::from)
+    }
+
+    // ── Registry tokens (CX-0b) ────────────────────────────────────────────
+
+    /// The registry's session key: fetched once from
+    /// `GET /.well-known/hive-session-key` and trusted only if one of this
+    /// client's root keys certified it. Refused outright when no root is
+    /// trusted for this registry.
+    pub async fn session_key(&self) -> Result<ed25519_dalek::VerifyingKey, ClientError> {
+        self.ensure_secure()?;
+        if self.root_keys.is_empty() {
+            return Err(crate::session_key::TokenError::NoTrustedRoot.into());
+        }
+        self.session_key
+            .get_or_try_init(|| async {
+                let url = format!("{}/.well-known/hive-session-key", self.base_url);
+                let response = self.http.get(&url).send().await?;
+                if !response.status().is_success() {
+                    return Err(Self::api_error(response).await);
+                }
+                let cert = response
+                    .json::<crate::session_key::SessionKeyCertificate>()
+                    .await?;
+                Ok(cert.verify(&self.root_keys)?)
+            })
+            .await
+            .copied()
+    }
+
+    /// The claims of `token` if the registry signed it (EdDSA, under its
+    /// certified [`session_key`](Self::session_key)) and it has not expired.
+    pub async fn verify_token<T: serde::de::DeserializeOwned>(
+        &self,
+        token: &str,
+    ) -> Result<T, ClientError> {
+        let key = self.session_key().await?;
+        Ok(crate::session_key::verify_token(
+            token,
+            &key,
+            chrono::Utc::now().timestamp(),
+        )?)
+    }
+
+    // ── Step-up (CX-0) ─────────────────────────────────────────────────────
+
+    /// File a step-up request for `action` over `target` and `value`
+    /// (`POST /api/step-up/requests`). Nothing is granted until the person
+    /// opens the answer's `page`, signs in again and approves it; then
+    /// [`step_up_request`](Self::step_up_request) carries the assertion.
+    pub async fn request_step_up(
+        &self,
+        action: crate::models::StepUpAction,
+        target: &str,
+        value: &str,
+    ) -> Result<crate::models::StepUpRequest, ClientError> {
+        let url = format!("{}/api/step-up/requests", self.base_url);
+        let body = serde_json::json!({
+            "action": action.as_str(),
+            "target": target,
+            "value": value,
+        });
+        let response = self
+            .send_authed(|| self.http.post(&url).json(&body))
+            .await?;
+        Self::json_or_error(response).await
+    }
+
+    /// A step-up request of the signed-in user's, with its assertion once
+    /// approved (`GET /api/step-up/requests/{id}`).
+    pub async fn step_up_request(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<crate::models::StepUpRequest, ClientError> {
+        self.get_json(&format!("/api/step-up/requests/{id}"), &())
+            .await
+    }
+
+    /// Poll request `id` every `interval` until it is approved, and return
+    /// its assertion. An expired request, or none within `timeout`, is
+    /// [`ClientError::StepUpNotApproved`].
+    pub async fn wait_for_step_up(
+        &self,
+        id: uuid::Uuid,
+        interval: std::time::Duration,
+        timeout: std::time::Duration,
+    ) -> Result<String, ClientError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let request = self.step_up_request(id).await?;
+            match (request.status.as_str(), request.assertion) {
+                ("approved", Some(assertion)) => return Ok(assertion),
+                ("expired", _) => {
+                    return Err(ClientError::StepUpNotApproved("it expired".to_string()));
+                }
+                _ => {}
+            }
+            if tokio::time::Instant::now() + interval > deadline {
+                return Err(ClientError::StepUpNotApproved(
+                    "it was not approved in time".to_string(),
+                ));
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    // ── External keys (CX-0) ───────────────────────────────────────────────
+
+    /// The signed-in user's `External` keys (`GET /api/auth/api-keys`).
+    pub async fn list_external_keys(&self) -> Result<Vec<crate::models::ExternalKey>, ClientError> {
+        self.get_json("/api/auth/api-keys", &()).await
+    }
+
+    /// File the `api_key_create` step-up for `key`: its target is the public
+    /// key and its value the exact body [`create_external_key`] sends.
+    ///
+    /// [`create_external_key`]: Self::create_external_key
+    pub async fn request_external_key_step_up(
+        &self,
+        key: &crate::models::CreateExternalKey,
+    ) -> Result<crate::models::StepUpRequest, ClientError> {
+        self.request_step_up(
+            crate::models::StepUpAction::ApiKeyCreate,
+            &key.target(),
+            &key.body(),
+        )
+        .await
+    }
+
+    /// Create an `External` key with an approved `api_key_create`
+    /// `assertion` for exactly this `key`. There is no secret in the answer:
+    /// the key is the public key the holder already has.
+    pub async fn create_external_key(
+        &self,
+        key: &crate::models::CreateExternalKey,
+        assertion: &str,
+    ) -> Result<crate::models::ExternalKey, ClientError> {
+        let url = format!("{}/api/auth/api-keys", self.base_url);
+        let body = key.body();
+        let response = self
+            .send_authed(|| {
+                self.http
+                    .post(&url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .header(STEP_UP_HEADER, assertion)
+                    .body(body.clone())
+            })
+            .await?;
+        Self::json_or_error(response).await
+    }
+
+    /// Revoke `External` key `id` (`DELETE /api/auth/api-keys/{id}`; no
+    /// step-up).
+    pub async fn revoke_external_key(&self, id: uuid::Uuid) -> Result<(), ClientError> {
+        let url = format!("{}/api/auth/api-keys/{id}", self.base_url);
+        let response = self.send_authed(|| self.http.delete(&url)).await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        Ok(())
+    }
+
+    async fn json_or_error<T: serde::de::DeserializeOwned>(
+        response: reqwest::Response,
+    ) -> Result<T, ClientError> {
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            return Err(Self::api_error(response).await);
+        }
+        response.json::<T>().await.map_err(ClientError::from)
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────
@@ -644,6 +835,10 @@ impl HiveRegistryClient {
         }
     }
 }
+
+/// The header a step-up assertion travels in (hive-registry's
+/// `STEP_UP_HEADER`).
+pub const STEP_UP_HEADER: &str = "hive-step-up";
 
 #[derive(Serialize)]
 struct RefreshTokenBody<'a> {

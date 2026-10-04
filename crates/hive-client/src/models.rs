@@ -442,6 +442,108 @@ mod tests {
     }
 }
 
+// ── Step-up (CX-0) ──────────────────────────────────────────────────────────
+
+/// An action that needs a step-up assertion (hive-registry's
+/// `StepUpAction`). Each binds a target and a value; see
+/// [`crate::HiveRegistryClient::request_step_up`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepUpAction {
+    /// `POST /api/auth/api-keys`. Target: the key's public key (lowercase
+    /// hex). Value: the request body, byte for byte.
+    ApiKeyCreate,
+    /// A module version publish. Target: the module name. Value: the version.
+    ModulePublish,
+    /// `PUT /api/modules/{name}`. Target: the name. Value: the body.
+    ModuleUpdate,
+    /// `PUT /api/modules/{name}/pricing`. Target: the name. Value: the body.
+    PricingSet,
+    /// `PUT /api/me/role/publisher`. Target: the user id. Value: `publisher`.
+    PublisherRole,
+    /// chatty-server's cap raise. Target: `token_tracking.cap_usd`. Value:
+    /// the new cap (`none`, or e.g. `25`).
+    CapRaise,
+}
+
+impl StepUpAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StepUpAction::ApiKeyCreate => "api_key_create",
+            StepUpAction::ModulePublish => "module_publish",
+            StepUpAction::ModuleUpdate => "module_update",
+            StepUpAction::PricingSet => "pricing_set",
+            StepUpAction::PublisherRole => "publisher_role",
+            StepUpAction::CapRaise => "cap_raise",
+        }
+    }
+}
+
+/// A filed step-up request (`POST`/`GET /api/step-up/requests`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepUpRequest {
+    pub id: Uuid,
+    pub action: String,
+    pub target: String,
+    pub value: String,
+    /// `pending`, `approved` or `expired`.
+    pub status: String,
+    pub expires_at: DateTime<Utc>,
+    /// The registry page where the person signs in again and approves it.
+    pub page: String,
+    /// The single-use assertion, once approved.
+    #[serde(default)]
+    pub assertion: Option<String>,
+}
+
+// ── External keys (CX-0) ────────────────────────────────────────────────────
+
+/// One spec version an `External` key may open reservations for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalKeyScope {
+    pub spec_id: String,
+    pub version: String,
+}
+
+/// What `POST /api/auth/api-keys` takes. There is no secret: the key is the
+/// holder's Ed25519 public key, and its private half never leaves them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CreateExternalKey {
+    pub name: String,
+    /// Hex Ed25519 public key.
+    pub public_key: String,
+    pub monthly_limit_micros: i64,
+    pub scope: Vec<ExternalKeyScope>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<i64>,
+}
+
+impl CreateExternalKey {
+    /// The request body: the step-up value and the bytes sent, both, so the
+    /// registry sees exactly what the owner approved.
+    pub fn body(&self) -> String {
+        serde_json::to_string(self).expect("a CreateExternalKey serializes")
+    }
+
+    /// The step-up target: the public key as the registry normalises it.
+    pub fn target(&self) -> String {
+        self.public_key.trim().to_ascii_lowercase()
+    }
+}
+
+/// An `External` key as its owner sees it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExternalKey {
+    pub id: Uuid,
+    pub name: String,
+    pub public_key: String,
+    pub monthly_limit_micros: i64,
+    pub scope: Vec<ExternalKeyScope>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
 // ── Agent specs and teams (HS-3, MK-T2) ────────────────────────────────────
 
 /// A lockfile entry as the marketplace lists it: the locked plugin and its
