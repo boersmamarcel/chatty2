@@ -179,6 +179,12 @@ verify = "true"
             &published,
         )));
         assert_eq!(eval.bundle_sha256(), expected);
+        // The same literal is pinned in hive-registry's
+        // `eval_bundle_hash_matches_chatty_core`: both sides hash alike.
+        assert_eq!(
+            expected,
+            "2f05594cf2272795cbe7389c39a1e08d70d64e5b3e0ceaf189a0ca5d5ed262c7"
+        );
 
         let mut changed = eval.clone();
         changed.tasks[1].verify = "false".to_string();

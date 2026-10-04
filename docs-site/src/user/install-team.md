@@ -56,3 +56,29 @@ chatty-tui --install-team payments-lead@1.0.0    # an exact version
 ```
 
 This does the same checks with the Hive sign-in the desktop saved, prints what it installed, and exits. Run the team in the TUI with `chatty-tui --broker`, then `/agent payments-lead <task>`.
+
+## Measure it: "Evaluated on N tasks"
+
+A team's spec may carry an `[eval]` section: a few tasks, each a prompt, the files its workspace starts with, and a verifier command that decides pass or fail.
+
+```toml
+[[eval.tasks]]
+id = "hold-invalid-iban"
+prompt = "Check payments.csv before Friday's payment run."
+verify = "grep -qi globex \"$CHATTY_EVAL_ANSWER\""
+files = { "payments.csv" = "vendor,iban,amount\nGlobex,NL91ABNA0417164301,1250.00\n" }
+```
+
+The verifier runs in the task's workspace after the team is done, with `CHATTY_EVAL_ANSWER` naming a file that holds the team's final answer; exit code 0 is a pass. The section's hash is signed into the published version, so a score always names the exact tasks it was measured on.
+
+Run the tasks with:
+
+```bash
+chatty-tui --install-team payments-lead@1.0.0
+chatty-tui --eval-team payments-lead@1.0.0 --runs 3 \
+  --openai-compat-url http://localhost:8000/v1 --model my-model
+```
+
+Each task runs `--runs` times (k), each in a fresh workspace, headless and with tools auto-approved. A task counts as passed only when it passed in every run. The result goes to `eval-<name>-<version>.json` (or `--eval-out PATH`): per task and run pass/fail, tokens and wall-clock, plus the model, k, the harness version and the bundle hash. It is signed by nobody: it is what your machine measured.
+
+The publisher files the result with `POST /api/agents/{name}/{version}/evals`; the marketplace then shows "passed X/N tasks (k runs), model M, measured <date>", labelled **self-reported**. A Hive operator who re-ran it files it as **verified**. A score belongs to one version: a new version starts unscored.
