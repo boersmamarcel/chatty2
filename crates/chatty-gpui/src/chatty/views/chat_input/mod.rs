@@ -107,6 +107,9 @@ pub struct ChatInputState {
     attachments: Vec<PathBuf>,
     should_clear: bool,
     selected_model_id: Option<String>,
+    /// While the conversation is hosted, the chip's text: the server's model
+    /// (AGE-849). `Some` also means there is no local picker.
+    hosted_model_label: Option<String>,
     available_models: Vec<ModelOption>,
     supports_images: bool,
     supports_pdf: bool,
@@ -172,6 +175,7 @@ impl ChatInputState {
             attachments: Vec::new(),
             should_clear: false,
             selected_model_id: None,
+            hosted_model_label: None,
             thumbnail_cache: Arc::new(RwLock::new(HashMap::new())),
             available_models: Vec::new(),
             supports_images: false,
@@ -488,6 +492,20 @@ impl ChatInputState {
         }
     }
 
+    /// Follow the displayed conversation's mode: a hosted one shows the
+    /// server's model and offers no local picker (AGE-849).
+    pub fn set_conversation_mode(
+        &mut self,
+        mode: &chatty_core::models::conversation::ConversationMode,
+    ) {
+        self.hosted_model_label = mode.hosted_model_label();
+    }
+
+    /// Whether the composer offers the local model picker.
+    pub fn local_model_picker_offered(&self) -> bool {
+        self.hosted_model_label.is_none()
+    }
+
     /// Get the selected model ID
     pub fn selected_model_id(&self) -> Option<&String> {
         self.selected_model_id.as_ref()
@@ -495,6 +513,9 @@ impl ChatInputState {
 
     /// Get display name for selected model
     pub fn get_selected_model_display_name(&self) -> String {
+        if let Some(label) = &self.hosted_model_label {
+            return label.clone();
+        }
         self.selected_model()
             .map(|model| format!("{} · {}", model.name, model.provider_type.display_name()))
             .unwrap_or_else(|| {

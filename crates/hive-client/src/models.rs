@@ -319,6 +319,20 @@ pub struct ModulePricingInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// `GET /api/usage/me/modules`: the signed-in user's usage per module.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MyModuleUsageList {
+    pub items: Vec<MyModuleUsage>,
+}
+
+/// One module's line in [`MyModuleUsageList`]: what the registry has
+/// recorded of this user's calls to it, across versions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MyModuleUsage {
+    pub module_name: String,
+    pub total_invocations: i64,
+}
+
 // ── Billing session (Phase 3b) ─────────────────────────────────────────────
 
 /// Request to acquire a billing session.
