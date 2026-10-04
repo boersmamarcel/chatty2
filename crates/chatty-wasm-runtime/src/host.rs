@@ -7,13 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tracing::{debug, error, info, trace, warn};
-use wasmtime::component::{Linker, Resource};
+use wasmtime::component::{HasData, Linker, Resource};
 use wasmtime::{ResourceLimiter, StoreLimits};
-use wasmtime_wasi::bindings::clocks::monotonic_clock;
-use wasmtime_wasi::{
-    DynPollable, IoImpl, IoView, OutputStream, Pollable, ResourceTable, StdoutStream, StreamError,
-    WasiCtx, WasiCtxBuilder, WasiImpl, WasiView,
-};
+use wasmtime_wasi::cli::{IsTerminal, StdoutStream};
+use wasmtime_wasi::clocks::{WasiClocksCtxView, WasiClocksView};
+use wasmtime_wasi::p2::bindings::clocks::monotonic_clock;
+use wasmtime_wasi::p2::{DynPollable, OutputStream, Pollable, StreamError};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::bindings::chatty::plugin::billing::SessionInfo;
 use crate::bindings::chatty::plugin::types::{CompletionResponse, Message};
@@ -340,7 +340,7 @@ impl ResourceLimiter for GuestLimiter {
         current: usize,
         desired: usize,
         maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         let allowed = self.inner.memory_growing(current, desired, maximum)?;
         if !allowed {
             self.memory_denied = true;
@@ -353,7 +353,7 @@ impl ResourceLimiter for GuestLimiter {
         current: usize,
         desired: usize,
         maximum: Option<usize>,
-    ) -> anyhow::Result<bool> {
+    ) -> wasmtime::Result<bool> {
         self.inner.table_growing(current, desired, maximum)
     }
 
@@ -420,13 +420,48 @@ impl Pollable for StderrTail {
     async fn ready(&mut self) {}
 }
 
+impl tokio::io::AsyncWrite for StderrTail {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let mut tail = self.get_mut().clone();
+        // Never fails (see `OutputStream::write` above).
+        let _ = OutputStream::write(&mut tail, bytes::Bytes::copy_from_slice(buf));
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl IsTerminal for StderrTail {
+    fn is_terminal(&self) -> bool {
+        false
+    }
+}
+
 impl StdoutStream for StderrTail {
-    fn stream(&self) -> Box<dyn OutputStream> {
+    fn async_stream(&self) -> Box<dyn tokio::io::AsyncWrite + Send + Sync> {
         Box::new(self.clone())
     }
 
-    fn isatty(&self) -> bool {
-        false
+    /// The tail itself, not WASI's default pipe adapter: writes land
+    /// synchronously, with no background task.
+    fn p2_stream(&self) -> Box<dyn OutputStream> {
+        Box::new(self.clone())
     }
 }
 
@@ -435,18 +470,27 @@ impl StdoutStream for StderrTail {
 // ---------------------------------------------------------------------------
 
 /// Replace `wasi:clocks/monotonic-clock` in `linker` (after
-/// `wasmtime_wasi::add_to_linker_sync` defined it) with [`DeadlineClock`].
+/// `wasmtime_wasi::p2::add_to_linker_sync` defined it) with [`DeadlineClock`].
 ///
 /// A guest that sleeps (`std::thread::sleep`, i.e. `subscribe-duration` +
 /// `wasi:io/poll`) blocks inside WASI's own `block_on`, where no epoch check
 /// runs, so the epoch deadline alone can't end the call. The only waits a
 /// guest can start are clock subscriptions (the `WasiCtx` grants no
 /// sockets, files or stdin), so bounding those bounds every WASI wait.
-pub(crate) fn add_deadline_clock_to_linker(linker: &mut Linker<ModuleState>) -> anyhow::Result<()> {
+pub(crate) fn add_deadline_clock_to_linker(
+    linker: &mut Linker<ModuleState>,
+) -> wasmtime::Result<()> {
     linker.allow_shadowing(true);
-    let added = monotonic_clock::add_to_linker_get_host(linker, deadline_clock);
+    let added = monotonic_clock::add_to_linker::<_, DeadlineClocks>(linker, deadline_clock);
     linker.allow_shadowing(false);
     added
+}
+
+/// Links [`DeadlineClock`] as the host side of the monotonic clock.
+struct DeadlineClocks;
+
+impl HasData for DeadlineClocks {
+    type Data<'a> = DeadlineClock<'a>;
 }
 
 fn deadline_clock(state: &mut ModuleState) -> DeadlineClock<'_> {
@@ -459,8 +503,8 @@ fn deadline_clock(state: &mut ModuleState) -> DeadlineClock<'_> {
 struct DeadlineClock<'a>(&'a mut ModuleState);
 
 impl DeadlineClock<'_> {
-    fn wasi(&mut self) -> WasiImpl<&mut ModuleState> {
-        WasiImpl(IoImpl(&mut *self.0))
+    fn wasi(&mut self) -> WasiClocksCtxView<'_> {
+        self.0.clocks()
     }
 
     /// A pollable for a `wait`, or `None` when it ends by the deadline
@@ -471,7 +515,7 @@ impl DeadlineClock<'_> {
     /// (and a guest still running afterwards is stopped by the epoch).
     /// Longer waits are only cut short, not refused: a guest may subscribe a
     /// long timeout and poll it beside a shorter one.
-    fn capped(&mut self, wait: Duration) -> anyhow::Result<Option<Resource<DynPollable>>> {
+    fn capped(&mut self, wait: Duration) -> wasmtime::Result<Option<Resource<DynPollable>>> {
         let Some(deadline) = self.0.deadline else {
             return Ok(None);
         };
@@ -484,23 +528,26 @@ impl DeadlineClock<'_> {
             hit: Arc::clone(&self.0.clock_deadline_hit),
         };
         let resource = self.0.table.push(cut)?;
-        Ok(Some(wasmtime_wasi::subscribe(&mut self.0.table, resource)?))
+        Ok(Some(wasmtime_wasi::p2::subscribe(
+            &mut self.0.table,
+            resource,
+        )?))
     }
 }
 
 impl monotonic_clock::Host for DeadlineClock<'_> {
-    fn now(&mut self) -> anyhow::Result<monotonic_clock::Instant> {
+    fn now(&mut self) -> wasmtime::Result<monotonic_clock::Instant> {
         monotonic_clock::Host::now(&mut self.wasi())
     }
 
-    fn resolution(&mut self) -> anyhow::Result<monotonic_clock::Duration> {
+    fn resolution(&mut self) -> wasmtime::Result<monotonic_clock::Duration> {
         monotonic_clock::Host::resolution(&mut self.wasi())
     }
 
     fn subscribe_instant(
         &mut self,
         when: monotonic_clock::Instant,
-    ) -> anyhow::Result<Resource<DynPollable>> {
+    ) -> wasmtime::Result<Resource<DynPollable>> {
         let now = monotonic_clock::Host::now(&mut self.wasi())?;
         match self.capped(Duration::from_nanos(when.saturating_sub(now)))? {
             Some(pollable) => Ok(pollable),
@@ -511,7 +558,7 @@ impl monotonic_clock::Host for DeadlineClock<'_> {
     fn subscribe_duration(
         &mut self,
         duration: monotonic_clock::Duration,
-    ) -> anyhow::Result<Resource<DynPollable>> {
+    ) -> wasmtime::Result<Resource<DynPollable>> {
         match self.capped(Duration::from_nanos(duration))? {
             Some(pollable) => Ok(pollable),
             None => monotonic_clock::Host::subscribe_duration(&mut self.wasi(), duration),
@@ -534,17 +581,13 @@ impl Pollable for CutAtDeadline {
     }
 }
 
-// Implement IoView (required by WasiView) so WASI can access the resource table.
-impl IoView for ModuleState {
-    fn table(&mut self) -> &mut ResourceTable {
-        &mut self.table
-    }
-}
-
 // Implement WasiView so the WASI linker can access the context and table.
 impl WasiView for ModuleState {
-    fn ctx(&mut self) -> &mut WasiCtx {
-        &mut self.wasi_ctx
+    fn ctx(&mut self) -> WasiCtxView<'_> {
+        WasiCtxView {
+            ctx: &mut self.wasi_ctx,
+            table: &mut self.table,
+        }
     }
 }
 

@@ -242,6 +242,17 @@ plugin that does not load fails the agent's build. The desktop runs spec agents 
 `chatty-tui` workers, which load their plugins the same way; it no longer adds its modules
 to the MCP server list — `/mcp/{module}` is for MCP clients outside chatty.
 
+A paid plugin (one installed from Hive with `pricing_model = "paid"`) is metered the same
+way whichever path calls it, a spec's `<module>__<tool>` or the gateway's `/mcp/{module}`:
+one `ModuleMeter` (`hive-client`) admits the call before the guest runs and reports it to
+Hive after it answers. The publisher's free calls (`free_tier_calls`, counted against the
+calls Hive has on record for the user) run at any balance; after those the balance must
+be positive, and a balance that cannot be read (signed out, sign-in expired, registry
+down) refuses the call. A worker uses the desktop's sign-in without refreshing it, and
+sends each paid call's report before it answers. The `billing` capability's host import
+is not wired yet: `acquire-session` answers "billing not configured on host" until
+ADR-0024 settles how a plugin-driven session is priced.
+
 A spec opts in by listing the plugin; nothing else does. Installing a plugin from the
 Hive marketplace puts it in the module directory and nothing more: it is not an agent
 and joins no agent until a spec names it.

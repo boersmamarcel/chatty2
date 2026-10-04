@@ -49,6 +49,7 @@ pub mod session;
 pub mod settings;
 pub mod settings_snapshot;
 pub mod slash_commands;
+pub mod team_install;
 /// Test kits shared across crates: the scriptable fake model server (AGE-632).
 /// Test-only: enable `chatty-core/test-support` from a dev-dependency.
 #[cfg(any(test, feature = "test-support"))]

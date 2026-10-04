@@ -12,6 +12,7 @@
 - [Terminal dock](./user/terminal-dock.md)
 - [Agents & tools](./user/agents-and-tools.md)
 - [Extensions & MCP](./user/extensions.md)
+  - [Install a team from the marketplace](./user/install-team.md)
 - [Memory & skills](./user/memory-and-skills.md)
 - [Sub-agents](./user/sub-agents.md)
   - [Tutorial: from one agent to a team](./user/tutorial-swarm.md)

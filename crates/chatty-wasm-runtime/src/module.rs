@@ -137,7 +137,9 @@ impl WasmModule {
         // parallelism in ML modules (wasm32-wasip2 + wasi:threads).
         config.wasm_threads(true);
 
-        let engine = Engine::new(&config).context("failed to create Wasmtime engine")?;
+        let engine = Engine::new(&config)
+            .map_err(anyhow::Error::from)
+            .context("failed to create Wasmtime engine")?;
         tick_epochs_of(&engine)?;
         Ok(engine)
     }
@@ -172,8 +174,9 @@ impl WasmModule {
     ) -> Result<Self> {
         info!(path = %path.display(), module = %manifest.name, "loading WASM module");
 
-        let component =
-            Component::from_file(engine, path).context("failed to load WASM component")?;
+        let component = Component::from_file(engine, path)
+            .map_err(anyhow::Error::from)
+            .context("failed to load WASM component")?;
 
         Self::from_component(
             engine,
@@ -207,8 +210,9 @@ impl WasmModule {
         billing_provider: Option<Arc<dyn BillingProvider>>,
         limits: ResourceLimits,
     ) -> Result<Self> {
-        let component =
-            Component::from_binary(engine, bytes).context("failed to parse WASM component")?;
+        let component = Component::from_binary(engine, bytes)
+            .map_err(anyhow::Error::from)
+            .context("failed to parse WASM component")?;
 
         Self::from_component(
             engine,
@@ -296,10 +300,12 @@ impl WasmModule {
         // Instantiation may run guest code: bound it like a call.
         store
             .set_fuel(self.limits.max_fuel)
+            .map_err(anyhow::Error::from)
             .context("failed to set fuel")?;
         store.set_epoch_deadline(epoch_ticks(self.limits.max_execution_ms));
 
         let bindings = PluginWorld::instantiate(&mut store, &self.component, &self.linker)
+            .map_err(anyhow::Error::from)
             .context("failed to instantiate WASM module")?;
         debug!(module = %self.manifest.name, "WASM plugin instantiated ({})", crate::WIT_PACKAGE);
         Ok(Instance { store, bindings })
@@ -499,9 +505,12 @@ fn build_linker(engine: &Engine, granted: &[Capability]) -> Result<Linker<Module
     // WASI Preview 2 first — modules compiled for wasm32-wasip2 import WASI
     // interfaces (e.g. wasi:io/poll) from the host even when they don't
     // actively use them.
-    wasmtime_wasi::add_to_linker_sync(&mut linker).context("failed to add WASI to linker")?;
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        .map_err(anyhow::Error::from)
+        .context("failed to add WASI to linker")?;
     // ...with every clock wait capped at the call deadline (AGE-706).
     add_deadline_clock_to_linker(&mut linker)
+        .map_err(anyhow::Error::from)
         .context("failed to add the deadline-bounded WASI clock to linker")?;
     grants::add_to_linker(&mut linker, granted).context("failed to add host imports to linker")?;
     Ok(linker)
@@ -589,7 +598,7 @@ fn run_export<O, E>(
     let store = &mut instance.store;
     if let Err(e) = store.set_fuel(limits.max_fuel) {
         return CallReport {
-            result: Err(e.context("failed to set fuel")),
+            result: Err(anyhow::Error::from(e).context("failed to set fuel")),
             fuel_consumed: 0,
             trapped: false,
         };

@@ -135,6 +135,8 @@ pub enum VerifyError {
     HashMismatch,
     #[error("the signed manifest is for {got}, not the requested {expected}")]
     WrongModule { expected: String, got: String },
+    #[error("the spec's SHA-256 does not match the signed spec manifest")]
+    SpecHashMismatch,
 }
 
 // ── Canonical JSON ─────────────────────────────────────────────────────────
@@ -336,6 +338,135 @@ pub fn verify_download_any(
     for root in roots {
         match verify_download(root, chain, wasm, name, version) {
             Ok(verified) => return Ok(verified),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(last_err)
+}
+
+// ── Agent specs (HS-3) ─────────────────────────────────────────────────────
+
+/// The `kind` of a [`SignedSpecManifest`]: a spec manifest can never pass
+/// for a module manifest or the other way round.
+pub const SPEC_MANIFEST_KIND: &str = "agent_spec";
+
+/// One plugin reference of a published spec, resolved at publish time to an
+/// exact module version and its `.wasm` SHA-256: an entry of the lockfile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockedPlugin {
+    pub module: String,
+    /// The semver requirement the spec gave (`*` when it gave none).
+    pub requirement: String,
+    /// Lowercase hex SHA-256 of that version's `.wasm`.
+    pub sha256: String,
+    pub version: String,
+}
+
+/// What the publisher's signature covers for an agent spec. Unknown fields
+/// are not refused: the signature covers the canonical bytes, not this
+/// struct (hive-verify's rule).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedSpecManifest {
+    /// Always [`SPEC_MANIFEST_KIND`].
+    pub kind: String,
+    pub lockfile: Vec<LockedPlugin>,
+    /// The spec's `agent.name`.
+    pub name: String,
+    /// Lowercase hex SHA-256 of [`SpecChain::spec`]'s bytes.
+    pub spec_sha256: String,
+    pub version: String,
+}
+
+/// A published spec's document and chain, each as the exact text that was
+/// signed or hashed (`signed` in `GET /api/agents/{name}/{version}`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpecChain {
+    /// The spec in its PL-D2 JSON form; hashed as given, never re-serialised.
+    pub spec: String,
+    /// Canonical JSON of the [`SignedSpecManifest`].
+    pub manifest: String,
+    /// Base64 publisher-key signature over `manifest`.
+    pub manifest_signature: String,
+    /// Canonical JSON of the [`PublisherCertificate`].
+    pub certificate: String,
+    /// Base64 root-key signature over `certificate`.
+    pub certificate_signature: String,
+}
+
+/// A spec chain that verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSpec {
+    pub certificate: PublisherCertificate,
+    pub manifest: SignedSpecManifest,
+}
+
+/// Verify root → publisher certificate → spec manifest signature → spec
+/// SHA-256, in hive-verify's `verify_spec_chain` order.
+pub fn verify_spec_chain(
+    root_public_key_hex: &str,
+    chain: &SpecChain,
+) -> Result<VerifiedSpec, VerifyError> {
+    let root = parse_public_key(root_public_key_hex)?;
+    if !signature_holds(
+        &root,
+        chain.certificate.as_bytes(),
+        &chain.certificate_signature,
+    )? {
+        return Err(VerifyError::CertificateSignatureMismatch);
+    }
+    let certificate: PublisherCertificate =
+        parse_canonical("publisher certificate", &chain.certificate)?;
+    let publisher = parse_public_key(&certificate.public_key)?;
+    if !signature_holds(
+        &publisher,
+        chain.manifest.as_bytes(),
+        &chain.manifest_signature,
+    )? {
+        return Err(VerifyError::ManifestSignatureMismatch);
+    }
+    let value: Value = serde_json::from_str(&chain.manifest)
+        .map_err(|e| VerifyError::Malformed("spec manifest", e.to_string()))?;
+    if canonical_json(&value) != chain.manifest.as_bytes() {
+        return Err(VerifyError::NotCanonical("spec manifest"));
+    }
+    let manifest: SignedSpecManifest = serde_json::from_value(value)
+        .map_err(|e| VerifyError::Malformed("spec manifest", e.to_string()))?;
+    if manifest.kind != SPEC_MANIFEST_KIND {
+        return Err(VerifyError::Malformed(
+            "spec manifest",
+            format!("kind is {:?}, not {SPEC_MANIFEST_KIND:?}", manifest.kind),
+        ));
+    }
+    if hex::encode(Sha256::digest(chain.spec.as_bytes())) != manifest.spec_sha256 {
+        return Err(VerifyError::SpecHashMismatch);
+    }
+    Ok(VerifiedSpec {
+        certificate,
+        manifest,
+    })
+}
+
+/// [`verify_spec_chain`] against each of `roots` in turn (SEC-3), then the
+/// consumer's own step: the manifest must name `name@version`, so another
+/// spec's genuine chain served under this name is refused.
+pub fn verify_spec_any(
+    roots: &[String],
+    chain: &SpecChain,
+    name: &str,
+    version: &str,
+) -> Result<VerifiedSpec, VerifyError> {
+    let mut last_err = VerifyError::CertificateSignatureMismatch;
+    for root in roots {
+        match verify_spec_chain(root, chain) {
+            Ok(verified) => {
+                if verified.manifest.name != name || verified.manifest.version != version {
+                    return Err(VerifyError::WrongModule {
+                        expected: format!("{name}@{version}"),
+                        got: format!("{}@{}", verified.manifest.name, verified.manifest.version),
+                    });
+                }
+                return Ok(verified);
+            }
             Err(err) => last_err = err,
         }
     }
