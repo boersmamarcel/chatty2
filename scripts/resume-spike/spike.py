@@ -316,6 +316,14 @@ def write_home(home, args, provider_url, prices):
         os.makedirs(d, exist_ok=True)
     if args.provider == "ollama":
         provider = {"name": "Ollama", "provider_type": "ollama", "base_url": provider_url}
+    elif args.provider == "openai":
+        # chatty-core has no separate OpenAI-compatible provider type; its
+        # `open_router` client already speaks plain OpenAI chat/completions
+        # against any `base_url`. A local server does not check the key, so
+        # any non-empty string does (OPENAI_API_KEY if set).
+        key = os.environ.get("OPENAI_API_KEY") or "local"
+        provider = {"name": "OpenAI-compatible", "provider_type": "open_router", "api_key": key,
+                    "base_url": provider_url}
     else:
         key = "fake" if args.provider == "fake" else os.environ.get("OPENROUTER_API_KEY")
         if not key:
@@ -516,7 +524,8 @@ def run_pair(index, task, args, prompts, runner, work_root, pairs_dir):
 
 def parse_args(argv):
     p = argparse.ArgumentParser(prog="run.sh", description="Run the resume spike (RC-1, AGE-650).")
-    p.add_argument("--provider", required=True, choices=("openrouter", "ollama", "fake"))
+    p.add_argument("--provider", required=True,
+                   choices=("openrouter", "ollama", "openai", "fake"))
     p.add_argument("--model", required=True)
     p.add_argument("--pairs", required=True, type=int)
     p.add_argument("--condition", required=True, choices=("warm", "cold"))
@@ -542,6 +551,9 @@ def parse_args(argv):
     if args.provider == "fake" and not args.base_url:
         die("--provider fake needs --base-url: the fake model is started by the "
             "resume_spike_dry_run test (cargo test -p chatty-tui --test resume_spike)")
+    if args.provider == "openai" and not args.base_url:
+        die("--provider openai needs --base-url: the OpenAI-compatible server's "
+            "root (e.g. a local vLLM's http://host:8000/v1)")
     args.arms = [args.arm] if args.arm else list(ARMS)
     args.run_timeout = 3 * 3600
     return args
@@ -558,6 +570,11 @@ def main(argv):
     elif args.provider == "fake":
         args.provider_url = args.base_url
         prices = parse_prices(args.prices) if args.prices else dict(FAKE_PRICES)
+    elif args.provider == "openai":
+        # An OpenAI-wire server with no catalog to price against (e.g. a
+        # local vLLM): unpriced like ollama unless --prices is given.
+        args.provider_url = args.base_url
+        prices = parse_prices(args.prices) if args.prices else None
     else:
         args.provider_url = args.base_url
         prices = parse_prices(args.prices) if args.prices else openrouter_prices(args.model, args.base_url)

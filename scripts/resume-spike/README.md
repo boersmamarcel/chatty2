@@ -25,7 +25,7 @@ default), so budget about 24 × (12 min + three runs).
 
 | Flag | Meaning |
 | -- | -- |
-| `--provider openrouter\|ollama\|fake` | OpenRouter needs `OPENROUTER_API_KEY`; Ollama defaults to `http://localhost:11434`; `fake` is the dry run's (below) |
+| `--provider openrouter\|ollama\|openai\|fake` | OpenRouter needs `OPENROUTER_API_KEY`; Ollama defaults to `http://localhost:11434`; `openai` speaks plain OpenAI chat/completions against any `--base-url` (e.g. a local vLLM) and is unpriced unless `--prices` is given; `fake` is the dry run's (below) |
 | `--model <id>` | The provider's model id, e.g. `anthropic/claude-sonnet-4.5` or `qwen3:14b` |
 | `--pairs N` | Pair *i* uses task *i* of the sorted task set, wrapping around past 24 (the 50-pair re-run repeats tasks) |
 | `--condition warm\|cold` | *warm*: each follow-up starts at once. *cold*: each waits `--cold-wait` seconds first |
