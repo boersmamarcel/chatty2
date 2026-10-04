@@ -122,6 +122,12 @@ pub struct PluginHost {
     /// are paid, and the Hive credit guard and usage collector. The
     /// default knows no paid modules.
     pub meter: Arc<ModuleMeter>,
+    /// The paid plugins of the agent's published version, from its
+    /// lockfile (ADR-0024 § 1, MK-2): a spec plugin named here is never
+    /// loaded from the module roots — its tools are built from this
+    /// manifest and run by hive ([`super::paid_plugin_tool`]). Hive fills
+    /// it; every other host leaves it empty.
+    pub paid: Vec<chatty_fabric::PaidPluginManifest>,
 }
 
 /// The meter for a process that runs plugins but does not own the user's
@@ -350,7 +356,14 @@ pub fn load_plugin(
         .list_tools()
         .with_context(|| format!("plugin `{}`: list-tools failed", spec.module))?
         .into_iter()
-        .map(|tool| tool_def(&manifest.name, tool))
+        .map(|tool| {
+            tool_def(
+                &manifest.name,
+                tool.name,
+                tool.description,
+                &tool.parameters_schema,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
 
     Ok(LoadedPlugin {
@@ -366,30 +379,33 @@ pub fn load_plugin(
     })
 }
 
-/// The advertised definition of one of `plugin`'s tools.
-fn tool_def(plugin: &str, tool: chatty_wasm_runtime::ToolDefinition) -> Result<PluginToolDef> {
-    let name = plugin_tool_name(plugin, &tool.name);
+/// The advertised definition of `plugin`'s tool `tool`, from what the
+/// plugin's `list-tools` (or, for a paid plugin, its lockfile manifest)
+/// says of it.
+pub(crate) fn tool_def(
+    plugin: &str,
+    tool: String,
+    description: String,
+    parameters_schema: &str,
+) -> Result<PluginToolDef> {
+    let name = plugin_tool_name(plugin, &tool);
     if !is_provider_tool_name(&name) {
         bail!(
-            "plugin `{plugin}`: tool `{}` would be advertised as `{name}`, which is not a legal \
-             tool name (letters, digits, `_` and `-`, at most {MAX_TOOL_NAME_LEN} characters)",
-            tool.name
+            "plugin `{plugin}`: tool `{tool}` would be advertised as `{name}`, which is not a \
+             legal tool name (letters, digits, `_` and `-`, at most {MAX_TOOL_NAME_LEN} characters)"
         );
     }
-    let parameters = if tool.parameters_schema.trim().is_empty() {
+    let parameters = if parameters_schema.trim().is_empty() {
         serde_json::json!({ "type": "object", "properties": {} })
     } else {
-        serde_json::from_str(&tool.parameters_schema).with_context(|| {
-            format!(
-                "plugin `{plugin}`: tool `{}` has a parameters schema that is not JSON",
-                tool.name
-            )
+        serde_json::from_str(parameters_schema).with_context(|| {
+            format!("plugin `{plugin}`: tool `{tool}` has a parameters schema that is not JSON")
         })?
     };
     Ok(PluginToolDef {
         name,
-        tool: tool.name,
-        description: tool.description,
+        tool,
+        description,
         parameters,
     })
 }
@@ -402,11 +418,18 @@ pub async fn load_plugins(
     host: &PluginHost,
     calling_model: &ModelConfig,
 ) -> Result<Vec<LoadedPlugin>> {
+    // A paid plugin's code runs only on hive (MK-2): its tools come from
+    // its manifest, never from these roots.
+    let specs: Vec<PluginSpec> = specs
+        .iter()
+        .filter(|spec| !host.paid.iter().any(|m| m.plugin.module == spec.module))
+        .cloned()
+        .collect();
     if specs.is_empty() {
         return Ok(Vec::new());
     }
     let runtime = tokio::runtime::Handle::current();
-    let (specs, host, calling_model) = (specs.to_vec(), host.clone(), calling_model.clone());
+    let (host, calling_model) = (host.clone(), calling_model.clone());
     let mut plugins = tokio::task::spawn_blocking(move || {
         specs
             .iter()
@@ -673,12 +696,9 @@ mod tests {
         );
         assert_eq!(plugin_tool_display_name("read_file"), None);
 
-        let too_long = chatty_wasm_runtime::ToolDefinition {
-            name: "t".repeat(60),
-            description: String::new(),
-            parameters_schema: String::new(),
-        };
-        let err = tool_def("echo", too_long).unwrap_err().to_string();
+        let err = tool_def("echo", "t".repeat(60), String::new(), "")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not a legal tool name"), "{err}");
     }
 

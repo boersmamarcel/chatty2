@@ -330,6 +330,14 @@ impl AgentClient {
         // this agent's model. A plugin that does not load fails the build —
         // the spec depends on it. The spec is their allow-list, so a tool
         // profile does not filter them.
+        // A paid plugin (ADR-0024, MK-2) is never loaded: its tools come
+        // from its lockfile manifest and call hive over this worker's
+        // connection.
+        let paid_plugins = crate::tools::paid_plugin_tool::paid_plugins(
+            &plugins,
+            &plugin_host.paid,
+            fabric_transport.as_ref(),
+        )?;
         let plugins =
             crate::tools::plugin_tool::load_plugins(&plugins, &plugin_host, model_config).await?;
 
@@ -1308,7 +1316,10 @@ impl AgentClient {
         // A plugin tool's name holds `__`, which no native tool's does; the
         // check is what keeps it that way. Reserving the names keeps an MCP
         // tool from shadowing one.
-        for name in crate::tools::plugin_tool::plugin_tool_names(&plugins) {
+        let paid_tool_names = paid_plugins
+            .iter()
+            .flat_map(|plugin| plugin.tools.iter().map(|tool| tool.name.as_str()));
+        for name in crate::tools::plugin_tool::plugin_tool_names(&plugins).chain(paid_tool_names) {
             if !native_tool_names.insert(name.to_string()) {
                 anyhow::bail!("plugin tool `{name}` has the name of another tool of this agent");
             }
@@ -1468,11 +1479,18 @@ impl AgentClient {
             ToolLoader::new(
                 native.iter().map(String::as_str),
                 mcp_tool_info.iter().map(|(_, name, _)| name.clone()),
-                plugins.iter().map(|plugin| PluginGroup {
-                    name: plugin.name.clone(),
-                    description: plugin.description.clone(),
-                    tools: plugin.tools.iter().map(|tool| tool.name.clone()).collect(),
-                }),
+                plugins
+                    .iter()
+                    .map(|plugin| PluginGroup {
+                        name: plugin.name.clone(),
+                        description: plugin.description.clone(),
+                        tools: plugin.tools.iter().map(|tool| tool.name.clone()).collect(),
+                    })
+                    .chain(paid_plugins.iter().map(|plugin| PluginGroup {
+                        name: plugin.name.clone(),
+                        description: plugin.description.clone(),
+                        tools: plugin.tools.iter().map(|tool| tool.name.clone()).collect(),
+                    })),
                 preload,
             )
         });
@@ -1582,6 +1600,12 @@ impl AgentClient {
                     .iter()
                     .flat_map(|plugin| crate::tools::plugin_tool::PluginTool::all(plugin, &approvals))
                     .map(crate::tools::plugin_tool::PluginTool::into_dynamic)
+                    .chain(
+                        paid_plugins
+                            .iter()
+                            .flat_map(crate::tools::paid_plugin_tool::PaidPluginTool::all)
+                            .map(crate::tools::paid_plugin_tool::PaidPluginTool::into_dynamic),
+                    )
                     .collect()
             },
         );

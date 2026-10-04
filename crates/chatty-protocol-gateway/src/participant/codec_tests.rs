@@ -1120,3 +1120,124 @@ fn task_metadata_roundtrips_every_worker_key() {
     };
     assert_eq!(metadata, Some(everything));
 }
+
+fn ocr() -> chatty_fabric::LockedPlugin {
+    chatty_fabric::LockedPlugin {
+        module: "ocr".into(),
+        version: "1.2.0".into(),
+        sha256: "ab".repeat(32),
+    }
+}
+
+/// MK-2 (ADR-0024 § 2): a paid plugin's tool call crosses the worker's
+/// socket as a `module.call` request, its answer as that request's result,
+/// and a refusal as the typed `needs_acceptance` / `fee_refused` errors —
+/// each back under the worker's own call id, unchanged.
+#[test]
+fn module_call_round_trips_on_the_wire() {
+    use chatty_fabric::{FeeRefusalReason, ItemKind, ItemRef, ModuleCallOutcome, ModuleCallParams};
+
+    let (broker, worker) = connected();
+    let params = ModuleCallParams {
+        plugin: ocr(),
+        tool: "read".into(),
+        arguments: r#"{"page":1}"#.into(),
+        run: Some("task-1".into()),
+    };
+    let calls = [11, 12, 13, 14];
+    let mut ids = Vec::new();
+    for id in calls {
+        let line = worker
+            .encode(&ParticipantFrame::Call {
+                id,
+                request: CallRequest::ModuleCall(params.clone()),
+            })
+            .unwrap()
+            .unwrap();
+        let json = value(&line);
+        assert_eq!(json["method"], "module.call");
+        assert_eq!(
+            json["params"],
+            json!({"plugin": {"module": "ocr", "version": "1.2.0", "sha256": "ab".repeat(32)},
+                   "tool": "read", "arguments": "{\"page\":1}", "run": "task-1"})
+        );
+        let Some(ParticipantFrame::Call {
+            id: request_id,
+            request: CallRequest::ModuleCall(decoded),
+        }) = broker.decode(&line).unwrap()
+        else {
+            panic!("a module.call");
+        };
+        assert_eq!(decoded, params);
+        ids.push(request_id);
+    }
+
+    let answers = [
+        Ok(ModuleCallOutcome::Result {
+            content: "page one".into(),
+        }),
+        Ok(ModuleCallOutcome::ToolError {
+            message: "no such page".into(),
+        }),
+        Err(CallError::NeedsAcceptance {
+            spec: "auditor".into(),
+            version: "2.0.0".into(),
+        }),
+        Err(CallError::FeeRefused {
+            item: ItemRef {
+                kind: ItemKind::Plugin,
+                name: "ocr".into(),
+                version: "1.2.0".into(),
+            },
+            reason: FeeRefusalReason::Cap,
+            resets_at: Some("2026-11-01T00:00:00Z".into()),
+        }),
+    ];
+    for ((request_id, call), answer) in ids.into_iter().zip(calls).zip(answers) {
+        let frame = match answer.clone() {
+            Ok(outcome) => BrokerFrame::CallResult {
+                id: request_id,
+                result: CallResult::ModuleCalled(outcome),
+            },
+            Err(error) => BrokerFrame::CallError {
+                id: request_id,
+                error,
+            },
+        };
+        let line = broker.encode(&frame).unwrap().unwrap();
+        match (worker.decode(&line).unwrap(), answer) {
+            (
+                Some(BrokerFrame::CallResult {
+                    id,
+                    result: CallResult::ModuleCalled(outcome),
+                }),
+                Ok(expected),
+            ) => {
+                assert_eq!(id, call);
+                assert_eq!(outcome, expected);
+            }
+            (Some(BrokerFrame::CallError { id, error }), Err(expected)) => {
+                assert_eq!(id, call);
+                assert_eq!(error, expected);
+                if let CallError::FeeRefused { .. } = expected {
+                    assert_eq!(
+                        value(&line)["error"],
+                        json!({"kind": "fee_refused",
+                               "item": {"kind": "plugin", "name": "ocr", "version": "1.2.0"},
+                               "reason": "cap", "resets_at": "2026-11-01T00:00:00Z",
+                               "message": "fee_refused: plugin ocr@1.2.0: cap, resets at \
+                                           2026-11-01T00:00:00Z"})
+                    );
+                }
+            }
+            (other, expected) => panic!("{expected:?} came back as {other:?}"),
+        }
+    }
+
+    // The broker may not send it: a `module.call` is the worker's request.
+    let line = json!({"v": 3, "id": 99, "method": "module.call",
+                      "params": {"plugin": {"module": "ocr", "version": "1.2.0",
+                                            "sha256": "ab"}, "tool": "read", "arguments": "{}"}})
+    .to_string();
+    assert!(worker.decode(&line).is_err());
+}
