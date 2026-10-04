@@ -1851,6 +1851,7 @@ dependencies = [
  "dirs 6.0.0",
  "docx-rs",
  "duckdb",
+ "ed25519-dalek 3.0.0",
  "flate2",
  "futures",
  "glob",
