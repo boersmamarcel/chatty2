@@ -24,6 +24,7 @@ use gpui::*;
 use gpui_component::button::*;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputState};
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{Select, SelectState};
 use gpui_component::{
     ActiveTheme, Disableable, IndexPath, Sizable, WindowExt as _, h_flex, v_flex,
@@ -362,6 +363,7 @@ fn open_editor(
                 .into_any_element(),
             Destination::New(home) => {
                 let chip = |id: &'static str, label: &str, value: SpecHome, enabled: bool| {
+                    let selected = home.get() == value;
                     let home = home.clone();
                     let button = Button::new(id)
                         .small()
@@ -371,7 +373,7 @@ fn open_editor(
                             home.set(value);
                             cx.refresh_windows();
                         });
-                    if home.get() == value {
+                    if selected {
                         button.primary()
                     } else {
                         button.outline()
@@ -749,11 +751,12 @@ pub fn open_add_to_agent(module: &str, window: &mut Window, cx: &mut App) {
                                 }
                             )))
                             .child(h_flex().gap_3().children(requested.iter().map(|capability| {
+                                let checked = granted.borrow().contains(capability);
                                 let granted = granted.clone();
                                 let name = capability.clone();
                                 Checkbox::new(SharedString::from(format!("add-grant-{capability}")))
                                     .label(capability.clone())
-                                    .checked(granted.borrow().contains(capability))
+                                    .checked(checked)
                                     .on_click(move |checked, _, cx| {
                                         let mut granted = granted.borrow_mut();
                                         granted.retain(|g| g != &name);

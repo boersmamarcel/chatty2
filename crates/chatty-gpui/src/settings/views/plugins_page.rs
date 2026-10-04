@@ -12,7 +12,7 @@ use crate::settings::models::{
 use crate::settings::views::agent_spec_editor;
 use crate::settings::views::extensions_page::trust_badge;
 use gpui_component::Sizable;
-use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::button::Button;
 use chatty_core::agent_spec::SpecListing;
 use chatty_wasm_runtime::SPECLESS_DEFAULTS;
 use gpui::prelude::FluentBuilder;
