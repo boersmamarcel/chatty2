@@ -141,7 +141,8 @@ impl std::fmt::Display for RefusalReason {
 }
 
 /// One call. On a worker's connection each variant is its own request
-/// method (`agent.invoke`, `agent.list`, `mailbox.post`, `mailbox.take`)
+/// method (`agent.invoke`, `agent.list`, `mailbox.post`, `mailbox.take`,
+/// `module.call`)
 /// with these params ([`wire::WorkerRequest`](crate::wire::WorkerRequest)).
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallRequest {
@@ -151,6 +152,9 @@ pub enum CallRequest {
     /// `mailbox.take` (TM-5): a node, between two of its tool rounds, takes
     /// the messages waiting on its mid-run list.
     TakeMessages,
+    /// `module.call` (ADR-0024 § 2): one tool call of a paid plugin, run by
+    /// the broker host in hive's module runtime.
+    ModuleCall(crate::ModuleCallParams),
 }
 
 /// One item of a [`CallStream`].
@@ -207,6 +211,8 @@ pub enum CallResult {
     /// `mailbox.take` (TM-5): the messages a node's tool round delivers,
     /// each already wrapped as untrusted data, oldest first.
     Messages(Vec<String>),
+    /// `module.call`: what the paid plugin's tool answered.
+    ModuleCalled(crate::ModuleCallOutcome),
 }
 
 /// A result is written as its method's result type: which one it is, the
@@ -218,6 +224,7 @@ impl Serialize for CallResult {
             Self::Agents(agents) => agents.serialize(serializer),
             Self::Posted(status) => status.serialize(serializer),
             Self::Messages(messages) => messages.serialize(serializer),
+            Self::ModuleCalled(outcome) => outcome.serialize(serializer),
         }
     }
 }
@@ -316,6 +323,19 @@ pub enum CallError {
     /// The peer broke the protocol (a hello whose schema does not match).
     #[error("protocol: {0}")]
     Protocol(String),
+    /// The run's root spec version is paid and its user has not accepted
+    /// its bill (ADR-0024 § 5). Only the user can, outside the run.
+    #[error("needs_acceptance: {spec}@{version}: the user has not accepted its bill")]
+    NeedsAcceptance { spec: String, version: String },
+    /// The ledger refused a fee for `item` (ADR-0024 § 7, L8). `resets_at`
+    /// is the end of the cap's UTC month (RFC 3339) when `reason` is
+    /// [`Cap`](crate::FeeRefusalReason::Cap).
+    #[error("fee_refused: {item}: {reason}{}", resets_at.as_ref().map(|at| format!(", resets at {at}")).unwrap_or_default())]
+    FeeRefused {
+        item: crate::ItemRef,
+        reason: crate::FeeRefusalReason,
+        resets_at: Option<String>,
+    },
 }
 
 /// Progress, then one result. An `Err` item ends the stream.

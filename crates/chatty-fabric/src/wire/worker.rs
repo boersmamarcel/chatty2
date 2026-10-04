@@ -2,7 +2,7 @@
 //!
 //! | Requests | Notifications | Results |
 //! |---|---|---|
-//! | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `mailbox.take`, `human.ask`, `human.approve` | `task.event`, `req.cancel` | `task.run` ([`TaskOutcome`]), a relayed `human.ask` ([`AskReply`](crate::AskReply)) |
+//! | `session.hello`, `agent.invoke`, `agent.list`, `mailbox.post`, `mailbox.take`, `module.call`, `human.ask`, `human.approve` | `task.event`, `req.cancel` | `task.run` ([`TaskOutcome`]), a relayed `human.ask` ([`AskReply`](crate::AskReply)) |
 
 use std::borrow::Cow;
 
@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::{DecodeError, IdParams, TaskMetadata, TaskState, no_params, params};
-use crate::{ApprovalRequest, AskRequest, InvokeAgentParams, SendMessageParams, SwarmItem};
+use crate::{
+    ApprovalRequest, AskRequest, InvokeAgentParams, ModuleCallParams, SendMessageParams, SwarmItem,
+};
 
 /// A request a worker may make.
 #[derive(Debug)]
@@ -27,6 +29,9 @@ pub enum WorkerRequest {
     /// `mailbox.take` (TM-5): the messages waiting on the worker's mid-run
     /// list, taken between two of its tool rounds. No params.
     MailboxTake,
+    /// `module.call` (ADR-0024 § 2, MK-2): one tool call of a paid plugin
+    /// the worker's lockfile pins.
+    ModuleCall(ModuleCallParams),
     /// `human.approve` (EN-2a): an approval only the root answers.
     HumanApprove(ApprovalRequest),
     /// `human.ask` (EN-2b): a question, relayed up the caller chain.
@@ -49,6 +54,7 @@ impl WorkerRequest {
                 no_params(method, raw)?;
                 Self::MailboxTake
             }
+            "module.call" => Self::ModuleCall(params(method, raw)?),
             "human.approve" => Self::HumanApprove(params(method, raw)?),
             "human.ask" => Self::HumanAsk(params(method, raw)?),
             other => return Err(DecodeError::WrongDirection(other.to_string())),

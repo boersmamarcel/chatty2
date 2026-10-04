@@ -23,6 +23,7 @@ mod delegation;
 mod directory;
 mod edge_log;
 mod handoff;
+mod module;
 mod origin;
 mod pending;
 mod permit;
@@ -39,6 +40,10 @@ pub use directory::{
 };
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES, UsagePricer};
 pub use handoff::HandoffContract;
+pub use module::{
+    FEE_REFUSED, FeeRefusalReason, ItemKind, ItemRef, LockedPlugin, ModuleCallOutcome,
+    ModuleCallParams, NEEDS_ACCEPTANCE, PaidPluginManifest, PaidTool, find_money_refusal,
+};
 pub use origin::AgentOrigin;
 pub use pending::{
     Message, PENDING_LIST_BYTES, PendingList, SENDER_ALLOWANCE_BYTES, Sender, wrap_message,

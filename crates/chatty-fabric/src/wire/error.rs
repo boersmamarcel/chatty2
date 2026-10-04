@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{CallError, Refusal};
+use crate::{CallError, FeeRefusalReason, ItemRef, Refusal};
 
 /// Why a request failed, as the wire carries it: a closed set tagged by
 /// `kind`, one variant per [`CallError`] variant plus [`Self::Protocol`],
@@ -38,6 +38,17 @@ pub enum WireError {
     /// frame this side cannot accept.
     #[error("protocol: {reason}")]
     Protocol { reason: String },
+    /// The run's root spec version needs its user's acceptance of its bill
+    /// (ADR-0024 § 5).
+    #[error("needs_acceptance: {spec}@{version}: the user has not accepted its bill")]
+    NeedsAcceptance { spec: String, version: String },
+    /// The ledger refused a fee (ADR-0024 § 7, L8).
+    #[error("fee_refused: {item}: {reason}{}", resets_at.as_ref().map(|at| format!(", resets at {at}")).unwrap_or_default())]
+    FeeRefused {
+        item: ItemRef,
+        reason: FeeRefusalReason,
+        resets_at: Option<String>,
+    },
 }
 
 /// [`WireError`] as it is written: the variant's fields and its display.
@@ -77,6 +88,17 @@ enum Repr {
         reason: String,
         message: String,
     },
+    NeedsAcceptance {
+        spec: String,
+        version: String,
+        message: String,
+    },
+    FeeRefused {
+        item: ItemRef,
+        reason: FeeRefusalReason,
+        resets_at: Option<String>,
+        message: String,
+    },
 }
 
 impl From<WireError> for Repr {
@@ -95,6 +117,21 @@ impl From<WireError> for Repr {
             WireError::Disconnected { reason } => Self::Disconnected { reason, message },
             WireError::Failed { reason } => Self::Failed { reason, message },
             WireError::Protocol { reason } => Self::Protocol { reason, message },
+            WireError::NeedsAcceptance { spec, version } => Self::NeedsAcceptance {
+                spec,
+                version,
+                message,
+            },
+            WireError::FeeRefused {
+                item,
+                reason,
+                resets_at,
+            } => Self::FeeRefused {
+                item,
+                reason,
+                resets_at,
+                message,
+            },
         }
     }
 }
@@ -113,6 +150,17 @@ impl From<Repr> for WireError {
             Repr::Disconnected { reason, .. } => Self::Disconnected { reason },
             Repr::Failed { reason, .. } => Self::Failed { reason },
             Repr::Protocol { reason, .. } => Self::Protocol { reason },
+            Repr::NeedsAcceptance { spec, version, .. } => Self::NeedsAcceptance { spec, version },
+            Repr::FeeRefused {
+                item,
+                reason,
+                resets_at,
+                ..
+            } => Self::FeeRefused {
+                item,
+                reason,
+                resets_at,
+            },
         }
     }
 }
@@ -130,6 +178,16 @@ impl From<CallError> for WireError {
             CallError::Disconnected(reason) => Self::Disconnected { reason },
             CallError::Failed(reason) => Self::Failed { reason },
             CallError::Protocol(reason) => Self::Protocol { reason },
+            CallError::NeedsAcceptance { spec, version } => Self::NeedsAcceptance { spec, version },
+            CallError::FeeRefused {
+                item,
+                reason,
+                resets_at,
+            } => Self::FeeRefused {
+                item,
+                reason,
+                resets_at,
+            },
         }
     }
 }
@@ -147,6 +205,16 @@ impl From<WireError> for CallError {
             WireError::Disconnected { reason } => Self::Disconnected(reason),
             WireError::Failed { reason } => Self::Failed(reason),
             WireError::Protocol { reason } => Self::Protocol(reason),
+            WireError::NeedsAcceptance { spec, version } => Self::NeedsAcceptance { spec, version },
+            WireError::FeeRefused {
+                item,
+                reason,
+                resets_at,
+            } => Self::FeeRefused {
+                item,
+                reason,
+                resets_at,
+            },
         }
     }
 }
@@ -169,6 +237,28 @@ mod tests {
             CallError::Disconnected("socket closed".into()),
             CallError::Failed("boom".into()),
             CallError::Protocol("schema mismatch".into()),
+            CallError::NeedsAcceptance {
+                spec: "auditor".into(),
+                version: "2.0.0".into(),
+            },
+            CallError::FeeRefused {
+                item: ItemRef {
+                    kind: crate::ItemKind::Plugin,
+                    name: "ocr".into(),
+                    version: "1.2.0".into(),
+                },
+                reason: FeeRefusalReason::Cap,
+                resets_at: Some("2026-11-01T00:00:00Z".into()),
+            },
+            CallError::FeeRefused {
+                item: ItemRef {
+                    kind: crate::ItemKind::Team,
+                    name: "auditor".into(),
+                    version: "2.0.0".into(),
+                },
+                reason: FeeRefusalReason::Funding,
+                resets_at: None,
+            },
         ]
     }
 

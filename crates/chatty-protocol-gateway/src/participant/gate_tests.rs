@@ -100,6 +100,7 @@ fn reaching<'a>(policy: &'a dyn CallPolicy, spec: &str) -> Result<Snapshot<'a>, 
         addressee: Addressee::None,
         binding: None,
         answer_nonce: None,
+        paid: None,
     })
 }
 
@@ -622,5 +623,180 @@ fn mid_run_message_rows() {
     assert!(
         policy.consulted().is_empty(),
         "no spec rule decides a message"
+    );
+}
+
+fn module_call(run: Option<&str>) -> ModuleCallParams {
+    ModuleCallParams {
+        plugin: chatty_fabric::LockedPlugin {
+            module: "ocr".to_string(),
+            version: "1.2.0".to_string(),
+            sha256: "ab".repeat(32),
+        },
+        tool: "read".to_string(),
+        arguments: "{}".to_string(),
+        run: run.map(str::to_string),
+    }
+}
+
+/// The paid inputs under which a node's call of `ocr@1.2.0` passes every
+/// structural row (ADR-0024 § 7).
+fn paid_inputs() -> PaidInputs {
+    let ocr = module_call(None).plugin.item();
+    PaidInputs {
+        funding: Funding::Credit,
+        root: Some(PublishedRoot {
+            name: "auditor".to_string(),
+            version: "2.0.0".to_string(),
+            spec_sha256: "cd".repeat(32),
+            closure: vec![ocr.clone()],
+        }),
+        lockfile: vec![ocr],
+        run_hold: true,
+    }
+}
+
+/// ADR-0024 § 7 (MK-2): every `module.call` row refuses while the
+/// snapshot carries no paid inputs — the node's own run, on a hosted
+/// broker, for a plugin it would otherwise be granted. With them, only a
+/// node calling from its own run, under a credit-funded published root
+/// with an open run hold, for a plugin in its lockfile and the closure,
+/// is granted; the local root, outsiders and a typed root's client never
+/// are. No spec is consulted for any of it.
+#[test]
+fn gate_refuses_module_call_with_empty_snapshot() {
+    let policy = Watching::new([]);
+    let binding = Binding {
+        tenant: "acme".to_string(),
+        user: "ada".to_string(),
+        root: BrokerRoot::Hosted,
+    };
+    let snapshot = |paid: Option<PaidInputs>, binding: Option<&'static Binding>| {
+        reaching(&policy, "analyst").map(|snapshot| Snapshot {
+            binding,
+            paid,
+            ..snapshot
+        })
+    };
+    let binding: &'static Binding = Box::leak(Box::new(binding));
+    let analyst = node("analyst-0", "analyst", "task-1");
+    let call = module_call(Some("task-1"));
+    let request = Request::ModuleCall(&call);
+
+    // Empty: refused, naming why, though every other input would pass.
+    let refused = decide(&analyst, &request, &snapshot(None, Some(binding)));
+    assert_eq!(refused.row.to_string(), "node/module.call");
+    match refused.outcome {
+        Err(Refused::Caller(why)) => assert!(why.contains("no paid inputs"), "{why}"),
+        other => panic!("refused while the snapshot is empty: {other:?}"),
+    }
+
+    // Filled: granted for the plugin it names.
+    assert_eq!(
+        decide(
+            &analyst,
+            &request,
+            &snapshot(Some(paid_inputs()), Some(binding))
+        )
+        .outcome,
+        Ok(Grant::ModuleCall {
+            plugin: call.plugin.clone()
+        })
+    );
+
+    // Each structural condition refuses on its own.
+    let mut cases: Vec<(&str, PaidInputs)> = Vec::new();
+    let mut own_key = paid_inputs();
+    own_key.funding = Funding::OwnKey;
+    cases.push(("not credit-funded", own_key));
+    let mut inline = paid_inputs();
+    inline.root = None;
+    cases.push(("not built from a published version", inline));
+    let mut no_hold = paid_inputs();
+    no_hold.run_hold = false;
+    cases.push(("no open run hold", no_hold));
+    let mut unlocked = paid_inputs();
+    unlocked.lockfile.clear();
+    cases.push(("not in its lockfile", unlocked));
+    let mut outside_closure = paid_inputs();
+    if let Some(root) = outside_closure.root.as_mut() {
+        root.closure.clear();
+    }
+    cases.push(("outside the closure", outside_closure));
+    for (why, paid) in cases {
+        match decide(&analyst, &request, &snapshot(Some(paid), Some(binding))).outcome {
+            Err(Refused::Caller(reason)) => assert!(reason.contains(why), "{why}: {reason}"),
+            other => panic!("{why}: {other:?}"),
+        }
+    }
+
+    // A run that is not its own, or none.
+    for run in [None, Some("task-9")] {
+        let call = module_call(run);
+        assert!(
+            decide(
+                &analyst,
+                &Request::ModuleCall(&call),
+                &snapshot(Some(paid_inputs()), Some(binding))
+            )
+            .outcome
+            .is_err(),
+            "{run:?}"
+        );
+    }
+
+    // Not on a local broker, and never the local root (ADR-0023 § 6).
+    assert!(
+        decide(&analyst, &request, &snapshot(Some(paid_inputs()), None))
+            .outcome
+            .is_err()
+    );
+    for caller in [Caller::Root].into_iter().chain(outsiders()) {
+        assert!(
+            decide(&caller, &request, &snapshot(Some(paid_inputs()), None))
+                .outcome
+                .is_err(),
+            "{caller}"
+        );
+    }
+
+    // The hosted root agent: its conversation's lockfile, refused while
+    // empty, and never on a typed root.
+    let ada = Caller::HostedRoot(HostedClient {
+        tenant: "acme".to_string(),
+        user: "ada".to_string(),
+    });
+    let root_call = module_call(None);
+    let root_request = Request::ModuleCall(&root_call);
+    assert!(
+        decide(&ada, &root_request, &snapshot(None, Some(binding)))
+            .outcome
+            .is_err()
+    );
+    assert!(
+        decide(
+            &ada,
+            &root_request,
+            &snapshot(Some(paid_inputs()), Some(binding))
+        )
+        .outcome
+        .is_ok()
+    );
+    let typed: &'static Binding = Box::leak(Box::new(Binding {
+        root: BrokerRoot::Typed { key_owner: None },
+        ..binding.clone()
+    }));
+    assert!(
+        decide(
+            &ada,
+            &root_request,
+            &snapshot(Some(paid_inputs()), Some(typed))
+        )
+        .outcome
+        .is_err()
+    );
+    assert!(
+        policy.consulted().is_empty(),
+        "module.call consults no spec"
     );
 }

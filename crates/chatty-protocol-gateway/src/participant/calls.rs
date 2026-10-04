@@ -1146,6 +1146,22 @@ impl BrokerCalls {
                     refusal_stream(error)
                 }
             },
+            CallRequest::ModuleCall(params) => {
+                let error = match self
+                    .gate(&peer, &caller, &Request::ModuleCall(&params))
+                    .outcome
+                {
+                    Err(refused) => refused.to_call_error(),
+                    // The module runtime is hive's (MK-3b): no chatty2
+                    // broker has one to run a granted call on.
+                    Ok(_) => CallError::Refused(format!(
+                        "module.call: this broker has no module runtime for {}",
+                        params.plugin.item()
+                    )),
+                };
+                self.log_refusal(&peer, "module.call", &error.to_string());
+                refusal_stream(error)
+            }
         }
     }
 
@@ -1213,6 +1229,9 @@ impl BrokerCalls {
             addressee,
             binding: self.hosted.as_ref().map(|hosted| &hosted.binding),
             answer_nonce,
+            // Hive's ledger and resolver fill these (MK-3a); until then
+            // every `module.call` row refuses.
+            paid: None,
         })
     }
 
@@ -2676,6 +2695,7 @@ mod tests {
             addressee: Addressee::None,
             binding: None,
             answer_nonce: None,
+            paid: None,
         });
         match gate::decide(&caller, &Request::Invoke(&params), &snapshot).outcome {
             Ok(Grant::Invoke { stamp, .. }) => Ok(stamp),

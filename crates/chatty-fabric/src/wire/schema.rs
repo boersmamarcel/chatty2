@@ -40,8 +40,9 @@ use super::worker::{
 use super::{IdParams, TaskState};
 use crate::{
     Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, Asker, HandoffContract,
-    InvokeAgentOutcome, InvokeAgentParams, MessageStatus, Question, QuestionOrigin, Refusal,
-    Remaining, SendMessageParams, SpawnContext,
+    InvokeAgentOutcome, InvokeAgentParams, ItemRef, LockedPlugin, MessageStatus, ModuleCallOutcome,
+    ModuleCallParams, Question, QuestionOrigin, Refusal, Remaining, SendMessageParams,
+    SpawnContext,
 };
 
 /// One field per method the v3 envelope carries, named after it (ADR-0021
@@ -67,6 +68,10 @@ struct Catalog {
     mailbox_post_result: MessageStatus,
     #[schemars(rename = "mailbox.take#result")]
     mailbox_take_result: Vec<String>,
+    #[schemars(rename = "module.call")]
+    module_call: ModuleCallParams,
+    #[schemars(rename = "module.call#result")]
+    module_call_result: ModuleCallOutcome,
     #[schemars(rename = "human.approve")]
     human_approve: ApprovalRequest,
     #[schemars(rename = "human.approve#result")]
@@ -121,6 +126,8 @@ fn every_wire_type_has_a_schema() {
     assert_json_schema::<Asker>();
     assert_json_schema::<Question>();
     assert_json_schema::<QuestionOrigin>();
+    assert_json_schema::<LockedPlugin>();
+    assert_json_schema::<ItemRef>();
 }
 
 /// Recursively re-sort every JSON object's entries by key, in place, and
@@ -277,6 +284,33 @@ mod tests {
              § 1 names; adding a fifth is kill criterion 4 (say so in the PR, don't widen this \
              list silently)"
         );
+    }
+
+    /// MK-2 (ADR-0024 § 7) changed the wire — `module.call`, and
+    /// `needs_acceptance` and `fee_refused` errors — so a peer built before
+    /// it is refused at hello rather than misreading a frame. The hash is
+    /// GT-0's last, which this build must no longer carry, and the export
+    /// names the new method and errors.
+    #[test]
+    fn schema_hash_bumped() {
+        const BEFORE_MK2: &str = "ad2106a853db94d53dbac9810dae4f08397276fb9a370993177ae14b8beea323";
+        assert_ne!(
+            hash(),
+            BEFORE_MK2,
+            "the wire changed; its schema hash must too"
+        );
+        let export = String::from_utf8(canonical_bytes()).unwrap();
+        for name in [
+            "module.call",
+            "module.call#result",
+            "needs_acceptance",
+            "fee_refused",
+        ] {
+            assert!(
+                export.contains(&format!("\"{name}\"")),
+                "the export names {name}"
+            );
+        }
     }
 
     /// The hash is of the committed file, not a moving target, and it is

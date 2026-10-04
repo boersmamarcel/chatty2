@@ -234,6 +234,44 @@
     "ConversationScope": {
       "type": "string"
     },
+    "FeeRefusalReason": {
+      "oneOf": [
+        {
+          "enum": [
+            "suspended"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "cap",
+          "type": "string"
+        },
+        {
+          "const": "limit",
+          "type": "string"
+        },
+        {
+          "const": "velocity",
+          "type": "string"
+        },
+        {
+          "const": "funding",
+          "type": "string"
+        },
+        {
+          "const": "review",
+          "type": "string"
+        },
+        {
+          "const": "unlisted",
+          "type": "string"
+        },
+        {
+          "const": "quota",
+          "type": "string"
+        }
+      ]
+    },
     "HandoffContract": {
       "additionalProperties": false,
       "properties": {
@@ -387,6 +425,53 @@
       ],
       "type": "object"
     },
+    "ItemKind": {
+      "enum": [
+        "plugin",
+        "team"
+      ],
+      "type": "string"
+    },
+    "ItemRef": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ItemKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "version"
+      ],
+      "type": "object"
+    },
+    "LockedPlugin": {
+      "additionalProperties": false,
+      "properties": {
+        "module": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "module",
+        "version",
+        "sha256"
+      ],
+      "type": "object"
+    },
     "MessageStatus": {
       "oneOf": [
         {
@@ -424,6 +509,70 @@
           "type": "object"
         }
       ]
+    },
+    "ModuleCallOutcome": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "status": {
+              "const": "result",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "status": {
+              "const": "tool_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ModuleCallParams": {
+      "additionalProperties": false,
+      "properties": {
+        "arguments": {
+          "type": "string"
+        },
+        "plugin": {
+          "$ref": "#/$defs/LockedPlugin"
+        },
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "plugin",
+        "tool",
+        "arguments"
+      ],
+      "type": "object"
     },
     "NodeName": {
       "type": "string"
@@ -1227,6 +1376,62 @@
             "message"
           ],
           "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "needs_acceptance",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "spec": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "spec",
+            "version",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "item": {
+              "$ref": "#/$defs/ItemRef"
+            },
+            "kind": {
+              "const": "fee_refused",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/$defs/FeeRefusalReason"
+            },
+            "resets_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "item",
+            "reason",
+            "message"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1510,6 +1715,12 @@
       },
       "type": "array"
     },
+    "module.call": {
+      "$ref": "#/$defs/ModuleCallParams"
+    },
+    "module.call#result": {
+      "$ref": "#/$defs/ModuleCallOutcome"
+    },
     "req.cancel": {
       "$ref": "#/$defs/IdParams"
     },
@@ -1541,6 +1752,8 @@
     "mailbox.post",
     "mailbox.post#result",
     "mailbox.take#result",
+    "module.call",
+    "module.call#result",
     "human.approve",
     "human.approve#result",
     "human.ask",

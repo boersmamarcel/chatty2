@@ -70,7 +70,7 @@ use chatty_fabric::wire::{
 };
 use chatty_fabric::{
     Answer, ApprovalVerdict, AskReply, CallError, CallRequest, CallResult, InvokeAgentOutcome,
-    MessageStatus,
+    MessageStatus, ModuleCallOutcome,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -313,6 +313,7 @@ enum CallMethod {
     List,
     Post,
     Take,
+    Module,
 }
 
 impl CallMethod {
@@ -322,6 +323,7 @@ impl CallMethod {
             CallRequest::ListAgents => Self::List,
             CallRequest::SendMessage(_) => Self::Post,
             CallRequest::TakeMessages => Self::Take,
+            CallRequest::ModuleCall(_) => Self::Module,
         }
     }
 
@@ -331,6 +333,9 @@ impl CallMethod {
             Self::List => CallResult::Agents(typed::<Vec<AgentEntry>>("agent.list", raw)?),
             Self::Post => CallResult::Posted(typed::<MessageStatus>("mailbox.post", raw)?),
             Self::Take => CallResult::Messages(typed::<Vec<String>>("mailbox.take", raw)?),
+            Self::Module => {
+                CallResult::ModuleCalled(typed::<ModuleCallOutcome>("module.call", raw)?)
+            }
         })
     }
 }
@@ -664,6 +669,10 @@ impl FrameCodec<BrokerSide> {
                         id,
                         request: CallRequest::TakeMessages,
                     },
+                    WorkerRequest::ModuleCall(params) => ParticipantFrame::Call {
+                        id,
+                        request: CallRequest::ModuleCall(params),
+                    },
                     WorkerRequest::HumanApprove(request) => {
                         state.their_approvals.insert(id);
                         ParticipantFrame::Approve { id, request }
@@ -927,6 +936,7 @@ impl FrameCodec<WorkerSide> {
                         request(m, id, "mailbox.post", Some(params))?
                     }
                     CallRequest::TakeMessages => request::<()>(m, id, "mailbox.take", None)?,
+                    CallRequest::ModuleCall(params) => request(m, id, "module.call", Some(params))?,
                 }
             }
             ParticipantFrame::CancelCall { id: call } => {

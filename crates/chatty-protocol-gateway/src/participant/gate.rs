@@ -83,8 +83,9 @@ use std::fmt;
 use std::time::SystemTime;
 
 use chatty_fabric::{
-    ApprovalRequest, AskRequest, CallChain, CallError, CallPolicy, InvokeAgentParams, NodeId,
-    ROOT_NAME, Refusal, RefusalReason, RunId, SendMessageParams, SpawnContext,
+    ApprovalRequest, AskRequest, CallChain, CallError, CallPolicy, InvokeAgentParams, ItemRef,
+    LockedPlugin, ModuleCallParams, NodeId, ROOT_NAME, Refusal, RefusalReason, RunId,
+    SendMessageParams, SpawnContext,
 };
 
 use super::protocol::CallStamp;
@@ -258,6 +259,8 @@ pub enum Request<'a> {
     Post(&'a SendMessageParams),
     /// `mailbox.take` (TM-5): a node takes its mid-run messages.
     Take,
+    /// `module.call` (ADR-0024 § 2): a paid plugin's tool call.
+    ModuleCall(&'a ModuleCallParams),
     /// `human.approve`, raised (EN-2a).
     Approve(&'a ApprovalRequest),
     /// The root answers the approval it was handed under `id`. `nonce` is
@@ -294,6 +297,7 @@ impl Request<'_> {
             Self::List => Method::List,
             Self::Post(_) => Method::Post,
             Self::Take => Method::Take,
+            Self::ModuleCall(_) => Method::ModuleCall,
             Self::Approve(_) => Method::Approve,
             Self::AnswerApproval { .. } => Method::AnswerApproval,
             Self::Ask(_) => Method::Ask,
@@ -314,6 +318,7 @@ pub enum Method {
     List,
     Post,
     Take,
+    ModuleCall,
     Approve,
     AnswerApproval,
     Ask,
@@ -332,6 +337,7 @@ impl Method {
             Self::List => "agent.list",
             Self::Post => "mailbox.post",
             Self::Take => "mailbox.take",
+            Self::ModuleCall => "module.call",
             Self::Approve => "human.approve",
             Self::AnswerApproval => "root.answer_approval",
             Self::Ask => "human.ask",
@@ -378,6 +384,51 @@ pub struct Snapshot<'a> {
     /// For an answer: the nonce the broker gave the hosted client with
     /// the pending id it names, if one is pending under it.
     pub answer_nonce: Option<String>,
+    /// ADR-0024 § 7's structural inputs, for a `module.call`. `None` until
+    /// hive's ledger and resolver fill them (MK-3a): every `module.call`
+    /// row refuses while it is.
+    pub paid: Option<PaidInputs>,
+}
+
+/// What the gate reads of a run's money structure (ADR-0024 § 7, the
+/// amendment to ADR-0023 § 1): only its shape. Every money condition —
+/// acceptance, item caps, limits, review, suspension, funding — is the
+/// ledger's (L8), and a refusal of one comes back as `needs_acceptance` or
+/// `fee_refused`, never from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaidInputs {
+    /// How the run's root is funded.
+    pub funding: Funding,
+    /// The conversation's stored `SpecRef::Published`, with the closure the
+    /// ledger recorded for it; `None` for an inline, workspace or preset
+    /// conversation, which reaches no paid artifact.
+    pub root: Option<PublishedRoot>,
+    /// The caller's lockfile: a node's admitted version's, or the hosted
+    /// root agent's conversation's.
+    pub lockfile: Vec<ItemRef>,
+    /// Whether the caller's run has an open run hold.
+    pub run_hold: bool,
+}
+
+/// How a run's root is funded (ADR-0022 L4a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Funding {
+    /// A user root drawing on prepaid credit: the only root a fee may be
+    /// drawn under.
+    Credit,
+    /// A user root on its own provider key.
+    OwnKey,
+}
+
+/// A conversation built from a published version (ADR-0024 § 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedRoot {
+    pub name: String,
+    pub version: String,
+    pub spec_sha256: String,
+    /// Every version the root's lockfile pins, recursively, as the ledger
+    /// recorded it at publish.
+    pub closure: Vec<ItemRef>,
 }
 
 /// A snapshot that does not add up — the registry says one thing and the
@@ -463,6 +514,10 @@ pub enum Grant {
     },
     /// Take the caller's mid-run messages (TM-5).
     Take,
+    /// Run `plugin`'s tool in hive's module runtime (ADR-0024 § 2).
+    ModuleCall {
+        plugin: LockedPlugin,
+    },
     /// Raise the approval with the root, its asker stamped with `chain`:
     /// the chain of the run it was raised from.
     Approve {
@@ -583,6 +638,14 @@ fn decide_row(
             invoke(caller, params, snapshot)
         }
         (Caller::Root | Caller::Node(_), Request::List) => Ok(Grant::List),
+        (Caller::Node(node), Request::ModuleCall(params)) => {
+            let own_run = named_run(node, "module.call", params.run.as_deref()).map(|_| ());
+            module_call(caller, own_run, params, snapshot)
+        }
+        (Caller::Root, Request::ModuleCall(_)) => Err(Refused::Caller(format!(
+            "{caller} may not module.call: paid plugins run only on a hosted broker, never on a \
+             desktop (ADR-0023 § 6)"
+        ))),
         (Caller::Root, Request::Post(_)) => human_post(&snapshot.addressee),
         (Caller::Node(node), Request::Post(params)) => post(node, params, snapshot),
         (Caller::Node(_), Request::Take) => Ok(Grant::Take),
@@ -626,6 +689,7 @@ fn decide_row(
             Request::Invoke(_)
             | Request::List
             | Request::Take
+            | Request::ModuleCall(_)
             | Request::Approve(_)
             | Request::AnswerApproval { .. }
             | Request::Ask(_)
@@ -669,6 +733,7 @@ fn hosted(
         Request::TakeRunMessages => Ok(Grant::TakeRunMessages),
         Request::Invoke(_)
         | Request::List
+        | Request::ModuleCall(_)
         | Request::AnswerApproval { .. }
         | Request::Answer { .. }
         | Request::Conversation(_)
@@ -680,6 +745,7 @@ fn hosted(
             )))
         }
         Request::Invoke(params) => invoke(caller, params, snapshot),
+        Request::ModuleCall(params) => module_call(caller, Ok(()), params, snapshot),
         Request::List => Ok(Grant::List),
         Request::Post(_) => Err(Refused::Message(RefusalReason::NotOnTree)),
         Request::Take => Err(Refused::Caller(format!(
@@ -751,7 +817,7 @@ fn invoke(
             (CallChain::root(snapshot.root_task_id.clone()), None, None)
         }
         Caller::Node(node) => {
-            let run = named_run(node, params.run.as_deref())?;
+            let run = named_run(node, "agent.invoke", params.run.as_deref())?;
             (run.chain.clone(), Some(run.id), Some(node))
         }
         Caller::Remote(_) | Caller::External(_) => {
@@ -794,12 +860,65 @@ fn invoke(
     Ok(Grant::Invoke { target, stamp })
 }
 
+/// `module.call` (ADR-0024 § 7, the amendment to ADR-0023 § 3): a node
+/// for a plugin in its own admitted version's lockfile, or the hosted root
+/// agent for one in its conversation's, each only from its own open run,
+/// inside an open run hold, under a credit-funded root built from a
+/// published version whose closure holds the plugin. Refused while the
+/// snapshot carries no [`PaidInputs`], and on any broker but a hosted one.
+fn module_call(
+    caller: &Caller,
+    own_run: Result<(), Refused>,
+    params: &ModuleCallParams,
+    snapshot: &Snapshot<'_>,
+) -> Result<Grant, Refused> {
+    let refuse = |why: &str| {
+        Err(Refused::Caller(format!(
+            "{caller} may not module.call: {why}"
+        )))
+    };
+    if snapshot.binding.is_none() {
+        return refuse("paid plugins run only on a hosted broker");
+    }
+    own_run?;
+    let Some(paid) = &snapshot.paid else {
+        return refuse("this broker has no paid inputs for the run (ADR-0024 § 7)");
+    };
+    match paid.funding {
+        Funding::Credit => {}
+        Funding::OwnKey => return refuse("its root is not credit-funded"),
+    }
+    let Some(root) = &paid.root else {
+        return refuse("its conversation is not built from a published version");
+    };
+    if !paid.run_hold {
+        return refuse("its run has no open run hold");
+    }
+    let item = params.plugin.item();
+    if !paid.lockfile.contains(&item) {
+        return refuse(&format!("{item} is not in its lockfile"));
+    }
+    if !root.closure.contains(&item) {
+        return refuse(&format!(
+            "{item} is outside the closure of {}@{}",
+            root.name, root.version
+        ));
+    }
+    Ok(Grant::ModuleCall {
+        plugin: params.plugin.clone(),
+    })
+}
+
 /// The run a node's call is made from: the one it names, which must be one
 /// of its own open runs (GT-0b).
-fn named_run<'n>(node: &'n NodeCaller, named: Option<&str>) -> Result<&'n OpenRun, Refused> {
+fn named_run<'n>(
+    node: &'n NodeCaller,
+    method: &str,
+    named: Option<&str>,
+) -> Result<&'n OpenRun, Refused> {
     let Some(named) = named else {
         return Err(Refused::Caller(format!(
-            "{}'s agent.invoke names no run: a node calls from the run it serves",
+            "{}'s {method} names no run: a node calls from the run it serves",
             node.name
         )));
     };

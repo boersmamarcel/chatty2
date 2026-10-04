@@ -59,7 +59,7 @@ use anyhow::{Context, Result};
 use chatty_core::services::fabric_transport::{CallReplies, Outbound, SocketTransport};
 use chatty_core::services::{StreamError, StreamErrorKind};
 use chatty_core::session::SessionEvent;
-use chatty_fabric::{AskReply, CallRequest, InvokeAgentParams, Transport};
+use chatty_fabric::{AskReply, CallRequest, InvokeAgentParams, ModuleCallParams, Transport};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -329,10 +329,15 @@ where
         .await
 }
 
-/// `request`, made from the run named `run`: an `agent.invoke` names it.
+/// `request`, made from the run named `run`: an `agent.invoke` and a
+/// `module.call` name it.
 fn from_run(request: CallRequest, run: &str) -> CallRequest {
     match request {
         CallRequest::InvokeAgent(params) => CallRequest::InvokeAgent(InvokeAgentParams {
+            run: Some(run.to_string()),
+            ..params
+        }),
+        CallRequest::ModuleCall(params) => CallRequest::ModuleCall(ModuleCallParams {
             run: Some(run.to_string()),
             ..params
         }),
