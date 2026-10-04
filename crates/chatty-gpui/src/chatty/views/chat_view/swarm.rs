@@ -29,7 +29,8 @@ use chatty_core::services::swarm_trace::{NodeStatus, SwarmTrace};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme, WindowExt as _};
+use gpui_component::scroll::ScrollableElement as _;
+use gpui_component::{ActiveTheme, WindowExt as _, v_flex};
 
 use super::ChatView;
 use crate::chatty::views::transcript::{
@@ -288,6 +289,8 @@ impl SwarmNodeTranscript {
     /// The message box, under a running agent's transcript.
     fn message_box(&self, cx: &Context<Self>) -> impl IntoElement {
         div()
+            .debug_selector(|| "swarm-message-box".into())
+            .flex_none()
             .flex()
             .flex_col()
             .gap_1()
@@ -328,11 +331,29 @@ impl Render for SwarmNodeTranscript {
                         })
                         .ok();
                     }));
-                div()
-                    .flex()
-                    .flex_col()
+                // The sheet's own body grows with its content instead of
+                // scrolling, so after a few tool calls a box at the end of
+                // the transcript sat below the sheet's bottom edge (AGE-839).
+                // Taken out of the flow, this fills the body at the sheet's
+                // height: the transcript scrolls, the box stays pinned under
+                // it.
+                v_flex()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .px_4()
+                    .py_3()
                     .gap_2()
-                    .child(transcript)
+                    .child(
+                        div()
+                            .debug_selector(|| "swarm-transcript".into())
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scrollbar()
+                            .child(transcript),
+                    )
                     .when(running, |this| this.child(self.message_box(cx)))
                     .into_any_element()
             }
@@ -342,5 +363,104 @@ impl Render for SwarmNodeTranscript {
                 .child("This agent's run is no longer in the conversation.")
                 .into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Named imports, not `super::*`: `use gpui::*` would shadow `#[test]`.
+    use super::ChatView;
+    use crate::chatty::views::transcript::{SwarmNodeView, SwarmTree};
+    use crate::settings::models::ExecutionSettingsModel;
+    use chatty_core::services::swarm_trace::{NodeStatus, ToolCall, ToolOutcome};
+    use gpui::{AppContext as _, Entity};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    /// A running worker with `calls` finished tool calls: a transcript far
+    /// taller than the window.
+    fn busy_worker(calls: usize) -> SwarmTree {
+        let tool_calls = (0..calls)
+            .map(|n| ToolCall {
+                id: format!("c{n}"),
+                name: "read_file".into(),
+                plugin: None,
+                arguments: None,
+                outcome: ToolOutcome::Done {
+                    result: format!("line {n} of the file"),
+                },
+            })
+            .collect();
+        SwarmTree {
+            nodes: vec![SwarmNodeView {
+                name: "analyst-0".into(),
+                spec: "analyst".into(),
+                model: None,
+                status: NodeStatus::Running,
+                depth: 0,
+                parent: None,
+                tokens: 0,
+                cost: None,
+                usage: Vec::new(),
+                turns: calls as u32,
+                text_bytes: 0,
+                tool_calls,
+            }],
+            ..SwarmTree::default()
+        }
+    }
+
+    /// AGE-839: after a few tool calls the message box sat at the end of the
+    /// sheet's scrolling body, below the sheet's bottom edge. It must stay
+    /// pinned inside the window, with the transcript scrolling above it.
+    #[gpui::test]
+    fn message_box_stays_reachable_with_many_tool_calls(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::models::general_model::GeneralSettingsModel::default());
+            cx.set_global(ExecutionSettingsModel::default());
+            cx.set_global(crate::settings::models::ExtensionsModel::default());
+            cx.set_global(chatty_core::models::ErrorStore::new(100));
+            cx.set_global(crate::auto_updater::AutoUpdater::new("0.0.0"));
+            cx.set_global(chatty_core::models::ConversationsStore::new());
+        });
+        let slot: Rc<RefCell<Option<Entity<ChatView>>>> = Rc::default();
+        let slot_for_window = slot.clone();
+        let window = cx.add_window(move |window, cx| {
+            let view = cx.new(|cx| ChatView::new(window, cx));
+            *slot_for_window.borrow_mut() = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = slot.borrow_mut().take().expect("ChatView captured");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        vcx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.delegation_runs.insert(0, Arc::new(busy_worker(40)));
+                view.open_swarm_node(0, "analyst-0".into(), window, cx);
+            })
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        let transcript = vcx
+            .debug_bounds("swarm-transcript")
+            .expect("the sheet draws the transcript");
+        assert!(
+            transcript.size.height > viewport.height,
+            "40 tool calls must overflow the window for this test to mean anything: \
+             transcript {transcript:?}, window {viewport:?}"
+        );
+        let message_box = vcx
+            .debug_bounds("swarm-message-box")
+            .expect("a running agent's sheet has a message box");
+        assert!(
+            message_box.origin.y >= gpui::px(0.)
+                && message_box.bottom() <= viewport.height,
+            "the message box must lie inside the window: box {message_box:?}, window {viewport:?}"
+        );
     }
 }
