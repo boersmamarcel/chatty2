@@ -94,6 +94,7 @@ The build pipeline produces:
 - **macOS ARM**: `chatty-macos-aarch64.dmg` (code-signed if secrets configured)
 - **Windows x86_64**: `chatty-windows-x86_64.exe` (Inno Setup installer)
 - **Checksums**: `checksums.txt` (SHA-256 for all artifacts)
+- **Release signature**: `checksums.txt.sig` (Ed25519/minisign, when `RELEASE_SIGNING_ENABLED` is on; see `docs/release-signing.md`)
 
 ## Post-Release Verification
 
