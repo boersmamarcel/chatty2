@@ -121,39 +121,6 @@ async fn write_ordered(path: &Path, json: String, ticket: SaveTicket) -> Reposit
     }
 }
 
-/// Write `value` to `path` atomically (temp file + rename), outside the
-/// per-file save ordering. For one-shot rewrites that happen as a side
-/// effect of `load` (AGE-768's `gateway_port` drop), not the normal
-/// every-keystroke save path, so the ordering ticket is unnecessary.
-pub(crate) async fn write_atomic<T: Serialize>(path: &Path, value: &T) -> RepositoryResult<()> {
-    let json = serde_json::to_string_pretty(value)
-        .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
-
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-    }
-
-    let temp_path = path.with_extension(format!(
-        "{}.{}.tmp",
-        path.extension()
-            .map(|e| e.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        std::process::id()
-    ));
-    tokio::fs::write(&temp_path, &json)
-        .await
-        .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-    if let Err(e) = tokio::fs::rename(&temp_path, path).await {
-        let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(RepositoryError::IoError(e.to_string()));
-    }
-
-    Ok(())
-}
-
 // ── Single-object repository ─────────────────────────────────────────────────
 
 /// Generic JSON repository for a **single settings object** (`load` / `save`).
