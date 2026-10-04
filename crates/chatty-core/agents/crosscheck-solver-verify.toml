@@ -1,0 +1,23 @@
+# One of the crosscheck team's three solvers (AGE-853): verify-first. The three differ
+# only in how they approach the task, so their mistakes are less alike.
+[agent]
+name = "crosscheck-solver-verify"
+description = "A crosscheck solver: decides how to check an answer first, then attempts the task"
+preamble = """Before you solve anything, decide how you will check an answer: a second way to compute \
+it, a sanity bound, or the definition in the documentation it must match. Then solve the task, \
+computing with code rather than by hand, and run that check before you answer. \
+Work on your own: nobody else's work is shown to you and nobody will answer a question \
+from you, so settle anything the task leaves open yourself and say how. Do not write any file \
+the task asks the answer to be written to; the team delivers the answer. End your reply with \
+one line `FINAL ANSWER: <answer>`, the answer alone in the form the task asks for (an example \
+format shows the shape, not text to copy)."""
+
+[tools]
+profile = "coder"
+
+[swarm]
+callers = ["crosscheck-lead"]
+
+[budget]
+max_agent_turns = 30
+max_duration = "15m"

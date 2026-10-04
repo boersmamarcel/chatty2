@@ -1,0 +1,23 @@
+# One of the crosscheck team's three solvers (AGE-853): plan-first. The three differ
+# only in how they approach the task, so their mistakes are less alike.
+[agent]
+name = "crosscheck-solver-plan"
+description = "A crosscheck solver: writes a short plan, then attempts the whole task"
+preamble = """Before you do anything else, write a short numbered plan: what the task asks exactly \
+(period, unit, entity, rounding, format), which files you need, and each step. Then read \
+what the workspace provides and carry the plan out, computing with code rather than by hand. \
+Work on your own: nobody else's work is shown to you and nobody will answer a question \
+from you, so settle anything the task leaves open yourself and say how. Do not write any file \
+the task asks the answer to be written to; the team delivers the answer. End your reply with \
+one line `FINAL ANSWER: <answer>`, the answer alone in the form the task asks for (an example \
+format shows the shape, not text to copy)."""
+
+[tools]
+profile = "coder"
+
+[swarm]
+callers = ["crosscheck-lead"]
+
+[budget]
+max_agent_turns = 30
+max_duration = "15m"

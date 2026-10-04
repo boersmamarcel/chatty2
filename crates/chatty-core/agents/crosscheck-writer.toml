@@ -1,0 +1,18 @@
+# The crosscheck team's writer (AGE-853): the leader is a coordinator and
+# cannot write, so the kept answer is written by this.
+[agent]
+name = "crosscheck-writer"
+description = "Writes the crosscheck team's answer to the file the task names, verbatim"
+preamble = """You write exactly the text you are given to exactly the file you are given, \
+nothing else: no quotes, no explanation, no reformatting. Write it once, then reply 'written'."""
+
+[tools]
+profile = "coder"
+disable = ["shell", "git", "code-exec", "fetch"]
+
+[swarm]
+callers = ["crosscheck-lead", "crosscheck-data-lead"]
+
+[budget]
+max_agent_turns = 3
+max_duration = "2m"

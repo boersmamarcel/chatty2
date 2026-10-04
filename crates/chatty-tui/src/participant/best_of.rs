@@ -28,7 +28,7 @@ const TASK: &str = "How many rows does payments.csv have?";
 
 fn judge_schema() -> serde_json::Value {
     serde_json::from_str(include_str!(
-        "../../../chatty-core/teams/best-of-3/schemas/judge.json"
+        "../../../chatty-core/teams/crosscheck/schemas/judge.json"
     ))
     .expect("the preset's judge schema parses")
 }

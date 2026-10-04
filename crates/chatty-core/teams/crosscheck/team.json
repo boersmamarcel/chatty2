@@ -1,0 +1,15 @@
+{
+  "name": "Crosscheck",
+  "leader": "crosscheck-lead",
+  "agents": [
+    "crosscheck-solver-direct",
+    "crosscheck-solver-plan",
+    "crosscheck-solver-verify",
+    "crosscheck-judge",
+    "crosscheck-writer"
+  ],
+  "max_agent_turns": 6,
+  "handoffs": {
+    "crosscheck-judge": "schemas/judge.json"
+  }
+}

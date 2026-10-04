@@ -66,60 +66,16 @@ pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 /// preset joins through its team (`--team <id>`), a declared roster that
 /// names it, or a spec of yours that delegates to it (AGE-760).
 pub const PRESETS: &[(&str, &str)] = &[
-    (
-        "arch-devils-advocate",
-        include_str!("../agents/arch-devils-advocate.toml"),
-    ),
-    ("arch-lead", include_str!("../agents/arch-lead.toml")),
-    (
-        "arch-maint-reviewer",
-        include_str!("../agents/arch-maint-reviewer.toml"),
-    ),
-    (
-        "arch-proposer",
-        include_str!("../agents/arch-proposer.toml"),
-    ),
-    (
-        "arch-sec-reviewer",
-        include_str!("../agents/arch-sec-reviewer.toml"),
-    ),
-    (
-        "arch-verifier",
-        include_str!("../agents/arch-verifier.toml"),
-    ),
-    ("bo3-judge", include_str!("../agents/bo3-judge.toml")),
-    ("bo3-lead", include_str!("../agents/bo3-lead.toml")),
-    ("bo3-solver-direct", include_str!("../agents/bo3-solver-direct.toml")),
-    ("bo3-solver-plan", include_str!("../agents/bo3-solver-plan.toml")),
-    ("bo3-solver-verify", include_str!("../agents/bo3-solver-verify.toml")),
-    ("bo3-writer", include_str!("../agents/bo3-writer.toml")),
-    (
-        "code-reviewer",
-        include_str!("../agents/code-reviewer.toml"),
-    ),
-    ("data-analyst", include_str!("../agents/data-analyst.toml")),
-    ("data-lead", include_str!("../agents/data-lead.toml")),
-    ("editor", include_str!("../agents/editor.toml")),
-    ("fix-coder", include_str!("../agents/fix-coder.toml")),
-    ("fix-lead", include_str!("../agents/fix-lead.toml")),
-    (
-        "panel-adjudicator",
-        include_str!("../agents/panel-adjudicator.toml"),
-    ),
-    (
-        "panel-analyst-1",
-        include_str!("../agents/panel-analyst-1.toml"),
-    ),
-    (
-        "panel-analyst-2",
-        include_str!("../agents/panel-analyst-2.toml"),
-    ),
-    (
-        "panel-analyst-3",
-        include_str!("../agents/panel-analyst-3.toml"),
-    ),
-    ("panel-lead", include_str!("../agents/panel-lead.toml")),
-    ("panel-writer", include_str!("../agents/panel-writer.toml")),
+    ("crosscheck-data-direct", include_str!("../agents/crosscheck-data-direct.toml")),
+    ("crosscheck-data-lead", include_str!("../agents/crosscheck-data-lead.toml")),
+    ("crosscheck-data-plan", include_str!("../agents/crosscheck-data-plan.toml")),
+    ("crosscheck-data-verify", include_str!("../agents/crosscheck-data-verify.toml")),
+    ("crosscheck-judge", include_str!("../agents/crosscheck-judge.toml")),
+    ("crosscheck-lead", include_str!("../agents/crosscheck-lead.toml")),
+    ("crosscheck-solver-direct", include_str!("../agents/crosscheck-solver-direct.toml")),
+    ("crosscheck-solver-plan", include_str!("../agents/crosscheck-solver-plan.toml")),
+    ("crosscheck-solver-verify", include_str!("../agents/crosscheck-solver-verify.toml")),
+    ("crosscheck-writer", include_str!("../agents/crosscheck-writer.toml")),
     ("researcher", include_str!("../agents/researcher.toml")),
     ("reviewer", include_str!("../agents/reviewer.toml")),
     ("writer", include_str!("../agents/writer.toml")),

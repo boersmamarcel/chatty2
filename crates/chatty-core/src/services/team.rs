@@ -62,65 +62,22 @@ pub struct TeamPreset {
 /// as `--team <id>`.
 pub const PRESETS: &[TeamPreset] = &[
     TeamPreset {
-        id: "data-analysis",
-        team_json: include_str!("../../teams/data-analysis/team.json"),
-        skill: None,
-        schemas: &[],
-    },
-    TeamPreset {
-        id: "research-brief",
-        team_json: include_str!("../../teams/research-brief/team.json"),
-        skill: None,
-        schemas: &[],
-    },
-    TeamPreset {
-        id: "fix-and-verify",
-        team_json: include_str!("../../teams/fix-and-verify/team.json"),
-        skill: None,
-        schemas: &[],
-    },
-    TeamPreset {
-        id: "analyst-panel",
-        team_json: include_str!("../../teams/analyst-panel/team.json"),
-        skill: Some(include_str!("../../teams/analyst-panel/SKILL.md")),
-        schemas: &[
-            (
-                "schemas/analyst.json",
-                include_str!("../../teams/analyst-panel/schemas/analyst.json"),
-            ),
-            (
-                "schemas/adjudicator.json",
-                include_str!("../../teams/analyst-panel/schemas/adjudicator.json"),
-            ),
-        ],
-    },
-    TeamPreset {
-        id: "best-of-3",
-        team_json: include_str!("../../teams/best-of-3/team.json"),
+        id: "crosscheck",
+        team_json: include_str!("../../teams/crosscheck/team.json"),
         skill: None,
         schemas: &[(
             "schemas/judge.json",
-            include_str!("../../teams/best-of-3/schemas/judge.json"),
+            include_str!("../../teams/crosscheck/schemas/judge.json"),
         )],
     },
     TeamPreset {
-        id: "architecture-review",
-        team_json: include_str!("../../teams/architecture-review/team.json"),
-        skill: Some(include_str!("../../teams/architecture-review/SKILL.md")),
-        schemas: &[
-            (
-                "schemas/proposer.json",
-                include_str!("../../teams/architecture-review/schemas/proposer.json"),
-            ),
-            (
-                "schemas/review.json",
-                include_str!("../../teams/architecture-review/schemas/review.json"),
-            ),
-            (
-                "schemas/verify.json",
-                include_str!("../../teams/architecture-review/schemas/verify.json"),
-            ),
-        ],
+        id: "crosscheck-data",
+        team_json: include_str!("../../teams/crosscheck-data/team.json"),
+        skill: None,
+        schemas: &[(
+            "schemas/judge.json",
+            include_str!("../../teams/crosscheck-data/schemas/judge.json"),
+        )],
     },
 ];
 
@@ -131,6 +88,10 @@ pub const WORKSPACE_TEAMS_DIR: &str = ".chatty/teams";
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TeamFile {
+    /// What the team is called where people pick it ("Crosscheck"); the
+    /// directory name is its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The spec the leader runs as.
     pub leader: String,
     /// The roster, by spec name; it replaces `module_settings.virtual_agents`
@@ -401,7 +362,13 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
                 .join(", "),
             PRESETS
                 .iter()
-                .map(|preset| preset.id)
+                .map(|preset| match TeamFile::parse(preset.team_json)
+                    .ok()
+                    .and_then(|file| file.name)
+                {
+                    Some(name) => format!("{} ({name})", preset.id),
+                    None => preset.id.to_string(),
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -869,25 +836,25 @@ mod tests {
     /// The analyst handoff is what turns a reply cut off mid-sentence into
     /// an invalid handoff (and its one re-prompt) instead of a lost answer;
     /// the adjudicator's names a candidate by number.
-    /// AGE-853: the best-of-3 leader is offered `best_of` over its three
+    /// AGE-853: the crosscheck leader is offered `best_of` over its three
     /// solvers and its judge, and the judge does not think.
     #[test]
-    fn the_best_of_3_preset_names_its_solvers_and_a_judge_that_does_not_think() {
-        let team = load_team("best-of-3", None, None).expect("the preset loads");
-        assert_eq!(team.file.leader, "bo3-lead");
+    fn the_crosscheck_preset_names_its_solvers_and_a_judge_that_does_not_think() {
+        let team = load_team("crosscheck", None, None).expect("the preset loads");
+        assert_eq!(team.file.leader, "crosscheck-lead");
         let best_of = team.leader.swarm.best_of.as_ref().expect("swarm.best_of");
         assert_eq!(
             best_of.solvers,
-            ["bo3-solver-direct", "bo3-solver-plan", "bo3-solver-verify"]
+            ["crosscheck-solver-direct", "crosscheck-solver-plan", "crosscheck-solver-verify"]
         );
-        assert_eq!(best_of.judge, "bo3-judge");
+        assert_eq!(best_of.judge, "crosscheck-judge");
         let judge = team
             .agents
             .iter()
-            .find(|a| a.agent.name == "bo3-judge")
+            .find(|a| a.agent.name == "crosscheck-judge")
             .expect("the judge is on the roster");
         assert_eq!(judge.agent.think, Some(false));
-        assert!(team.handoffs.contains_key("bo3-judge"));
+        assert!(team.handoffs.contains_key("crosscheck-judge"));
     }
 
     #[test]
