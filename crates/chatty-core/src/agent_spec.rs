@@ -61,10 +61,10 @@ use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
 /// The relative directory specs live in under a workspace.
 pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 
-/// The specs compiled into the binary: `(name, spec.toml)`. They are the
-/// experimental example teams' roles, so none is on the default roster: a
-/// preset joins through its team (`--team <id>`), a declared roster that
-/// names it, or a spec of yours that delegates to it (AGE-760).
+/// The specs compiled into the binary: `(name, spec.toml)`. Every exposed
+/// one is on the default roster; the members internal to a team (those that
+/// name their `callers`) are served for their lead but never offered to the
+/// root.
 pub const PRESETS: &[(&str, &str)] = &[
     (
         "crosscheck-data-direct",
@@ -907,42 +907,14 @@ pub fn root_agent_names_of(declared: &[String], listings: &[SpecListing]) -> Vec
         .collect()
 }
 
-/// The served listings the default roster holds, in lookup order (AGE-760):
-/// every spec from a spec directory, and a preset only when one of those
-/// names it in `delegates_to` — directly or through another preset, so a
-/// lead brings its workers. A glob in `delegates_to` pulls in no preset:
-/// the presets are experimental example teams (`--team <id>`), and joining
-/// the roster of everyone who never asked for them is what this prevents.
+/// The served listings the default roster holds, in lookup order: every
+/// first definition that is exposed, from a spec directory or built in. A
+/// team's internal members are among them, so its lead reaches them through
+/// the broker; [`root_agent_names_of`] keeps them from the root.
 fn default_roster(listings: &[SpecListing]) -> Vec<&SpecListing> {
-    let served: Vec<&SpecListing> = listings
+    listings
         .iter()
         .filter(|listing| listing.is_served())
-        .collect();
-    let mut joined: HashSet<&str> = served
-        .iter()
-        .filter(|listing| listing.source != SpecSource::Preset)
-        .map(|listing| listing.name.as_str())
-        .collect();
-    let mut pending: Vec<&str> = joined.iter().copied().collect();
-    while let Some(name) = pending.pop() {
-        let Some(spec) = served
-            .iter()
-            .find(|listing| listing.name == name)
-            .and_then(|listing| listing.spec.as_ref().ok())
-        else {
-            continue;
-        };
-        for delegate in &spec.swarm.delegates_to {
-            if served.iter().any(|listing| &listing.name == delegate)
-                && joined.insert(delegate.as_str())
-            {
-                pending.push(delegate.as_str());
-            }
-        }
-    }
-    served
-        .into_iter()
-        .filter(|listing| joined.contains(listing.name.as_str()))
         .collect()
 }
 
@@ -1476,42 +1448,72 @@ cap_usd = 2.0
         specs.iter().map(|spec| spec.agent.name.as_str()).collect()
     }
 
-    /// AGE-760: with nothing declared and no spec of your own, the roster
-    /// is `local-agent` alone. The presets are experimental example teams;
-    /// none joins a roster nobody asked it into.
+    /// With nothing declared and no spec of your own, the roster is
+    /// `local-agent` and the built-in presets: the broker serves every one,
+    /// the root is offered each but a team's internal members.
     #[test]
-    fn default_roster_is_local_agent_only() {
+    fn default_roster_is_local_agent_and_the_presets() {
         let roster = load_roster_from(&[], None, None).unwrap();
-        assert_eq!(names(&roster), [crate::tools::LOCAL_AGENT_NAME]);
         assert_eq!(roster[0], AgentSpec::named(crate::tools::LOCAL_AGENT_NAME));
         assert_eq!(
             roster_names_from(&[], None, None),
-            [crate::tools::LOCAL_AGENT_NAME]
+            [
+                "local-agent",
+                "crosscheck-data-lead",
+                "crosscheck-lead",
+                "researcher",
+                "reviewer",
+                "writer",
+            ]
         );
-        // Naming a preset is the opt-in.
-        let declared = vec!["researcher".to_string()];
-        assert_eq!(
-            names(&load_roster_from(&declared, None, None).unwrap()),
-            ["researcher"]
-        );
+        // The broker also serves the internal members, for their leads.
+        for (name, _) in PRESETS {
+            assert!(names(&roster).contains(name), "{name} is served");
+        }
     }
 
-    /// AGE-760: a preset joins the default roster when a spec of your own
-    /// names it in `delegates_to`, and brings the presets it delegates to,
-    /// so a lead reaches its workers. A glob pulls in no preset, and a
-    /// team-internal worker (one that names its `callers`) is served for
-    /// its lead but never offered to the root.
+    /// Every built-in leader or standalone agent is on the default roster,
+    /// and no member internal to a team (it names its `callers`) is.
     #[test]
-    fn a_preset_joins_when_your_spec_delegates_to_it() {
+    fn every_built_in_agent_but_a_team_internal_one_is_on_the_default_roster() {
+        let roster = roster_names_from(&[], None, None);
+        let listings = inspect_agent_specs_from(None, None);
+        for (name, _) in PRESETS {
+            let listing = listings.iter().find(|l| l.name == *name).unwrap();
+            assert!(listing.is_served(), "{name} is served");
+            assert_eq!(
+                roster.iter().any(|n| n == name),
+                !listing.is_team_member_preset(),
+                "{name}"
+            );
+        }
+        for internal in [
+            "crosscheck-solver-direct",
+            "crosscheck-solver-plan",
+            "crosscheck-solver-verify",
+            "crosscheck-judge",
+            "crosscheck-writer",
+            "crosscheck-data-direct",
+            "crosscheck-data-plan",
+            "crosscheck-data-verify",
+        ] {
+            assert!(!roster.iter().any(|n| n == internal), "{internal}");
+        }
+        for leader in ["crosscheck-lead", "crosscheck-data-lead"] {
+            assert!(roster.iter().any(|n| n == leader), "{leader}");
+        }
+    }
+
+    /// A spec of yours joins the roster beside the presets, and shadows the
+    /// preset it renames; a team-internal worker is served for its lead but
+    /// never offered to the root.
+    #[test]
+    fn your_spec_joins_the_presets_on_the_roster() {
         let workspace = tempfile::tempdir().unwrap();
         let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("boss.toml"),
-            "[agent]\nname = \"boss\"\n\n[swarm]\ndelegates_to = [\"crosscheck-lead\", \"crosscheck-data-lead\", \"*\"]\n",
-        )
-        .unwrap();
-        // A spec of yours with a preset's name is yours: it joins.
+        std::fs::write(dir.join("boss.toml"), "[agent]\nname = \"boss\"\n").unwrap();
+        // A spec of yours with a preset's name is yours.
         std::fs::write(dir.join("writer.toml"), "[agent]\nname = \"writer\"\n").unwrap();
 
         let roster = exposed_specs_from(Some(workspace.path()), None);
@@ -1531,6 +1533,8 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "researcher",
+                "reviewer",
             ]
         );
         let listings = inspect_agent_specs_from(Some(workspace.path()), None);
@@ -1543,6 +1547,8 @@ cap_usd = 2.0
                 "writer",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "researcher",
+                "reviewer",
             ]
         );
     }
@@ -1576,7 +1582,7 @@ cap_usd = 2.0
         assert!(!mine.is_team_member_preset());
     }
 
-    /// AGE-760: a team-internal spec is never offered to the root, even
+    /// A team-internal spec is never offered to the root, even
     /// when module settings name it; `local-agent` declared beside a
     /// preset is the default worker.
     #[test]

@@ -1,6 +1,6 @@
 //! Settings → Agents (PL-U5): every agent spec the workspace reaches, read
 //! only. One kind of local agent — a spec, run by the harness — whatever
-//! file or preset defined it; the broker serves the roster (AGE-760) at
+//! file or preset defined it; the broker serves the roster at
 //! `/a2a/{name}`, and `list_agents`, `invoke_agent` and `/agent` reach them
 //! by name. Remote A2A agents are listed below them.
 
@@ -102,18 +102,11 @@ fn default_worker_row(name: &str, cx: &App) -> AnyElement {
 }
 
 fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
-    // An experimental team's role joins the roster only when asked for
-    // (AGE-760): say so, and how.
-    let preset_off = !served
-        && !listing.shadowed
-        && listing.source == SpecSource::Preset
-        && listing.spec.as_ref().is_ok_and(|spec| spec.swarm.exposed);
     let (status, color): (&str, Hsla) = match (&listing.spec, listing.shadowed) {
         (_, true) => ("Shadowed", cx.theme().muted_foreground),
         (Err(_), false) => ("Does not load", cx.theme().danger),
         (Ok(_), false) if served => ("Served", gpui::rgb(0x16A34A).into()),
         (Ok(spec), false) if !spec.swarm.exposed => ("Not exposed", cx.theme().muted_foreground),
-        (Ok(_), false) if preset_off => ("Preset · not in the roster", cx.theme().muted_foreground),
         (Ok(_), false) => ("Not in the roster", cx.theme().muted_foreground),
     };
 
@@ -133,13 +126,6 @@ fn spec_row(listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
                         .child(listing.source.label()),
                 ),
         )
-        .when(preset_off, |el| {
-            el.child(detail(
-                "Runs with its team (chatty-tui --team <id>); to add it here, name it in \
-                 virtual_agents in module_settings.json.",
-                cx,
-            ))
-        })
         .map(|el| match &listing.spec {
             Ok(spec) => el.children(spec_details(spec, cx)),
             Err(error) => el.child(

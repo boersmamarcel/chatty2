@@ -711,9 +711,9 @@ mod tests {
         assert!(data.skill().is_none(), "the playbook is the preamble");
     }
 
-    /// AGE-760: a preset team's specs are on no default roster; selecting
-    /// the team (`--team <id>`) is what puts them on the run's roster, and
-    /// its leader, the root, reaches every one of them.
+    /// Selecting a team (`--team <id>`) puts exactly its specs on the run's
+    /// roster, and its leader, the root, reaches every one of them. The
+    /// leader is on the default roster too; its internal members are not.
     #[test]
     fn selecting_a_team_adds_its_presets() {
         let default_roster = crate::agent_spec::roster_names_from(&[], None, None);
@@ -721,9 +721,16 @@ mod tests {
             let id = preset.id;
             let team = load_team(id, None, None).expect("the preset loads");
             for name in team.file.agents.iter().chain([&team.file.leader]) {
-                assert!(
-                    !default_roster.contains(name),
-                    "{id}: {name} is not on the default roster"
+                let internal = name != &team.file.leader
+                    && load_team(id, None, None)
+                        .unwrap()
+                        .agents
+                        .iter()
+                        .any(|spec| &spec.agent.name == name && spec.swarm.callers.is_some());
+                assert_eq!(
+                    default_roster.contains(name),
+                    !internal,
+                    "{id}: {name} is on the default roster unless team-internal"
                 );
             }
             assert_eq!(team.agent_names(), team.file.agents, "{id}");
