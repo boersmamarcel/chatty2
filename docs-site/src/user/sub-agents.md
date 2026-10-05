@@ -13,7 +13,7 @@ A sub-agent is a separate `chatty-tui` process the parent agent hands a task to,
 
 ## Isolated file changes
 
-Sub-agents work in the conversation's workspace, the folder its folder chip shows, unless their team asks for isolation. A team whose `team.json` sets `"isolate": true` (the coding preset `fix-and-verify` does; for a roster in `module_settings.json` it is `"team": { "isolate": true }`) gives each spawned sub-agent its own `git worktree` on a new branch (`sub-agent/<name>`) instead, when the workspace is a git repository with at least one commit. That means two children editing the same file at the same time no longer silently overwrite each other — each keeps its own copy. The branch name is unique per repository: if `sub-agent/<name>` is already taken (for example, two sub-agent leaders on the same repo naming a worker the same thing), Chatty picks `sub-agent/<name>-2`, `-3`, and so on. When a child finishes, its changes are committed to its branch and the worktree is left on disk; the parent agent merges the branch to take the changes. The tool result includes a fenced `evidence` block naming the actual branch, its commit count, and a diff summary against the base branch — if the project declares a verification command, its exit code and last lines are in there too. A child that committed nothing gets no evidence block, since there's nothing to merge. If a worktree can't be created at all (a repository with no commits yet, for example), the delegation fails before the sub-agent starts, rather than silently falling back to a shared tree: you get a red **Could not start** card saying what failed and what to do, and the agent that asked stops instead of retrying.
+Sub-agents work in the conversation's workspace, the folder its folder chip shows, unless their team asks for isolation. A team whose `team.json` sets `"isolate": true` (a coding team would; for a roster in `module_settings.json` it is `"team": { "isolate": true }`) gives each spawned sub-agent its own `git worktree` on a new branch (`sub-agent/<name>`) instead, when the workspace is a git repository with at least one commit. That means two children editing the same file at the same time no longer silently overwrite each other — each keeps its own copy. The branch name is unique per repository: if `sub-agent/<name>` is already taken (for example, two sub-agent leaders on the same repo naming a worker the same thing), Chatty picks `sub-agent/<name>-2`, `-3`, and so on. When a child finishes, its changes are committed to its branch and the worktree is left on disk; the parent agent merges the branch to take the changes. The tool result includes a fenced `evidence` block naming the actual branch, its commit count, and a diff summary against the base branch — if the project declares a verification command, its exit code and last lines are in there too. A child that committed nothing gets no evidence block, since there's nothing to merge. If a worktree can't be created at all (a repository with no commits yet, for example), the delegation fails before the sub-agent starts, rather than silently falling back to a shared tree: you get a red **Could not start** card saying what failed and what to do, and the agent that asked stops instead of retrying.
 
 > [!NOTE]
 > If the workspace isn't a git repository, sub-agents fall back to sharing the parent's tree as before, so parallel children editing files can still collide.
@@ -157,29 +157,14 @@ A worker's side effects come to you for approval like the leader's own, whatever
 
 `--team <id>` packages a roster like the one above with a leader and a verification command into one directory, so a run is reproducible and the leader has a role too: a named leader plus co-workers, each with its own model, role and standing instructions, defined once in `teams/<id>/team.json`, which names the leader's spec and the workers' specs. It implies `--broker`, and for that run the team's `agents` replace whatever `virtual_agents` your module settings declare.
 
-Four teams ship built in. Agent teams are supported and **experimental**: they show what Chatty can do with a team, not that a team beats a single agent. That research comes later.
+Two teams ship built in, both **experimental**: they are free, run on your own model, and become documented defaults only once a measured result supports them.
 
-| Team | Start it with | What it shows |
+| Team | Start it with | What it does |
 |---|---|---|
-| `data-analysis` | `/agent data-lead Revenue in orders.csv fell in August. Find out why.` | A lead breaks a business question about a data file into parts, an analyst answers them with SQL queries, a reviewer works out the key numbers again, and the analyst saves the report (the write comes to you for approval). Walkthrough: [From one agent to a team](./tutorial-swarm.md). |
-| `fix-and-verify` | `chatty-tui --team fix-and-verify -m "The tests fail. Find the bug and fix it without changing the tests."` | A coder fixes a bug in its own git worktree, Chatty runs the project's tests on that branch (the coder's claim that they pass counts for nothing), a reviewer reads the real diff and Chatty's test output, and the lead merges only on approval with passing tests. One fix round at most. Walkthrough: [A coding team whose tests Chatty runs](./tutorial-team.md#a-built-in-coding-team-fix-and-verify). |
-| `research-brief` | `/agent editor Using the documents in docs/, write brief.md: <your question>` | A researcher finds sourced facts in a folder of documents, a writer turns them into a brief (the file write comes to you for approval), and the reviewer checks the brief against the sources. |
+| `crosscheck` (Crosscheck) | `chatty-tui --team crosscheck -m "<task>"` | Several independent attempts at your task, and a judge picks the strongest; the reply says what it cost. |
+| `crosscheck-data` (Crosscheck: Data) | `chatty-tui --team crosscheck-data -m "<question about your data>"` | The same, with data analysts as the attempts. |
 
-`chatty-tui --team <id>` runs a team from the terminal. The desktop has no team switch: name the team's agents in `virtual_agents` (for `data-analysis`, `["local-agent", "data-lead", "data-analyst", "reviewer"]`), restart, and `/agent <leader> …` runs it, since the leader is an agent like any other:
-
-```bash
-chatty-tui --team research-brief --headless --ollama --model qwen3:14b \
-  -m "Using the documents in docs/, write brief.md: what do our procurement rules say about splitting purchases?"
-```
-
-A third, also experimental, is for hard data questions, `analyst-panel`: three analysts answer the question independently, and unless their answers agree, an adjudicator compares how each one got its answer and picks one. It is slower and costs about three to four times a single agent; use it where one analysis is often plausibly wrong. If your data comes with notes for analysts, put them in a `BRIEF.md` in the workspace root and every analyst reads it first:
-
-```bash
-chatty-tui --team analyst-panel --headless --ollama --model qwen3:14b \
-  -m "Which customers churned last quarter, and why? The data is in data/."
-```
-
-Another, also experimental, writes architecture documents: `architecture-review` writes an ADR or a design doc from your repository and has it reviewed in rounds by three fresh reviewers (maintainability, security and a devil's advocate) until a round finds nothing that must be fixed. It is the one built-in team that names its own models, hosted Claude models through OpenRouter, so a run costs hosted-model tokens, and it will not start without an OpenRouter key unless you run it on your own model (`--model <model>` does that for the whole team). How to run it and how to swap the models: [An architecture-review team](./tutorial-team.md#a-built-in-architecture-review-team-architecture-review).
+See [Crosscheck](./crosscheck.md) for when it pays and what it costs. `chatty-tui --team <id>` runs a team from the terminal. The desktop has no team switch: name the team's agents in `virtual_agents`, restart, and `/agent <leader> …` runs it, since the leader is an agent like any other. Three standalone agents ship too: `researcher`, `reviewer` and `writer`.
 
 `--model` runs every agent of the team on that model for the run, including agents whose spec names a model of its own; `--tools` and `--preamble` override the leader's settings. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/agents-and-specs.md#teams).
 
@@ -187,7 +172,7 @@ A team can also make what one role hands the next explicit and checkable: `team.
 
 ## Next
 
-- [Tutorial: from one agent to a team](./tutorial-swarm.md): the desktop walkthrough with `data-analysis`, approvals, the bill and mixed models
+- [Tutorial: from one agent to a team](./tutorial-swarm.md): the desktop walkthrough with a data team, approvals, the bill and mixed models
 - [Tutorial: your first named worker](./tutorial-named-worker.md) — twenty minutes, one reviewer, real hand-off
 - [Tutorial: a small agentic team](./tutorial-team.md) — a coding team directory of your own, with its own playbook
 - [Terminal interface](./terminal.md)

@@ -27,7 +27,51 @@ You give a sales export to a three-agent team and ask it a real question: *reven
 
 ## 1. Set up
 
-**Add the team.** Its agents ship with Chatty but are experimental, so they are not on your roster until you name them. Quit Chatty, then write `module_settings.json` (create the file if it is not there) and start Chatty again:
+**Write the team.** The `reviewer` ships with Chatty; the lead and the analyst are two short files you write. Create `~/sales/.chatty/agents/` (the sample data goes in `~/sales` below) and put these two files in it:
+
+```toml
+# ~/sales/.chatty/agents/data-lead.toml
+[agent]
+name = "data-lead"
+description = "Team lead: answers a business question about a data file with an analyst and a reviewer"
+preamble = """
+You lead a data analysis and compute nothing yourself.
+1. Turn the question into two to four sub-questions a script can answer: the totals, which segments changed and by how much, and whether volume, price or discount moved in each.
+2. Ask data-analyst to answer them, naming the file.
+3. Write the report: the answer in one or two sentences, then each finding with its numbers and its share of the change, then what to do next. Every number comes from the analyst, never from you. Where the data shows how much but not why, say so instead of guessing a cause.
+4. Send reviewer the report and the file's path. On REQUEST_CHANGES, fix exactly what it lists, asking the analyst again only for a disputed number, and send the report back once.
+5. Ask data-analyst to save the reviewed report, exactly as written, as report.md next to the data file.
+Your final answer is the reviewed report, with any notes the reviewer still has."""
+
+[tools]
+profile = "coordinator"
+
+[swarm]
+delegates_to = ["data-analyst", "reviewer"]
+
+[budget]
+max_agent_turns = 16
+```
+
+```toml
+# ~/sales/.chatty/agents/data-analyst.toml
+[agent]
+name = "data-analyst"
+description = "Answers questions about a data file with SQL queries, and reports the exact numbers"
+preamble = "You answer questions about data files with numbers you computed, never by eye. Compute every number with query_data (SQL over the file); look at the columns first. Break every change down by period and by each column that could explain it, and give each segment's share of the change. For each segment behind a large share, say whether volume, price or discount moved. Report numbers, not guesses. When you are asked to save a file, write exactly the text you are given."
+
+[tools]
+profile = "coder"
+disable = ["shell"]
+
+[swarm]
+exposed = true
+
+[budget]
+max_agent_turns = 16
+```
+
+**Add the team to your roster.** Quit Chatty, then write `module_settings.json` (create the file if it is not there) and start Chatty again:
 
 - macOS: `~/Library/Application Support/chatty/module_settings.json`
 - Linux: `~/.config/chatty/module_settings.json` (or `$XDG_CONFIG_HOME/chatty/module_settings.json`)
@@ -66,7 +110,7 @@ Open **Settings → Agents**. Every local agent is a *spec*: a short TOML file t
 
 ![Settings → Agents lists every agent spec, preset or your own](../assets/screenshots/swarm-01-settings-agents.png)
 
-This tutorial uses three of the presets. Together they make up the **data-analysis** team:
+This tutorial's team is your two specs and the built-in `reviewer`:
 
 | Agent | Job | Can use |
 |---|---|---|
@@ -150,14 +194,14 @@ max_agent_turns = 12
 
 `model` is matched against your model list the same way as the model selector: by id, by name, or by part of the model identifier. Ask the same question again. The tree now shows two models, and the side sheet bills each agent by model. A small model on a CPU is slow, so expect the reviewer's turn to take longer.
 
-**A cloud model as the lead.** The opposite mix is common too: a strong hosted model plans and writes, and cheaper local models do the legwork. Copy `data-lead` the same way and point it at a hosted model from your list:
+**A cloud model as the lead.** The opposite mix is common too: a strong hosted model plans and writes, and cheaper local models do the legwork. Add a model line to your `data-lead.toml` and point it at a hosted model from your list:
 
 ```toml
-# ~/sales/.chatty/agents/data-lead.toml: the preset, plus the model line
+# ~/sales/.chatty/agents/data-lead.toml: as before, plus the model line
 [agent]
 name = "data-lead"
 model = "claude-sonnet"   # any model in your list: its id, name, or part of its identifier
-description = "Experimental team lead (data-analysis): answers a business question about a data file with an analyst and a reviewer"
+description = "Team lead: answers a business question about a data file with an analyst and a reviewer"
 preamble = """
 You lead a data analysis and compute nothing yourself.
 1. Turn the question into two to four sub-questions a script can answer: the totals, which segments changed and by how much, and whether volume, price or discount moved in each.
@@ -237,11 +281,11 @@ When `memo-writer` wants to create `memo.md`, you get the same kind of card as i
 
 | You see | Why | Fix |
 |---|---|---|
-| `data-lead` shows **Preset · not in the roster**, and `/agent data-lead …` goes to the default agent | The team's agents are not in `virtual_agents` | Step 1: name all three in `module_settings.json`, then restart |
+| `/agent data-lead …` goes to the default agent | The team's agents are not in `virtual_agents`, or the two spec files are not in `~/sales/.chatty/agents/` | Step 1: write both files, name all three in `module_settings.json`, then restart |
 | A red **Could not start 'data-lead'** card: *this conversation has no workspace folder* | The chat has no folder | Pick `~/sales` with the folder chip under the message box and send the message again |
 | A red **Could not start** card: *code execution is off* | Code execution is turned off | Turn on **Enable Code Execution** in Settings → Code Execution and send the message again |
 | The lead says it cannot find `orders.csv` | The chat's folder is not the one with the file | Check the folder chip and the workspace line under your message, then pick `~/sales` |
-| A red **Could not start** card that mentions a git worktree | A team with `"isolate": true` (a coding team such as `fix-and-verify`) gives each agent its own git worktree, and the folder is a git repository without a first commit | Commit something first, or pick a folder that is not a git repository. The data-analysis team does not isolate and never needs this |
+| A red **Could not start** card that mentions a git worktree | A team with `"isolate": true` (a coding team) gives each agent its own git worktree, and the folder is a git repository without a first commit | Commit something first, or pick a folder that is not a git repository. The data-analysis team does not isolate and never needs this |
 | No approval card at all | The approval mode is **Auto-approve sandboxed** (the default), which lets writes inside the workspace through | Switch to **Always ask** in Settings → Code Execution to see each write and command first |
 | The reviewer appears twice in the tree | It asked for changes, and the lead fixed the report and sent it back | This is the review loop working. The lead sends the report back only once. |
 | A run takes a long time on a local model | Every agent's turns share one model server, one request at a time | Expect five to ten minutes on a single local GPU. A hosted lead (step 7) makes it faster. |
