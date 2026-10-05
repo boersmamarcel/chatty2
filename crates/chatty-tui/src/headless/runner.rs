@@ -311,6 +311,12 @@ impl HeadlessRunner {
         self.config.team.is_some()
     }
 
+    /// Whether this run is a worker a broker started (`--participant-fd`):
+    /// it holds the connection's transport.
+    pub fn is_worker(&self) -> bool {
+        self.fabric_transport.is_some()
+    }
+
     /// This role's preamble (`--preamble`, or a team leader's/worker's own
     /// declared one), if any. An instruction like "write your answer to
     /// /app/answer.txt" can arrive here instead of in `--message`, which the
