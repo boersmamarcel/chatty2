@@ -244,6 +244,18 @@ impl Tool for BestOfTool {
 
 fn attempt(number: usize, agent: &str, run: Result<InvokeAgentOutput, String>) -> Attempt {
     match run {
+        // A worker that ended without a word gets `invoke_agent`'s stand-in
+        // reply; that is no attempt at an answer.
+        Ok(out) if out.response == format!("Agent '{agent}' completed successfully.") => Attempt {
+            number,
+            agent: agent.to_string(),
+            success: false,
+            answer: "the attempt ended without an answer".to_string(),
+            verified: None,
+            tokens: tokens_of(&out.usage),
+            response: String::new(),
+            trace: out.trace,
+        },
         Ok(out) => Attempt {
             number,
             agent: agent.to_string(),

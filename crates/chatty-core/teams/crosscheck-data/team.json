@@ -9,7 +9,7 @@
     "crosscheck-judge",
     "crosscheck-writer"
   ],
-  "max_agent_turns": 6,
+  "max_agent_turns": 40,
   "handoffs": {
     "crosscheck-judge": "schemas/judge.json"
   }
