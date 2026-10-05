@@ -1668,7 +1668,25 @@ cap_usd = 2.0
         assert!(!shadowed_preset.is_served());
 
         let roster = exposed_specs_from(Some(workspace.path()), None);
-        assert_eq!(names(&roster), ["local-agent", "analyst"]);
+        assert_eq!(
+            names(&roster),
+            [
+                "local-agent",
+                "analyst",
+                "crosscheck-data-direct",
+                "crosscheck-data-lead",
+                "crosscheck-data-plan",
+                "crosscheck-data-verify",
+                "crosscheck-judge",
+                "crosscheck-lead",
+                "crosscheck-solver-direct",
+                "crosscheck-solver-plan",
+                "crosscheck-solver-verify",
+                "crosscheck-writer",
+                "reviewer",
+                "writer"
+            ]
+        );
         assert_eq!(roster[0].agent.preamble.as_deref(), Some("Be brief."));
     }
 
