@@ -668,14 +668,14 @@ mod runner {
             "the role comes from the team config"
         );
         assert!(!answer_file_exists(&leader));
-        assert!(!stops_on_answer_file(&leader, true));
+        assert!(!stops_on_answer_file(&leader, true, true));
 
         // The first worker's `final_answer` lands in the shared workspace
         // while the leader is still waiting on its `invoke_agent` result.
         std::fs::write(workspace.path().join("answer.txt"), "42").unwrap();
         assert!(answer_file_exists(&leader));
         assert!(
-            !stops_on_answer_file(&leader, true),
+            !stops_on_answer_file(&leader, true, true),
             "a worker's answer file must not end the leader's turn"
         );
     }
@@ -691,13 +691,49 @@ mod runner {
         lone.execution_settings.workspace_dir =
             Some(workspace.path().to_string_lossy().into_owned());
         assert!(!lone.is_team_leader());
-        assert!(!stops_on_answer_file(&lone, true), "no file yet");
+        assert!(!stops_on_answer_file(&lone, true, false), "no file yet");
 
         std::fs::write(workspace.path().join("answer.txt"), "42").unwrap();
-        assert!(stops_on_answer_file(&lone, true));
+        assert!(stops_on_answer_file(&lone, true, false));
         assert!(
-            !stops_on_answer_file(&lone, false),
+            !stops_on_answer_file(&lone, false, true),
             "a task that never asked for an answer file is not stopped by one"
+        );
+    }
+
+    /// A transport that is never called: what makes a runner a worker.
+    struct NoCalls;
+
+    #[async_trait::async_trait]
+    impl chatty_fabric::Transport for NoCalls {
+        async fn call(
+            &self,
+            req: chatty_fabric::CallRequest,
+        ) -> Result<chatty_fabric::CallStream, chatty_fabric::CallError> {
+            Err(chatty_fabric::CallError::UnknownAgent(format!("{req:?}")))
+        }
+    }
+
+    /// AGE-853: `best_of` runs several workers on one task in one workspace.
+    /// A sibling's answer file must not end a worker's run; the worker stops
+    /// once a tool call of its own names the answer file.
+    #[tokio::test]
+    async fn a_worker_stops_on_its_own_answer_file_only() {
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let (mut worker, _event_rx) = test_runner().await;
+        worker.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        worker.set_fabric_transport(std::sync::Arc::new(NoCalls), "root".to_string());
+        assert!(worker.is_worker());
+
+        std::fs::write(workspace.path().join("answer.txt"), "41").unwrap();
+        assert!(
+            !stops_on_answer_file(&worker, true, false),
+            "a sibling wrote it: keep going"
+        );
+        assert!(
+            stops_on_answer_file(&worker, true, true),
+            "its own write of the answer file ends the run"
         );
     }
 

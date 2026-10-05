@@ -346,6 +346,7 @@ pub async fn run_headless(
                 let mut pivot_msg: Option<String> = None;
                 let mut tool_failed = false;
                 let mut wrote_by_command = false;
+                let mut named_answer_file = false;
                 let mut compact_file_extracted = false;
                 let mut progress = ProgressCheck::Fine;
                 if let Some(tc) = engine.transcript.tool_call(&id_str) {
@@ -377,6 +378,7 @@ pub async fn run_headless(
                     }
                     tool_failed = status == "err" && !tool_result_is_policy_refusal(tc);
                     wrote_by_command = COMMAND_TOOLS.contains(&tc.name.as_str());
+                    named_answer_file = tc.input.contains(ANSWER_FILE_NAME);
                     compact_file_extracted =
                         compact_file_extraction_tool_result(answer_file_required, tc);
                     // Check for repeated identical tool call (loop detection).
@@ -397,7 +399,7 @@ pub async fn run_headless(
                 if called_final_answer {
                     eprintln!("final_answer completed and answer file exists; stopping stream.");
                     engine.stop_stream();
-                } else if stops_on_answer_file(&engine, answer_file_required) {
+                } else if stops_on_answer_file(&engine, answer_file_required, named_answer_file) {
                     match answer_file_stop(answer_file_grace_turn, wrote_by_command) {
                         AnswerFileStop::Now => {
                             // Written by a dedicated write (write_file & co.),
@@ -504,7 +506,11 @@ pub async fn run_headless(
                     refused = tool_result_is_policy_refusal(tc);
                     progress = loop_guard.on_tool_progress(&tc.name, &tc.input);
                 }
-                if answer_file_grace_turn && stops_on_answer_file(&engine, answer_file_required) {
+                // The grace turn follows a command of this run's own that wrote
+                // the file, so the file is this run's.
+                if answer_file_grace_turn
+                    && stops_on_answer_file(&engine, answer_file_required, true)
+                {
                     eprintln!("Answer file exists after the extra turn; stopping stream.");
                     engine.stop_stream();
                     continue;
@@ -959,14 +965,27 @@ fn final_answer_ends_run(
 /// Whether a tool result ends the turn because the task's answer file now
 /// exists (AGE-441).
 ///
-/// A lone `--headless` agent — and a worker, which never runs with `--team`
-/// — is done once the file is there: staying in the loop only rewrites the
-/// same answer. A `--team` leader shares the workspace with its workers, so
-/// the file is one of *their* results; its own turn ends when its delegation
-/// flow does, or its turns run out, never on a file somebody else wrote.
-fn stops_on_answer_file(engine: &HeadlessRunner, answer_file_required: bool) -> bool {
-    answer_file_required && !engine.is_team_leader() && answer_file_exists(engine)
+/// A lone `--headless` agent is done once the file is there: staying in the
+/// loop only rewrites the same answer. A `--team` leader shares the workspace
+/// with its workers, so the file is one of *their* results; its own turn ends
+/// when its delegation flow does, or its turns run out, never on a file
+/// somebody else wrote. A worker shares the workspace with its siblings
+/// (`best_of` runs several on one task at once, AGE-853), so it stops only
+/// when the tool call that just finished names the answer file
+/// (`own_write`): a sibling's file must not cut its run short.
+fn stops_on_answer_file(
+    engine: &HeadlessRunner,
+    answer_file_required: bool,
+    own_write: bool,
+) -> bool {
+    answer_file_required
+        && !engine.is_team_leader()
+        && (own_write || !engine.is_worker())
+        && answer_file_exists(engine)
 }
+
+/// The file name every answer-file candidate has.
+const ANSWER_FILE_NAME: &str = "answer.txt";
 
 /// What an answer file that just appeared after a tool result means for
 /// the stream.

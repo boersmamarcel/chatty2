@@ -73,6 +73,7 @@
     - [Showcase teams: real-model reliability runs](./dev/adrs/showcase-runs-2026-09-29.md)
     - [DABstep: analyst-panel against a single agent](./dev/adrs/dabstep-team-2026-09-30.md)
     - [Crosscheck on DABstep: pre-registration](./dev/adrs/crosscheck-prereg.md)
+    - [Crosscheck: Data with helpers: pre-registration](./dev/adrs/crosscheck-data-confirm-prereg.md)
     - [Swarm vs single agent: pre-registration](./dev/adrs/swarm-vs-single-prereg.md)
     - [Swarm vs single agent: result (EV-4)](./dev/adrs/swarm-vs-single-2026-10-02.md)
     - [WASM plugin performance baseline (S7)](./dev/adrs/plugin-perf-2026-09-27.md)
