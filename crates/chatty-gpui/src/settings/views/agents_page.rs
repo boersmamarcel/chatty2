@@ -7,7 +7,7 @@
 use crate::settings::models::agent_specs::{broker_reachable, served_names};
 use crate::settings::models::extensions_store::ExtensionsModel;
 use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel};
-use chatty_core::agent_spec::{AgentSpec, SpecListing, SpecSource};
+use chatty_core::agent_spec::{AgentSpec, SpecListing};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
