@@ -9,7 +9,7 @@ use rig_core::completion::Message;
 use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
-use chatty_core::agent_spec::{SpecListing, SpecSource};
+use chatty_core::agent_spec::SpecListing;
 use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationMode;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
