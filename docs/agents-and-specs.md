@@ -35,10 +35,10 @@ each name (`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`
 presets are experimental teams' roles and join the default roster only when one of
 your specs names them in `delegates_to`, directly or through another preset (a glob
 pulls in none; AGE-760). Otherwise a preset runs with its team (`--team <id>`) or when
-`virtual_agents` names it: then the `data-analyst` preset is an agent like any other,
-`list_agents` lists it, `invoke_agent` reaches it at `/a2a/data-analyst`, and
-`/agent data-analyst …` runs it. A spec that names its `callers` (a team-internal worker
-such as `panel-writer`) is served for its lead but never offered to the root's
+`virtual_agents` names it: then the `researcher` preset is an agent like any other,
+`list_agents` lists it, `invoke_agent` reaches it at `/a2a/researcher`, and
+`/agent researcher …` runs it. A spec that names its `callers` (a team-internal worker
+such as `crosscheck-writer`) is served for its lead but never offered to the root's
 `list_agents`/`invoke_agent`. A spec file that does not load is left out of the roster
 with a warning; Settings → Agents and `/agents` show it with its error.
 
@@ -591,7 +591,7 @@ streams.
 A worker works in its caller's tree — the conversation's workspace, passed as its
 `--workspace` and `cwd` — unless its team asks for isolation (AGE-822): `isolate` in the
 `team.json` that claims the agent by name, else `module_settings.team.isolate`. Off by
-default; the coding preset `fix-and-verify` turns it on. Only then does the embedder hand
+default; a coding team turns it on. Only then does the embedder hand
 the runner a workspace factory, and only then does BI-5's nesting below apply. An
 isolated worker runs in its own `git worktree` under the conversation's workspace
 (ADR-0012), through `chatty_core::services::worker_tree`: `.chatty/worktrees/<name>`
@@ -929,95 +929,48 @@ as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
 `crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
-Five presets ship, all **experimental**: teams are supported, and a team becomes a
-documented default only after a benchmark shows it beats a single agent (PL-S8). Their specs name no models, except
-`architecture-review`'s (below), and a changed prompt is a new preset name, so a run of one stays comparable with an
-earlier one.
+Two presets ship, both **experimental**: teams are supported, and a team becomes a
+documented default only after a benchmark shows it beats a single agent (PL-S8). Their
+specs name no models. Besides them, three standalone specs ship: `researcher`,
+`reviewer` and `writer`.
 
-| Team | Leader | Workers | Shows |
+| Team (display name) | Leader | Attempts | Judge |
 |------|--------|---------|-------|
-| `data-analysis` | `data-lead` | `data-analyst`, `reviewer` | A business question answered with SQL (`query_data`, no shell), a reviewer that re-derives the numbers, and the saved `report.md` relayed to you for approval. `teams/data-analysis/fixture/orders.csv` is its sample: 793 orders over July–August with a known answer (August revenue −17.6%; EU `Pro` orders fall 47 → 14, about 70% of the fall; the online `SUMMER30` code takes 30% off `Starter` from 1 August without lifting volume, about 27%). |
-| `research-brief` | `editor` | `researcher`, `writer`, `reviewer` | Sourced writing from a folder of documents, a relayed write approval. `teams/research-brief/fixture/docs/` is its sample corpus. |
-| `fix-and-verify` | `fix-lead` | `fix-coder`, `code-reviewer` | A coding team whose tests Chatty runs (AGE-757): the coder fixes a bug in its own worktree, the team's `verification` runs the project's test command in that tree and the result goes into the `evidence` block, `code-reviewer` (no shell) judges the real diff (`git_diff <base>..<branch>`) and that evidence, never the coder's word, and the leader merges on `APPROVE` with exit code 0. At most one fix round. `teams/fix-and-verify/fixture/` is a four-test Python project with one known bug (an order of exactly the free-shipping threshold is charged shipping; the fix is `>=` in `invoice.py`). Its `verification` is that fixture's command; for your own project, put a `team.json` naming the same specs and your test command in `.chatty/teams/fix-and-verify/`. |
+| `crosscheck` (Crosscheck) | `crosscheck-lead` | `crosscheck-solver-direct`, `-plan`, `-verify` | `crosscheck-judge` |
+| `crosscheck-data` (Crosscheck: Data) | `crosscheck-data-lead` | `crosscheck-data-direct`, `-plan`, `-verify` | `crosscheck-judge` |
 
-`data-analysis`, `research-brief` and `fix-and-verify` have no `SKILL.md`: the leader's preamble is the
-playbook, so `/agent data-lead …` on the desktop runs it the same as `--team data-analysis`
-once `virtual_agents` names the team (`["local-agent", "data-lead", "data-analyst",
-"reviewer"]`); the desktop has no team selection of its own.
-`reviewer` is shared by both.
-The user walkthrough is the docs-site tutorial *From one agent to a team*; the
-reliability runs behind both presets, and why `coder-reviewer` and the Benford team did
-not ship, are in `docs/research/showcase-runs-2026-09-29.md`. The old `coder-reviewer`
-team (`coordinator` leader, `local-coder`, `local-reviewer`, its `SKILL.md`) is now a
-test fixture only, `crates/chatty-tui/tests/fixtures/team-workspace/`: `spec_golden`'s
-recorded contexts and the team-mechanics tests load it from there.
-
-```bash
-chatty-tui --team data-analysis --headless --model <model> \
-  -m "Revenue in orders.csv fell in August. Find out why."
-```
-
-The third preset, `analyst-panel` (experimental, AGE-754), is for data questions: a
-`coordinator` leader `panel-lead` whose `delegates_to` is exactly its roster; three
-identical analysts `panel-analyst-1..3` on the `coder` profile (30 turns and 12 minutes
-each, inside the leader's 45-minute deadline); a read-only adjudicator
-`panel-adjudicator` (the `coordinator` profile with no one to delegate to, so it compares
-the analysts' traces and cannot re-solve); and `panel-writer` for a question that asks
-for its answer in a file. The analysts' and the adjudicator's handoffs are typed
-(`schemas/analyst.json`: `answer`, `method`, `assumptions`; `schemas/adjudicator.json`:
-`choice`, `answer`, `reason`), and a preset's schemas are compiled into the binary beside
-its `team.json` (`TeamPreset::schemas`). The skill has the leader delegate to the three
-analysts with `include_trace`, compare their normalised answers, send anything short of
-a unanimous panel to the adjudicator with every trace, and deliver the chosen answer
-verbatim; a failed analyst drops out rather than being re-asked. Dataset-specific help
-(helper code, conventions) is not part of the preset: the analysts read a `BRIEF.md` in
-the workspace root when there is one. Measurement: `docs/research/`.
-
-The fifth preset, `architecture-review` (experimental, AGE-808), brings one architecture
-document to acceptance by repeated blank review: an ADR (`docs/adr/ADR-NNNN-slug.md`) or a
-design doc (`docs/design/<component>.md`), in the frontmatter-and-headings format that
-`chatty_core::services::architecture_doc` checks. It is derived from an ADR review team run by
-hand. The roster:
-
-| Agent | Profile | Model | Job |
-|-------|---------|-------|-----|
-| `arch-lead` | `coordinator` | `anthropic/claude-opus-5` | Picks the mode and path, runs the rounds, counts, merges the proposer's branches, asks the human product questions with `ask_user` as they come up; writes nothing. |
-| `arch-proposer` | `coder` (no `execute_code`) | `anthropic/claude-opus-5` | Owns the document: reads the code itself, writes it, and verifies every finding against the code before accepting it or rejecting it with evidence. |
-| `arch-maint-reviewer`, `arch-sec-reviewer`, `arch-devils-advocate` | `reviewer` | `anthropic/claude-opus-5` | Blank reviewers: a fresh instance every round with a new persona from the skill's lists, seeing neither earlier rounds nor each other. |
-| `arch-verifier` | `reviewer` (no shell) | `anthropic/claude-sonnet-5` | Checks only the final polish diff (`<branch>~1..<branch>`): every hunk true, nothing meaning-bearing lost. |
-
-The handoffs are small and flat (E8's biggest loss was invalid handoffs): `schemas/review.json`
-(`must_fix`, and the review as one Markdown `findings` string, each finding tagged
-`must-fix`/`should-fix`/`nit` with its claim, evidence and fix; optional `verdict`,
-`should_fix`), `schemas/proposer.json` (`accepted`, `rejected`, `rejected_must_fix`,
-`human_questions`, `summary`; optional `partial`, `words`, `sections_edited`) and
-`schemas/verify.json` (`verdict` `PASS`/`FAIL`, `blockers`). The loop rule is the skill's: rounds
-repeat until one has zero must-fix findings, not counting a must-fix the proposer rejected with
-evidence; it stops as **not converged** when two consecutive rounds do not lower the count, when
-a fixed must-fix comes back, or at 10 rounds. The leader merges each proposer branch
-(`git_merge`, no fast-forward) before the next delegation, so the next blank reviewer reads the
-current document, and merges the polish only on the verifier's `PASS`. An ADR never changes
-status from `proposed`; the round log, the human's decisions, the open questions and the polish
-verdict go to `<document>.review.md` beside it. The templates date themselves: `load_team` replaces
-`{{today}}` in every member's preamble with the local date (`team::fill_today`), since a model asked
-for today's date makes one up; the checker's `dates` rule rejects a date key that is not `YYYY-MM-DD`.
-To check a document's format:
+Crosscheck (AGE-853) is several independent attempts at one task, and a judge picks the
+strongest. The fan-out and the selection are not the leader model's: the leader's spec
+declares `[swarm.best_of]` (`solvers`, `judge`, each named in `delegates_to`), which
+offers it the `best_of` tool (`chatty_core::tools::best_of_tool`). One `best_of` call
+sends the task word for word to every solver at once over the leader's own
+`invoke_agent` (with `include_trace`), each its own worker with its own context; they run
+in parallel as far as the endpoint budget allows. Each solver ends with `FINAL ANSWER:`.
+An attempt whose `evidence` block shows the team's verification command exiting 0 wins
+outright; between several passing attempts, or with no verifier, identical normalised
+answers need no judge, and otherwise the judge gets the task and every candidate's
+answer, reply and trace and names one by number (`schemas/judge.json`: `choice`,
+`reason`). The answer returned is the chosen solver's, character for character; a judge
+that fails falls back to the most common answer. The result carries a cost line, "3
+attempts + judge, N tokens (≈X× a single run)", against the attempts' mean, from the
+usage `InvokeAgentOutput::usage` now carries. The judge's spec sets `[agent] think =
+false`, which overrides the run's `--think` for that agent. `crosscheck-writer` writes
+the answer when the task names a file (the leaders are coordinators). The two teams
+differ only in their solvers: Crosscheck: Data's are data analysts that read a
+`BRIEF.md` and the data's documentation first and compute with code. A preset whose
+`team.json` sets `"experimental": true` is left out of `--team` listings unless named by
+its exact id, and running it prints one line pointing at `docs/research/`. The
+pre-registered measurement is `docs/research/crosscheck-prereg.md`; the user page is
+the docs-site's *Crosscheck*.
 
 ```bash
-cargo run -p chatty-core --example check_architecture_doc -- docs/adr/ADR-0001-*.md
+chatty-tui --team crosscheck-data --headless --model <model> \
+  -m "What was the average transaction value in March 2023, in EUR?"
 ```
 
-The run needs the git tools (`--enable git`), since the leader merges the proposer's branches with `git_merge`. It is the one preset that pins models, so it is also the one that needs a hosted provider:
-`chatty-tui` checks every pinned model of the run (`team::check_model_providers`) before
-anything starts, and without OpenRouter configured it fails naming OpenRouter and each agent
-with its model. The same check names each agent's pin when no configured model matches it (an Azure-only
-user's roster, say), with the models there are. To run the whole team on one model,
-`--model <model>` replaces every member's model for that run; to change one agent's model,
-shadow its spec with a `<workspace>/.chatty/agents/<name>.toml` of the same name, without
-`model` (the roster's default runs it) or with your own. There is no way yet to remap only the
-model of one role without copying its spec. A run on the pinned models costs hosted-model tokens for six roles
-over up to ten rounds; nothing measures yet whether it writes a better document than a single
-agent.
+The `coder-reviewer` team (`coordinator` leader, `local-coder`, `local-reviewer`, its
+`SKILL.md`) is a test fixture only, `crates/chatty-tui/tests/fixtures/team-workspace/`:
+`spec_golden`'s recorded contexts and the team-mechanics tests load it from there.
 
 **Ollama thinking models as leaders (AGE-400).** A thinking model such as `qwen3`
 sometimes writes its tool call inside the thinking channel; Ollama surfaces tool calls

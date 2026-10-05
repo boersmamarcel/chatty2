@@ -209,14 +209,9 @@ if [[ -d "$ROOT/assets/screenshots" ]]; then
   done
 fi
 
-# Sample data the user tutorials download from the site: the preset teams'
-# frozen fixtures (AGE-752).
-copy "$ROOT/crates/chatty-core/teams/data-analysis/fixture/orders.csv" \
+# Sample data the user tutorials download from the site (AGE-752).
+copy "$ROOT/docs/samples/orders.csv" \
   "$SITE_SRC/assets/samples/orders.csv"
-for f in invoice.py tests/test_invoice.py; do
-  copy "$ROOT/crates/chatty-core/teams/fix-and-verify/fixture/$f" \
-    "$SITE_SRC/assets/samples/invoice/$f"
-done
 
 # App icon for the site header.
 if [[ -f "$ROOT/assets/app_icon/ai-2.png" ]]; then

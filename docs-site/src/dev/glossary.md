@@ -40,7 +40,7 @@
 
 **Tool profile.** A named allowlist of tool *names* (`coordinator`, `coder`, `reviewer` in `tool_profile.rs`) that is a worker's whole tool set, MCP included; it only ever removes tools. Passed as `chatty-tui --tools`. Contrast tool *groups*, which `--enable` / `--disable` switch.
 
-**Team.** A directory `teams/<id>/team.json` + `SKILL.md` declaring a leader (model, profile, preamble), a roster of virtual agents, a verification command, the skill the leader follows and a turn budget; run with `chatty-tui --team <id>`. Two presets ship, both experimental: `data-analysis` and `research-brief`. Owning page: [Sub-agents › Teams](../user/sub-agents.md#teams).
+**Team.** A directory `teams/<id>/team.json` + `SKILL.md` declaring a leader (model, profile, preamble), a roster of virtual agents, a verification command, the skill the leader follows and a turn budget; run with `chatty-tui --team <id>`. Two presets ship, both experimental: `crosscheck` and `crosscheck-data`. Owning page: [Sub-agents › Teams](../user/sub-agents.md#teams).
 
 **Evidence envelope.** The runner's — not the model's — account of a worker's output, appended to every delegation reply as a fenced `evidence` block and carried on the terminal status's `metadata.evidence`: branch, base, commit count, diff stat and, when the team declares one, the verification command's exit code and tail. Empty branch, no envelope.
 

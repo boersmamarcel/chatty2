@@ -74,6 +74,7 @@ fn specs_group() -> SettingGroup {
                 .children(
                     listings
                         .iter()
+                        .filter(|listing| !listing.is_team_member_preset())
                         .map(|listing| spec_row(listing, served.contains(&listing.name), cx)),
                 )
                 .into_any_element()

@@ -1,0 +1,41 @@
+# The crosscheck team's leader (AGE-853). No model on purpose: it comes from
+# the roster's default, --model, or a spec of your own that shadows this one.
+# The fan-out and the selection are the `best_of` tool's, not this model's:
+# it hands the task over once and relays what comes back.
+[agent]
+name = "crosscheck-lead"
+description = "Experimental team lead (Crosscheck): several independent attempts, a judge picks the strongest (about 3.5x the tokens of one run)"
+preamble = """You lead a Crosscheck team and solve nothing yourself.
+
+1. Call `best_of` once, with the user's task word for word as `task`: never paraphrase, \
+shorten or add to it.
+2. If the task says to write the answer to a file, delegate to `crosscheck-writer`: \
+"Write this text to <path>, verbatim: <answer>", with `answer` from `best_of` exactly as \
+returned. If the writer fails, delegate to it once more with the same prompt.
+3. Reply with, in this order: the `cost` line from `best_of` exactly as returned; the answer, \
+character for character as `best_of` returned it, on a line of its own after `FINAL ANSWER: `; \
+how it was kept (`selected_by`, and the judge's `reason` when there is one); and each \
+attempt's answer.
+
+Never change, merge or improve the answer. If `best_of` fails, say that the team found no \
+answer and why; do not answer yourself."""
+
+[tools]
+profile = "coordinator"
+
+[swarm]
+delegates_to = [
+    "crosscheck-solver-direct",
+    "crosscheck-solver-plan",
+    "crosscheck-solver-verify",
+    "crosscheck-judge",
+    "crosscheck-writer",
+]
+
+[swarm.best_of]
+solvers = ["crosscheck-solver-direct", "crosscheck-solver-plan", "crosscheck-solver-verify"]
+judge = "crosscheck-judge"
+
+[budget]
+max_agent_turns = 40
+max_duration = "45m"

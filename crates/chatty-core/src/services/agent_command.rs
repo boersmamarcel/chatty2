@@ -175,21 +175,21 @@ mod tests {
         }
     }
 
-    /// The issue's "Verify": `/agent data-analyst <question>` runs the
+    /// The issue's "Verify": `/agent researcher <question>` runs the
     /// preset spec, resolved from the same roster the broker serves — one
     /// that names it, as a preset is on no default roster (AGE-760).
     #[test]
     fn agent_command_resolves_against_the_roster() {
-        let roster = load_roster_from(&["data-analyst".to_string()], None, None).unwrap();
+        let roster = load_roster_from(&["researcher".to_string()], None, None).unwrap();
         let target = resolve_agent_command(
-            "data-analyst  Sum the amounts in data.csv",
+            "researcher  Sum the amounts in data.csv",
             &[remote("voucher", true)],
             &roster,
         );
         let AgentCommandTarget::Spec { spec, prompt } = target else {
-            panic!("data-analyst is a spec on the roster, got {target:?}");
+            panic!("researcher is a spec on the roster, got {target:?}");
         };
-        assert_eq!(spec.agent.name, "data-analyst");
+        assert_eq!(spec.agent.name, "researcher");
         assert_eq!(prompt, "Sum the amounts in data.csv");
 
         assert_eq!(
@@ -215,7 +215,7 @@ mod tests {
             // A disabled remote is not a target.
             "off do it",
             // A name alone has no prompt to send.
-            "data-analyst",
+            "researcher",
         ] {
             assert_eq!(
                 resolve_agent_command(text, &[remote("off", false)], &roster),

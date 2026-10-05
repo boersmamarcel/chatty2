@@ -55,65 +55,60 @@ pub struct TeamPreset {
 /// Every preset team is experimental (PL-S8): none is a documented default
 /// until a benchmark shows it beats a single agent. Their specs name no
 /// models on purpose, so they come from the roster's default, `--model`, or a
-/// spec of your own that shadows one; the exception is
-/// `architecture-review` (AGE-808), whose specs pin hosted models and which
-/// [`check_model_providers`] refuses to start without that provider. A preset without a `SKILL.md` has its
+/// spec of your own that shadows one. A preset without a `SKILL.md` has its
 /// playbook in the leader's preamble, so `/agent <leader>` runs it the same
 /// as `--team <id>`.
 pub const PRESETS: &[TeamPreset] = &[
     TeamPreset {
-        id: "data-analysis",
-        team_json: include_str!("../../teams/data-analysis/team.json"),
+        id: "crosscheck",
+        team_json: include_str!("../../teams/crosscheck/team.json"),
         skill: None,
-        schemas: &[],
+        schemas: &[(
+            "schemas/judge.json",
+            include_str!("../../teams/crosscheck/schemas/judge.json"),
+        )],
     },
     TeamPreset {
-        id: "research-brief",
-        team_json: include_str!("../../teams/research-brief/team.json"),
+        id: "crosscheck-data",
+        team_json: include_str!("../../teams/crosscheck-data/team.json"),
         skill: None,
-        schemas: &[],
-    },
-    TeamPreset {
-        id: "fix-and-verify",
-        team_json: include_str!("../../teams/fix-and-verify/team.json"),
-        skill: None,
-        schemas: &[],
-    },
-    TeamPreset {
-        id: "analyst-panel",
-        team_json: include_str!("../../teams/analyst-panel/team.json"),
-        skill: Some(include_str!("../../teams/analyst-panel/SKILL.md")),
-        schemas: &[
-            (
-                "schemas/analyst.json",
-                include_str!("../../teams/analyst-panel/schemas/analyst.json"),
-            ),
-            (
-                "schemas/adjudicator.json",
-                include_str!("../../teams/analyst-panel/schemas/adjudicator.json"),
-            ),
-        ],
-    },
-    TeamPreset {
-        id: "architecture-review",
-        team_json: include_str!("../../teams/architecture-review/team.json"),
-        skill: Some(include_str!("../../teams/architecture-review/SKILL.md")),
-        schemas: &[
-            (
-                "schemas/proposer.json",
-                include_str!("../../teams/architecture-review/schemas/proposer.json"),
-            ),
-            (
-                "schemas/review.json",
-                include_str!("../../teams/architecture-review/schemas/review.json"),
-            ),
-            (
-                "schemas/verify.json",
-                include_str!("../../teams/architecture-review/schemas/verify.json"),
-            ),
-        ],
+        schemas: &[(
+            "schemas/judge.json",
+            include_str!("../../teams/crosscheck-data/schemas/judge.json"),
+        )],
     },
 ];
+
+/// Where an experimental preset's results are written up (AGE-696).
+pub const EXPERIMENTAL_NOTES: &str = "docs/research/";
+
+/// The presets shown wherever teams are listed. An `experimental` one is
+/// left out: it runs only when asked for by its exact id (AGE-696).
+pub fn listed_presets() -> impl Iterator<Item = &'static TeamPreset> {
+    PRESETS
+        .iter()
+        .filter(|preset| !TeamFile::parse(preset.team_json).is_ok_and(|file| file.experimental))
+}
+
+/// `the presets are a (A), b` for a team list in an error or help line.
+fn preset_list<'a>(presets: impl Iterator<Item = &'a TeamPreset>) -> String {
+    let names: Vec<String> = presets
+        .map(|preset| {
+            match TeamFile::parse(preset.team_json)
+                .ok()
+                .and_then(|file| file.name)
+            {
+                Some(name) => format!("{} ({name})", preset.id),
+                None => preset.id.to_string(),
+            }
+        })
+        .collect();
+    if names.is_empty() {
+        "no preset is listed".to_string()
+    } else {
+        format!("the presets are {}", names.join(", "))
+    }
+}
 
 /// The relative directory a team of that id lives in under a workspace.
 pub const WORKSPACE_TEAMS_DIR: &str = ".chatty/teams";
@@ -122,6 +117,14 @@ pub const WORKSPACE_TEAMS_DIR: &str = ".chatty/teams";
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TeamFile {
+    /// What the team is called where people pick it ("Crosscheck"); the
+    /// directory name is its id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Not yet shown where teams are listed (AGE-696): it runs only when
+    /// asked for by its exact id, and says so when it starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub experimental: bool,
     /// The spec the leader runs as.
     pub leader: String,
     /// The roster, by spec name; it replaces `module_settings.virtual_agents`
@@ -295,6 +298,17 @@ impl Team {
         }
         Some(text)
     }
+
+    /// The one line a run of an `experimental` team prints when it starts
+    /// (AGE-696); `None` for any other team.
+    pub fn experimental_notice(&self) -> Option<String> {
+        self.file.experimental.then(|| {
+            format!(
+                "{} is experimental: see {EXPERIMENTAL_NOTES}",
+                self.file.name.as_deref().unwrap_or(&self.id)
+            )
+        })
+    }
 }
 
 /// The verification command declared by whichever team — a preset compiled
@@ -383,18 +397,14 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
     }
     let Some((source, file, skill_content)) = found else {
         bail!(
-            "no team '{id}': looked in {}, and the presets are {}",
+            "no team '{id}': looked in {}, and {}",
             candidates
                 .iter()
                 .flatten()
                 .map(|d| d.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", "),
-            PRESETS
-                .iter()
-                .map(|preset| preset.id)
-                .collect::<Vec<_>>()
-                .join(", ")
+            preset_list(listed_presets())
         );
     };
     let spec = |name: &str| {
@@ -621,7 +631,6 @@ fn load_handoffs(
 mod tests {
     use super::*;
     use crate::agent_spec::WORKSPACE_AGENTS_DIR;
-    use crate::services::architecture_doc;
 
     fn write_team(dir: &Path, id: &str, json: &str, skill: Option<&str>) -> PathBuf {
         let team_dir = dir.join(id);
@@ -632,6 +641,14 @@ mod tests {
         }
         team_dir
     }
+
+    const CROSSCHECK_ROSTER: [&str; 5] = [
+        "crosscheck-solver-direct",
+        "crosscheck-solver-plan",
+        "crosscheck-solver-verify",
+        "crosscheck-judge",
+        "crosscheck-writer",
+    ];
 
     fn write_spec(root: &Path, name: &str, body: &str) {
         let dir = root.join(WORKSPACE_AGENTS_DIR);
@@ -675,13 +692,23 @@ mod tests {
                 );
             }
         }
-        let analysis = load_team("data-analysis", None, None).unwrap();
-        assert_eq!(analysis.file.leader, "data-lead");
-        assert_eq!(analysis.file.agents, ["data-analyst", "reviewer"]);
-        assert!(analysis.skill().is_none(), "the playbook is the preamble");
-        let brief = load_team("research-brief", None, None).unwrap();
-        assert_eq!(brief.file.leader, "editor");
-        assert_eq!(brief.file.agents, ["researcher", "writer", "reviewer"]);
+        let crosscheck = load_team("crosscheck", None, None).unwrap();
+        assert_eq!(crosscheck.file.leader, "crosscheck-lead");
+        assert_eq!(crosscheck.file.agents, CROSSCHECK_ROSTER);
+        assert!(crosscheck.skill().is_none(), "the playbook is the preamble");
+        let data = load_team("crosscheck-data", None, None).unwrap();
+        assert_eq!(data.file.leader, "crosscheck-data-lead");
+        assert_eq!(
+            data.file.agents,
+            [
+                "crosscheck-data-direct",
+                "crosscheck-data-plan",
+                "crosscheck-data-verify",
+                "crosscheck-judge",
+                "crosscheck-writer"
+            ]
+        );
+        assert!(data.skill().is_none(), "the playbook is the preamble");
     }
 
     /// AGE-760: a preset team's specs are on no default roster; selecting
@@ -711,217 +738,70 @@ mod tests {
         }
     }
 
-    /// AGE-757: `fix-and-verify` is a coding team whose tests Chatty runs:
-    /// the verification command is the fixture's own test suite, the coder
-    /// has a shell (so its tree is checked) and the reviewer has none (it
-    /// judges the diff and Chatty's evidence, not a run of its own).
+    /// AGE-853: the crosscheck leader is offered `best_of` over its three
+    /// solvers and its judge, and the judge does not think.
     #[test]
-    fn fix_and_verify_runs_the_projects_tests_on_the_coders_tree() {
-        let team = load_team("fix-and-verify", None, None).unwrap();
-        assert_eq!(team.file.leader, "fix-lead");
-        assert_eq!(team.file.agents, ["fix-coder", "code-reviewer"]);
+    fn the_crosscheck_preset_names_its_solvers_and_a_judge_that_does_not_think() {
+        let team = load_team("crosscheck", None, None).expect("the preset loads");
+        assert_eq!(team.file.leader, "crosscheck-lead");
+        let best_of = team.leader.swarm.best_of.as_ref().expect("swarm.best_of");
         assert_eq!(
-            team.file.verification.as_deref(),
-            Some("python3 -m unittest discover -s tests -t . -v")
-        );
-        let tools = |name: &str| {
-            let spec = team.agents.iter().find(|s| s.agent.name == name).unwrap();
-            (spec.tools.profile.clone(), spec.tools.disable.clone())
-        };
-        assert_eq!(tools("fix-coder"), (Some("coder".into()), vec![]));
-        assert_eq!(
-            tools("code-reviewer"),
-            (Some("reviewer".into()), vec!["shell".to_string()])
-        );
-    }
-
-    /// AGE-757: the fixture has one known bug: an order of exactly the
-    /// free-shipping threshold is charged shipping (`>` where the docstring
-    /// says "or more"). One test fails on it and the other three pass; the
-    /// fix is `>=` in `invoice.py`, with the tests untouched.
-    #[test]
-    fn the_fix_and_verify_fixture_has_one_known_bug() {
-        let code = include_str!("../../teams/fix-and-verify/fixture/invoice.py");
-        let tests = include_str!("../../teams/fix-and-verify/fixture/tests/test_invoice.py");
-        assert!(code.contains("if subtotal > FREE_SHIPPING_FROM:"));
-        assert!(code.contains("FREE_SHIPPING_FROM or more ships free"));
-        assert_eq!(tests.matches("    def test_").count(), 4);
-        assert!(tests.contains("def test_order_of_exactly_the_threshold_ships_free"));
-    }
-
-    /// AGE-752: `data-analysis`'s sample orders have a known answer, so a
-    /// run on them has a right one: August revenue is 17.6% below July's,
-    /// and two planted causes carry almost all of the fall — EU `Pro` sales
-    /// stop from 11 August (about 70%) and the online `SUMMER30` code takes
-    /// 30% off `Starter` from 1 August without lifting volume (about 27%).
-    /// The fixture is frozen with the preset.
-    #[test]
-    fn the_data_analysis_orders_have_a_known_answer() {
-        let csv = include_str!("../../teams/data-analysis/fixture/orders.csv");
-        let mut lines = csv.lines();
-        assert_eq!(
-            lines.next(),
-            Some(
-                "order_id,date,region,channel,product,units,unit_price,\
-                 discount_pct,promo_code,customer_type,revenue"
-            )
-        );
-        let mut total = [0.0f64; 2];
-        let mut eu_pro = [0.0f64; 2];
-        let mut online_starter = [0.0f64; 2];
-        let mut rows = 0;
-        for line in lines {
-            let f: Vec<&str> = line.split(',').collect();
-            let month = usize::from(f[1].starts_with("2026-08"));
-            let revenue: f64 = f[10].parse().expect("a revenue");
-            total[month] += revenue;
-            if f[2] == "EU" && f[4] == "Pro" {
-                eu_pro[month] += revenue;
-            }
-            if f[3] == "online" && f[4] == "Starter" {
-                online_starter[month] += revenue;
-            }
-            rows += 1;
-        }
-        assert_eq!(rows, 793);
-        let fall = total[1] - total[0];
-        assert!(((fall / total[0]) * 100.0 + 17.6).abs() < 0.05, "{fall}");
-        let share = |seg: [f64; 2]| (seg[1] - seg[0]) / fall;
-        assert!((0.69..0.72).contains(&share(eu_pro)), "{}", share(eu_pro));
-        assert!(
-            (0.26..0.29).contains(&share(online_starter)),
-            "{}",
-            share(online_starter)
-        );
-    }
-
-    /// The analyst-panel preset (AGE-754): a coordinator leader allowed to
-    /// delegate to exactly its roster, three identical analysts with turn
-    /// and time budgets inside the leader's deadline, a read-only
-    /// adjudicator, a writer, and both handoff schemas compiled in.
-    #[test]
-    fn the_analyst_panel_preset_loads_with_its_handoffs_and_budgets() {
-        let team = load_team("analyst-panel", None, None).expect("the preset loads");
-        assert_eq!(team.source, TeamSource::Preset);
-        assert_eq!(team.file.leader, "panel-lead");
-        assert_eq!(team.leader.tools.profile.as_deref(), Some("coordinator"));
-        assert_eq!(team.leader.swarm.delegates_to, team.file.agents);
-        assert_eq!(team.leader.budget.max_duration.as_deref(), Some("45m"));
-        assert!(team.leader.agent.model.is_none(), "no model in the preset");
-
-        let analysts: Vec<_> = team
-            .agents
-            .iter()
-            .filter(|a| a.agent.name.starts_with("panel-analyst-"))
-            .collect();
-        assert_eq!(analysts.len(), 3);
-        for analyst in &analysts {
-            assert_eq!(analyst.tools.profile.as_deref(), Some("coder"));
-            assert_eq!(analyst.budget.max_agent_turns, Some(30));
-            assert_eq!(analyst.budget.max_duration.as_deref(), Some("12m"));
-            assert_eq!(
-                analyst.swarm.callers.as_deref(),
-                Some(&["panel-lead".to_string()][..])
-            );
-            assert!(analyst.agent.model.is_none());
-            // Identical but for the name: a homogeneous panel.
-            assert_eq!(analyst.agent.preamble, analysts[0].agent.preamble);
-        }
-        let adjudicator = team
-            .agents
-            .iter()
-            .find(|a| a.agent.name == "panel-adjudicator")
-            .unwrap();
-        assert_eq!(adjudicator.tools.profile.as_deref(), Some("coordinator"));
-        assert!(
-            adjudicator.swarm.delegates_to.is_empty(),
-            "the adjudicator delegates to nobody"
-        );
-
-        assert_eq!(
-            team.handoffs.keys().collect::<Vec<_>>(),
+            best_of.solvers,
             [
-                "panel-adjudicator",
-                "panel-analyst-1",
-                "panel-analyst-2",
-                "panel-analyst-3"
+                "crosscheck-solver-direct",
+                "crosscheck-solver-plan",
+                "crosscheck-solver-verify"
             ]
         );
-        assert!(team.handoff_ledger().is_some());
-        assert_eq!(
-            team.first_turn_instruction().as_deref(),
-            Some("read_skill analyst-panel and follow it.")
-        );
-        let skill = team.skill().unwrap();
-        assert!(skill.content.contains("include_trace: true"));
-        assert!(skill.content.contains("## When a step fails"));
+        assert_eq!(best_of.judge, "crosscheck-judge");
+        let judge = team
+            .agents
+            .iter()
+            .find(|a| a.agent.name == "crosscheck-judge")
+            .expect("the judge is on the roster");
+        assert_eq!(judge.agent.think, Some(false));
+        assert!(team.handoffs.contains_key("crosscheck-judge"));
     }
 
-    /// The analyst handoff is what turns a reply cut off mid-sentence into
-    /// an invalid handoff (and its one re-prompt) instead of a lost answer;
-    /// the adjudicator's names a candidate by number.
+    /// A handoff schema is what turns a reply cut off mid-sentence into an
+    /// invalid handoff (and its one re-prompt) instead of a lost answer: the
+    /// crosscheck judge's names a candidate by number, with its reason.
     #[test]
-    fn the_analyst_panel_handoffs_reject_a_truncated_reply() {
-        let team = load_team("analyst-panel", None, None).unwrap();
-        let analyst = &team.handoffs["panel-analyst-2"];
-        assert!(matches!(
-            handoff::check(analyst, "The"),
-            handoff::HandoffOutcome::Invalid { .. }
-        ));
-        assert!(matches!(
-            handoff::check(
-                analyst,
-                "```json\n{\"answer\": \"\", \"method\": \"sum\"}\n```"
-            ),
-            handoff::HandoffOutcome::Invalid { .. }
-        ));
-        assert_eq!(
-            handoff::check(
-                analyst,
-                "Done.\n```json\n{\"answer\": \"42.5\", \"method\": \"sum of amount\", \"assumptions\": \"\"}\n```"
-            ),
-            handoff::HandoffOutcome::Valid(serde_json::json!({
-                "answer": "42.5", "method": "sum of amount", "assumptions": ""
-            }))
-        );
-
-        let adjudicator = &team.handoffs["panel-adjudicator"];
-        assert!(matches!(
-            handoff::check(
-                adjudicator,
-                "```json\n{\"choice\": 4, \"answer\": \"x\", \"reason\": \"y\"}\n```"
-            ),
-            handoff::HandoffOutcome::Invalid { .. }
-        ));
-        assert!(matches!(
-            handoff::check(
-                adjudicator,
-                "```json\n{\"choice\": 2, \"answer\": \"x\", \"reason\": \"y\"}\n```"
-            ),
-            handoff::HandoffOutcome::Valid(_)
-        ));
-        // Only what the leader acts on is required: a decision without its
-        // reason still delivers an answer (a dev-10 smoke lost one that way).
-        assert!(matches!(
-            handoff::check(
-                adjudicator,
-                "```json\n{\"choice\": 1, \"answer\": \"x\"}\n```"
-            ),
-            handoff::HandoffOutcome::Valid(_)
-        ));
-        assert!(matches!(
-            handoff::check(analyst, "```json\n{\"answer\": \"NL\"}\n```"),
-            handoff::HandoffOutcome::Valid(_)
-        ));
+    fn the_crosscheck_judge_handoff_rejects_a_truncated_reply() {
+        for id in ["crosscheck", "crosscheck-data"] {
+            let team = load_team(id, None, None).unwrap();
+            assert!(team.handoff_ledger().is_some(), "{id}");
+            let judge = &team.handoffs["crosscheck-judge"];
+            for reply in [
+                "The",
+                "```json\n{\"choice\": 2}\n```",
+                "```json\n{\"choice\": 2, \"reason\": \"\"}\n```",
+                "```json\n{\"choice\": 0, \"reason\": \"y\"}\n```",
+                "```json\n{\"choice\": 10, \"reason\": \"y\"}\n```",
+                "```json\n{\"choice\": 2, \"reason\": \"y\", \"answer\": \"x\"}\n```",
+            ] {
+                assert!(
+                    matches!(
+                        handoff::check(judge, reply),
+                        handoff::HandoffOutcome::Invalid { .. }
+                    ),
+                    "{id}: the judge must reject {reply:?}"
+                );
+            }
+            assert_eq!(
+                handoff::check(
+                    judge,
+                    "Done.\n```json\n{\"choice\": 2, \"reason\": \"Only 2 checked the units.\"}\n```"
+                ),
+                handoff::HandoffOutcome::Valid(serde_json::json!({
+                    "choice": 2, "reason": "Only 2 checked the units."
+                }))
+            );
+        }
     }
 
     const STRONGEST_CLAUDE: &str = "anthropic/claude-opus-5";
     const CHEAPER_CLAUDE: &str = "anthropic/claude-sonnet-5";
-    const ARCH_REVIEWERS: [&str; 3] = [
-        "arch-maint-reviewer",
-        "arch-sec-reviewer",
-        "arch-devils-advocate",
-    ];
 
     /// The models the OpenRouter sync makes of the two pinned ids.
     fn synced_claude_models() -> Vec<ModelConfig> {
@@ -949,100 +829,53 @@ mod tests {
         }
     }
 
-    fn arch_specs(team: &Team) -> Vec<&AgentSpec> {
+    fn team_specs(team: &Team) -> Vec<&AgentSpec> {
         std::iter::once(&team.leader).chain(&team.agents).collect()
     }
 
-    /// The architecture-review preset (AGE-808): a coordinator leader that
-    /// delegates to exactly its roster, a proposer that owns the document
-    /// (the only writer), three blank read-only reviewers, a read-only
-    /// verifier, all callable by the leader only; typed handoffs for every
-    /// worker; and the first pinned models of any preset: the strongest
-    /// Claude model for every role but the verifier, which checks one diff
-    /// on a cheaper one.
+    /// A workspace team `pinned` whose specs pin hosted models: the
+    /// strongest Claude for the lead and the worker, a cheaper one for the
+    /// checker. The worker's preamble carries the date token.
+    fn write_pinned_team(workspace: &Path) {
+        write_spec(
+            workspace,
+            "pin-lead",
+            &format!(
+                "model = \"{STRONGEST_CLAUDE}\"\n[swarm]\ndelegates_to = [\"pin-worker\", \"pin-checker\"]\n"
+            ),
+        );
+        write_spec(
+            workspace,
+            "pin-worker",
+            &format!(
+                "model = \"{STRONGEST_CLAUDE}\"\npreamble = \"decision-date: {TODAY_TOKEN}\"\n"
+            ),
+        );
+        write_spec(
+            workspace,
+            "pin-checker",
+            &format!("model = \"{CHEAPER_CLAUDE}\"\n"),
+        );
+        write_team(
+            &workspace.join(WORKSPACE_TEAMS_DIR),
+            "pinned",
+            r#"{"leader":"pin-lead","agents":["pin-worker","pin-checker"]}"#,
+            None,
+        );
+    }
+
+    /// Pinned models resolve among the models the OpenRouter sync makes,
+    /// which is what `spec.validate` checks, and `load_team` dates a
+    /// member's preamble.
     #[test]
-    fn the_architecture_review_preset_loads_with_its_roster_handoffs_and_pinned_models() {
-        let team = load_team("architecture-review", None, None).expect("the preset loads");
-        assert_eq!(team.source, TeamSource::Preset);
-        assert_eq!(team.file.leader, "arch-lead");
-        assert_eq!(
-            team.file.agents,
-            [
-                "arch-proposer",
-                "arch-maint-reviewer",
-                "arch-sec-reviewer",
-                "arch-devils-advocate",
-                "arch-verifier"
-            ]
-        );
-        assert_eq!(team.file.max_agent_turns, Some(160));
-        assert_eq!(team.leader.tools.profile.as_deref(), Some("coordinator"));
-        assert_eq!(team.leader.swarm.delegates_to, team.file.agents);
-        assert!(team.leader.budget.max_duration.is_some());
-        let spec = |name: &str| team.agents.iter().find(|a| a.agent.name == name).unwrap();
-        for worker in &team.agents {
-            assert_eq!(
-                worker.swarm.callers.as_deref(),
-                Some(&["arch-lead".to_string()][..]),
-                "{}",
-                worker.agent.name
-            );
-            assert!(
-                worker.budget.max_agent_turns.is_some() && worker.budget.max_duration.is_some()
-            );
-        }
-
-        // The proposer writes; everyone else only reads.
-        let proposer = spec("arch-proposer");
-        assert_eq!(proposer.tools.profile.as_deref(), Some("coder"));
-        assert_eq!(proposer.tools.disable, ["execute_code", "git"]);
-        for reviewer in ARCH_REVIEWERS {
-            assert_eq!(
-                spec(reviewer).tools.profile.as_deref(),
-                Some("reviewer"),
-                "{reviewer}"
-            );
-            assert!(spec(reviewer).tools.disable.is_empty(), "{reviewer}");
-        }
-        let verifier = spec("arch-verifier");
-        assert_eq!(verifier.tools.profile.as_deref(), Some("reviewer"));
-        assert_eq!(verifier.tools.disable, ["shell"]);
-
-        // The proposer's templates are the format `architecture_doc` checks.
-        let preamble = proposer.agent.preamble.as_deref().unwrap();
-        for key in architecture_doc::ADR_KEYS
-            .iter()
-            .chain(architecture_doc::DESIGN_KEYS)
-        {
-            assert!(
-                preamble.contains(&format!("\n{key}: ")),
-                "the templates carry `{key}:`"
-            );
-        }
-        for (level, heading) in architecture_doc::ADR_HEADINGS
-            .iter()
-            .chain(architecture_doc::DESIGN_HEADINGS)
-        {
-            let line = format!("\n{} {heading}", "#".repeat(*level));
-            assert!(preamble.contains(&line), "the templates carry {line:?}");
-        }
-        assert!(preamble.contains("status: proposed"));
-        // The template dates itself: `load_team` filled in today's date.
-        let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
-        assert!(
-            !preamble.contains(TODAY_TOKEN),
-            "every {TODAY_TOKEN} is filled"
-        );
-        assert!(preamble.contains(&format!("\ndecision-date: {today}\n")));
-        assert!(preamble.contains(&format!("(verified {today})")));
-        assert!(preamble.contains("docs/adr/ADR-NNNN-slug.md"));
-
-        // Pinned models: they resolve among the models the OpenRouter sync
-        // makes, which is what `spec.validate` checks.
+    fn a_teams_pinned_models_resolve_and_its_preambles_are_dated() {
+        let workspace = tempfile::tempdir().unwrap();
+        write_pinned_team(workspace.path());
+        let team = load_team("pinned", Some(workspace.path()), None).unwrap();
         let models = synced_claude_models();
-        for member in arch_specs(&team) {
+        for member in team_specs(&team) {
             let name = &member.agent.name;
-            let expected = if name == "arch-verifier" {
+            let expected = if name == "pin-checker" {
                 CHEAPER_CLAUDE
             } else {
                 STRONGEST_CLAUDE
@@ -1054,198 +887,16 @@ mod tests {
             let resolved = resolve_model_query(&models, member.agent.model.as_deref()).unwrap();
             assert_eq!(resolved.model_identifier, expected);
         }
-
+        let today = chrono::Local::now().date_naive().format("%Y-%m-%d");
+        let worker = team
+            .agents
+            .iter()
+            .find(|a| a.agent.name == "pin-worker")
+            .unwrap();
         assert_eq!(
-            team.handoffs.keys().collect::<Vec<_>>(),
-            [
-                "arch-devils-advocate",
-                "arch-maint-reviewer",
-                "arch-proposer",
-                "arch-sec-reviewer",
-                "arch-verifier"
-            ]
+            worker.agent.preamble.as_deref(),
+            Some(format!("decision-date: {today}").as_str())
         );
-        for reviewer in ARCH_REVIEWERS {
-            assert_eq!(
-                team.handoffs[reviewer].schema, team.handoffs["arch-sec-reviewer"].schema,
-                "the three reviewers share one schema"
-            );
-        }
-        assert!(team.handoff_ledger().is_some());
-        assert_eq!(
-            team.first_turn_instruction().as_deref(),
-            Some("read_skill architecture-review and follow it.")
-        );
-        let skill = team.skill().unwrap();
-        assert!(skill.content.contains("## When a step fails"));
-        assert!(
-            skill
-                .content
-                .contains("delegate to the same reviewer once more with a new persona")
-        );
-        assert!(
-            skill
-                .content
-                .contains("## Personas (one per round, in order)")
-        );
-        assert!(skill.content.contains("**Devil's advocate:**"));
-        assert!(skill.content.contains("record the gap"));
-        assert!(
-            skill.content.contains("`ask_user`"),
-            "product questions go to the human"
-        );
-    }
-
-    /// The handoffs are small and flat on purpose (E8, AGE-754: invalid
-    /// handoffs were the panel's biggest loss): each rejects a malformed
-    /// reply and accepts a valid one, and requires only what the leader
-    /// acts on.
-    #[test]
-    fn the_architecture_review_handoffs_reject_a_malformed_reply_and_accept_a_valid_one() {
-        let team = load_team("architecture-review", None, None).unwrap();
-        let invalid = |role: &str, reply: &str| {
-            assert!(
-                matches!(
-                    handoff::check(&team.handoffs[role], reply),
-                    handoff::HandoffOutcome::Invalid { .. }
-                ),
-                "{role} must reject {reply:?}"
-            );
-        };
-        let valid = |role: &str, reply: &str| match handoff::check(&team.handoffs[role], reply) {
-            handoff::HandoffOutcome::Valid(value) => value,
-            other => panic!("{role} must accept {reply:?}: {other:?}"),
-        };
-
-        for reviewer in ARCH_REVIEWERS {
-            invalid(reviewer, "The draft looks good.");
-            invalid(reviewer, "```json\n{\"findings\": \"1. must-fix: x\"}\n```");
-            invalid(
-                reviewer,
-                "```json\n{\"must_fix\": -1, \"findings\": \"x\"}\n```",
-            );
-            invalid(
-                reviewer,
-                "```json\n{\"must_fix\": 0, \"findings\": \"\"}\n```",
-            );
-            invalid(
-                reviewer,
-                "```json\n{\"must_fix\": 0, \"findings\": \"ok\", \"verdict\": \"LGTM\"}\n```",
-            );
-            invalid(
-                reviewer,
-                "```json\n{\"must_fix\": 1, \"findings\": [{\"severity\": \"must-fix\"}]}\n```",
-            );
-            // Only the count the leader loops on and the text the proposer
-            // reads are required.
-            valid(
-                reviewer,
-                "```json\n{\"must_fix\": 0, \"findings\": \"No findings: the decision holds.\"}\n```",
-            );
-            let review = valid(
-                reviewer,
-                "Review done.\n```json\n{\"verdict\": \"REWORK\", \"must_fix\": 1, \"should_fix\": 1, \"findings\": \"1. must-fix: Decision says the flag isolates the agent; nothing enforces it. Evidence: crates/chatty-core/src/services/a2a_client.rs:40. Fix: say what enforces it.\\n2. should-fix: no owner for the allowlist.\"}\n```",
-            );
-            assert_eq!(review["must_fix"], 1);
-        }
-
-        let proposer = "arch-proposer";
-        invalid(proposer, "I revised the document.");
-        invalid(
-            proposer,
-            "```json\n{\"accepted\": 1, \"rejected\": 0, \"human_questions\": [], \"summary\": \"x\"}\n```",
-        );
-        invalid(
-            proposer,
-            "```json\n{\"accepted\": 1, \"rejected\": 0, \"rejected_must_fix\": 0, \"human_questions\": \"none\", \"summary\": \"x\"}\n```",
-        );
-        invalid(
-            proposer,
-            "```json\n{\"accepted\": 0, \"rejected\": 0, \"rejected_must_fix\": 0, \"human_questions\": [], \"summary\": \"\"}\n```",
-        );
-        let report = valid(
-            proposer,
-            "Written.\n```json\n{\"accepted\": 2, \"partial\": 1, \"rejected\": 1, \"rejected_must_fix\": 1, \"words\": 900, \"human_questions\": [\"Default on or off? I recommend off.\"], \"summary\": \"Named the owner; rejected F3: ssrf_guard.rs:30 already blocks it.\"}\n```",
-        );
-        assert_eq!(report["rejected_must_fix"], 1);
-        valid(
-            proposer,
-            "```json\n{\"accepted\": 0, \"rejected\": 0, \"rejected_must_fix\": 0, \"human_questions\": [], \"summary\": \"First draft.\"}\n```",
-        );
-
-        let verifier = "arch-verifier";
-        invalid(verifier, "Looks like wording only.");
-        invalid(verifier, "```json\n{\"verdict\": \"PASS\"}\n```");
-        invalid(
-            verifier,
-            "```json\n{\"verdict\": \"ok\", \"blockers\": []}\n```",
-        );
-        valid(
-            verifier,
-            "```json\n{\"verdict\": \"PASS\", \"blockers\": []}\n```",
-        );
-        valid(
-            verifier,
-            "```json\n{\"verdict\": \"FAIL\", \"blockers\": [\"Kill criteria: two releases became three; restore two.\"]}\n```",
-        );
-    }
-
-    /// The loop rule is the leader's: a coordinator model follows the skill,
-    /// and a scripted model would only replay whatever decisions a test
-    /// scripts, so what pins the rule is the skill's own text. A round with
-    /// no must-fix ends the review; a must-fix the proposer rejected with
-    /// evidence does not count; the two safety valves and the 10-round cap
-    /// end it as not converged; the review file records every round.
-    #[test]
-    fn the_architecture_review_skill_states_the_loop_rule() {
-        let team = load_team("architecture-review", None, None).unwrap();
-        let skill = team.skill().unwrap().content;
-        let step = |n: usize| {
-            skill
-                .split(&format!("\n{n}. **"))
-                .nth(1)
-                .and_then(|rest| rest.split(&format!("\n{}. **", n + 1)).next())
-                .unwrap_or_else(|| panic!("the skill has a step {n}"))
-        };
-        let count = step(3);
-        assert!(
-            count.contains("sum of the three reviewers' `must_fix`"),
-            "{count}"
-        );
-        assert!(
-            count.contains("`M(N)` is 0 and all three reviewers returned a review")
-                && count.contains("**converged**"),
-            "{count}"
-        );
-        let revise = step(4);
-        assert!(
-            revise.contains("Subtract its `rejected_must_fix`"),
-            "{revise}"
-        );
-        assert!(revise.contains("**converged**"), "{revise}");
-        let rule = step(5);
-        let clauses: Vec<&str> = rule
-            .lines()
-            .filter(|l| l.trim_start().starts_with("- "))
-            .collect();
-        assert_eq!(clauses.len(), 4, "{rule}");
-        assert!(clauses[0].contains("`M(N-1) >= M(N-2)` and `M(N) >= M(N-1)`"));
-        assert!(clauses[1].contains("accepted in an earlier round"));
-        assert!(clauses[2].contains("`N` is 10"));
-        for valve in &clauses[..3] {
-            assert!(valve.contains("**not converged**"), "{valve}");
-        }
-        assert!(clauses[3].contains("step 2 with N + 1"));
-        assert!(skill.contains("the round does not converge, even at 0 must-fix"));
-        let record = step(8);
-        assert!(record.contains("Round <N>: <M(N)> must-fix"), "{record}");
-        assert!(
-            record.contains("## Open questions for the human"),
-            "{record}"
-        );
-        assert!(skill.contains("`.review.md`"));
-        assert!(skill.contains("Never call a not-converged review done"));
-        assert!(skill.contains("never saved up for the end"));
     }
 
     /// AGE-808: without the provider a pinned model needs, the team fails
@@ -1253,11 +904,13 @@ mod tests {
     /// with every spec shadowed by one without a pin, it passes.
     #[test]
     fn a_pinned_model_without_its_provider_names_the_provider() {
-        let team = load_team("architecture-review", None, None).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_pinned_team(workspace.path());
+        let team = load_team("pinned", Some(workspace.path()), None).unwrap();
         let text = |models: &[ModelConfig], providers: &[ProviderConfig]| {
             format!(
                 "{:#}",
-                check_model_providers(arch_specs(&team), models, providers).unwrap_err()
+                check_model_providers(team_specs(&team), models, providers).unwrap_err()
             )
         };
 
@@ -1265,11 +918,11 @@ mod tests {
         let error = text(&[], &[]);
         assert!(error.contains("OpenRouter is not configured"), "{error}");
         assert!(
-            error.contains("arch-lead (model = \"anthropic/claude-opus-5\")"),
+            error.contains("pin-lead (model = \"anthropic/claude-opus-5\")"),
             "{error}"
         );
         assert!(
-            error.contains("arch-verifier (model = \"anthropic/claude-sonnet-5\")"),
+            error.contains("pin-checker (model = \"anthropic/claude-sonnet-5\")"),
             "{error}"
         );
         assert!(error.contains("Settings → Providers"), "{error}");
@@ -1289,7 +942,7 @@ mod tests {
         assert!(error.contains("OpenRouter is not configured"), "{error}");
 
         check_model_providers(
-            arch_specs(&team),
+            team_specs(&team),
             &synced_claude_models(),
             &[openrouter(Some("sk-or-test"))],
         )
@@ -1314,7 +967,7 @@ mod tests {
             "{error}"
         );
         assert!(
-            error.contains("arch-proposer (model = \"anthropic/claude-opus-5\")"),
+            error.contains("pin-worker (model = \"anthropic/claude-opus-5\")"),
             "{error}"
         );
         assert!(error.contains("Your models: GPT-5.6 (Azure)."), "{error}");
@@ -1332,11 +985,9 @@ mod tests {
         assert!(!is_openrouter_id("hf.co/bartowski/qwen"));
         assert!(is_openrouter_id("deepseek/deepseek-r1:free"));
 
-        // Every spec shadowed without a pin: the roster's default runs it.
-        let workspace = tempfile::tempdir().unwrap();
+        // Every spec rewritten without a pin: the roster's default runs it.
         let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
-        std::fs::create_dir_all(&dir).unwrap();
-        for member in arch_specs(&team) {
+        for member in team_specs(&team) {
             let mut shadow = member.clone();
             shadow.agent.model = None;
             std::fs::write(
@@ -1345,14 +996,11 @@ mod tests {
             )
             .unwrap();
         }
-        let shadowed = load_team("architecture-review", Some(workspace.path()), None).unwrap();
-        check_model_providers(arch_specs(&shadowed), &[], &[])
+        let shadowed = load_team("pinned", Some(workspace.path()), None).unwrap();
+        check_model_providers(team_specs(&shadowed), &[], &[])
             .expect("a shadowed team needs no hosted provider");
     }
 
-    /// AGE-808: `--model` on a team run is the one-flag way onto a single
-    /// model: every member runs it, the preset's pins included; without it
-    /// the pins stand.
     /// AGE-808: a preamble's `{{today}}` becomes the date; a spec without
     /// the token is left as it was.
     #[test]
@@ -1372,9 +1020,14 @@ mod tests {
         assert_eq!(plain.agent.preamble, None);
     }
 
+    /// AGE-808: `--model` on a team run is the one-flag way onto a single
+    /// model: every member runs it, the pins included; without it the pins
+    /// stand.
     #[test]
     fn model_for_the_run_replaces_every_members_pin() {
-        let team = load_team("architecture-review", None, None).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_pinned_team(workspace.path());
+        let team = load_team("pinned", Some(workspace.path()), None).unwrap();
         let pinned = team.run_roster(None);
         assert_eq!(pinned, team.agents);
         assert!(pinned.iter().all(|spec| spec.agent.model.is_some()));
@@ -1388,7 +1041,7 @@ mod tests {
                 spec.agent.name
             );
         }
-        let data = load_team("data-analysis", None, None).unwrap();
+        let data = load_team("crosscheck-data", None, None).unwrap();
         assert!(
             data.run_roster(None)
                 .iter()
@@ -1439,15 +1092,12 @@ mod tests {
         .unwrap();
         write_team(
             &data_teams,
-            "data-analysis",
-            r#"{"leader":"data-lead","agents":["data-coder"],"skill":"data-analysis"}"#,
+            "crosscheck",
+            r#"{"leader":"crosscheck-lead","agents":["data-coder"],"skill":"crosscheck"}"#,
             Some("# data skill"),
         );
-        let team = load_team("data-analysis", Some(workspace.path()), Some(data.path())).unwrap();
-        assert_eq!(
-            team.source,
-            TeamSource::Dir(data_teams.join("data-analysis"))
-        );
+        let team = load_team("crosscheck", Some(workspace.path()), Some(data.path())).unwrap();
+        assert_eq!(team.source, TeamSource::Dir(data_teams.join("crosscheck")));
         assert_eq!(team.agents[0].agent.name, "data-coder");
         assert_eq!(team.skill().unwrap().content, "# data skill");
 
@@ -1458,22 +1108,22 @@ mod tests {
         );
         write_spec(
             workspace.path(),
-            "data-lead",
+            "crosscheck-lead",
             "model = \"big\"\npreamble = \"lead\"\n[tools]\nprofile = \"coordinator\"\n",
         );
         let ws_dir = write_team(
             &ws_teams,
-            "data-analysis",
+            "crosscheck",
             r#"{
-              "leader": "data-lead",
+              "leader": "crosscheck-lead",
               "agents": ["ws-coder"],
               "verification": "cargo test",
-              "skill": "data-analysis",
+              "skill": "crosscheck",
               "max_agent_turns": 7
             }"#,
             None,
         );
-        let team = load_team("data-analysis", Some(workspace.path()), Some(data.path())).unwrap();
+        let team = load_team("crosscheck", Some(workspace.path()), Some(data.path())).unwrap();
         assert_eq!(team.source, TeamSource::Dir(ws_dir));
         assert_eq!(team.leader.agent.model.as_deref(), Some("big"));
         assert_eq!(team.agents[0].agent.name, "ws-coder");
@@ -1486,7 +1136,7 @@ mod tests {
         assert_eq!(
             team.first_turn_instruction().as_deref(),
             Some(
-                "read_skill data-analysis and follow it. \
+                "read_skill crosscheck and follow it. \
                  The team's verification command is: `cargo test`"
             )
         );
@@ -1507,11 +1157,11 @@ mod tests {
         let mut execution_settings = ExecutionSettingsModel::default();
         let before = execution_settings.max_agent_turns;
 
-        let mut team = load_team("data-analysis", None, None).unwrap();
+        let mut team = load_team("crosscheck", None, None).unwrap();
         team.file.max_agent_turns = None;
         let run = team.run_module_settings(&on_disk);
-        assert_eq!(run.virtual_agents, ["data-analyst", "reviewer"]);
-        assert_eq!(team.agent_names(), ["data-analyst", "reviewer"]);
+        assert_eq!(run.virtual_agents, CROSSCHECK_ROSTER);
+        assert_eq!(team.agent_names(), CROSSCHECK_ROSTER);
         assert!(run.team.verification.is_none());
         assert_eq!(
             run.default_endpoint_budget, 7,
@@ -1543,11 +1193,11 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         write_team(
             &workspace.path().join(WORKSPACE_TEAMS_DIR),
-            "data-analysis",
+            "crosscheck",
             "{ not json",
             None,
         );
-        let err = load_team("data-analysis", Some(workspace.path()), None).unwrap_err();
+        let err = load_team("crosscheck", Some(workspace.path()), None).unwrap_err();
         assert!(err.to_string().contains("not a team file"), "{err:#}");
     }
 
@@ -1562,7 +1212,7 @@ mod tests {
                 "`leader`",
             ),
             (
-                r#"{"leader":"data-lead","agents":[{"name":"local-coder","tools":"coder"}]}"#,
+                r#"{"leader":"crosscheck-lead","agents":[{"name":"local-coder","tools":"coder"}]}"#,
                 "`agents`",
             ),
         ] {
@@ -1591,7 +1241,7 @@ mod tests {
         let teams = workspace.path().join(WORKSPACE_TEAMS_DIR);
         let team_json = |handoffs: &str| {
             format!(
-                r#"{{"leader":"data-lead","agents":["data-analyst","reviewer"],"handoffs":{handoffs}}}"#
+                r#"{{"leader":"crosscheck-lead","agents":["researcher","reviewer"],"handoffs":{handoffs}}}"#
             )
         };
         let schemas = teams.join("t").join("schemas");
@@ -1605,18 +1255,15 @@ mod tests {
         .unwrap();
         std::fs::write(
             schemas.join("review.json"),
-            r#"{"type":"object","x-must-be-read":{"data-analyst":["files_changed"]}}"#,
+            r#"{"type":"object","x-must-be-read":{"researcher":["files_changed"]}}"#,
         )
         .unwrap();
 
         for (handoffs, says) in [
+            (r#"{"researcher":"schemas/missing.json"}"#, "failed to read"),
+            (r#"{"researcher":"schemas/not-json.json"}"#, "is not JSON"),
             (
-                r#"{"data-analyst":"schemas/missing.json"}"#,
-                "failed to read",
-            ),
-            (r#"{"data-analyst":"schemas/not-json.json"}"#, "is not JSON"),
-            (
-                r#"{"data-analyst":"schemas/bad.json"}"#,
+                r#"{"researcher":"schemas/bad.json"}"#,
                 "not a valid JSON Schema",
             ),
             (r#"{"nobody":"schemas/change.json"}"#, "not in `agents`"),
@@ -1637,20 +1284,24 @@ mod tests {
         write_team(
             &teams,
             "t",
-            &team_json(
-                r#"{"data-analyst":"schemas/change.json","reviewer":"schemas/review.json"}"#,
-            ),
+            &team_json(r#"{"researcher":"schemas/change.json","reviewer":"schemas/review.json"}"#),
             None,
         );
         let team = load_team("t", Some(workspace.path()), None).unwrap();
-        assert_eq!(team.handoffs["data-analyst"].role, "data-analyst");
+        assert_eq!(team.handoffs["researcher"].role, "researcher");
         assert_eq!(
-            team.handoffs["data-analyst"].schema.to_value().unwrap()["required"][0],
+            team.handoffs["researcher"].schema.to_value().unwrap()["required"][0],
             "files_changed"
         );
         assert!(team.handoff_ledger().is_some());
-        let preset = load_team("data-analysis", None, None).unwrap();
-        assert!(preset.handoffs.is_empty() && preset.handoff_ledger().is_none());
+        write_team(
+            &teams,
+            "plain",
+            r#"{"leader":"crosscheck-lead","agents":["researcher","reviewer"]}"#,
+            None,
+        );
+        let plain = load_team("plain", Some(workspace.path()), None).unwrap();
+        assert!(plain.handoffs.is_empty() && plain.handoff_ledger().is_none());
     }
 
     #[test]
@@ -1659,7 +1310,7 @@ mod tests {
         write_team(
             &workspace.path().join(WORKSPACE_TEAMS_DIR),
             "t",
-            r#"{"leader":"data-lead","agents":["nobody"]}"#,
+            r#"{"leader":"crosscheck-lead","agents":["nobody"]}"#,
             None,
         );
         let err = format!(
@@ -1669,14 +1320,60 @@ mod tests {
         assert!(err.contains("'nobody'"), "{err}");
     }
 
+    /// The error names where it looked and the listed presets; an
+    /// experimental preset is not among them (AGE-696).
     #[test]
     fn an_unknown_team_lists_where_it_looked_and_the_presets() {
         let workspace = tempfile::tempdir().unwrap();
         let err = load_team("nope", Some(workspace.path()), None).unwrap_err();
         let text = err.to_string();
         assert!(text.contains(".chatty/teams/nope"), "{text}");
-        assert!(text.contains("data-analysis"), "{text}");
+        for preset in listed_presets() {
+            assert!(text.contains(preset.id), "{text}");
+        }
+        assert!(!text.contains("crosscheck"), "{text}");
         assert!(load_team("../x", None, None).is_err());
         assert!(load_team("", None, None).is_err());
+    }
+
+    /// AGE-696: `experimental` lists a preset nowhere, and is written only
+    /// when set.
+    #[test]
+    fn an_experimental_team_is_not_listed() {
+        let listed = |json: &'static str| {
+            let preset = TeamPreset {
+                id: "t",
+                team_json: json,
+                skill: None,
+                schemas: &[],
+            };
+            preset_list([preset].iter())
+        };
+        assert_eq!(
+            listed(r#"{"name":"T","leader":"l"}"#),
+            "the presets are t (T)"
+        );
+        for preset in PRESETS {
+            let file = TeamFile::parse(preset.team_json).unwrap();
+            assert_eq!(
+                listed_presets().any(|p| p.id == preset.id),
+                !file.experimental,
+                "{}",
+                preset.id
+            );
+        }
+        let plain = TeamFile::parse(r#"{"leader":"l"}"#).unwrap();
+        assert!(!plain.experimental);
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("experimental")
+        );
+        let team = load_team("crosscheck", None, None).unwrap();
+        assert!(team.file.experimental);
+        assert_eq!(
+            team.experimental_notice().as_deref(),
+            Some("Crosscheck is experimental: see docs/research/")
+        );
     }
 }

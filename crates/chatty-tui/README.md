@@ -129,11 +129,11 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 `--team <id>` runs a fixed roster from a team directory (`teams/<id>/team.json` +
 `SKILL.md`) and implies `--broker`. Searched in `<workspace>/.chatty/teams/`, then
 the platform data directory's `chatty/teams/`, then the compiled-in presets
-(`data-analysis`, `research-brief`, `fix-and-verify`; all experimental):
+(`crosscheck`, `crosscheck-data`; both experimental):
 
 ```bash
-chatty-tui --team data-analysis --headless --ollama --model qwen3:14b \
-  -m "Revenue in orders.csv fell in August. Find out why."
+chatty-tui --team crosscheck-data --headless --ollama --model qwen3:14b \
+  -m "What was the average transaction value in March 2023, in EUR?"
 ```
 
 Flags a worker is started with (a leader rarely passes these by hand):

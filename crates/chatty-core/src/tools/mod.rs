@@ -157,6 +157,7 @@ mod map_tool_error_tests {
 pub mod add_attachment_tool;
 pub mod agent_todo_tool;
 pub mod ask_user_tool;
+pub mod best_of_tool;
 #[cfg(feature = "browser")]
 pub mod browser_tools;
 pub mod browser_use_tool;

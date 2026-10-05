@@ -33,6 +33,7 @@ use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
+use crate::tools::best_of_tool::BestOfTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, AskUserTool, BrowserUseTool, CreateChartTool,
     CreateDirectoryTool, DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool,
@@ -1415,6 +1416,12 @@ impl AgentClient {
         }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
         let delegator = role.delegates.then(|| invoke_agent_tool.clone());
+        // `best_of` fans out over this same `invoke_agent` (AGE-853).
+        let best_of_tool = role
+            .best_of
+            .clone()
+            .filter(|_| role.delegates)
+            .map(|config| BestOfTool::new(invoke_agent_tool.clone(), config));
 
         // Publish module tool (if an MCP server exposes `publish_module`)
         let publish_module_tool: Option<PublishModuleTool> = mcp_tools.as_ref().and_then(|servers| {
@@ -1564,6 +1571,7 @@ impl AgentClient {
             daytona_tool: daytona_tool,
             list_agents_tool: role.delegates.then_some(list_agents_tool),
             invoke_agent_tool: role.delegates.then_some(invoke_agent_tool),
+            best_of_tool: best_of_tool,
             publish_module_tool: publish_module_tool,
             ask_user_tool: ask_user_tool,
             terminal_read_tool: terminal_read_tool,

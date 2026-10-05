@@ -154,11 +154,11 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
 }
 
 /// The issue's "Verify", second half: a team file in the workspace
-/// overrides the preset of the same id (`data-analysis`).
+/// overrides the preset of the same id (`crosscheck`).
 #[tokio::test]
 async fn a_team_file_in_the_workspace_overrides_the_preset() {
     let workspace = tempfile::tempdir().expect("a temp dir");
-    let team_dir = workspace.path().join(".chatty/teams/data-analysis");
+    let team_dir = workspace.path().join(".chatty/teams/crosscheck");
     std::fs::create_dir_all(&team_dir).unwrap();
     let agents_dir = workspace.path().join(".chatty/agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
@@ -170,19 +170,19 @@ async fn a_team_file_in_the_workspace_overrides_the_preset() {
     std::fs::write(
         team_dir.join("team.json"),
         r#"{
-          "leader": "data-lead",
+          "leader": "crosscheck-lead",
           "agents": ["ws-coder"],
           "verification": "make test",
-          "skill": "data-analysis",
+          "skill": "crosscheck",
           "max_agent_turns": 12
         }"#,
     )
     .unwrap();
 
-    let team = load_team("data-analysis", Some(workspace.path()), None).unwrap();
+    let team = load_team("crosscheck", Some(workspace.path()), None).unwrap();
     assert_eq!(team.source, TeamSource::Dir(team_dir));
     let (module_settings, agents, execution_settings) =
-        team_settings("data-analysis", workspace.path());
+        team_settings("crosscheck", workspace.path());
     assert_eq!(module_settings.roster_names(None), ["ws-coder"]);
     assert_eq!(
         module_settings.team.verification.as_deref(),

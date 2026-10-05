@@ -145,6 +145,9 @@ pub(super) struct NativeTools {
     /// The delegation tools, `None` unless the agent may delegate (DP-1).
     pub list_agents_tool: Option<ListAgentsTool>,
     pub invoke_agent_tool: Option<InvokeAgentTool>,
+    /// `best_of` (AGE-853), for a spec that declares `swarm.best_of`. The
+    /// spec is its allow-list, so the profile does not filter it.
+    pub best_of_tool: Option<crate::tools::best_of_tool::BestOfTool>,
     pub publish_module_tool: Option<PublishModuleTool>,
     pub ask_user_tool: Option<AskUserTool>,
     pub terminal_read_tool: Option<TerminalReadTool>,
@@ -188,6 +191,9 @@ impl NativeTools {
         }
         if let Some(t) = self.invoke_agent_tool {
             b = add(b, profile, t);
+        }
+        if let Some(t) = self.best_of_tool {
+            b = b.tool(t);
         }
 
         if let Some(t) = self.ask_user_tool {
@@ -396,6 +402,7 @@ macro_rules! native_tools {
         daytona_tool: $daytona_tool:expr,
         list_agents_tool: $list_agents_tool:expr,
         invoke_agent_tool: $invoke_agent_tool:expr,
+        best_of_tool: $best_of_tool:expr,
         publish_module_tool: $publish_module_tool:expr,
         ask_user_tool: $ask_user_tool:expr,
         terminal_read_tool: $terminal_read_tool:expr,
@@ -454,6 +461,7 @@ macro_rules! native_tools {
             daytona_tool: $daytona_tool,
             list_agents_tool: $list_agents_tool,
             invoke_agent_tool: $invoke_agent_tool,
+            best_of_tool: $best_of_tool,
             publish_module_tool: $publish_module_tool,
             ask_user_tool: $ask_user_tool,
             terminal_read_tool: $terminal_read_tool,

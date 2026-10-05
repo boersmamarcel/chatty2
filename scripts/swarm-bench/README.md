@@ -4,7 +4,7 @@ Measures whether a Chatty team beats one harness agent with the same tools
 and model, and at what cost. There are 30 tasks in three families (data
 audit, code fix and review, research then write). Each task runs as arm
 `single` (one agent, no tool profile) and as arm `swarm` (the family's frozen
-team preset).
+team, in `frozen/`; no longer compiled into chatty).
 
 - **Protocol:** fixed before any real run in
   [`docs/research/swarm-vs-single-prereg.md`](../../docs/research/swarm-vs-single-prereg.md).

@@ -3,7 +3,7 @@
 //!
 //! `scripts/swarm-bench/run.sh` drives real `chatty-tui --headless` runs (the
 //! binary this crate builds): arm `single` as one agent, arm `swarm` as the
-//! family's frozen team preset, whose leader really spawns its workers. A
+//! family's frozen team (`scripts/swarm-bench/frozen/`), whose leader really spawns its workers. A
 //! `FakeDaemon` scripts every agent's turns; the task verifiers run for real;
 //! `report.py` turns the results into the report. Needs `bash`, `git` and
 //! `python3`.

@@ -20,6 +20,8 @@
 
 #[cfg(test)]
 mod approval_relay;
+#[cfg(test)]
+mod best_of;
 pub mod broker;
 #[cfg(test)]
 mod broker_delegation;
