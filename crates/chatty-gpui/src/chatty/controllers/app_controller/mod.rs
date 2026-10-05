@@ -1055,7 +1055,7 @@ mod tests {
         cx.update(|cx| {
             cx.set_global(crate::settings::models::ModuleSettingsModel {
                 enabled: false,
-                virtual_agents: vec!["data-analyst".to_string()],
+                virtual_agents: vec!["researcher".to_string()],
                 ..Default::default()
             });
             cx.set_global(crate::settings::models::DiscoveredModulesModel::default());
@@ -1066,7 +1066,7 @@ mod tests {
                 .lazy_broker = Some(std::sync::Arc::new(PendingBroker));
             let names = gateway_and_roster(cx, None).expect("module settings exist");
             if cfg!(unix) {
-                assert_eq!(names, vec!["data-analyst".to_string()]);
+                assert_eq!(names, vec!["researcher".to_string()]);
             } else {
                 assert!(names.is_empty(), "no runners on this platform: {names:?}");
             }

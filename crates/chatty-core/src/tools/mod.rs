@@ -157,6 +157,7 @@ mod map_tool_error_tests {
 pub mod add_attachment_tool;
 pub mod agent_todo_tool;
 pub mod ask_user_tool;
+pub mod best_of_tool;
 #[cfg(feature = "browser")]
 pub mod browser_tools;
 pub mod browser_use_tool;
@@ -177,7 +178,6 @@ pub mod filesystem_tool;
 pub mod filesystem_write_tool;
 pub mod git_tool;
 mod html_entities;
-pub mod best_of_tool;
 pub mod invoke_agent_tool;
 pub mod list_agents_tool;
 pub mod list_mcp_tool;

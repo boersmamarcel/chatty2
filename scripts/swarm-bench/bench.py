@@ -7,8 +7,10 @@ repository, then one `chatty-tui --headless` run does the task:
 
 - arm `single`: one harness agent, no tool profile, no team: every tool the
   execution settings allow, which covers the union of the team's profiles;
-- arm `swarm`: the family's frozen team preset (`--team <preset>`), its
-  leader and workers exactly as compiled into this build.
+- arm `swarm`: the family's frozen team (`--team <id>`), its leader and
+  workers exactly as frozen in frozen/ beside this file, which the scratch
+  HOME's data directory serves (they are no longer compiled into chatty,
+  AGE-853).
 
 Both arms get the same prompt, the same execution settings and the same
 model. The task's verifier (verify.py) then judges the workspace and the
@@ -51,10 +53,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 PREREG = os.path.join(ROOT, "docs", "research", "swarm-vs-single-prereg.md")
 DEFAULT_TASKS = os.path.join(HERE, "tasks")
+FROZEN = os.path.join(HERE, "frozen")
 DEFAULT_OUT = os.path.join(ROOT, "target", "swarm-bench")
 VLLM_URL = "http://172.17.0.1:8000/v1"
 
-# The frozen team preset each family's swarm arm runs (compiled into chatty).
+# The frozen team each family's swarm arm runs (frozen/teams/<id>/).
 FAMILY_PRESET = {
     "data-audit": "data-analysis",
     "code-fix": "fix-and-verify",
@@ -361,6 +364,13 @@ def write_home(home, args, base_url):
         path = os.path.join(config, name)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(value, f, indent=2)
+    # The frozen teams and their specs, where chatty looks after the
+    # workspace: the platform data directory's chatty/.
+    if sys.platform == "darwin":
+        data = os.path.join(home, "Library", "Application Support")
+    else:
+        data = os.path.join(home, ".local", "share")
+    shutil.copytree(FROZEN, os.path.join(data, "chatty"))
     with open(os.path.join(home, ".gitconfig"), "w") as f:
         f.write("[user]\n\temail = swarm-bench@chatty.invalid\n\tname = swarm-bench\n"
                 "[commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n")

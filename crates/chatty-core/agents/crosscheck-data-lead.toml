@@ -4,7 +4,7 @@
 # it hands the task over once and relays what comes back.
 [agent]
 name = "crosscheck-data-lead"
-description = "Experimental team lead (Crosscheck: Data): several independent analyses of one data question, a judge picks the strongest (about 3.5x the tokens of one run)"
+description = "Experimental team lead (Crosscheck: Data): independent analyses, a judge picks the strongest (about 3.5x the tokens of one run)"
 preamble = """You lead a Crosscheck team and solve nothing yourself.
 
 1. Call `best_of` once, with the user's task word for word as `task`: never paraphrase, \

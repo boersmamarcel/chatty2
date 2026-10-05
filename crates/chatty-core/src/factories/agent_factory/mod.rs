@@ -31,9 +31,9 @@ use crate::services::shell_service::ShellSession;
 use crate::settings::models::ToolLoading;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
-use crate::tools::best_of_tool::BestOfTool;
 #[cfg(feature = "math-render")]
 use crate::tools::CompileTypstTool;
+use crate::tools::best_of_tool::BestOfTool;
 use crate::tools::{
     AddAttachmentTool, ApplyDiffTool, AskUserTool, BrowserUseTool, CreateChartTool,
     CreateDirectoryTool, DaytonaTool, DeleteFileTool, DocRetrieverTool, ExecuteCodeTool, FetchTool,

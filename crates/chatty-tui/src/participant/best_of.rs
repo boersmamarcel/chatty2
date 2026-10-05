@@ -152,8 +152,14 @@ async fn judge_selects_one_attempt_and_never_rewrites() {
 
     assert_eq!(out.selected_by, SelectedBy::Judge);
     assert_eq!(out.chosen, 2);
-    assert_eq!(out.answer, "1 000 rows (approx.)", "solver 2's answer, verbatim");
-    assert!(!out.answer.contains("99"), "nothing of the judge's own text");
+    assert_eq!(
+        out.answer, "1 000 rows (approx.)",
+        "solver 2's answer, verbatim"
+    );
+    assert!(
+        !out.answer.contains("99"),
+        "nothing of the judge's own text"
+    );
     assert_eq!(out.reason.as_deref(), Some("it used the right file"));
 
     let judged = kit.ndjson.requests_for(JUDGE_MODEL);
@@ -211,5 +217,9 @@ async fn verifier_overrides_judge_when_present() {
         kit.ndjson.requests_for(JUDGE_MODEL).is_empty(),
         "a verifier that decides leaves the judge unasked"
     );
-    assert!(out.cost.starts_with("3 attempts, no judge needed"), "{}", out.cost);
+    assert!(
+        out.cost.starts_with("3 attempts, no judge needed"),
+        "{}",
+        out.cost
+    );
 }

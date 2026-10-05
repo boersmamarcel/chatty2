@@ -125,28 +125,6 @@ mod tests {
         }
     }
 
-    /// AGE-808: a preset spec that pins a model pins one of these, so a user
-    /// with an OpenRouter key has it synced; a pin the sync never adds would
-    /// fail every run with "model not found".
-    #[test]
-    fn every_model_a_preset_spec_pins_is_curated() {
-        let curated: Vec<String> = default_curated_models().into_iter().map(|m| m.id).collect();
-        let mut pinned = 0;
-        for (name, _) in chatty_core::agent_spec::PRESETS {
-            let spec = chatty_core::agent_spec::load_agent_spec_from(name, None, None)
-                .unwrap()
-                .spec;
-            if let Some(model) = spec.agent.model {
-                assert!(
-                    curated.contains(&model),
-                    "{name} pins {model}, which is not curated"
-                );
-                pinned += 1;
-            }
-        }
-        assert!(pinned > 0, "architecture-review's specs pin models");
-    }
-
     /// These were delisted by OpenRouter and failed at point of use. Keep them
     /// out rather than rediscovering the failure through a user report.
     #[test]

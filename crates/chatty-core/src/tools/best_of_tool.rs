@@ -204,13 +204,26 @@ impl Tool for BestOfTool {
                     Ok(out) => {
                         let tokens = tokens_of(&out.usage);
                         match judge_choice(&out, candidates.len()) {
-                            Some((pick, reason)) => {
-                                (candidates[pick - 1], SelectedBy::Judge, reason, Some(tokens))
-                            }
-                            None => (vote(&attempts, &candidates), SelectedBy::Vote, None, Some(tokens)),
+                            Some((pick, reason)) => (
+                                candidates[pick - 1],
+                                SelectedBy::Judge,
+                                reason,
+                                Some(tokens),
+                            ),
+                            None => (
+                                vote(&attempts, &candidates),
+                                SelectedBy::Vote,
+                                None,
+                                Some(tokens),
+                            ),
                         }
                     }
-                    Err(_) => (vote(&attempts, &candidates), SelectedBy::Vote, None, Some(0)),
+                    Err(_) => (
+                        vote(&attempts, &candidates),
+                        SelectedBy::Vote,
+                        None,
+                        Some(0),
+                    ),
                 }
             }
         };
@@ -265,10 +278,7 @@ fn tokens_of(usage: &[TokenUsage]) -> u64 {
 /// What a reply answers: the text after its last [`FINAL_ANSWER_MARKER`],
 /// up to an `evidence` block, trimmed; the whole reply without a marker.
 pub fn final_answer(response: &str) -> String {
-    let body = response
-        .split("```evidence")
-        .next()
-        .unwrap_or(response);
+    let body = response.split("```evidence").next().unwrap_or(response);
     match body.rfind(FINAL_ANSWER_MARKER) {
         Some(at) => body[at + FINAL_ANSWER_MARKER.len()..].trim().to_string(),
         None => body.trim().to_string(),
@@ -388,7 +398,10 @@ fn judge_prompt(task: &str, attempts: &[Attempt], candidates: &[usize]) -> Strin
 /// handoff when the team names a schema, else from the first JSON object in
 /// its reply. `None` when it named no candidate in range.
 fn judge_choice(out: &InvokeAgentOutput, candidates: usize) -> Option<(usize, Option<String>)> {
-    let value = out.handoff.clone().or_else(|| first_json_object(&out.response))?;
+    let value = out
+        .handoff
+        .clone()
+        .or_else(|| first_json_object(&out.response))?;
     let choice = usize::try_from(value.get("choice")?.as_u64()?).ok()?;
     if !(1..=candidates).contains(&choice) {
         return None;
@@ -475,7 +488,8 @@ mod tests {
 
     #[test]
     fn the_final_answer_is_after_the_last_marker_and_before_the_evidence() {
-        let reply = "Work.\nFINAL ANSWER: draft\nMore.\nFINAL ANSWER:  42 \n\n```evidence\nbranch: b\n```";
+        let reply =
+            "Work.\nFINAL ANSWER: draft\nMore.\nFINAL ANSWER:  42 \n\n```evidence\nbranch: b\n```";
         assert_eq!(final_answer(reply), "42");
         assert_eq!(final_answer("  just this  "), "just this");
     }
@@ -493,15 +507,27 @@ mod tests {
 
     #[test]
     fn one_passing_attempt_is_kept_without_a_judge() {
-        let attempts = [att(1, "a", Some(false)), att(2, "b", Some(true)), att(3, "c", Some(false))];
+        let attempts = [
+            att(1, "a", Some(false)),
+            att(2, "b", Some(true)),
+            att(3, "c", Some(false)),
+        ];
         assert_eq!(plan(&attempts), Plan::Decided(2, SelectedBy::Verifier));
-        let two = [att(1, "a", Some(true)), att(2, "b", Some(false)), att(3, "c", Some(true))];
+        let two = [
+            att(1, "a", Some(true)),
+            att(2, "b", Some(false)),
+            att(3, "c", Some(true)),
+        ];
         assert_eq!(plan(&two), Plan::Judge(vec![1, 3]));
     }
 
     #[test]
     fn agreeing_answers_need_no_judge_and_a_split_does() {
-        let same = [att(1, "1,000", None), att(2, "1000.", None), att(3, "1000", None)];
+        let same = [
+            att(1, "1,000", None),
+            att(2, "1000.", None),
+            att(3, "1000", None),
+        ];
         assert_eq!(plan(&same), Plan::Decided(1, SelectedBy::Unanimous));
         let split = [att(1, "1", None), att(2, "2", None), att(3, "2", None)];
         assert_eq!(plan(&split), Plan::Judge(vec![1, 2, 3]));

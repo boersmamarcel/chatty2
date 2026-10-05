@@ -66,16 +66,46 @@ pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 /// preset joins through its team (`--team <id>`), a declared roster that
 /// names it, or a spec of yours that delegates to it (AGE-760).
 pub const PRESETS: &[(&str, &str)] = &[
-    ("crosscheck-data-direct", include_str!("../agents/crosscheck-data-direct.toml")),
-    ("crosscheck-data-lead", include_str!("../agents/crosscheck-data-lead.toml")),
-    ("crosscheck-data-plan", include_str!("../agents/crosscheck-data-plan.toml")),
-    ("crosscheck-data-verify", include_str!("../agents/crosscheck-data-verify.toml")),
-    ("crosscheck-judge", include_str!("../agents/crosscheck-judge.toml")),
-    ("crosscheck-lead", include_str!("../agents/crosscheck-lead.toml")),
-    ("crosscheck-solver-direct", include_str!("../agents/crosscheck-solver-direct.toml")),
-    ("crosscheck-solver-plan", include_str!("../agents/crosscheck-solver-plan.toml")),
-    ("crosscheck-solver-verify", include_str!("../agents/crosscheck-solver-verify.toml")),
-    ("crosscheck-writer", include_str!("../agents/crosscheck-writer.toml")),
+    (
+        "crosscheck-data-direct",
+        include_str!("../agents/crosscheck-data-direct.toml"),
+    ),
+    (
+        "crosscheck-data-lead",
+        include_str!("../agents/crosscheck-data-lead.toml"),
+    ),
+    (
+        "crosscheck-data-plan",
+        include_str!("../agents/crosscheck-data-plan.toml"),
+    ),
+    (
+        "crosscheck-data-verify",
+        include_str!("../agents/crosscheck-data-verify.toml"),
+    ),
+    (
+        "crosscheck-judge",
+        include_str!("../agents/crosscheck-judge.toml"),
+    ),
+    (
+        "crosscheck-lead",
+        include_str!("../agents/crosscheck-lead.toml"),
+    ),
+    (
+        "crosscheck-solver-direct",
+        include_str!("../agents/crosscheck-solver-direct.toml"),
+    ),
+    (
+        "crosscheck-solver-plan",
+        include_str!("../agents/crosscheck-solver-plan.toml"),
+    ),
+    (
+        "crosscheck-solver-verify",
+        include_str!("../agents/crosscheck-solver-verify.toml"),
+    ),
+    (
+        "crosscheck-writer",
+        include_str!("../agents/crosscheck-writer.toml"),
+    ),
     ("researcher", include_str!("../agents/researcher.toml")),
     ("reviewer", include_str!("../agents/reviewer.toml")),
     ("writer", include_str!("../agents/writer.toml")),
@@ -602,7 +632,11 @@ impl AgentSpec {
                     "name at least two solvers".to_string(),
                 ));
             }
-            for name in best_of.solvers.iter().chain(std::iter::once(&best_of.judge)) {
+            for name in best_of
+                .solvers
+                .iter()
+                .chain(std::iter::once(&best_of.judge))
+            {
                 if !self.swarm.delegates_to.contains(name) {
                     errors.push(SpecError::BadBestOf(format!(
                         "'{name}' is not named in swarm.delegates_to"
@@ -854,7 +888,7 @@ pub fn roster_names_of(declared: &[String], listings: &[SpecListing]) -> Vec<Str
 
 /// [`roster_names`] over listings already read: [`roster_names_of`] less
 /// the specs that name their `callers`. A plain root is no named caller,
-/// so a team-internal worker (`panel-writer`, `callers = ["panel-lead"]`)
+/// so a team-internal worker (`crosscheck-writer`, `callers = ["crosscheck-lead", ...]`)
 /// is never offered to it; its lead still reaches it through the broker
 /// (AGE-760).
 pub fn root_agent_names_of(declared: &[String], listings: &[SpecListing]) -> Vec<String> {
@@ -1003,6 +1037,16 @@ impl SpecListing {
     /// and exposed.
     pub fn is_served(&self) -> bool {
         !self.shadowed && self.spec.as_ref().is_ok_and(|spec| spec.swarm.exposed)
+    }
+
+    /// A preset team's internal member (its `swarm.callers` is set): where
+    /// specs are listed for people, its team's lead stands for it.
+    pub fn is_team_member_preset(&self) -> bool {
+        self.source == SpecSource::Preset
+            && self
+                .spec
+                .as_ref()
+                .is_ok_and(|spec| spec.swarm.callers.is_some())
     }
 }
 
@@ -1314,53 +1358,50 @@ cap_usd = 2.0
         let data_dir = data.path().join("chatty").join("agents");
         let write = |dir: &Path, preamble: &str| {
             std::fs::create_dir_all(dir).unwrap();
-            let path = dir.join("data-analyst.toml");
+            let path = dir.join("researcher.toml");
             std::fs::write(
                 &path,
-                format!("[agent]\nname = \"data-analyst\"\npreamble = \"{preamble}\"\n"),
+                format!("[agent]\nname = \"researcher\"\npreamble = \"{preamble}\"\n"),
             )
             .unwrap();
             path
         };
 
         let loaded =
-            load_agent_spec_from("data-analyst", Some(workspace.path()), Some(data.path()))
-                .unwrap();
+            load_agent_spec_from("researcher", Some(workspace.path()), Some(data.path())).unwrap();
         assert_eq!(loaded.source, SpecSource::Preset);
 
         let data_path = write(&data_dir, "data");
         let loaded =
-            load_agent_spec_from("data-analyst", Some(workspace.path()), Some(data.path()))
-                .unwrap();
+            load_agent_spec_from("researcher", Some(workspace.path()), Some(data.path())).unwrap();
         assert_eq!(loaded.source, SpecSource::DataDir(data_path.clone()));
         assert_eq!(loaded.spec.agent.preamble.as_deref(), Some("data"));
 
         let ws_path = write(&ws_dir, "workspace");
         let loaded =
-            load_agent_spec_from("data-analyst", Some(workspace.path()), Some(data.path()))
-                .unwrap();
+            load_agent_spec_from("researcher", Some(workspace.path()), Some(data.path())).unwrap();
         assert_eq!(loaded.source, SpecSource::Workspace(ws_path.clone()));
         assert_eq!(loaded.spec.agent.preamble.as_deref(), Some("workspace"));
 
         let listed: Vec<_> = list_agent_specs_from(Some(workspace.path()), Some(data.path()))
             .into_iter()
-            .filter(|entry| entry.name == "data-analyst")
+            .filter(|entry| entry.name == "researcher")
             .collect();
         assert_eq!(
             listed,
             vec![
                 ListedSpec {
-                    name: "data-analyst".to_string(),
+                    name: "researcher".to_string(),
                     source: SpecSource::Workspace(ws_path),
                     shadowed: false,
                 },
                 ListedSpec {
-                    name: "data-analyst".to_string(),
+                    name: "researcher".to_string(),
                     source: SpecSource::DataDir(data_path),
                     shadowed: true,
                 },
                 ListedSpec {
-                    name: "data-analyst".to_string(),
+                    name: "researcher".to_string(),
                     source: SpecSource::Preset,
                     shadowed: true,
                 },
@@ -1405,10 +1446,8 @@ cap_usd = 2.0
 
     /// AGE-752: what ships reads well in Settings → Agents and `list_agents`:
     /// every preset has a one-line description and a preamble, names no
-    /// model (the roster's default runs it) unless it is one of the
-    /// `architecture-review` team's, the one preset team that pins its
-    /// models (AGE-808, checked in `services::team`), and has a budget: a
-    /// turn cap or a deadline.
+    /// model (the roster's default runs it), and has a budget: a turn cap or
+    /// a deadline.
     #[test]
     fn every_preset_is_described_and_budgeted() {
         for (name, _) in PRESETS {
@@ -1425,11 +1464,7 @@ cap_usd = 2.0
                     .is_some_and(|p| !p.is_empty()),
                 "{name} has a preamble"
             );
-            assert_eq!(
-                spec.agent.model.is_some(),
-                name.starts_with("arch-"),
-                "{name}: only the architecture-review specs pin a model"
-            );
+            assert!(spec.agent.model.is_none(), "{name}: no preset pins a model");
             assert!(
                 spec.budget.max_agent_turns.is_some() || spec.budget.max_duration.is_some(),
                 "{name} has a budget"
@@ -1454,10 +1489,10 @@ cap_usd = 2.0
             [crate::tools::LOCAL_AGENT_NAME]
         );
         // Naming a preset is the opt-in.
-        let declared = vec!["data-analyst".to_string()];
+        let declared = vec!["researcher".to_string()];
         assert_eq!(
             names(&load_roster_from(&declared, None, None).unwrap()),
-            ["data-analyst"]
+            ["researcher"]
         );
     }
 
@@ -1473,7 +1508,7 @@ cap_usd = 2.0
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("boss.toml"),
-            "[agent]\nname = \"boss\"\n\n[swarm]\ndelegates_to = [\"data-lead\", \"panel-lead\", \"*\"]\n",
+            "[agent]\nname = \"boss\"\n\n[swarm]\ndelegates_to = [\"crosscheck-lead\", \"crosscheck-data-lead\", \"*\"]\n",
         )
         .unwrap();
         // A spec of yours with a preset's name is yours: it joins.
@@ -1486,15 +1521,16 @@ cap_usd = 2.0
                 "local-agent",
                 "boss",
                 "writer",
-                "data-analyst",
-                "data-lead",
-                "panel-adjudicator",
-                "panel-analyst-1",
-                "panel-analyst-2",
-                "panel-analyst-3",
-                "panel-lead",
-                "panel-writer",
-                "reviewer",
+                "crosscheck-data-direct",
+                "crosscheck-data-lead",
+                "crosscheck-data-plan",
+                "crosscheck-data-verify",
+                "crosscheck-judge",
+                "crosscheck-lead",
+                "crosscheck-solver-direct",
+                "crosscheck-solver-plan",
+                "crosscheck-solver-verify",
+                "crosscheck-writer",
             ]
         );
         let listings = inspect_agent_specs_from(Some(workspace.path()), None);
@@ -1505,12 +1541,39 @@ cap_usd = 2.0
                 "local-agent",
                 "boss",
                 "writer",
-                "data-analyst",
-                "data-lead",
-                "panel-lead",
-                "reviewer",
+                "crosscheck-data-lead",
+                "crosscheck-lead",
             ]
         );
+    }
+
+    /// Settings → Agents lists a preset team's lead, not its members; a spec
+    /// of yours that names its callers is still listed.
+    #[test]
+    fn a_preset_team_member_is_not_listed_for_people() {
+        let listings = inspect_agent_specs_from(None, None);
+        let member = |name: &str| {
+            listings
+                .iter()
+                .find(|listing| listing.name == name)
+                .unwrap_or_else(|| panic!("{name} is listed"))
+                .is_team_member_preset()
+        };
+        assert!(member("crosscheck-judge"));
+        assert!(member("crosscheck-solver-direct"));
+        assert!(!member("crosscheck-lead"));
+        assert!(!member("researcher"));
+        let workspace = tempfile::tempdir().unwrap();
+        let dir = workspace.path().join(WORKSPACE_AGENTS_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mine.toml"),
+            "[agent]\nname = \"mine\"\n\n[swarm]\ncallers = [\"boss\"]\n",
+        )
+        .unwrap();
+        let listings = inspect_agent_specs_from(Some(workspace.path()), None);
+        let mine = listings.iter().find(|l| l.name == "mine").unwrap();
+        assert!(!mine.is_team_member_preset());
     }
 
     /// AGE-760: a team-internal spec is never offered to the root, even
@@ -1518,12 +1581,12 @@ cap_usd = 2.0
     /// preset is the default worker.
     #[test]
     fn a_team_internal_spec_is_not_offered_to_the_root() {
-        let declared: Vec<String> = ["local-agent", "panel-lead", "panel-writer"]
+        let declared: Vec<String> = ["local-agent", "crosscheck-lead", "crosscheck-writer"]
             .map(str::to_string)
             .to_vec();
         assert_eq!(
             names(&load_roster_from(&declared, None, None).unwrap()),
-            ["local-agent", "panel-lead", "panel-writer"],
+            ["local-agent", "crosscheck-lead", "crosscheck-writer"],
             "the broker serves it, for its lead"
         );
         assert_eq!(
@@ -1532,7 +1595,7 @@ cap_usd = 2.0
         );
         assert_eq!(
             roster_names_from(&declared, None, None),
-            ["local-agent", "panel-lead"]
+            ["local-agent", "crosscheck-lead"]
         );
     }
 
@@ -1570,8 +1633,8 @@ cap_usd = 2.0
         .unwrap();
         // A workspace spec that turns a preset off hides the preset too.
         std::fs::write(
-            dir.join("data-analyst.toml"),
-            "[agent]\nname = \"data-analyst\"\n\n[swarm]\nexposed = false\n",
+            dir.join("researcher.toml"),
+            "[agent]\nname = \"researcher\"\n\n[swarm]\nexposed = false\n",
         )
         .unwrap();
 
@@ -1592,7 +1655,7 @@ cap_usd = 2.0
         );
         let shadowed_preset = listings
             .iter()
-            .find(|listing| listing.name == "data-analyst" && listing.shadowed)
+            .find(|listing| listing.name == "researcher" && listing.shadowed)
             .unwrap();
         assert_eq!(shadowed_preset.source, SpecSource::Preset);
         assert!(shadowed_preset.spec.is_ok());
@@ -1777,7 +1840,10 @@ cap_usd = 2.0
              [swarm.best_of]\nsolvers = [\"a\", \"c\"]\njudge = \"j\"\n",
         )
         .expect("parses");
-        let errors = spec.validate(None).expect_err("c and j are not delegates").0;
+        let errors = spec
+            .validate(None)
+            .expect_err("c and j are not delegates")
+            .0;
         assert_eq!(errors.len(), 2, "{errors:?}");
         assert!(errors.iter().all(|e| matches!(e, SpecError::BadBestOf(_))));
     }

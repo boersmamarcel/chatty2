@@ -1,5 +1,6 @@
 {
   "name": "Crosscheck",
+  "experimental": true,
   "leader": "crosscheck-lead",
   "agents": [
     "crosscheck-solver-direct",

@@ -393,11 +393,11 @@ struct Cli {
     /// it), `max_agent_turns` replaces the persisted budget, and the first turn opens with
     /// "read_skill <skill> and follow it". Searched in
     /// `<workspace>/.chatty/teams/`, then the platform data directory's
-    /// `chatty/teams/`, then the presets compiled in: `data-analysis`,
-    /// `research-brief`.
+    /// `chatty/teams/`, then the presets compiled in. Experimental presets
+    /// are not listed; they run when named by their exact id.
     /// Valid with --headless, --pipe and the interactive TUI.
     ///
-    /// Example: --team data-analysis --headless -m "Why did revenue fall in orders.csv?"
+    /// Example: --team my-team --headless -m "Why did revenue fall in orders.csv?"
     #[arg(long, value_name = "ID")]
     team: Option<String>,
 
@@ -630,6 +630,9 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         ),
         None => None,
     };
+    if let Some(notice) = team.as_ref().and_then(|team| team.experimental_notice()) {
+        eprintln!("{notice}");
+    }
     let broker_module_settings = match team.as_ref() {
         Some(team) => {
             info!(team = %team.id, source = ?team.source, "Running as a team leader");
@@ -1879,6 +1882,40 @@ mod cli_smoke_tests {
         assert!(help.contains("--headless"), "{help}");
         assert!(help.contains("--pipe"), "{help}");
         assert!(help.contains("--broker"), "{help}");
+    }
+
+    /// AGE-696: an experimental preset is named nowhere in `--help`.
+    #[test]
+    fn experimental_preset_hidden_from_help() {
+        use chatty_core::services::team::{PRESETS, TeamFile};
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("--team"), "{help}");
+        let experimental: Vec<&str> = PRESETS
+            .iter()
+            .filter(|preset| TeamFile::parse(preset.team_json).unwrap().experimental)
+            .map(|preset| preset.id)
+            .collect();
+        assert!(experimental.contains(&"crosscheck"), "{experimental:?}");
+        for id in experimental {
+            assert!(!help.contains(id), "{id} is in --help:\n{help}");
+        }
+    }
+
+    /// AGE-696: `--team <exact id>` runs an experimental preset, and its
+    /// run says once that it is experimental and where its results are.
+    #[test]
+    fn experimental_preset_runs_by_exact_id() {
+        let cli = Cli::try_parse_from(["chatty-tui", "--team", "crosscheck", "--headless"])
+            .expect("--team crosscheck parses");
+        let id = cli.team.as_deref().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let team = chatty_core::services::team::load_team(id, Some(workspace.path()), None)
+            .expect("an experimental preset loads by its exact id");
+        assert_eq!(team.file.leader, "crosscheck-lead");
+        let notice = team.experimental_notice().expect("a notice");
+        assert_eq!(notice, "Crosscheck is experimental: see docs/research/");
+        assert_eq!(notice.lines().count(), 1);
+        assert!(chatty_core::services::team::load_team("Crosscheck", None, None).is_err());
     }
 
     /// AGE-414: `acp` is a subcommand; the global flags come before it.

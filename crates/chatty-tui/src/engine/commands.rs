@@ -1215,7 +1215,7 @@ mod tests {
             dir.join("auditor.toml"),
             "[agent]\nname = \"auditor\"\ndescription = \"Audits a list of amounts\"\n\n\
              [tools]\nprofile = \"reviewer\"\n\n[[plugins]]\nmodule = \"benford\"\n\n\
-             [swarm]\ndelegates_to = [\"data-analyst\", \"reviewer\"]\n",
+             [swarm]\ndelegates_to = [\"researcher\", \"reviewer\"]\n",
         )
         .unwrap();
         std::fs::write(
@@ -1246,10 +1246,7 @@ mod tests {
         );
         assert!(text.contains("plugins benford"), "{text}");
         assert!(text.contains("profile reviewer"), "{text}");
-        assert!(
-            text.contains("delegates to data-analyst, reviewer"),
-            "{text}"
-        );
+        assert!(text.contains("delegates to researcher, reviewer"), "{text}");
         assert!(
             text.contains("voucher — remote A2A agent at https://example.com/a2a (disabled)"),
             "{text}"
@@ -1261,10 +1258,10 @@ mod tests {
         assert!(left_out.contains("exposed = false"), "{text}");
         // A preset joins through a spec that delegates to it; the rest are
         // left out as presets (AGE-760).
-        assert!(text.contains("  data-analyst — "), "{text}");
-        assert!(!left_out.contains("data-analyst"), "{text}");
+        assert!(text.contains("  researcher — "), "{text}");
+        assert!(!left_out.contains("researcher"), "{text}");
         assert!(
-            left_out.contains("data-lead (preset) — preset; runs with its team"),
+            left_out.contains("crosscheck-lead (preset) — preset; runs with its team"),
             "{text}"
         );
     }

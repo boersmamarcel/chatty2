@@ -572,25 +572,31 @@ mod tests {
         );
     }
 
-    /// AGE-763: the desktop's `/agent fix-lead <task>` reaches the broker
-    /// through a declared roster — presets are opt-in since AGE-760, so the
-    /// user lists `fix-lead` and its workers — with no
-    /// `module_settings.team.verification` set (the desktop never writes one
-    /// for a built-in preset). `fix-lead`
-    /// is `fix-and-verify`'s leader, so the roster's own shell-having
-    /// member, `fix-coder`, still gets that team's own test command, exactly
-    /// as `--team fix-and-verify` gives it — and nobody else's evidence
-    /// picks it up.
+    /// AGE-763: the desktop's `/agent my-lead <task>` reaches the broker
+    /// through a declared roster with no `module_settings.team.verification`
+    /// set (the desktop never writes one for a team). `my-lead` is a
+    /// workspace team's leader, so the roster's own shell-having member,
+    /// `my-coder`, still gets that team's own test command, exactly as
+    /// `--team my-fixers` gives it — and nobody else's evidence picks it up.
     #[test]
     fn slash_agent_team_leader_uses_team_verification() {
-        let declared: Vec<String> = ["fix-lead", "fix-coder", "code-reviewer", "data-analyst"]
-            .map(String::from)
-            .to_vec();
-        let roster =
-            crate::agent_spec::load_roster(&declared, None).expect("the declared roster loads");
-        assert!(
-            roster.iter().any(|spec| spec.agent.name == "fix-lead"),
-            "fix-lead is on the declared roster /agent resolves against"
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let team = workspace.path().join(".chatty/teams/my-fixers");
+        std::fs::create_dir_all(&team).expect("a team dir");
+        std::fs::write(
+            team.join("team.json"),
+            r#"{"leader": "my-lead", "agents": ["my-coder", "my-checker"], "verification": "cargo test -q"}"#,
+        )
+        .expect("team.json");
+        let mut coder = AgentSpec::named("my-coder");
+        coder.tools.profile = Some("coder".to_string());
+        let mut checker = AgentSpec::named("my-checker");
+        checker.tools.profile = Some("reviewer".to_string());
+        checker.tools.disable = vec!["shell".to_string()];
+        let mut roster = vec![AgentSpec::named("my-lead"), coder, checker];
+        roster.extend(
+            crate::agent_spec::load_roster(&["researcher".to_string()], None)
+                .expect("the declared roster loads"),
         );
 
         let specs = resolve_virtual_agents(
@@ -599,35 +605,30 @@ mod tests {
             &ModuleSettingsModel::default(),
             &roster,
             &[],
-            None,
+            Some(workspace.path()),
         );
-
-        let fix_coder = specs
-            .iter()
-            .find(|spec| spec.name == "fix-coder")
-            .expect("fix-coder is on the declared roster");
+        let verification = |name: &str| {
+            specs
+                .iter()
+                .find(|spec| spec.name == name)
+                .unwrap_or_else(|| panic!("{name} is on the declared roster"))
+                .verification
+                .clone()
+        };
         assert_eq!(
-            fix_coder.verification.as_deref(),
-            Some("python3 -m unittest discover -s tests -t . -v"),
+            verification("my-coder").as_deref(),
+            Some("cargo test -q"),
             "the leader's own team supplies the verification command, not module settings"
         );
-
-        let code_reviewer = specs
-            .iter()
-            .find(|spec| spec.name == "code-reviewer")
-            .expect("code-reviewer is on the declared roster");
         assert_eq!(
-            code_reviewer.verification, None,
-            "code-reviewer disables the shell group, so it never produced a build to check"
+            verification("my-checker"),
+            None,
+            "my-checker disables the shell group, so it never produced a build to check"
         );
-
-        let data_analyst = specs
-            .iter()
-            .find(|spec| spec.name == "data-analyst")
-            .expect("data-analyst is on the declared roster");
         assert_eq!(
-            data_analyst.verification, None,
-            "data-analysis's own team declares no verification command"
+            verification("researcher"),
+            None,
+            "no team claims researcher, and module settings declare no command"
         );
     }
 
@@ -637,9 +638,14 @@ mod tests {
     /// claims. Only a team that asks for isolation gets worktrees.
     #[test]
     fn team_without_isolate_runs_in_the_shared_workspace() {
-        let declared: Vec<String> = ["data-lead", "data-analyst", "reviewer", "researcher"]
-            .map(String::from)
-            .to_vec();
+        let declared: Vec<String> = [
+            "crosscheck-data-lead",
+            "crosscheck-data-direct",
+            "crosscheck-judge",
+            "researcher",
+        ]
+        .map(String::from)
+        .to_vec();
         let roster = crate::agent_spec::load_roster(&declared, None).expect("the roster loads");
         let specs = resolve_virtual_agents(
             &[],
@@ -655,26 +661,11 @@ mod tests {
         }
     }
 
-    /// AGE-822: a coding preset (`fix-and-verify`) and a workspace team
-    /// with `"isolate": true` give every member a worktree; a `--team` run
-    /// carries the flag in `module_settings.team` for the members no team
-    /// claims by name.
+    /// AGE-822: a workspace team with `"isolate": true` gives every member
+    /// a worktree; a `--team` run carries the flag in `module_settings.team`
+    /// for the members no team claims by name.
     #[test]
     fn isolated_team_gets_worktrees() {
-        let declared: Vec<String> = ["fix-lead", "fix-coder", "code-reviewer"]
-            .map(String::from)
-            .to_vec();
-        let roster = crate::agent_spec::load_roster(&declared, None).expect("the roster loads");
-        let specs = resolve_virtual_agents(
-            &[],
-            &[],
-            &ModuleSettingsModel::default(),
-            &roster,
-            &[],
-            None,
-        );
-        assert!(specs.iter().all(|spec| spec.isolate), "{specs:?}");
-
         let workspace = tempfile::tempdir().expect("a workspace");
         let team = workspace.path().join(".chatty/teams/my-coders");
         std::fs::create_dir_all(&team).expect("a team dir");
