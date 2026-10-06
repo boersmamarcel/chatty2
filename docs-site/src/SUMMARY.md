@@ -76,6 +76,7 @@
     - [Crosscheck: Data with helpers: pre-registration](./dev/adrs/crosscheck-data-confirm-prereg.md)
     - [Swarm vs single agent: pre-registration](./dev/adrs/swarm-vs-single-prereg.md)
     - [Swarm vs single agent: result (EV-4)](./dev/adrs/swarm-vs-single-2026-10-02.md)
+    - [Crosscheck: the evidence (Oct 2026)](./dev/adrs/crosscheck-evidence-2026-10.md)
     - [WASM plugin performance baseline (S7)](./dev/adrs/plugin-perf-2026-09-27.md)
     - [Resume spike: result (RC-2)](./dev/adrs/resume-spike-2026-10-04.md)
     - [Resume spike: the frozen prompts](./dev/adrs/resume-spike-template.md)
