@@ -312,6 +312,10 @@ impl ChattyApp {
                         workspace.as_deref(),
                         cx,
                     ),
+                    AgentCommandTarget::Refused { message } => {
+                        self.chat_view
+                            .update(cx, |view, cx| view.add_info_message(message, cx));
+                    }
                     AgentCommandTarget::Default { prompt } => self.send_local_delegation(
                         Delegation {
                             agent: LOCAL_AGENT_NAME.to_string(),

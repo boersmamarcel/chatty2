@@ -697,6 +697,7 @@ impl ChatEngine {
                 });
                 Ok(())
             }
+            AgentCommandTarget::Refused { message } => bail!(message),
             AgentCommandTarget::Default { prompt } => {
                 self.send_delegation(Delegation {
                     agent: LOCAL_AGENT_NAME.to_string(),
@@ -718,9 +719,12 @@ impl ChatEngine {
             .as_deref()
             .map(Path::new);
         let listings = chatty_core::agent_spec::inspect_agent_specs(workspace);
+        // Entry points only: a team's internal members are reached through
+        // their lead (AGE-856).
         let roster: Vec<&str> = self
             .agent_roster
             .iter()
+            .filter(|spec| spec.swarm.callers.is_none())
             .map(|spec| spec.agent.name.as_str())
             .collect();
         format_agents_summary(&self.remote_agents, &roster, &listings)
