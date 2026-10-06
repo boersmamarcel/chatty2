@@ -40,11 +40,10 @@ pub struct ModuleSettingsModel {
     /// The broker's virtual agents (ADR-0011 C10), by agent spec name
     /// (AGE-614): each names a spec in `<workspace>/.chatty/agents/`, the
     /// data directory's `chatty/agents/`, or the presets. Empty means
-    /// `local-agent` and every exposed spec of your own, plus the presets
-    /// they delegate to
+    /// `local-agent`, every exposed spec of your own and the built-in
+    /// presets
     /// ([`agent_spec::exposed_specs`](crate::agent_spec::exposed_specs),
-    /// PL-U5, AGE-760); naming agents here sets the roster to exactly them,
-    /// which is how a preset joins without its team.
+    /// PL-U5); naming agents here sets the roster to exactly them.
     ///
     /// Roles are declared here rather than passed on `invoke_agent`, so the
     /// leader's tool schema and prompt stay identical whatever the team. A

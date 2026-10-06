@@ -176,11 +176,11 @@ mod tests {
     }
 
     /// The issue's "Verify": `/agent researcher <question>` runs the
-    /// preset spec, resolved from the same roster the broker serves — one
-    /// that names it, as a preset is on no default roster (AGE-760).
+    /// preset spec, resolved from the same roster the broker serves, the
+    /// default one.
     #[test]
     fn agent_command_resolves_against_the_roster() {
-        let roster = load_roster_from(&["researcher".to_string()], None, None).unwrap();
+        let roster = load_roster_from(&[], None, None).unwrap();
         let target = resolve_agent_command(
             "researcher  Sum the amounts in data.csv",
             &[remote("voucher", true)],

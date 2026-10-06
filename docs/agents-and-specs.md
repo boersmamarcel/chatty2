@@ -30,12 +30,10 @@ agent, and `module.toml` refuses the keys that used to say it was one.
 
 The broker serves the **roster**: the specs `module_settings.json`'s `virtual_agents`
 names (a `--team` names its own), or — when nothing is declared — `local-agent` and
-**every exposed spec of your own** (workspace and data directory), first definition of
-each name (`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). The
-presets are experimental teams' roles and join the default roster only when one of
-your specs names them in `delegates_to`, directly or through another preset (a glob
-pulls in none; AGE-760). Otherwise a preset runs with its team (`--team <id>`) or when
-`virtual_agents` names it: then the `researcher` preset is an agent like any other,
+**every exposed spec of your own** (workspace and data directory) and the built-in
+presets, first definition of each name
+(`chatty_core::agent_spec::{load_roster, roster_names, exposed_specs}`). So the
+`researcher` preset is on the default roster and an agent like any other,
 `list_agents` lists it, `invoke_agent` reaches it at `/a2a/researcher`, and
 `/agent researcher …` runs it. A spec that names its `callers` (a team-internal worker
 such as `crosscheck-writer`) is served for its lead but never offered to the root's

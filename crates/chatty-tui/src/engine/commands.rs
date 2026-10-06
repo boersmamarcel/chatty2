@@ -9,7 +9,7 @@ use rig_core::completion::Message;
 use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
-use chatty_core::agent_spec::{SpecListing, SpecSource};
+use chatty_core::agent_spec::SpecListing;
 use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationMode;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
@@ -106,12 +106,6 @@ pub(crate) fn format_agents_summary(
                 (_, true) => "shadowed by a nearer spec of the same name".to_string(),
                 (Err(error), false) => format!("does not load: {error}"),
                 (Ok(spec), false) if !spec.swarm.exposed => "exposed = false".to_string(),
-                // An experimental team's role (AGE-760).
-                (Ok(_), false) if listing.source == SpecSource::Preset => {
-                    "preset; runs with its team (--team <id>), or name it in \
-                     module settings' virtual_agents"
-                        .to_string()
-                }
                 (Ok(_), false) => "not in the declared roster".to_string(),
             };
             format!("  {} ({}) — {why}\n", listing.name, listing.source.label())
@@ -1256,14 +1250,11 @@ mod tests {
         assert!(left_out.contains("does not load"), "{text}");
         assert!(left_out.contains("hidden"), "{text}");
         assert!(left_out.contains("exposed = false"), "{text}");
-        // A preset joins through a spec that delegates to it; the rest are
-        // left out as presets (AGE-760).
+        // The presets are on the default roster.
         assert!(text.contains("  researcher — "), "{text}");
+        assert!(text.contains("  crosscheck-lead — "), "{text}");
         assert!(!left_out.contains("researcher"), "{text}");
-        assert!(
-            left_out.contains("crosscheck-lead (preset) — preset; runs with its team"),
-            "{text}"
-        );
+        assert!(!left_out.contains("crosscheck-lead"), "{text}");
     }
 
     /// AGE-806: `/agents` shows the per-agent private-network opt-in, so a

@@ -11,8 +11,7 @@
 //!    signature-checked plugin path ([`install::download_wasm_module`]), and
 //!    refuses bytes whose SHA-256 is not the one the signed lockfile pins;
 //! 4. writes the specs to the global agents folder
-//!    (`<data_dir>/chatty/agents/`), so the leader joins the default roster
-//!    (AGE-760) — and, when module settings declare a roster, adds the
+//!    (`<data_dir>/chatty/agents/`), so the leader joins the default roster — and, when module settings declare a roster, adds the
 //!    leader and the names it delegates to there;
 //! 5. leaves a [`TeamRecord`] in `<data_dir>/chatty/installed-teams/`, which
 //!    is what [`uninstall_team`] removes by.

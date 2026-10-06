@@ -71,8 +71,8 @@ pub fn broker_reachable(cx: &App) -> bool {
 }
 
 /// The names the broker serves out of `listings`: what module settings
-/// declare, else the default roster: `local-agent`, your own exposed specs,
-/// and the presets they delegate to (AGE-760). None when no broker can reach
+/// declare, else the default roster: `local-agent`, your own exposed specs
+/// and the built-in presets. None when no broker can reach
 /// them ([`broker_reachable`]).
 pub fn served_names(listings: &[SpecListing], cx: &App) -> Vec<String> {
     if !broker_reachable(cx) {
