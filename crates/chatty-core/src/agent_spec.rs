@@ -1553,6 +1553,27 @@ cap_usd = 2.0
         );
     }
 
+    /// The `/agent` picker's list (desktop and TUI): team leads and
+    /// standalone agents, never a team's internal members (AGE-856).
+    #[test]
+    fn agent_picker_shows_only_entry_points() {
+        let listings = inspect_agent_specs_from(None, None);
+        let names = root_agent_names_of(&[], &listings);
+        for entry in ["crosscheck-lead", "crosscheck-data-lead", "researcher"] {
+            assert!(names.contains(&entry.to_string()), "{entry} in {names:?}");
+        }
+        for member in [
+            "crosscheck-judge",
+            "crosscheck-writer",
+            "crosscheck-solver-direct",
+        ] {
+            assert!(
+                !names.contains(&member.to_string()),
+                "{member} in {names:?}"
+            );
+        }
+    }
+
     /// Settings → Agents lists a preset team's lead, not its members; a spec
     /// of yours that names its callers is still listed.
     #[test]

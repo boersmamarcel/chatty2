@@ -30,6 +30,9 @@ pub enum AgentCommandTarget {
     },
     /// The default sub-agent, with the whole text as its prompt.
     Default { prompt: String },
+    /// A team's internal member, typed by hand: not an entry point, so
+    /// nothing runs and `message` says which lead to use (AGE-856).
+    Refused { message: String },
 }
 
 /// Resolve `/agent`'s argument against the remote agents and the local
@@ -67,6 +70,15 @@ pub fn resolve_agent_command(
         };
     }
     if let Some(spec) = roster.iter().find(|spec| spec.agent.name == first) {
+        if let Some(callers) = &spec.swarm.callers {
+            let team = callers
+                .iter()
+                .find(|caller| !caller.contains('*'))
+                .map_or_else(|| callers.join(", "), Clone::clone);
+            return AgentCommandTarget::Refused {
+                message: format!("{first} is part of team {team}; use /agent {team}"),
+            };
+        }
         return AgentCommandTarget::Spec {
             spec: Box::new(spec.clone()),
             prompt: rest.to_string(),
@@ -203,6 +215,25 @@ mod tests {
                 prompt: "translate this".to_string(),
             }
         );
+    }
+
+    /// AGE-856: a team's internal member is not an entry point.
+    #[test]
+    fn agent_command_refuses_internal_member() {
+        let roster = load_roster_from(&[], None, None).unwrap();
+        let target = resolve_agent_command("crosscheck-writer draft it", &[], &roster);
+        let AgentCommandTarget::Refused { message } = target else {
+            panic!("a team member is refused, got {target:?}");
+        };
+        assert_eq!(
+            message,
+            "crosscheck-writer is part of team crosscheck-lead; use /agent crosscheck-lead"
+        );
+        // The lead itself is an entry point.
+        assert!(matches!(
+            resolve_agent_command("crosscheck-lead go", &[], &roster),
+            AgentCommandTarget::Spec { .. }
+        ));
     }
 
     #[test]
