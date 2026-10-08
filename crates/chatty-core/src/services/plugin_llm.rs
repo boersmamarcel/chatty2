@@ -23,7 +23,7 @@ use rig_core::completion::{AssistantContent, CompletionRequestBuilder, ToolDefin
 use tokio::runtime::Handle;
 use tracing::debug;
 
-use crate::factories::agent_factory::{completion_model, request_params};
+use crate::factories::agent_factory::{completion_model, ensure_tools_reachable, request_params};
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::llm_service::normalize_usage;
 use crate::settings::models::models_store::ModelConfig;
@@ -173,6 +173,8 @@ async fn send(
 
     let mut request = CompletionRequestBuilder::new(model, prompt).messages(history);
     if let Some(tools) = tools {
+        ensure_tools_reachable(model_config, provider_config)
+            .map_err(|e| format!("llm::complete: {e:#}"))?;
         request = request.tools(normalize_tools(tools));
     }
     if model_config.supports_temperature {

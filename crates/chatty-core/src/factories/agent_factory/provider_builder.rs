@@ -27,6 +27,10 @@ use super::azure_auth_http::AzureAuthHttpClient;
 use super::connect_retry_http::ConnectRetryHttpClient;
 use super::empty_turn_retry::EmptyTurnRetry;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
+use super::openai_responses::{
+    AzureResponsesHttpClient, AzureWire, azure_wire, ensure_tools_reachable,
+    openai_platform_responses_base,
+};
 use super::prompt_cache_http::PromptCachingHttpClient;
 use super::request_recorder::RequestRecorder;
 use super::tool_collector::NativeTools;
@@ -67,6 +71,8 @@ pub(super) async fn build_provider_agent(
     let context_shaper = ContextShaper::for_model(model_config);
     let request_recorder = RequestRecorder::default();
 
+    // Chat agents always carry tools.
+    ensure_tools_reachable(model_config, provider_config)?;
     let model = completion_model(model_config, provider_config)?;
     let mut builder = AgentBuilder::from_model_handle(model.clone()).preamble(preamble);
     if model_config.supports_temperature {
@@ -152,6 +158,19 @@ pub(crate) fn completion_model(
                 .clone()
                 .ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
 
+            // OpenAI's own API speaks Responses, the one wire its reasoning
+            // models take tools on (AGE-858); every other OpenAI-compatible
+            // server keeps chat completions.
+            if let Some(base_url) = openai_platform_responses_base(openrouter_base_url(provider_config))
+            {
+                let client = rig_core::providers::openai::Client::builder()
+                    .api_key(&key)
+                    .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
+                    .base_url(base_url)
+                    .build()?;
+                return Ok(ModelHandle::new(client.completion_model(identifier)));
+            }
+
             // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
             // OpenRouter cache nothing unless the request carries
             // `cache_control` breakpoints; rig's `with_prompt_caching()` puts
@@ -210,6 +229,17 @@ fn azure_completion_model(
         .as_deref()
         .ok_or_else(|| anyhow!("Endpoint URL not configured for Azure OpenAI provider"))?;
 
+    // An Azure OpenAI resource speaks Responses, the one wire OpenAI's
+    // reasoning models take tools on (AGE-858); the model-inference surface
+    // keeps chat completions.
+    if let AzureWire::Responses {
+        base_url,
+        api_version,
+    } = azure_wire(raw_endpoint)
+    {
+        return azure_responses_model(model_config, provider_config, base_url, api_version);
+    }
+
     let endpoint = normalize_azure_endpoint(raw_endpoint);
 
     let api_version = model_config
@@ -247,18 +277,7 @@ fn azure_completion_model(
         AzureAuthMethod::EntraId => {
             tracing::info!("Using Entra ID authentication; the token is attached per request");
 
-            let cache = match AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
-                Ok(cache) => Some(cache),
-                Err(e) => {
-                    tracing::warn!(error = ?e, "Failed to create the shared Azure token cache");
-                    None
-                }
-            }) {
-                Some(cache) => cache.clone(),
-                // The shared cache stays `None` for the process once creation
-                // failed; a per-agent cache is the same thing without the sharing.
-                None => AzureTokenCache::new().context("Failed to create Azure token cache")?,
-            };
+            let cache = shared_azure_token_cache()?;
 
             // rig writes this placeholder into the bearer header at build time;
             // `AzureAuthHttpClient` replaces it with a current token on every
@@ -298,6 +317,79 @@ fn azure_completion_model(
             ))
         }
     }
+}
+
+/// Azure's Responses API through rig's OpenAI Responses client: `base_url`
+/// is the resource's `/openai/v1` (or the dated `/openai` with its
+/// `api_version`), the deployment is the model, and the key goes out as
+/// `api-key` (Entra ID keeps its per-request bearer token).
+fn azure_responses_model(
+    model_config: &ModelConfig,
+    provider_config: &ProviderConfig,
+    base_url: String,
+    api_version: Option<String>,
+) -> Result<ModelHandle> {
+    tracing::info!(
+        base_url = %base_url,
+        deployment = %model_config.model_identifier,
+        api_version = ?api_version,
+        auth_method = ?provider_config.azure_auth_method(),
+        "Building Azure OpenAI Responses client"
+    );
+    let identifier = model_config.model_identifier.as_str();
+    match provider_config.azure_auth_method() {
+        AzureAuthMethod::EntraId => {
+            let cache = shared_azure_token_cache()?;
+            let client = rig_core::providers::openai::Client::builder()
+                .api_key(AZURE_ENTRA_PLACEHOLDER_TOKEN)
+                .http_client(AzureAuthHttpClient::new(
+                    AzureResponsesHttpClient::new(
+                        ConnectRetryHttpClient::new(llm_client().clone()),
+                        None,
+                        api_version,
+                    ),
+                    Arc::new(cache),
+                ))
+                .base_url(base_url)
+                .build()?;
+            Ok(ModelHandle::new(client.completion_model(identifier)))
+        }
+        AzureAuthMethod::ApiKey => {
+            let key = provider_config
+                .api_key
+                .clone()
+                .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
+            let client = rig_core::providers::openai::Client::builder()
+                .api_key(&key)
+                .http_client(AzureResponsesHttpClient::new(
+                    ConnectRetryHttpClient::new(llm_client().clone()),
+                    Some(key.clone()),
+                    api_version,
+                ))
+                .base_url(base_url)
+                .build()?;
+            Ok(ModelHandle::new(client.completion_model(identifier)))
+        }
+    }
+}
+
+/// The process-wide Entra token cache, or a per-agent one when the shared
+/// one could not be created.
+fn shared_azure_token_cache() -> Result<AzureTokenCache> {
+    Ok(
+        match AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
+            Ok(cache) => Some(cache),
+            Err(e) => {
+                tracing::warn!(error = ?e, "Failed to create the shared Azure token cache");
+                None
+            }
+        }) {
+            Some(cache) => cache.clone(),
+            // The shared cache stays `None` for the process once creation
+            // failed; a per-agent cache is the same thing without the sharing.
+            None => AzureTokenCache::new().context("Failed to create Azure token cache")?,
+        },
+    )
 }
 
 /// The provider-specific request fields a chat request for `model_config`
