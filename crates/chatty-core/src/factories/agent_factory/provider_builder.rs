@@ -163,12 +163,7 @@ pub(crate) fn completion_model(
             // server keeps chat completions.
             if let Some(base_url) = openai_platform_responses_base(openrouter_base_url(provider_config))
             {
-                let client = rig_core::providers::openai::Client::builder()
-                    .api_key(&key)
-                    .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
-                    .base_url(base_url)
-                    .build()?;
-                return Ok(ModelHandle::new(client.completion_model(identifier)));
+                return openai_responses_model(&base_url, &key, identifier);
             }
 
             // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
@@ -317,6 +312,21 @@ fn azure_completion_model(
             ))
         }
     }
+}
+
+/// OpenAI's Responses API at `base_url` (the API root rig appends
+/// `/responses` to), with `key` as the bearer token.
+pub(super) fn openai_responses_model(
+    base_url: &str,
+    key: &str,
+    identifier: &str,
+) -> Result<ModelHandle> {
+    let client = rig_core::providers::openai::Client::builder()
+        .api_key(key)
+        .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
+        .base_url(base_url)
+        .build()?;
+    Ok(ModelHandle::new(client.completion_model(identifier)))
 }
 
 /// Azure's Responses API through rig's OpenAI Responses client: `base_url`
