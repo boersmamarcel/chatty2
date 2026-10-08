@@ -364,8 +364,7 @@ mod tests {
             Some("https://api.openai.com/v1")
         );
         assert_eq!(
-            openai_platform_responses_base("https://api.openai.com/v1/chat/completions")
-                .as_deref(),
+            openai_platform_responses_base("https://api.openai.com/v1/chat/completions").as_deref(),
             Some("https://api.openai.com/v1")
         );
         assert_eq!(
@@ -401,7 +400,10 @@ mod tests {
             openai_platform_responses_base("https://openrouter.ai/api/v1"),
             None
         );
-        assert_eq!(openai_platform_responses_base("http://localhost:8000/v1"), None);
+        assert_eq!(
+            openai_platform_responses_base("http://localhost:8000/v1"),
+            None
+        );
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -419,7 +421,10 @@ mod tests {
         );
         ensure_tools_reachable(&model_config, &provider_config).unwrap();
         send_with_tools(completion_model(&model_config, &provider_config).unwrap()).await;
-        assert_eq!(only_body(&server).await["tools"][0]["function"]["name"], "add");
+        assert_eq!(
+            only_body(&server).await["tools"][0]["function"]["name"],
+            "add"
+        );
     }
 
     /// No chat-completions request chatty sends carries `reasoning_effort`
@@ -443,9 +448,11 @@ mod tests {
             "sk-compat",
             &format!("{}/v1", server.uri()),
         );
-        let mut request =
-            CompletionRequestBuilder::new(completion_model(&compat, &compat_provider).unwrap(), "hi")
-                .tools(vec![add_tool()]);
+        let mut request = CompletionRequestBuilder::new(
+            completion_model(&compat, &compat_provider).unwrap(),
+            "hi",
+        )
+        .tools(vec![add_tool()]);
         if let Some(params) =
             crate::factories::agent_factory::request_params(&compat, &ProviderType::OpenRouter)
         {
@@ -548,7 +555,10 @@ mod tests {
             api_version: None,
         };
         let res = "https://res.openai.azure.com";
-        assert_eq!(azure_wire(res), v1("https://res.openai.azure.com/openai/v1"));
+        assert_eq!(
+            azure_wire(res),
+            v1("https://res.openai.azure.com/openai/v1")
+        );
         assert_eq!(
             azure_wire("res.openai.azure.com/"),
             v1("https://res.openai.azure.com/openai/v1")
@@ -572,7 +582,9 @@ mod tests {
             v1("https://res.cognitiveservices.azure.com/openai/v1")
         );
         assert_eq!(
-            azure_wire("https://res.openai.azure.com/openai/responses?api-version=2025-04-01-preview"),
+            azure_wire(
+                "https://res.openai.azure.com/openai/responses?api-version=2025-04-01-preview"
+            ),
             AzureWire::Responses {
                 base_url: "https://res.openai.azure.com/openai".to_string(),
                 api_version: Some("2025-04-01-preview".to_string()),
@@ -583,7 +595,9 @@ mod tests {
             v1("https://res.openai.azure.com/openai/v1")
         );
         assert_eq!(
-            azure_wire("https://res.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview"),
+            azure_wire(
+                "https://res.services.ai.azure.com/models/chat/completions?api-version=2024-05-01-preview"
+            ),
             AzureWire::ChatCompletionsOnly
         );
         assert_eq!(
@@ -610,7 +624,11 @@ mod tests {
         assert!(message.contains("Responses API"), "{message}");
 
         ensure_tools_reachable(&model(ProviderType::AzureOpenAI, false), &inference).unwrap();
-        let resource = provider(ProviderType::AzureOpenAI, "sk", "https://res.openai.azure.com");
+        let resource = provider(
+            ProviderType::AzureOpenAI,
+            "sk",
+            "https://res.openai.azure.com",
+        );
         ensure_tools_reachable(&model(ProviderType::AzureOpenAI, true), &resource).unwrap();
     }
 
@@ -623,7 +641,12 @@ mod tests {
         let sse = |events: Vec<serde_json::Value>| -> String {
             events
                 .iter()
-                .map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()))
+                .map(|event| {
+                    format!(
+                        "event: {}\ndata: {event}\n\n",
+                        event["type"].as_str().unwrap()
+                    )
+                })
                 .collect()
         };
         let call = serde_json::json!({
@@ -720,8 +743,12 @@ mod tests {
         assert_eq!(input[output_at]["output"], "5");
 
         let history = history.expect("the run hands back its messages");
-        assert!(history.iter().any(|m| matches!(m, Message::Assistant { content, .. }
-            if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_))))));
+        assert!(
+            history
+                .iter()
+                .any(|m| matches!(m, Message::Assistant { content, .. }
+            if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)))))
+        );
         assert!(history.iter().any(|m| matches!(m, Message::User { content }
             if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))));
         assert!(tool_round_trips_intact(&history, &[]));

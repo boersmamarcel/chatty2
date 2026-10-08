@@ -161,7 +161,8 @@ pub(crate) fn completion_model(
             // OpenAI's own API speaks Responses, the one wire its reasoning
             // models take tools on (AGE-858); every other OpenAI-compatible
             // server keeps chat completions.
-            if let Some(base_url) = openai_platform_responses_base(openrouter_base_url(provider_config))
+            if let Some(base_url) =
+                openai_platform_responses_base(openrouter_base_url(provider_config))
             {
                 return openai_responses_model(&base_url, &key, identifier);
             }

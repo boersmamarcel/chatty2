@@ -1210,7 +1210,9 @@ mod tests {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter_map(|t| t["function"]["name"].as_str())
+                    // Chat completions nest the name under `function`; the
+                    // Responses API (Azure, AGE-858) keeps it at the top.
+                    .filter_map(|t| t["function"]["name"].as_str().or(t["name"].as_str()))
                     .collect();
                 if let Some(bad) = names.iter().find(|n| !rule.is_match(n)) {
                     return ResponseTemplate::new(400).set_body_json(serde_json::json!({
@@ -1222,6 +1224,30 @@ mod tests {
                 }
                 if !names.iter().any(|n| n.contains("__")) {
                     return ResponseTemplate::new(500).set_body_string("no plugin tool sent");
+                }
+                if request.url.path().ends_with("/responses") {
+                    let completed = serde_json::json!({
+                        "type": "response.completed", "sequence_number": 1,
+                        "response": { "id": "resp", "object": "response", "created_at": 0,
+                            "status": "completed", "model": "m", "tools": [],
+                            "output": [{ "type": "message", "id": "msg", "role": "assistant",
+                                "status": "completed", "content": [{ "type": "output_text",
+                                    "text": "ok", "annotations": [] }] }],
+                            "usage": { "input_tokens": 1, "output_tokens": 1,
+                                "total_tokens": 2 } },
+                    });
+                    let delta = serde_json::json!({
+                        "type": "response.output_text.delta", "item_id": "msg",
+                        "output_index": 0, "content_index": 0, "sequence_number": 0,
+                        "delta": "ok",
+                    });
+                    return ResponseTemplate::new(200).set_body_raw(
+                        format!(
+                            "event: response.output_text.delta\ndata: {delta}\n\n\
+                             event: response.completed\ndata: {completed}\n\n"
+                        ),
+                        "text/event-stream",
+                    );
                 }
                 if self.ollama {
                     let record = serde_json::json!({
