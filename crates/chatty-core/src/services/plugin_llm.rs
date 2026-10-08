@@ -23,7 +23,7 @@ use rig_core::completion::{AssistantContent, CompletionRequestBuilder, ToolDefin
 use tokio::runtime::Handle;
 use tracing::debug;
 
-use crate::factories::agent_factory::{completion_model, request_params};
+use crate::factories::agent_factory::{completion_model, ensure_tools_reachable, request_params};
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::llm_service::normalize_usage;
 use crate::settings::models::models_store::ModelConfig;
@@ -173,6 +173,8 @@ async fn send(
 
     let mut request = CompletionRequestBuilder::new(model, prompt).messages(history);
     if let Some(tools) = tools {
+        ensure_tools_reachable(model_config, provider_config)
+            .map_err(|e| format!("llm::complete: {e:#}"))?;
         request = request.tools(normalize_tools(tools));
     }
     if model_config.supports_temperature {
@@ -329,7 +331,7 @@ mod tests {
     use chatty_wasm_runtime::{
         Capability, ModuleManifest, ResourceLimits, ToolCallRequest, WasmModule,
     };
-    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -508,15 +510,21 @@ mod tests {
     }
 
     /// Azure OpenAI authenticates with an `api-key` header (never a bearer
-    /// token) on its deployment URL.
+    /// token) on the resource's Responses API (AGE-858).
     #[tokio::test(flavor = "multi_thread")]
     async fn row_4_1_azure_uses_api_key_header_not_bearer() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/openai/deployments/test-model/chat/completions"))
-            .and(query_param("api-version", AZURE_API_VERSION))
+            .and(path("/openai/v1/responses"))
             .and(header("api-key", "sk-azure"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "resp_1", "object": "response", "created_at": 0,
+                "status": "completed", "model": "test-model", "tools": [],
+                "output": [{ "type": "message", "id": "msg_1", "role": "assistant",
+                    "status": "completed",
+                    "content": [{ "type": "output_text", "text": "hi", "annotations": [] }] }],
+                "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 },
+            })))
             .expect(1)
             .mount(&server)
             .await;
@@ -543,9 +551,6 @@ mod tests {
             "an Azure API key must not also go out as a bearer token"
         );
     }
-
-    const AZURE_API_VERSION: &str =
-        crate::settings::models::models_store::AZURE_DEFAULT_API_VERSION;
 
     // -- 4.2: current-thread runtime -----------------------------------
 

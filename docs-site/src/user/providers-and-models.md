@@ -29,10 +29,12 @@ Ollama models are added for you: Chatty discovers what is installed shortly afte
 Azure serves your own deployments rather than a public catalogue, so it needs three things:
 
 1. **API key**, or switch on **Use Entra ID instead of a key** to sign in with your Azure account.
-2. **Endpoint URL** — your resource address, e.g. `https://my-resource.openai.azure.com`.
+2. **Endpoint URL** — your resource address, e.g. `https://my-resource.openai.azure.com`. The v1 base URL (`https://my-resource.openai.azure.com/openai/v1/`) and the deployment or Responses URLs the Azure portal shows work too.
 3. **Deployment name** — the deployment you created in Azure, e.g. `gpt-5-chat`.
 
-Press **Connect & fetch models**. Each further deployment is added by name in the **Add model** sheet. The API version can be adjusted per model under **Edit… → Advanced**.
+Press **Connect & fetch models**. Each further deployment is added by name in the **Add model** sheet.
+
+chatty talks to an Azure OpenAI resource through the Responses API, the one OpenAI's reasoning models accept tools on. A model-inference endpoint (`…services.ai.azure.com/models`) serves chat completions only: chatty uses it for other models, and a reasoning model with tools there asks you to switch to the resource's v1 base URL. The API version under **Edit… → Advanced** applies to that chat-completions endpoint.
 
 ## Add a model
 

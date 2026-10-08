@@ -5,6 +5,7 @@ mod cache_breakpoint_probe;
 mod connect_retry_http;
 mod empty_turn_retry;
 mod mcp_helpers;
+mod openai_responses;
 mod preamble_builder;
 mod prompt_cache_http;
 mod provider_builder;
@@ -65,6 +66,7 @@ pub use build_context::{
     AgentBuildContext, AgentRole, AgentServices, SpecBuild, gated_exec_settings,
 };
 pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
+pub(crate) use openai_responses::ensure_tools_reachable;
 #[cfg(test)]
 pub(crate) use provider_builder::openrouter_base_url;
 pub(crate) use provider_builder::{completion_model, ollama_think, request_params};
