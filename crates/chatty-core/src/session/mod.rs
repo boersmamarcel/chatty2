@@ -69,6 +69,7 @@ use crate::models::message_types::{
 use crate::models::token_usage::{PriceBook, TokenUsage};
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
 use crate::repositories::ConversationData;
+use crate::services::swarm_trace::{AGENTS_TRACE_KEY, SwarmTrace};
 use crate::services::turn_budget::TurnBudget;
 use crate::services::{
     AgentTaskController, AgentTaskSnapshot, RecoveryAction, StreamError, StreamErrorKind,
@@ -217,6 +218,10 @@ pub struct AgentSession {
     /// Stream-error recovery attempts per kind across the turns of one task;
     /// reset by a human turn (AGE-273).
     recovery_attempts: HashMap<StreamErrorKind, usize>,
+    /// The turn's agents — who ran under whom, their tool calls, spend,
+    /// status and captured conversations — persisted on the turn's trace
+    /// by `finish_turn` for the full-run export (AGE-859).
+    swarm: SwarmTrace,
 }
 
 impl AgentSession {
@@ -236,6 +241,7 @@ impl AgentSession {
             side_usages: Vec::new(),
             price_book: PriceBook::default(),
             recovery_attempts: HashMap::new(),
+            swarm: SwarmTrace::new(),
         }
     }
 
@@ -631,6 +637,7 @@ impl AgentSession {
             SessionEvent::TurnMessages(messages) => self.set_turn_messages(messages.clone()),
             SessionEvent::TokenUsage(usage) => self.record_turn_usage(usage.clone()),
             SessionEvent::PluginUsage(usage) => self.note_plugin_usage(usage.clone()),
+            SessionEvent::SwarmEvent(batch) => self.note_swarm_event(batch),
             _ => {}
         }
         None
@@ -647,6 +654,10 @@ impl AgentSession {
     /// trace and remember its name, so its result can be told apart from any
     /// other's.
     pub fn note_tool_started(&mut self, id: &str, name: &str) {
+        self.swarm.apply(&SessionEvent::ToolCallStarted {
+            id: id.to_string(),
+            name: name.to_string(),
+        });
         self.pending_tool_names
             .insert(id.to_string(), name.to_string());
         if let Some(conversation) = self.conversation.as_mut() {
@@ -676,6 +687,10 @@ impl AgentSession {
 
     /// `SessionEvent::ToolCallInput`: the call's arguments, in the trace.
     pub fn note_tool_input(&mut self, id: &str, arguments: &str) {
+        self.swarm.apply(&SessionEvent::ToolCallInput {
+            id: id.to_string(),
+            arguments: arguments.to_string(),
+        });
         if let Some(trace) = self
             .conversation
             .as_mut()
@@ -693,6 +708,10 @@ impl AgentSession {
     /// a todo tool, take the agent's new todo snapshot onto the conversation
     /// and return it for the owner's plan UI.
     pub fn note_tool_result(&mut self, id: &str, result: &str) -> Option<AgentTaskSnapshot> {
+        self.swarm.apply(&SessionEvent::ToolCallResult {
+            id: id.to_string(),
+            result: result.to_string(),
+        });
         if let Some(trace) = self
             .conversation
             .as_mut()
@@ -716,6 +735,10 @@ impl AgentSession {
     /// `SessionEvent::ToolCallError`: close the call as failed in the trace;
     /// otherwise as [`note_tool_result`](Self::note_tool_result).
     pub fn note_tool_error(&mut self, id: &str, error: &str) -> Option<AgentTaskSnapshot> {
+        self.swarm.apply(&SessionEvent::ToolCallError {
+            id: id.to_string(),
+            error: error.to_string(),
+        });
         if let Some(trace) = self
             .conversation
             .as_mut()
@@ -801,6 +824,8 @@ impl AgentSession {
 
     /// `SessionEvent::Delegation`: the sub-agent's row on the conversation.
     pub fn note_delegation(&mut self, progress: &InvokeAgentProgress) {
+        self.swarm
+            .apply(&SessionEvent::Delegation(progress.clone()));
         let Some(conversation) = self.conversation.as_mut() else {
             return;
         };
@@ -839,7 +864,15 @@ impl AgentSession {
             // Who waits on the human: the running-agents overview's, read
             // off `SwarmTrace` (TB-6); the cards are the approval's own.
             InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => {}
+            // Kept by the turn's swarm trace, for the export (AGE-859).
+            InvokeAgentProgress::Conversation(_) => {}
         }
+    }
+
+    /// `SessionEvent::SwarmEvent`: what a run nested under one of the
+    /// turn's delegations did (TB-1), kept for the export (AGE-859).
+    pub fn note_swarm_event(&mut self, batch: &chatty_fabric::SwarmEvent) {
+        self.swarm.apply_swarm(batch);
     }
 
     /// `SessionEvent::PluginUsage`: what one of the agent's plugins spent
@@ -912,7 +945,10 @@ impl AgentSession {
         // leave a tool parked until its timeout.
         self.clarifications.cancel_all();
 
-        let trace = trace.or_else(|| self.trace_json());
+        let trace = with_agents(
+            trace.or_else(|| self.trace_json()),
+            std::mem::take(&mut self.swarm),
+        );
         let conversation = self.conversation.as_mut()?;
         let response = conversation
             .streaming_message()
@@ -967,6 +1003,21 @@ impl AgentSession {
 
         Some(outcome)
     }
+}
+
+/// `trace` with the turn's agents under [`AGENTS_TRACE_KEY`] when it
+/// delegated (AGE-859): what the full-run export nests under the turn's
+/// delegation steps. A turn that delegated nothing keeps its trace as is.
+fn with_agents(trace: Option<serde_json::Value>, swarm: SwarmTrace) -> Option<serde_json::Value> {
+    let records = swarm.records();
+    if records.len() <= 1 {
+        return trace;
+    }
+    let mut trace = trace.unwrap_or_else(|| serde_json::json!({ "items": [] }));
+    if let (Some(object), Ok(records)) = (trace.as_object_mut(), serde_json::to_value(records)) {
+        object.insert(AGENTS_TRACE_KEY.to_string(), records);
+    }
+    Some(trace)
 }
 
 /// `contents` with the delivered tree `messages` ahead of it, as one text

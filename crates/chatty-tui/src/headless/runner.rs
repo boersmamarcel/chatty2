@@ -811,6 +811,9 @@ impl HeadlessRunner {
                 self.session.note_plugin_usage(usage);
             }
             AppEvent::TurnMessages(messages) => self.session.set_turn_messages(messages),
+            // What runs nested under a delegation did, kept for the
+            // full-run export (AGE-859).
+            AppEvent::SwarmEvent(batch) => self.session.note_swarm_event(&batch),
             AppEvent::Delegation(progress) => {
                 if let chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished {
                     usage,

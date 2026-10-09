@@ -59,6 +59,39 @@ pub enum SwarmItem {
     Ended {
         state: String,
     },
+    /// The conversation the run's terminal status carried (RC-0, AGE-649):
+    /// what the full-run export nests under the call that started the run
+    /// (AGE-859). Sent once, before [`Ended`](Self::Ended).
+    Conversation {
+        conversation: CapturedConversation,
+    },
+}
+
+/// A run's captured conversation, as its terminal status carried it
+/// (RC-0, AGE-649).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "captured", rename_all = "snake_case")]
+pub enum CapturedConversation {
+    /// Every message of every turn the run took, in order: chatty-core's
+    /// messages, as JSON.
+    Messages { messages: Value },
+    /// The conversation was over the capture cap, so only its size came
+    /// back. An export says so rather than cutting it silently.
+    TooLarge { bytes: u64 },
+}
+
+impl CapturedConversation {
+    /// What `metadata` carries, if the run captured anything.
+    pub fn from_metadata(metadata: &crate::wire::TaskMetadata) -> Option<Self> {
+        if let Some(conversation) = metadata.conversation.as_ref()
+            && let Ok(messages) = conversation.to_value()
+        {
+            return Some(Self::Messages { messages });
+        }
+        metadata
+            .conversation_too_large
+            .map(|bytes| Self::TooLarge { bytes })
+    }
 }
 
 impl SwarmItem {

@@ -158,7 +158,7 @@ use chatty_fabric::{
     CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallResult,
     CallStream, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL,
     InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList,
-    ROOT_NAME, Refusal, RefusalReason, SendMessageParams, Sender, SwarmBatcher, SwarmItem,
+    ROOT_NAME, Refusal, RefusalReason, SendMessageParams, Sender, SwarmBatcher, SwarmItem, CapturedConversation,
     Transport, UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
@@ -1558,6 +1558,10 @@ impl BrokerCalls {
             .with_call(Some(stamp))
             .with_spawn_context(spawn)
             .with_swarm_events(reports_to.is_some())
+            // Every run hands back its conversation, so the root can export
+            // the whole tree (AGE-859): a nested run's goes to the root as a
+            // swarm item, the root's callee's rides its result.
+            .with_capture_conversation(true)
             // A hosted broker's tasks carry its binding, and no other
             // (ADR-0021 § 3).
             .with_identity(self.hosted.as_ref().map(Hosted::identity));
@@ -1710,6 +1714,12 @@ impl BrokerCalls {
                                 && let Ok(usage) = serde_json::to_value(usage)
                             {
                                 report(SwarmItem::Usage { usage });
+                            }
+                            if let Some(conversation) = metadata
+                                .as_ref()
+                                .and_then(CapturedConversation::from_metadata)
+                            {
+                                report(SwarmItem::Conversation { conversation });
                             }
                             // Finished before the result, as the A2A path
                             // does before its terminal event: that commits

@@ -680,6 +680,8 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             InvokeAgentProgress::Admitted(_) => continue,
             // Newer than the goldens too (TB-6).
             InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => continue,
+            // Newer than the goldens too (AGE-859).
+            InvokeAgentProgress::Conversation(_) => continue,
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),

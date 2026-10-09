@@ -48,7 +48,7 @@ pub use permit::{
     WeakRunPermit,
 };
 pub use question::{Answer, AskReply, AskRequest, Question, QuestionOrigin};
-pub use swarm::{FORWARD_INTERVAL, SwarmBatcher, SwarmEvent, SwarmItem};
+pub use swarm::{CapturedConversation, FORWARD_INTERVAL, SwarmBatcher, SwarmEvent, SwarmItem};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
     CANCELLED_BY_USER, CallError, CallEvent, CallRequest, CallResult, CallStream,
