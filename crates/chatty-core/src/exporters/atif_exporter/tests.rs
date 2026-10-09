@@ -1036,3 +1036,487 @@ fn snapshot_full_conversation() {
     // Semantic comparison: key order doesn't matter
     assert_eq!(actual, expected);
 }
+
+/// The full-run export (AGE-859): every agent's steps nested under the
+/// delegation step that started it, from the turn's agents as the session
+/// keeps them on its trace.
+mod full_run {
+    use super::*;
+    use crate::models::token_usage::ModelRef;
+    use crate::services::swarm_trace::{AGENTS_TRACE_KEY, SwarmTrace};
+    use crate::session::SessionEvent;
+    use crate::tools::invoke_agent_tool::{InvokeAgentProgress, STOPPED_BY_USER};
+    use chatty_fabric::{CallChain, CapturedConversation, SwarmEvent, SwarmItem};
+    use rig_core::completion::message::{
+        Reasoning, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
+    };
+    use serde_json::{Value, json};
+
+    fn model() -> ModelRef {
+        ModelRef {
+            provider: ProviderType::Ollama,
+            model_id: "m".to_string(),
+        }
+    }
+
+    fn usage(input: u32, output: u32, delegated_to: Option<&str>) -> TokenUsage {
+        let mut usage = TokenUsage::new(input, output);
+        usage.model = Some(model());
+        usage.delegated_to = delegated_to.map(str::to_string);
+        usage
+    }
+
+    fn call(id: &str, name: &str, arguments: Value) -> AssistantContent {
+        AssistantContent::ToolCall(ToolCall {
+            id: ToolCallId::new(id).unwrap(),
+            provider: None,
+            function: ToolFunction {
+                name: name.to_string(),
+                arguments,
+            },
+            signature: None,
+            additional_params: None,
+        })
+    }
+
+    fn result(id: &str, name: &str, text: &str) -> Message {
+        Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new(id).unwrap(),
+                name: name.to_string(),
+                content: vec![ToolResultContent::text(text)],
+                provider: None,
+            })],
+        }
+    }
+
+    /// A worker's captured conversation: it thinks, reads a file, maybe
+    /// delegates to `callee`, and answers.
+    fn worker(callee: Option<&str>) -> CapturedConversation {
+        let mut messages = vec![
+            Message::user("write it"),
+            Message::Assistant {
+                id: None,
+                content: vec![
+                    AssistantContent::Reasoning(Reasoning::new("thinking about it")),
+                    call("w-read", "read_file", json!({ "path": "main.rs" })),
+                ],
+            },
+            result("w-read", "read_file", "fn main() {}"),
+        ];
+        if let Some(callee) = callee {
+            messages.push(Message::Assistant {
+                id: None,
+                content: vec![call(
+                    "w-call",
+                    "invoke_agent",
+                    json!({ "agent": callee, "prompt": "test it" }),
+                )],
+            });
+            messages.push(result("w-call", "invoke_agent", "tests pass"));
+        }
+        messages.push(Message::assistant("done"));
+        CapturedConversation::Messages {
+            messages: serde_json::to_value(messages).unwrap(),
+        }
+    }
+
+    /// The root's turn: its delegation tool calls, the events its
+    /// delegations sent, and the usage the conversation recorded.
+    struct Turn {
+        trace: SwarmTrace,
+        calls: Vec<AssistantContent>,
+        outputs: Vec<(String, String, String)>,
+        usage: ConversationTokenUsage,
+    }
+
+    impl Turn {
+        fn new(own: TokenUsage) -> Self {
+            let mut usage = ConversationTokenUsage::new();
+            usage.add_usage(own);
+            Self {
+                trace: SwarmTrace::new(),
+                calls: Vec::new(),
+                outputs: Vec::new(),
+                usage,
+            }
+        }
+
+        fn start_call(&mut self, id: &str, name: &str, arguments: Value) {
+            self.trace.apply(&SessionEvent::ToolCallStarted {
+                id: id.into(),
+                name: name.into(),
+            });
+            self.trace.apply(&SessionEvent::ToolCallInput {
+                id: id.into(),
+                arguments: arguments.to_string(),
+            });
+            self.calls.push(call(id, name, arguments));
+        }
+
+        fn end_call(&mut self, id: &str, name: &str, output: &str) {
+            self.trace.apply(&SessionEvent::ToolCallResult {
+                id: id.into(),
+                result: output.into(),
+            });
+            self.outputs
+                .push((id.to_string(), name.to_string(), output.to_string()));
+        }
+
+        fn progress(&mut self, progress: InvokeAgentProgress) {
+            self.trace.apply(&SessionEvent::Delegation(progress));
+        }
+
+        fn started(&mut self, agent: &str, prompt: &str) {
+            self.progress(InvokeAgentProgress::Started {
+                agent_name: agent.into(),
+                prompt: prompt.into(),
+                source: ToolSource::Local,
+            });
+        }
+
+        /// A delegation ending, with what it captured and spent.
+        fn finished(
+            &mut self,
+            agent: &str,
+            conversation: Option<CapturedConversation>,
+            success: bool,
+            result: Option<&str>,
+            spent: Option<(u32, u32)>,
+        ) {
+            if let Some(conversation) = conversation {
+                self.progress(InvokeAgentProgress::Conversation(conversation));
+            }
+            let lines: Vec<TokenUsage> = spent
+                .map(|(i, o)| usage(i, o, Some(agent)))
+                .into_iter()
+                .collect();
+            for line in &lines {
+                self.usage.add_usage(line.clone());
+            }
+            self.progress(InvokeAgentProgress::Finished {
+                success,
+                result: result.map(str::to_string),
+                usage: lines,
+            });
+        }
+
+        fn delegate(&mut self, id: &str, agent: &str, spent: (u32, u32)) {
+            let prompt = format!("task for {agent}");
+            self.start_call(id, "invoke_agent", json!({ "agent": agent, "prompt": prompt }));
+            self.started(agent, &prompt);
+            self.finished(agent, Some(worker(None)), true, Some("done"), Some(spent));
+            self.end_call(id, "invoke_agent", "done");
+        }
+
+        /// The conversation the session would have persisted for the turn.
+        fn conversation(self) -> ConversationData {
+            let items: Vec<TraceItem> = self
+                .outputs
+                .iter()
+                .map(|(id, name, output)| {
+                    TraceItem::ToolCall(ToolCallBlock {
+                        id: id.clone(),
+                        tool_name: name.clone(),
+                        display_name: name.clone(),
+                        input: String::new(),
+                        output: Some(output.clone()),
+                        output_preview: None,
+                        state: ToolCallState::Success,
+                        duration: None,
+                        text_before: String::new(),
+                        source: ToolSource::Local,
+                        execution_engine: None,
+                    })
+                })
+                .collect();
+            let mut trace = serde_json::to_value(SystemTrace {
+                items,
+                total_duration: None,
+                active_tool_index: None,
+            })
+            .unwrap();
+            let mut records = self.trace.records();
+            records[0].node.tool_calls.clear();
+            trace[AGENTS_TRACE_KEY] = serde_json::to_value(records).unwrap();
+            let mut content = self.calls;
+            content.push(AssistantContent::text("all done"));
+            make_conversation_data(
+                "run",
+                "m",
+                vec![
+                    Message::user("build it"),
+                    Message::Assistant { id: None, content },
+                ],
+                vec![None, Some(trace)],
+                self.usage,
+                vec![vec![], vec![]],
+                vec![None, None],
+                vec![None, None],
+                vec![],
+            )
+        }
+    }
+
+    fn export_of(conversation: &ConversationData) -> Value {
+        conversation_to_atif(conversation, None).unwrap()
+    }
+
+    fn steps_of<'a>(export: &'a Value, agent: &str) -> Vec<&'a Value> {
+        export["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["extra"]["agent"] == agent)
+            .collect()
+    }
+
+    fn roster_entry<'a>(export: &'a Value, path: &str) -> &'a Value {
+        export["extra"]["swarm"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["path"] == path)
+            .unwrap_or_else(|| panic!("{path} is not in the roster"))
+    }
+
+    /// root → coder → tester: the root's delegation, then coder's steps
+    /// under it, then tester's under coder's own `invoke_agent` step.
+    fn nested_run() -> Value {
+        let mut turn = Turn::new(usage(100, 10, None));
+        turn.start_call(
+            "call-1",
+            "invoke_agent",
+            json!({ "agent": "coder", "prompt": "write" }),
+        );
+        turn.started("coder", "write");
+        let chain = CallChain::root("t-1")
+            .extend("coder")
+            .unwrap()
+            .extend("tester")
+            .unwrap();
+        turn.trace.apply(&SessionEvent::SwarmEvent(SwarmEvent {
+            root_task_id: "t-1".into(),
+            node: "tester-0".into(),
+            chain,
+            inner: vec![
+                SwarmItem::TurnStarted,
+                SwarmItem::Conversation {
+                    conversation: worker(None),
+                },
+                SwarmItem::Usage {
+                    usage: json!({ "lines": [{
+                        "model": { "provider": "ollama", "model_id": "m" },
+                        "inputTokens": 20, "outputTokens": 2,
+                    }] }),
+                },
+                SwarmItem::Ended {
+                    state: "completed".into(),
+                },
+            ],
+        }));
+        // What coder reports is its whole subtree's: 40/4 own + tester's.
+        turn.finished(
+            "coder",
+            Some(worker(Some("tester"))),
+            true,
+            Some("done"),
+            Some((60, 6)),
+        );
+        turn.end_call("call-1", "invoke_agent", "done");
+        export_of(&turn.conversation())
+    }
+
+    #[test]
+    fn export_nests_worker_turns_under_delegation() {
+        let export = nested_run();
+        let root = steps_of(&export, "root");
+        assert_eq!(root.len(), 2, "the user's message and the leader's turn");
+        let delegation = root[1]["step_id"].as_u64().unwrap();
+        assert_eq!(root[1]["tool_calls"][0]["function_name"], "invoke_agent");
+
+        let coder = steps_of(&export, "root/coder");
+        assert!(!coder.is_empty(), "coder's turns are in the export");
+        for step in &coder {
+            assert_eq!(step["extra"]["parent_step"], delegation);
+        }
+        assert_eq!(coder[0]["step_id"].as_u64(), Some(delegation + 1));
+
+        let coder_call = coder
+            .iter()
+            .find(|s| s["tool_calls"][0]["function_name"] == "invoke_agent")
+            .expect("coder's own delegation")["step_id"]
+            .as_u64()
+            .unwrap();
+        let tester = steps_of(&export, "root/coder/tester-0");
+        assert!(!tester.is_empty(), "tester's turns are in the export");
+        for step in &tester {
+            assert_eq!(step["extra"]["parent_step"], coder_call);
+        }
+        assert_eq!(tester[0]["step_id"].as_u64(), Some(coder_call + 1));
+
+        // Step ids are the document's order.
+        let ids: Vec<u64> = export["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["step_id"].as_u64().unwrap())
+            .collect();
+        assert_eq!(ids, (1..=ids.len() as u64).collect::<Vec<_>>());
+        assert_eq!(roster_entry(&export, "root/coder/tester-0")["parent"], 1);
+    }
+
+    #[test]
+    fn export_includes_worker_reasoning_and_tool_results() {
+        let export = nested_run();
+        for agent in ["root/coder", "root/coder/tester-0"] {
+            let steps = steps_of(&export, agent);
+            let read = steps
+                .iter()
+                .find(|s| s["tool_calls"][0]["function_name"] == "read_file")
+                .unwrap_or_else(|| panic!("{agent}'s read_file step"));
+            assert_eq!(read["reasoning_content"], "thinking about it");
+            assert_eq!(read["tool_calls"][0]["arguments"]["path"], "main.rs");
+            assert_eq!(read["observation"]["results"][0]["content"], "fn main() {}");
+            assert_eq!(
+                read["observation"]["results"][0]["source_call_id"],
+                "w-read"
+            );
+            assert!(steps.iter().any(|s| s["message"] == "done"), "its answer");
+            assert!(
+                steps.iter().any(|s| s["source"] == "user" && s["message"] == "write it"),
+                "the task it was given"
+            );
+        }
+    }
+
+    #[test]
+    fn best_of_attempts_and_judge_are_children() {
+        let mut turn = Turn::new(usage(100, 10, None));
+        turn.start_call("call-b", "best_of", json!({ "task": "solve" }));
+        for agent in ["solver-a", "solver-b"] {
+            turn.started(agent, "solve");
+            turn.finished(agent, Some(worker(None)), true, Some("42"), Some((30, 3)));
+        }
+        turn.started("judge", "pick one");
+        turn.finished("judge", Some(worker(None)), true, Some("2"), Some((10, 1)));
+        let output = json!({
+            "answer": "42", "chosen": 2, "selected_by": "judge",
+            "reason": "the second shows its work",
+            "response": "FINAL ANSWER: 42", "cost": "2 attempts + judge",
+            "attempts": [
+                { "number": 1, "agent": "solver-a", "success": true, "answer": "42", "tokens": 33 },
+                { "number": 2, "agent": "solver-b", "success": true, "answer": "42", "tokens": 33 },
+            ],
+        });
+        turn.end_call("call-b", "best_of", &output.to_string());
+        let export = export_of(&turn.conversation());
+
+        let best_of = steps_of(&export, "root")[1];
+        let id = best_of["step_id"].as_u64().unwrap();
+        for agent in ["root/solver-a", "root/solver-b", "root/judge"] {
+            let steps = steps_of(&export, agent);
+            assert!(!steps.is_empty(), "{agent} is in the export");
+            for step in steps {
+                assert_eq!(step["extra"]["parent_step"], id, "{agent}");
+            }
+        }
+        let choice = &best_of["extra"]["best_of"];
+        assert_eq!(choice["chosen"], 2);
+        assert_eq!(choice["selected_by"], "judge");
+        assert_eq!(choice["reason"], "the second shows its work");
+        assert_eq!(choice["judge"], "root/judge");
+        assert!(export["extra"]["incomplete"].is_null(), "{export:#}");
+    }
+
+    #[test]
+    fn failed_and_stopped_workers_are_exported_with_status() {
+        let mut turn = Turn::new(usage(100, 10, None));
+        turn.start_call(
+            "call-f",
+            "invoke_agent",
+            json!({ "agent": "coder", "prompt": "write" }),
+        );
+        turn.started("coder", "write");
+        turn.finished("coder", Some(worker(None)), false, Some("⚠️ boom"), Some((40, 4)));
+        turn.end_call("call-f", "invoke_agent", "Agent 'coder' reported failure: boom");
+        turn.start_call(
+            "call-s",
+            "invoke_agent",
+            json!({ "agent": "reviewer", "prompt": "review" }),
+        );
+        turn.started("reviewer", "review");
+        // A stopped worker hands back no conversation, but what it spent
+        // until then still counts.
+        turn.finished("reviewer", None, false, Some(STOPPED_BY_USER), Some((5, 0)));
+        turn.end_call("call-s", "invoke_agent", STOPPED_BY_USER);
+        let export = export_of(&turn.conversation());
+
+        assert_eq!(roster_entry(&export, "root/coder")["status"]["state"], "failed");
+        assert_eq!(
+            roster_entry(&export, "root/reviewer")["status"]["state"],
+            "canceled"
+        );
+        let coder = steps_of(&export, "root/coder");
+        assert!(coder.iter().any(|s| s["message"] == "done"), "its turns");
+        let reviewer = steps_of(&export, "root/reviewer");
+        assert_eq!(reviewer.len(), 1, "{reviewer:#?}");
+        assert!(
+            reviewer[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("was stopped"),
+            "{reviewer:#?}"
+        );
+        assert_eq!(reviewer[0]["metrics"]["prompt_tokens"], 5);
+        let incomplete = export["extra"]["incomplete"].to_string();
+        assert!(
+            incomplete.contains("root/reviewer: no conversation was captured (was stopped)"),
+            "{incomplete}"
+        );
+        // Usage still reconciles: only the missing conversation is noted.
+        assert!(!incomplete.contains("step usage"), "{incomplete}");
+    }
+
+    #[test]
+    fn usage_sums_reconcile_or_export_marked_incomplete() {
+        // Complete: step usage is the conversation's total, root, workers
+        // and the worker's own worker included.
+        let export = nested_run();
+        assert!(export["extra"]["incomplete"].is_null(), "{export:#}");
+        let sum = |key: &str| -> u64 {
+            export["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s["metrics"][key].as_u64())
+                .sum()
+        };
+        assert_eq!(sum("prompt_tokens"), 160);
+        assert_eq!(sum("completion_tokens"), 16);
+        assert_eq!(export["final_metrics"]["total_prompt_tokens"], 160);
+        assert_eq!(export["final_metrics"]["total_completion_tokens"], 16);
+
+        // A conversation that recorded a worker's usage but not its agents
+        // (from before AGE-859): marked incomplete, with both reasons.
+        let mut turn = Turn::new(usage(100, 10, None));
+        turn.delegate("call-1", "coder", (40, 4));
+        let mut conversation = turn.conversation();
+        let mut traces: Vec<Option<Value>> =
+            serde_json::from_str(&conversation.system_traces).unwrap();
+        if let Some(Some(trace)) = traces.get_mut(1) {
+            trace.as_object_mut().unwrap().remove(AGENTS_TRACE_KEY);
+        }
+        conversation.system_traces = serde_json::to_string(&traces).unwrap();
+        let old = export_of(&conversation);
+        let incomplete = old["extra"]["incomplete"].to_string();
+        assert!(
+            incomplete.contains("step usage sums to 100 prompt and 10 completion tokens; final_metrics has 140 and 14"),
+            "{incomplete}"
+        );
+        assert!(
+            incomplete.contains("step 2 delegated (invoke_agent) but has no child trajectory"),
+            "{incomplete}"
+        );
+    }
+}
