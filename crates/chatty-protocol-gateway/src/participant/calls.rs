@@ -156,10 +156,10 @@ use chatty_fabric::wire::{AgentEntry, TaskMetadata, WireProgress};
 use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, Asker,
     CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallResult,
-    CallStream, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow, FORWARD_INTERVAL,
-    InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId, NodeState, PendingList,
-    ROOT_NAME, Refusal, RefusalReason, SendMessageParams, Sender, SwarmBatcher, SwarmItem, CapturedConversation,
-    Transport, UsagePricer, deadline_grace,
+    CallStream, CapturedConversation, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow,
+    FORWARD_INTERVAL, InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId,
+    NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, SendMessageParams, Sender,
+    SwarmBatcher, SwarmItem, Transport, UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};

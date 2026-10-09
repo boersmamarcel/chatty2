@@ -12,7 +12,6 @@ use crate::models::execution_approval_store::{
     ApprovalDetail, ApprovalKind, PendingApprovals, request_relayed_execution_approval,
 };
 use crate::models::message_types::ToolSource;
-use chatty_fabric::CapturedConversation;
 use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::a2a_client::{
@@ -26,6 +25,7 @@ use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::services::worker_start::{STOP_NOTE, WorkerStartFailure};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::filesystem_write_tool::request_relayed_write_approval;
+use chatty_fabric::CapturedConversation;
 use chatty_fabric::wire::WireProgress;
 use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskRequest, CallError, CallEvent,
@@ -741,14 +741,12 @@ impl InvokeAgentTool {
                         success = false;
                         error_msg = Some(e);
                         break;
-                    } else if state == "completed" {
-                        if include_trace {
-                            // The worker's trace rides the same terminal
-                            // status as its usage (AGE-467); a failed task
-                            // never reaches this branch, so it never
-                            // returns one.
-                            trace = trace_from_status_metadata(metadata.as_ref());
-                        }
+                    } else if state == "completed" && include_trace {
+                        // The worker's trace rides the same terminal
+                        // status as its usage (AGE-467); a failed task
+                        // never reaches this branch, so it never
+                        // returns one.
+                        trace = trace_from_status_metadata(metadata.as_ref());
                     }
                     // The worker's captured conversation rides its terminal
                     // status (RC-0, AGE-649), failed or not: capture is a
