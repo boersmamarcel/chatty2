@@ -1009,10 +1009,12 @@ impl AgentSession {
 /// delegated (AGE-859): what the full-run export nests under the turn's
 /// delegation steps. A turn that delegated nothing keeps its trace as is.
 fn with_agents(trace: Option<serde_json::Value>, swarm: SwarmTrace) -> Option<serde_json::Value> {
-    let records = swarm.records();
+    let mut records = swarm.records();
     if records.len() <= 1 {
         return trace;
     }
+    // The root's own tool calls are its conversation's already.
+    records[0].node.tool_calls.clear();
     let mut trace = trace.unwrap_or_else(|| serde_json::json!({ "items": [] }));
     if let (Some(object), Ok(records)) = (trace.as_object_mut(), serde_json::to_value(records)) {
         object.insert(AGENTS_TRACE_KEY.to_string(), records);

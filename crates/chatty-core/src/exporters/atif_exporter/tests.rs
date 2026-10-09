@@ -3,6 +3,19 @@
 //! Split out of `mod.rs` so the production code is easier to navigate.
 
 use super::*;
+use crate::exporters::{ExportRun, export_run};
+
+/// The one exporter, read back as JSON (AGE-859).
+fn conversation_to_atif(
+    conversation: &ConversationData,
+    model_config: Option<&ModelConfig>,
+) -> Result<serde_json::Value> {
+    let text = export_run(&ExportRun {
+        root: conversation,
+        model_config,
+    })?;
+    Ok(serde_json::from_str(&text)?)
+}
 
 use crate::models::message_types::{
     SystemTrace, ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,

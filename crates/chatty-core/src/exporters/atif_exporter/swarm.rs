@@ -308,7 +308,9 @@ impl Agent {
                 }
             },
         };
-        if steps.is_empty() {
+        // A worker always has a trajectory, if only a step saying nothing
+        // was recorded; the root's is its conversation, empty or not.
+        if steps.is_empty() && self.parent.is_some() {
             steps.push(Built::new(
                 system_step(format!(
                     "[{} {}; nothing it did was recorded]",
@@ -354,12 +356,10 @@ fn assemble(
     }
 
     for step in steps.iter_mut() {
-        if let Some(best_of) = best_of_extra(step) {
-            let id = step.step_id;
-            if let Some(extra) = step.extra.as_mut() {
-                extra.best_of = Some(best_of);
-            }
-            let _ = id;
+        if let Some(best_of) = best_of_extra(step)
+            && let Some(extra) = step.extra.as_mut()
+        {
+            extra.best_of = Some(best_of);
         }
     }
     name_the_judges(&mut steps, &agents);
@@ -403,7 +403,7 @@ fn place_children(agents: &[Agent], read: &[Option<Vec<Built>>]) -> Vec<Option<u
                 .enumerate()
                 .flat_map(|(s, b)| b.calls.iter().map(move |c| (s, c)))
                 .filter(|(_, c)| {
-                    c.name == "invoke_agent" && c.agent.as_deref() == Some(&agent.roster.spec)
+                    c.name == "invoke_agent" && c.agent.as_deref() == Some(agent.roster.spec.as_str())
                 })
                 .nth(*n)
                 .map(|(s, _)| s);
