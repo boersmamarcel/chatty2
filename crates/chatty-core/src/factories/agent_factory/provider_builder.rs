@@ -28,7 +28,7 @@ use super::connect_retry_http::ConnectRetryHttpClient;
 use super::empty_turn_retry::EmptyTurnRetry;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 use super::openai_responses::{
-    AzureResponsesHttpClient, AzureWire, azure_wire, ensure_tools_reachable,
+    AzureResponsesHttpClient, AzureWire, ToolsOnResponses, azure_wire, ensure_tools_reachable,
     openai_platform_responses_base,
 };
 use super::prompt_cache_http::PromptCachingHttpClient;
@@ -158,15 +158,6 @@ pub(crate) fn completion_model(
                 .clone()
                 .ok_or_else(|| anyhow!("API key not configured for OpenRouter provider"))?;
 
-            // OpenAI's own API speaks Responses, the one wire its reasoning
-            // models take tools on (AGE-858); every other OpenAI-compatible
-            // server keeps chat completions.
-            if let Some(base_url) =
-                openai_platform_responses_base(openrouter_base_url(provider_config))
-            {
-                return openai_responses_model(&base_url, &key, identifier);
-            }
-
             // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
             // OpenRouter cache nothing unless the request carries
             // `cache_control` breakpoints; rig's `with_prompt_caching()` puts
@@ -180,9 +171,19 @@ pub(crate) fn completion_model(
                 .http_client(PromptCachingHttpClient::new(llm_client().clone()))
                 .base_url(openrouter_base_url(provider_config))
                 .build()?;
-            Ok(ModelHandle::new(
-                client.completion_model(identifier).with_prompt_caching(),
-            ))
+            let chat = ModelHandle::new(client.completion_model(identifier).with_prompt_caching());
+
+            // OpenAI's own API takes a request with tools on Responses, the
+            // one wire its reasoning models accept tools on (AGE-858); a
+            // request without tools, and every other OpenAI-compatible
+            // server, keeps chat completions.
+            match openai_platform_responses_base(openrouter_base_url(provider_config)) {
+                Some(base_url) => Ok(ModelHandle::new(ToolsOnResponses {
+                    chat,
+                    responses: openai_responses_model(&base_url, &key, identifier)?,
+                })),
+                None => Ok(chat),
+            }
         }
         ProviderType::Ollama => {
             let client = rig_core::providers::ollama::Client::builder()
@@ -214,8 +215,11 @@ pub(crate) fn openrouter_base_url(provider_config: &ProviderConfig) -> &str {
         .unwrap_or(DEFAULT_OPENROUTER_URL)
 }
 
-/// Azure OpenAI has more complex setup (endpoint normalization, Entra ID auth),
-/// so it gets its own function.
+/// Azure OpenAI: a request with tools on an Azure OpenAI resource goes to
+/// its Responses API, the one wire OpenAI's reasoning models take tools on
+/// (AGE-858); a request without tools, and every request to the
+/// model-inference surface, keeps the deployment's chat completions, so a
+/// deployment without Responses still chats.
 fn azure_completion_model(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
@@ -224,18 +228,26 @@ fn azure_completion_model(
         .base_url
         .as_deref()
         .ok_or_else(|| anyhow!("Endpoint URL not configured for Azure OpenAI provider"))?;
-
-    // An Azure OpenAI resource speaks Responses, the one wire OpenAI's
-    // reasoning models take tools on (AGE-858); the model-inference surface
-    // keeps chat completions.
-    if let AzureWire::Responses {
-        base_url,
-        api_version,
-    } = azure_wire(raw_endpoint)
-    {
-        return azure_responses_model(model_config, provider_config, base_url, api_version);
+    let chat = azure_chat_model(model_config, provider_config, raw_endpoint)?;
+    match azure_wire(raw_endpoint) {
+        AzureWire::Responses {
+            base_url,
+            api_version,
+        } => Ok(ModelHandle::new(ToolsOnResponses {
+            chat,
+            responses: azure_responses_model(model_config, provider_config, base_url, api_version)?,
+        })),
+        AzureWire::ChatCompletionsOnly => Ok(chat),
     }
+}
 
+/// Azure's chat completions on the deployment URL, which has more complex
+/// setup (endpoint normalization, Entra ID auth).
+fn azure_chat_model(
+    model_config: &ModelConfig,
+    provider_config: &ProviderConfig,
+    raw_endpoint: &str,
+) -> Result<ModelHandle> {
     let endpoint = normalize_azure_endpoint(raw_endpoint);
 
     let api_version = model_config

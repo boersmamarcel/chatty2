@@ -331,7 +331,7 @@ mod tests {
     use chatty_wasm_runtime::{
         Capability, ModuleManifest, ResourceLimits, ToolCallRequest, WasmModule,
     };
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -510,21 +510,19 @@ mod tests {
     }
 
     /// Azure OpenAI authenticates with an `api-key` header (never a bearer
-    /// token) on the resource's Responses API (AGE-858).
+    /// token); a request without tools stays on the deployment's chat
+    /// completions (AGE-858).
     #[tokio::test(flavor = "multi_thread")]
     async fn row_4_1_azure_uses_api_key_header_not_bearer() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/openai/v1/responses"))
+            .and(path("/openai/deployments/test-model/chat/completions"))
+            .and(query_param(
+                "api-version",
+                crate::settings::models::models_store::AZURE_DEFAULT_API_VERSION,
+            ))
             .and(header("api-key", "sk-azure"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": "resp_1", "object": "response", "created_at": 0,
-                "status": "completed", "model": "test-model", "tools": [],
-                "output": [{ "type": "message", "id": "msg_1", "role": "assistant",
-                    "status": "completed",
-                    "content": [{ "type": "output_text", "text": "hi", "annotations": [] }] }],
-                "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 },
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(ok_body()))
             .expect(1)
             .mount(&server)
             .await;

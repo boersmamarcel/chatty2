@@ -34,7 +34,7 @@ Azure serves your own deployments rather than a public catalogue, so it needs th
 
 Press **Connect & fetch models**. Each further deployment is added by name in the **Add model** sheet.
 
-chatty talks to an Azure OpenAI resource through the Responses API, the one OpenAI's reasoning models accept tools on. A model-inference endpoint (`…services.ai.azure.com/models`) serves chat completions only: chatty uses it for other models, and a reasoning model with tools there asks you to switch to the resource's v1 base URL. The API version under **Edit… → Advanced** applies to that chat-completions endpoint.
+When a request carries tools (an agent turn), chatty sends it to the resource's Responses API, the one OpenAI's reasoning models accept tools on. A plain chat without tools, such as a title or a summary, goes to the deployment's chat completions, so an older deployment without the Responses API still chats. The API version under **Edit… → Advanced** applies to those chat completions. A model-inference endpoint (`…services.ai.azure.com/models`) serves chat completions only: chatty uses it for everything, and a reasoning model with tools there asks you to switch to the resource's v1 base URL.
 
 ## Add a model
 

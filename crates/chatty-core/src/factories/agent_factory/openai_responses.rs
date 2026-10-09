@@ -2,11 +2,13 @@
 //!
 //! OpenAI's reasoning models take function tools only on the Responses API
 //! (`/responses`): `/chat/completions` rejects a request that carries both
-//! reasoning and tools. So OpenAI's own API and Azure OpenAI resources go to
-//! Responses, through rig's OpenAI Responses client. OpenAI-compatible
-//! servers (vLLM, OpenRouter, Ollama compat) and Azure's model-inference
-//! surface keep chat completions; their base URL decides, and nothing about
-//! them changes.
+//! reasoning and tools. So on OpenAI's own API and on Azure OpenAI resources
+//! a request with tools goes to Responses, through rig's OpenAI Responses
+//! client ([`ToolsOnResponses`]); a request without tools keeps chat
+//! completions, so an older Azure deployment without Responses still chats.
+//! OpenAI-compatible servers (vLLM, OpenRouter, Ollama compat) and Azure's
+//! model-inference surface keep chat completions for everything; their base
+//! URL decides, and nothing about them changes.
 //!
 //! Users paste whatever endpoint their portal shows, so the Azure URL is
 //! read for the resource it names: a trailing `/responses` or
@@ -21,10 +23,15 @@ use std::future::Future;
 use anyhow::anyhow;
 use bytes::Bytes;
 use reqwest::Url;
+use rig_agent::ModelHandle;
+use rig_core::completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse, ProviderCapabilities,
+};
 use rig_core::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, Response,
     StreamingResponse, Uri,
 };
+use rig_core::streaming::StreamingCompletionResponse;
 use rig_core::wasm_compat::WasmCompatSend;
 
 use crate::settings::models::models_store::ModelConfig;
@@ -145,6 +152,48 @@ pub(crate) fn ensure_tools_reachable(
              endpoint to your resource's v1 base URL, {AZURE_V1_BASE_HINT}",
             model_config.model_identifier
         )),
+    }
+}
+
+/// A model that sends each request on the wire it needs: a request with
+/// tools to the Responses API, one without (titles, summaries, a plain
+/// chat) to chat completions.
+#[derive(Clone, Debug)]
+pub(crate) struct ToolsOnResponses {
+    pub(crate) chat: ModelHandle,
+    pub(crate) responses: ModelHandle,
+}
+
+impl ToolsOnResponses {
+    fn pick(&self, request: &CompletionRequest) -> &ModelHandle {
+        if request.tools.is_empty() {
+            &self.chat
+        } else {
+            &self.responses
+        }
+    }
+}
+
+impl CompletionModel for ToolsOnResponses {
+    fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> impl Future<Output = Result<CompletionResponse, CompletionError>> + WasmCompatSend {
+        self.pick(&request).completion(request)
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> impl Future<Output = Result<StreamingCompletionResponse, CompletionError>> + WasmCompatSend
+    {
+        self.pick(&request).stream(request)
+    }
+
+    /// The tool-carrying wire's: capabilities describe how tools and
+    /// structured output compose, which only the Responses side sees.
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.responses.capabilities()
     }
 }
 
@@ -482,11 +531,12 @@ mod tests {
         assert!(ensure_tools_reachable(&reasoning, &azure_provider).is_err());
     }
 
-    /// Marcel's case: an Azure resource with a reasoning deployment and
-    /// tools goes to `/openai/v1/responses`, authenticated with `api-key`
-    /// and no bearer token.
+    /// Marcel's case: a request with tools on an Azure resource (here a
+    /// reasoning deployment, pasted as its Responses URL) goes to
+    /// `/openai/v1/responses`, authenticated with `api-key` and no bearer
+    /// token.
     #[tokio::test(flavor = "multi_thread")]
-    async fn azure_reasoning_model_with_tools_uses_responses_api() {
+    async fn azure_with_tools_uses_responses_api() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/openai/v1/responses"))
@@ -515,6 +565,54 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["model"], "gpt-6.1-sol", "the deployment is the model");
         assert_eq!(body["tools"][0]["name"], "add");
+    }
+
+    /// A request without tools on the same Azure resource stays on the
+    /// deployment's chat completions with the model's api-version, so a
+    /// deployment without Responses still chats, whichever URL was pasted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn azure_without_tools_uses_chat_completions() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openai/deployments/gpt-6.1-sol/chat/completions"))
+            .and(wiremock::matchers::query_param(
+                "api-version",
+                crate::settings::models::models_store::AZURE_DEFAULT_API_VERSION,
+            ))
+            .and(header("api-key", "sk-azure"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_completion_body()))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let model_config = model(ProviderType::AzureOpenAI, true);
+        for pasted in ["", "/openai/v1/", "/openai/v1/responses"] {
+            let provider_config = provider(
+                ProviderType::AzureOpenAI,
+                "sk-azure",
+                &format!("{}{pasted}", server.uri()),
+            );
+            let reply = CompletionRequestBuilder::new(
+                completion_model(&model_config, &provider_config).unwrap(),
+                Message::user("hi"),
+            )
+            .send()
+            .await
+            .expect("chat completions answers");
+            assert!(
+                reply
+                    .choice
+                    .into_iter()
+                    .any(|c| matches!(c, AssistantContent::Text(t) if t.text == "hi"))
+            );
+        }
+        for request in server.received_requests().await.unwrap() {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert!(
+                body.get("tools")
+                    .is_none_or(|t| t.as_array().is_none_or(Vec::is_empty))
+            );
+        }
     }
 
     /// The dated preview keeps the `api-version` the user pasted.
