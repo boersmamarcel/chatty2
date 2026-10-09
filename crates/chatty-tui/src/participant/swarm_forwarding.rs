@@ -150,12 +150,13 @@ const LEAVES: usize = 19;
 
 /// A 20-node run — a sub-leader and nineteen leaves under it — coalesces
 /// each leaf's items into fewer batches than it forwarded raw items (never
-/// one `SwarmEvent` per item), and no text chunk crosses a hop: the
-/// leaves' answers reach the root only as byte counts. The batch counts
-/// this checks are structural (how many items each node produced, how
-/// many batches it took to carry them), not a real-time rate: a run that
-/// is slow under load still coalesces, so nothing here depends on
-/// wall-clock timing.
+/// one `SwarmEvent` per item), and no text chunk crosses a hop on its own:
+/// the leaves' answers reach the root only as byte counts, except inside
+/// the leaf's own captured conversation, forwarded whole by design so the
+/// root can export the run's tree (AGE-859). The batch counts this checks
+/// are structural (how many items each node produced, how many batches it
+/// took to carry them), not a real-time rate: a run that is slow under
+/// load still coalesces, so nothing here depends on wall-clock timing.
 #[tokio::test]
 async fn forwarding_is_bounded() {
     let leaves: Vec<(String, String)> = (0..LEAVES)
@@ -229,7 +230,16 @@ async fn forwarding_is_bounded() {
         events.len()
     );
 
-    // No text chunk crossed a hop: nothing forwarded carries an answer.
-    let forwarded = serde_json::to_string(&events).unwrap();
-    assert!(!forwarded.contains("secret answer"), "{forwarded}");
+    // No text chunk crossed a hop on its own: nothing but the leaf's full
+    // captured conversation — forwarded whole, by design, so the root can
+    // export the run's tree (AGE-859) — carries the answer.
+    for event in &events {
+        for item in &event.inner {
+            if matches!(item, SwarmItem::Conversation { .. }) {
+                continue;
+            }
+            let item_json = serde_json::to_string(item).unwrap();
+            assert!(!item_json.contains("secret answer"), "{item_json}");
+        }
+    }
 }

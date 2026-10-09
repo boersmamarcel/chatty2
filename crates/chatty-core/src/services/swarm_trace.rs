@@ -814,7 +814,7 @@ impl SwarmTrace {
         running()
             .find(asked_for)
             .or_else(|| running().find(|call| call.name == "best_of"))
-            .or_else(|| running().last())
+            .or_else(|| running().next_back())
             .map(|call| call.id.clone())
     }
 
