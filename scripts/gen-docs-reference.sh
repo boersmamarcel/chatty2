@@ -131,6 +131,7 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/paste [n]` | Print the full text of an elided long paste | — | Yes |
 | `/now <text>` | Cancel the running turn and send `<text>` next | — | Yes |
 | `/unqueue` | Take back the message queued last | — | Yes |
+| `/export [path]` | Export the conversation as ATIF; default path is `<config dir>/chatty/exports/<conversation-id>.atif.json` | — | Yes |
 | `/model [query]` | Switch / list models | — | Yes |
 | `/tools [name]` | Open tool picker or toggle by name | — | Yes |
 | `/modules …` | Module runtime settings | — | Yes |

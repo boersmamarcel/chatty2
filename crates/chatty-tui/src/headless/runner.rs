@@ -104,6 +104,8 @@ pub struct HeadlessRunner {
     /// Where the conversation goes when the run ends
     /// (`--save-conversation`, AGE-650).
     save_conversation: Option<PathBuf>,
+    /// `--export-atif` (AGE-860).
+    export: Option<PathBuf>,
     /// The connection a delegated worker's calls travel over (ADR-0020,
     /// BI-4), set before the agent is built.
     fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
@@ -181,6 +183,7 @@ impl HeadlessRunner {
             answer_file: None,
             usage: UsageRecorder::default(),
             save_conversation: None,
+            export: None,
             fabric_transport: None,
             handoff: None,
             handoff_ledger,
@@ -408,6 +411,38 @@ impl HeadlessRunner {
     /// (`--save-conversation`, AGE-650).
     pub fn set_save_conversation(&mut self, path: Option<PathBuf>) {
         self.save_conversation = path;
+    }
+
+    /// `--export-atif` (AGE-860).
+    pub fn set_export(&mut self, atif: Option<PathBuf>) {
+        self.export = atif;
+    }
+
+    /// Write the `--export-atif` file, if the run has one. Called when the
+    /// run ends, also on failure or stop, so a failed run can be debugged.
+    pub(super) fn write_export(&self) {
+        let Some(path) = &self.export else {
+            return;
+        };
+        let Some(conversation) = self.session.conversation() else {
+            eprintln!("export: the run has no conversation to export");
+            return;
+        };
+        let secrets = crate::export::secret_values(
+            &self.config.providers,
+            &self.config.provider_config,
+            &self.config.user_secrets,
+        );
+        let result = conversation
+            .to_conversation_data()
+            .and_then(|data| {
+                crate::export::render(&data, Some(&self.config.model_config), &secrets)
+            })
+            .and_then(|text| crate::export::write(path, &text));
+        match result {
+            Ok(wrote) => eprintln!("Exported conversation to {wrote}"),
+            Err(error) => eprintln!("export: {error:#}"),
+        }
     }
 
     /// Write the conversation's messages to the `--save-conversation` path,

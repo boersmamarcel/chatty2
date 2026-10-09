@@ -172,6 +172,8 @@ pub enum Command {
     Now(Option<String>),
     /// /unqueue — take back the message queued last (AGE-482)
     Unqueue,
+    /// /export [path] — export the conversation as ATIF (AGE-860)
+    Export(Option<String>),
     /// /quit, /exit — quit the application
     Quit,
 }
@@ -233,6 +235,7 @@ impl ChatEngine {
             "/paste" => Some(Command::Paste(arg)),
             "/now" => Some(Command::Now(arg)),
             "/unqueue" => Some(Command::Unqueue),
+            "/export" => Some(Command::Export(arg)),
             "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }

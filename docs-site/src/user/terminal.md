@@ -61,6 +61,16 @@ Totals are summed per model call across every pass, plus what delegated agents
 reported spending; `tool_calls` counts this agent's own calls. A request cut off
 mid-stream reports no usage and is not counted.
 
+## Export a conversation
+
+Export a conversation as ATIF, the trajectory format the desktop app also writes, to debug a run.
+
+- `chatty-tui --headless --export-atif <PATH> -m "…"` writes the finished conversation when the run ends, also when it fails or is stopped. `-` writes to stdout.
+- `/export [path]` in the interactive TUI exports the current conversation. Without a path it writes `<config dir>/chatty/exports/<conversation-id>.atif.json` and prints where.
+- `chatty-tui --export <conversation-id> [--out <PATH>]` exports a saved conversation without running anything.
+
+API keys and your configured secrets are replaced with `[REDACTED]` in every export. Text a tool returned is exported as the tool returned it, so check it before sharing a trajectory. `--save-conversation` is a different file: the restore format, not an analysis export.
+
 ## Zero-config quick start
 
 Talk to a running model server without opening the desktop app or storing a key:
@@ -108,7 +118,7 @@ keyboard until answered — `Ctrl+C`/`Ctrl+Q` still work. Multiple questions are
 answered one at a time; press `Esc` while typing a custom answer to go back
 to the options.
 
-The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/swarm`, `/msg`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
+The terminal app has a few commands of its own — `/model`, `/tools`, `/modules`, `/update`, `/paste`, `/now`, `/unqueue`, `/export`, `/swarm`, `/msg`, `/stop`, `/quit` — alongside the shared ones. All of them: [slash commands](../dev/reference/slash-commands.md).
 
 `/swarm` prints the agent tree for the conversation's latest delegation as an indented list, one row per agent: name, model, status (running, done or failed) and spend. With no delegation yet, it says so.
 
