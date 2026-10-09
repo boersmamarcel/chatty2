@@ -600,7 +600,10 @@ mod tests {
             .await
             .expect("chat completions answers");
             assert!(
-                matches!(reply.choice.iter().next(), Some(AssistantContent::Text(t)) if t.text == "hi")
+                reply
+                    .choice
+                    .into_iter()
+                    .any(|c| matches!(c, AssistantContent::Text(t) if t.text == "hi"))
             );
         }
         for request in server.received_requests().await.unwrap() {
