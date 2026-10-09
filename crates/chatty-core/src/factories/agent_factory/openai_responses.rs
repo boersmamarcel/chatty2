@@ -23,14 +23,13 @@ use std::future::Future;
 use anyhow::anyhow;
 use bytes::Bytes;
 use reqwest::Url;
+use rig_agent::ModelHandle;
+use rig_core::completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse, ProviderCapabilities,
+};
 use rig_core::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, Response,
     StreamingResponse, Uri,
-};
-use rig_agent::ModelHandle;
-use rig_core::completion::{
-    CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
-    ProviderCapabilities,
 };
 use rig_core::streaming::StreamingCompletionResponse;
 use rig_core::wasm_compat::WasmCompatSend;
@@ -532,11 +531,12 @@ mod tests {
         assert!(ensure_tools_reachable(&reasoning, &azure_provider).is_err());
     }
 
-    /// Marcel's case: an Azure resource with a reasoning deployment and
-    /// tools goes to `/openai/v1/responses`, authenticated with `api-key`
-    /// and no bearer token.
+    /// Marcel's case: a request with tools on an Azure resource (here a
+    /// reasoning deployment, pasted as its Responses URL) goes to
+    /// `/openai/v1/responses`, authenticated with `api-key` and no bearer
+    /// token.
     #[tokio::test(flavor = "multi_thread")]
-    async fn azure_reasoning_model_with_tools_uses_responses_api() {
+    async fn azure_with_tools_uses_responses_api() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/openai/v1/responses"))
@@ -565,6 +565,51 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(body["model"], "gpt-6.1-sol", "the deployment is the model");
         assert_eq!(body["tools"][0]["name"], "add");
+    }
+
+    /// A request without tools on the same Azure resource stays on the
+    /// deployment's chat completions with the model's api-version, so a
+    /// deployment without Responses still chats, whichever URL was pasted.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn azure_without_tools_uses_chat_completions() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openai/deployments/gpt-6.1-sol/chat/completions"))
+            .and(wiremock::matchers::query_param(
+                "api-version",
+                crate::settings::models::models_store::AZURE_DEFAULT_API_VERSION,
+            ))
+            .and(header("api-key", "sk-azure"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(chat_completion_body()))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let model_config = model(ProviderType::AzureOpenAI, true);
+        for pasted in ["", "/openai/v1/", "/openai/v1/responses"] {
+            let provider_config = provider(
+                ProviderType::AzureOpenAI,
+                "sk-azure",
+                &format!("{}{pasted}", server.uri()),
+            );
+            let reply = CompletionRequestBuilder::new(
+                completion_model(&model_config, &provider_config).unwrap(),
+                Message::user("hi"),
+            )
+            .send()
+            .await
+            .expect("chat completions answers");
+            assert!(
+                matches!(reply.choice.iter().next(), Some(AssistantContent::Text(t)) if t.text == "hi")
+            );
+        }
+        for request in server.received_requests().await.unwrap() {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert!(
+                body.get("tools")
+                    .is_none_or(|t| t.as_array().is_none_or(Vec::is_empty))
+            );
+        }
     }
 
     /// The dated preview keeps the `api-version` the user pasted.
