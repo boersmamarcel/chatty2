@@ -433,6 +433,8 @@ impl DesktopSink {
             // The running-agents overview reads these off `SwarmTrace`
             // (TB-6); the approval card or question is the row's own.
             InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => {}
+            // The session keeps it for the export (AGE-859).
+            InvokeAgentProgress::Conversation(_) => {}
         }
     }
 }

@@ -190,6 +190,19 @@ pub fn conversation_from_status_metadata(metadata: Option<&Value>) -> Option<Val
     metadata?.get(CONVERSATION_METADATA_KEY).cloned()
 }
 
+/// The captured conversation a terminal status carries, whole or as the
+/// size of what was over the cap (AGE-859).
+pub fn captured_from_status_metadata(
+    metadata: Option<&Value>,
+) -> Option<chatty_fabric::CapturedConversation> {
+    conversation_from_status_metadata(metadata)
+        .map(|messages| chatty_fabric::CapturedConversation::Messages { messages })
+        .or_else(|| {
+            conversation_too_large_from_status_metadata(metadata)
+                .map(|bytes| chatty_fabric::CapturedConversation::TooLarge { bytes })
+        })
+}
+
 /// The byte count a delegated task's terminal status carries under
 /// [`CONVERSATION_TOO_LARGE_METADATA_KEY`], if its captured conversation
 /// went over the cap.

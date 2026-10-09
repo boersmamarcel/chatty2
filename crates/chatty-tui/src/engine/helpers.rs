@@ -110,6 +110,8 @@ pub(crate) fn delegation_line(
         // The approval card or question says it; `/agents running` lists
         // who waits (TB-6).
         InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => String::new(),
+        // The export's, not the transcript's (AGE-859).
+        InvokeAgentProgress::Conversation(_) => String::new(),
     }
 }
 

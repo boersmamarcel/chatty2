@@ -46,7 +46,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chatty_fabric::{EdgeKind, EdgeRow, ROOT_NAME, SwarmEvent, SwarmItem};
+use chatty_fabric::{CapturedConversation, EdgeKind, EdgeRow, ROOT_NAME, SwarmEvent, SwarmItem};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -496,7 +496,34 @@ pub struct SwarmTrace {
     /// broker stamped on it and what it waits for (TB-6). Kept by name, not
     /// node: an approval can arrive before the asker's first batch has.
     waits: BTreeMap<String, (String, WaitingOn)>,
+    /// Each run's captured conversation, as its terminal status carried it
+    /// (RC-0): what the full-run export nests (AGE-859).
+    conversations: BTreeMap<NodeId, CapturedConversation>,
+    /// The id of the root's tool call each of its callees ran under: its
+    /// `invoke_agent`, or the `best_of` that fanned it out (AGE-859).
+    started_by: BTreeMap<NodeId, String>,
     revision: u64,
+}
+
+/// The key a turn's persisted trace keeps its [`AgentRecord`]s under
+/// (AGE-859).
+pub const AGENTS_TRACE_KEY: &str = "agents";
+
+/// One agent of a finished turn, as the conversation keeps it for the
+/// full-run export (AGE-859): its node, where it hangs, the root tool call
+/// that started it (the root's callees only) and its captured conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentRecord {
+    #[serde(flatten)]
+    pub node: AgentNode,
+    /// The index of its parent among the turn's records; `None` for the
+    /// root, which is always the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<CapturedConversation>,
 }
 
 impl Default for SwarmTrace {
@@ -519,6 +546,8 @@ impl SwarmTrace {
             delegated: Vec::new(),
             seen: vec![SystemTime::now()],
             waits: BTreeMap::new(),
+            conversations: BTreeMap::new(),
+            started_by: BTreeMap::new(),
             revision: 0,
         }
     }
@@ -679,9 +708,21 @@ impl SwarmTrace {
     /// delegation, whose steps carry its descendants' steps as well.
     fn apply_delegation(&mut self, progress: &InvokeAgentProgress) {
         match progress {
-            InvokeAgentProgress::Started { agent_name, .. } => {
+            InvokeAgentProgress::Started {
+                agent_name, prompt, ..
+            } => {
+                let call = self.delegating_call(agent_name, prompt);
                 let id = self.callee(agent_name);
+                if let Some(call) = call {
+                    self.started_by.insert(id, call);
+                }
                 self.open.push(id);
+            }
+            InvokeAgentProgress::Conversation(conversation) => {
+                let Some(id) = self.open.last().copied() else {
+                    return;
+                };
+                self.conversations.insert(id, conversation.clone());
             }
             InvokeAgentProgress::Text(text) => {
                 let Some(id) = self.open.last().copied() else {
@@ -745,6 +786,68 @@ impl SwarmTrace {
         self.bump();
     }
 
+    /// The root's tool call a delegation to `agent` with `prompt` runs
+    /// under: the running `invoke_agent` that asked for exactly it, else a
+    /// running `best_of` (its attempts and judge), else the latest running
+    /// call. A call already claimed by another delegation is skipped.
+    fn delegating_call(&self, agent: &str, prompt: &str) -> Option<String> {
+        let root = self.tree.get(self.tree.root());
+        let claimed: Vec<&String> = self.started_by.values().collect();
+        let running = || {
+            root.tool_calls
+                .iter()
+                .filter(|call| matches!(call.outcome, ToolOutcome::Running))
+        };
+        let asked_for = |call: &&ToolCall| {
+            let arg = |key: &str| {
+                call.arguments
+                    .as_ref()
+                    .and_then(|a| a.get(key))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            };
+            call.name == "invoke_agent"
+                && arg("agent").as_deref() == Some(agent)
+                && arg("prompt").as_deref() == Some(prompt)
+                && !claimed.contains(&&call.id)
+        };
+        running()
+            .find(asked_for)
+            .or_else(|| running().find(|call| call.name == "best_of"))
+            .or_else(|| running().next_back())
+            .map(|call| call.id.clone())
+    }
+
+    /// The run's captured conversation, if its terminal status carried one.
+    pub fn conversation(&self, id: NodeId) -> Option<&CapturedConversation> {
+        self.conversations.get(&id)
+    }
+
+    /// Every agent of the turn, root first and parents before children,
+    /// as the conversation keeps them for the export (AGE-859). The root's
+    /// own tool calls are left out: they are its conversation's.
+    pub fn records(&self) -> Vec<AgentRecord> {
+        let order = self.tree.preorder();
+        let index: BTreeMap<NodeId, usize> =
+            order.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        order
+            .iter()
+            .map(|id| {
+                let mut node = self.tree.get(*id).clone();
+                let parent = self.tree.parent(*id).map(|p| index[&p]);
+                if parent.is_none() {
+                    node.tool_calls.clear();
+                }
+                AgentRecord {
+                    node,
+                    parent,
+                    started_by: self.started_by.get(id).cloned(),
+                    conversation: self.conversations.get(id).cloned(),
+                }
+            })
+            .collect()
+    }
+
     /// The node for a delegation of the root's to `spec`: a stand-in its
     /// descendants already left, or a new one.
     fn callee(&mut self, spec: &str) -> NodeId {
@@ -800,6 +903,9 @@ impl SwarmTrace {
                     if let Some(parent) = self.tree.parent(id) {
                         self.settle_usage(parent);
                     }
+                }
+                SwarmItem::Conversation { conversation } => {
+                    self.conversations.insert(id, conversation.clone());
                 }
                 SwarmItem::Ended { state } => {
                     node.status = NodeStatus::ended(state);

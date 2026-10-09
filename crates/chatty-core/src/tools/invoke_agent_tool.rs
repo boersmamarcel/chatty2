@@ -15,7 +15,7 @@ use crate::models::message_types::ToolSource;
 use crate::models::token_usage::TokenUsage;
 use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::a2a_client::{
-    A2aClarificationRequest, A2aClient, A2aStreamEvent, conversation_from_status_metadata,
+    A2aClarificationRequest, A2aClient, A2aStreamEvent, captured_from_status_metadata,
     trace_from_status_metadata, usage_from_status_metadata, usage_from_wire,
 };
 use crate::services::handoff::{HandoffLedger, HandoffReport};
@@ -25,6 +25,7 @@ use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::services::worker_start::{STOP_NOTE, WorkerStartFailure};
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::filesystem_write_tool::request_relayed_write_approval;
+use chatty_fabric::CapturedConversation;
 use chatty_fabric::wire::WireProgress;
 use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskRequest, CallError, CallEvent,
@@ -98,6 +99,10 @@ pub enum InvokeAgentProgress {
     /// What [`Waiting`](Self::Waiting) named under `id` is over: answered,
     /// or withdrawn.
     Resumed { id: String },
+    /// The callee's captured conversation (RC-0, AGE-649), sent just before
+    /// [`Finished`](Self::Finished) when its terminal status carried one:
+    /// what the full-run export nests under this delegation (AGE-859).
+    Conversation(CapturedConversation),
 }
 
 /// What a run is waiting on the human for (TB-6).
@@ -157,13 +162,11 @@ pub struct InvokeAgentOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<String>,
     /// The worker's captured conversation (RC-0, AGE-649), when its terminal
-    /// status carried one. Test-support only for now: nothing sets the
-    /// broker-side capture flag outside a test, and nothing here reads this
-    /// field back into a session; RC-3 is what a leader does with it.
-    /// Absent from the JSON the model sees otherwise, for the same reason
-    /// `trace` is.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<serde_json::Value>,
+    /// status carried one. It reaches the session as
+    /// [`InvokeAgentProgress::Conversation`], for the export (AGE-859);
+    /// never in the JSON the model sees.
+    #[serde(skip)]
+    pub conversation: Option<CapturedConversation>,
     /// The worker's typed handoff (TD-2, AGE-693): the JSON its final
     /// answer carried, already checked against its role's schema. Present
     /// only when the team names a schema for that role; absent from the JSON
@@ -738,20 +741,18 @@ impl InvokeAgentTool {
                         success = false;
                         error_msg = Some(e);
                         break;
-                    } else if state == "completed" {
-                        if include_trace {
-                            // The worker's trace rides the same terminal
-                            // status as its usage (AGE-467); a failed task
-                            // never reaches this branch, so it never
-                            // returns one.
-                            trace = trace_from_status_metadata(metadata.as_ref());
-                        }
-                        // The worker's captured conversation rides the same
-                        // terminal status too (RC-0, AGE-649), read back
-                        // unconditionally: unlike the trace, capture is a
-                        // broker-side decision this call has no argument
-                        // for, so there is nothing here to gate it on.
-                        conversation = conversation_from_status_metadata(metadata.as_ref());
+                    } else if state == "completed" && include_trace {
+                        // The worker's trace rides the same terminal
+                        // status as its usage (AGE-467); a failed task
+                        // never reaches this branch, so it never
+                        // returns one.
+                        trace = trace_from_status_metadata(metadata.as_ref());
+                    }
+                    // The worker's captured conversation rides its terminal
+                    // status (RC-0, AGE-649), failed or not: capture is a
+                    // broker-side decision this call has no argument for.
+                    if conversation.is_none() {
+                        conversation = captured_from_status_metadata(metadata.as_ref());
                     }
                     // An "input-required" without a request is an approval
                     // the worker is waiting on, which the worker settles
@@ -953,18 +954,15 @@ impl InvokeAgentTool {
                 ..line
             })
             .collect();
-        let (trace, conversation) = if outcome.success {
-            (
-                include_trace
-                    .then(|| metadata.and_then(|metadata| metadata.trace.clone()))
-                    .flatten(),
-                metadata
-                    .and_then(|metadata| metadata.conversation.as_ref())
-                    .and_then(|conversation| conversation.to_value().ok()),
-            )
+        let trace = if outcome.success {
+            include_trace
+                .then(|| metadata.and_then(|metadata| metadata.trace.clone()))
+                .flatten()
         } else {
-            (None, None)
+            None
         };
+        // Failed or not, the run's conversation is the export's (AGE-859).
+        let conversation = metadata.and_then(CapturedConversation::from_metadata);
         self.finish(
             agent,
             outcome.response,
@@ -992,7 +990,7 @@ impl InvokeAgentTool {
         error_msg: Option<String>,
         usage: Vec<TokenUsage>,
         trace: Option<String>,
-        conversation: Option<serde_json::Value>,
+        conversation: Option<CapturedConversation>,
         handoff: HandoffReport,
         messages: Vec<String>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
@@ -1003,6 +1001,9 @@ impl InvokeAgentTool {
         }
         let response = response.trim().to_string();
         let handoff_value = if success { handoff.handoff } else { None };
+        if let Some(conversation) = conversation.as_ref() {
+            self.send_progress(InvokeAgentProgress::Conversation(conversation.clone()));
+        }
         if let Some(ledger) = self.handoff_ledger.as_ref() {
             ledger.record(agent, handoff.invalid_count, handoff_value.as_ref());
         }
