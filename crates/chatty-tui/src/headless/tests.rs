@@ -1265,7 +1265,10 @@ mod runner {
         let text = std::fs::read_to_string(&path).expect("the hook wrote the export");
         let export: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(
-            export["schema_version"].as_str().unwrap().starts_with("ATIF"),
+            export["schema_version"]
+                .as_str()
+                .unwrap()
+                .starts_with("ATIF"),
             "{export:#}"
         );
         assert_eq!(export["extra"]["swarm"][0]["path"], "root", "{export:#}");

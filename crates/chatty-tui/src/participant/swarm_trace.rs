@@ -342,7 +342,10 @@ async fn swarm_atif_round_trip() {
             (&t.name, &t.spec, &t.usage, &t.status)
         );
         let names = |n: &chatty_core::services::swarm_trace::AgentNode| {
-            n.tool_calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+            n.tool_calls
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>()
         };
         assert_eq!(names(b), names(t), "{}", t.name);
     }

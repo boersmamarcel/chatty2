@@ -1203,7 +1203,11 @@ mod full_run {
 
         fn delegate(&mut self, id: &str, agent: &str, spent: (u32, u32)) {
             let prompt = format!("task for {agent}");
-            self.start_call(id, "invoke_agent", json!({ "agent": agent, "prompt": prompt }));
+            self.start_call(
+                id,
+                "invoke_agent",
+                json!({ "agent": agent, "prompt": prompt }),
+            );
             self.started(agent, &prompt);
             self.finished(agent, Some(worker(None)), true, Some("done"), Some(spent));
             self.end_call(id, "invoke_agent", "done");
@@ -1384,7 +1388,9 @@ mod full_run {
             );
             assert!(steps.iter().any(|s| s["message"] == "done"), "its answer");
             assert!(
-                steps.iter().any(|s| s["source"] == "user" && s["message"] == "write it"),
+                steps
+                    .iter()
+                    .any(|s| s["source"] == "user" && s["message"] == "write it"),
                 "the task it was given"
             );
         }
@@ -1438,8 +1444,18 @@ mod full_run {
             json!({ "agent": "coder", "prompt": "write" }),
         );
         turn.started("coder", "write");
-        turn.finished("coder", Some(worker(None)), false, Some("⚠️ boom"), Some((40, 4)));
-        turn.end_call("call-f", "invoke_agent", "Agent 'coder' reported failure: boom");
+        turn.finished(
+            "coder",
+            Some(worker(None)),
+            false,
+            Some("⚠️ boom"),
+            Some((40, 4)),
+        );
+        turn.end_call(
+            "call-f",
+            "invoke_agent",
+            "Agent 'coder' reported failure: boom",
+        );
         turn.start_call(
             "call-s",
             "invoke_agent",
@@ -1452,7 +1468,10 @@ mod full_run {
         turn.end_call("call-s", "invoke_agent", STOPPED_BY_USER);
         let export = export_of(&turn.conversation());
 
-        assert_eq!(roster_entry(&export, "root/coder")["status"]["state"], "failed");
+        assert_eq!(
+            roster_entry(&export, "root/coder")["status"]["state"],
+            "failed"
+        );
         assert_eq!(
             roster_entry(&export, "root/reviewer")["status"]["state"],
             "canceled"

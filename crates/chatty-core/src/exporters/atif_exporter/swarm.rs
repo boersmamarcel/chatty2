@@ -35,8 +35,8 @@ use super::{SCHEMA_VERSION, root_conversation};
 use crate::exporters::run_export::ExportRun;
 use crate::exporters::types::*;
 use crate::services::swarm_trace::{
-    AgentNode, AgentRecord, NodeId, NodeStatus, SwarmTrace, ToolCall, ToolOutcome, Tree,
-    UsageLine, plugin_of,
+    AgentNode, AgentRecord, NodeId, NodeStatus, SwarmTrace, ToolCall, ToolOutcome, Tree, UsageLine,
+    plugin_of,
 };
 use chatty_fabric::{CapturedConversation, ROOT_NAME};
 
@@ -54,21 +54,14 @@ pub fn export_swarm(trace: &SwarmTrace) -> Result<serde_json::Value> {
 /// [`export_swarm`], typed.
 pub fn swarm_to_atif(trace: &SwarmTrace) -> AtifExport {
     let records = trace.records();
-    let mut agents = Vec::with_capacity(records.len());
-    let mut root_steps = Vec::new();
-    for (i, record) in records.iter().enumerate() {
-        if i == 0 {
-            root_steps = record
-                .node
-                .tool_calls
-                .iter()
-                .map(|call| tool_step(call))
-                .collect();
-        }
-        agents.push(Agent::from_record(record.clone(), record.parent, &agents));
+    let mut agents: Vec<Agent> = Vec::with_capacity(records.len());
+    for record in records {
+        let parent = record.parent;
+        agents.push(Agent::from_record(record, parent, &agents));
     }
+    // The root has no captured conversation: its steps are its tool calls.
     if let Some(root) = agents.first_mut() {
-        root.steps = Some(root_steps);
+        root.steps = Some(root.tool_steps());
     }
 
     let total = trace.total();
@@ -119,10 +112,7 @@ pub fn run_to_atif(run: &ExportRun<'_>) -> Result<AtifExport> {
     let root_node = AgentNode {
         turns: root.assistant_turns,
         usage: root.own_usage.clone(),
-        model: root
-            .own_usage
-            .iter()
-            .find_map(|line| line.model.clone()),
+        model: root.own_usage.iter().find_map(|line| line.model.clone()),
         status: NodeStatus::Completed,
         ..AgentNode::new(ROOT_NAME, ROOT_NAME, None)
     };
@@ -154,7 +144,9 @@ pub fn run_to_atif(run: &ExportRun<'_>) -> Result<AtifExport> {
 
     let final_metrics = AtifFinalMetrics {
         total_prompt_tokens: Some(
-            usage.total_input_tokens + usage.total_cache_read_tokens + usage.total_cache_write_tokens,
+            usage.total_input_tokens
+                + usage.total_cache_read_tokens
+                + usage.total_cache_write_tokens,
         ),
         total_completion_tokens: Some(usage.total_output_tokens),
         total_cost_usd: Some(usage.total_estimated_cost_usd),
@@ -403,7 +395,8 @@ fn place_children(agents: &[Agent], read: &[Option<Vec<Built>>]) -> Vec<Option<u
                 .enumerate()
                 .flat_map(|(s, b)| b.calls.iter().map(move |c| (s, c)))
                 .filter(|(_, c)| {
-                    c.name == "invoke_agent" && c.agent.as_deref() == Some(agent.roster.spec.as_str())
+                    c.name == "invoke_agent"
+                        && c.agent.as_deref() == Some(agent.roster.spec.as_str())
                 })
                 .nth(*n)
                 .map(|(s, _)| s);
@@ -447,7 +440,8 @@ fn emit(
         extra.parent_step = parent_step;
         b.step.extra = Some(extra);
         steps.push(b.step);
-        for child in (0..agents.len()).filter(|c| agents[*c].parent == Some(i) && placed[*c] == Some(s))
+        for child in
+            (0..agents.len()).filter(|c| agents[*c].parent == Some(i) && placed[*c] == Some(s))
         {
             emit(child, Some(step_id), agents, read, placed, steps);
         }
@@ -499,7 +493,11 @@ fn name_the_judges(steps: &mut [AtifStep], agents: &[Agent]) {
         };
         let solvers: Vec<String> = best_of["attempts"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default();
         let judge = children
             .iter()
@@ -516,15 +514,16 @@ fn name_the_judges(steps: &mut [AtifStep], agents: &[Agent]) {
 /// The completeness check (AGE-859): step usage sums to `final_metrics`,
 /// and every delegation step has a child trajectory.
 fn check(steps: &[AtifStep], final_metrics: &AtifFinalMetrics, incomplete: &mut Vec<String>) {
-    let (prompt, completion) = steps
-        .iter()
-        .filter_map(|s| s.metrics.as_ref())
-        .fold((0u32, 0u32), |(p, c), m| {
-            (
-                p.saturating_add(m.prompt_tokens.unwrap_or(0)),
-                c.saturating_add(m.completion_tokens.unwrap_or(0)),
-            )
-        });
+    let (prompt, completion) =
+        steps
+            .iter()
+            .filter_map(|s| s.metrics.as_ref())
+            .fold((0u32, 0u32), |(p, c), m| {
+                (
+                    p.saturating_add(m.prompt_tokens.unwrap_or(0)),
+                    c.saturating_add(m.completion_tokens.unwrap_or(0)),
+                )
+            });
     let (want_prompt, want_completion) = (
         final_metrics.total_prompt_tokens.unwrap_or(0),
         final_metrics.total_completion_tokens.unwrap_or(0),
@@ -541,9 +540,9 @@ fn check(steps: &[AtifStep], final_metrics: &AtifFinalMetrics, incomplete: &mut 
             .iter()
             .flatten()
             .find(|c| DELEGATING_TOOLS.contains(&c.function_name.as_str()));
-        let has_child = steps.iter().any(|s| {
-            s.extra.as_ref().and_then(|e| e.parent_step) == Some(step.step_id)
-        });
+        let has_child = steps
+            .iter()
+            .any(|s| s.extra.as_ref().and_then(|e| e.parent_step) == Some(step.step_id));
         if let Some(call) = delegated
             && !has_child
         {
