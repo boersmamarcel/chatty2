@@ -69,6 +69,8 @@ Export a conversation as ATIF, the trajectory format the desktop app also writes
 - `/export [path]` in the interactive TUI exports the current conversation. Without a path it writes `<config dir>/chatty/exports/<conversation-id>.atif.json` and prints where.
 - `chatty-tui --export <conversation-id> [--out <PATH>]` exports a saved conversation without running anything.
 
+A run that delegated exports as one tree. Each agent's turns, reasoning, tool calls with their results, and token usage come right after the step that delegated to it. Each step names its agent by path, for example `root/coder-1`, and the delegation step that started it. The agents, their models, spend and final status (completed, failed or stopped) are listed together. `best_of` attempts and the judge sit under the `best_of` step, which records the attempt kept and the judge's reason. If a worker's conversation was over the capture size limit, or a stopped worker left none, the export says so. It does the same when the step token counts do not add up to the run's total.
+
 API keys and your configured secrets are replaced with `[REDACTED]` in every export. Text a tool returned is exported as the tool returned it, so check it before sharing a trajectory. `--save-conversation` is a different file: the restore format, not an analysis export.
 
 ## Zero-config quick start

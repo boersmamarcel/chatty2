@@ -342,12 +342,31 @@ had refused as `Refused` nodes. A run reports its usage once, with its own
 workers' already folded in (AGE-415), so a node's own spend is what it
 reported less what its children reported, per model: nobody is billed twice,
 and the nodes sum to what the root's conversation records
-(`swarm_tree_spend_sums`). `exporters::export_swarm` writes the tree as one
-ATIF document: a step per tool call with `extra.agent` naming its agent, a
-plugin tool's call (`<plugin>__<tool>`) with `extra.plugin` naming its
-plugin, and the agents with their parents and own usage — tokens per model,
-never a price — in `extra.swarm`. `swarm_tree_from_atif` reads it back into
-the same tree (`swarm_atif_round_trip`).
+(`swarm_tree_spend_sums`).
+
+**The full-run ATIF export (AGE-859).** Every delegated task captures its
+conversation (RC-0; the broker sets `capture_conversation` on every task).
+A nested run's conversation reaches the root as `SwarmItem::Conversation`,
+and the root's callee's arrives as `InvokeAgentProgress::Conversation`, sent
+just before `Finished`. Neither is ever in the JSON a model sees. The
+session's `SwarmTrace` keeps them. `finish_turn` persists the turn's
+`AgentRecord`s on its trace under `agents`. `exporters::export_run`, which the
+CLI and the desktop share, writes one document. The root conversation's
+steps come first, and each agent's steps follow the step that delegated to
+it. Every step's `extra.agent` names its agent by path (`root/coder-1`), and
+`extra.parent_step` names the delegation step. A worker's steps are its
+captured conversation: turns, reasoning, tool calls and results. Its own
+usage is its last step's metrics. A conversation over the 32 MiB cap is
+replaced by a step with `extra.cut_bytes`, followed by its tool calls from
+the trace. A `best_of` step records `extra.best_of` (`chosen`,
+`selected_by`, `reason`, `judge`). The agents, with their parents, own usage
+(tokens per model, never a price) and status, are in `extra.swarm`. When step
+usage does not sum to `final_metrics`, a delegation step has no child
+trajectory, or a conversation was cut or never captured,
+`extra.incomplete` lists the reasons. `export_swarm` writes the same layout
+from a live `SwarmTrace`, and `swarm_tree_from_atif` reads it back into the
+same tree (`swarm_atif_round_trip`). Known gap: hosted (Firecracker) workers
+do not yet return their conversation to the broker (AGE-854 family).
 
 **Spawn context: sub-leaders use the root broker (ADR-0020 invariants 5–6,
 BI-5, AGE-637).** Only a root process starts a broker. A sub-leader — a worker

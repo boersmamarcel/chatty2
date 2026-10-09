@@ -273,8 +273,9 @@ async fn swarm_tree_spend_sums() {
 }
 
 /// Invariant 2: the one ATIF document holds every tool call of all three
-/// agents, each step naming its agent and the plugin call its plugin, and
-/// it parses back into the exporter's own types and into the same tree.
+/// agents, each step naming its agent by path and the plugin call its
+/// plugin, and it parses back into the exporter's own types and into the
+/// same tree.
 #[tokio::test]
 async fn swarm_atif_round_trip() {
     let run = leader_reviewer_coder().await;
@@ -304,9 +305,9 @@ async fn swarm_atif_round_trip() {
     let expected: Vec<(String, String, Option<String>)> = [
         ("root", PLUGIN_TOOL, Some("benford")),
         ("root", "invoke_agent", None),
-        ("kit-reviewer-0", "read_file", None),
-        ("kit-reviewer-0", "invoke_agent", None),
-        ("kit-coder-0", "read_file", None),
+        ("root/kit-reviewer-0", "read_file", None),
+        ("root/kit-reviewer-0", "invoke_agent", None),
+        ("root/kit-reviewer-0/kit-coder-0", "read_file", None),
     ]
     .into_iter()
     .map(|(a, t, p)| (a.to_string(), t.to_string(), p.map(str::to_string)))
@@ -327,6 +328,22 @@ async fn swarm_atif_round_trip() {
         }
     }
 
+    // The same tree: the same agents, spend and status, and the same tool
+    // calls. A worker's calls read back from its captured conversation
+    // (AGE-859), which knows more than the live trace's step lines do —
+    // the provider's call ids, arguments and results — so only the calls'
+    // names are compared.
     let back = swarm_tree_from_atif(&parsed).expect("a swarm export");
-    assert_eq!(&back, tree);
+    assert_eq!(back.len(), tree.len());
+    for (b, t) in back.preorder().into_iter().zip(tree.preorder()) {
+        let (b, t) = (back.get(b), tree.get(t));
+        assert_eq!(
+            (&b.name, &b.spec, &b.usage, &b.status),
+            (&t.name, &t.spec, &t.usage, &t.status)
+        );
+        let names = |n: &chatty_core::services::swarm_trace::AgentNode| {
+            n.tool_calls.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(names(b), names(t), "{}", t.name);
+    }
 }
