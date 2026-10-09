@@ -2,11 +2,13 @@
 //!
 //! OpenAI's reasoning models take function tools only on the Responses API
 //! (`/responses`): `/chat/completions` rejects a request that carries both
-//! reasoning and tools. So OpenAI's own API and Azure OpenAI resources go to
-//! Responses, through rig's OpenAI Responses client. OpenAI-compatible
-//! servers (vLLM, OpenRouter, Ollama compat) and Azure's model-inference
-//! surface keep chat completions; their base URL decides, and nothing about
-//! them changes.
+//! reasoning and tools. So on OpenAI's own API and on Azure OpenAI resources
+//! a request with tools goes to Responses, through rig's OpenAI Responses
+//! client ([`ToolsOnResponses`]); a request without tools keeps chat
+//! completions, so an older Azure deployment without Responses still chats.
+//! OpenAI-compatible servers (vLLM, OpenRouter, Ollama compat) and Azure's
+//! model-inference surface keep chat completions for everything; their base
+//! URL decides, and nothing about them changes.
 //!
 //! Users paste whatever endpoint their portal shows, so the Azure URL is
 //! read for the resource it names: a trailing `/responses` or
@@ -25,6 +27,12 @@ use rig_core::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, Response,
     StreamingResponse, Uri,
 };
+use rig_agent::ModelHandle;
+use rig_core::completion::{
+    CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+    ProviderCapabilities,
+};
+use rig_core::streaming::StreamingCompletionResponse;
 use rig_core::wasm_compat::WasmCompatSend;
 
 use crate::settings::models::models_store::ModelConfig;
@@ -145,6 +153,48 @@ pub(crate) fn ensure_tools_reachable(
              endpoint to your resource's v1 base URL, {AZURE_V1_BASE_HINT}",
             model_config.model_identifier
         )),
+    }
+}
+
+/// A model that sends each request on the wire it needs: a request with
+/// tools to the Responses API, one without (titles, summaries, a plain
+/// chat) to chat completions.
+#[derive(Clone, Debug)]
+pub(crate) struct ToolsOnResponses {
+    pub(crate) chat: ModelHandle,
+    pub(crate) responses: ModelHandle,
+}
+
+impl ToolsOnResponses {
+    fn pick(&self, request: &CompletionRequest) -> &ModelHandle {
+        if request.tools.is_empty() {
+            &self.chat
+        } else {
+            &self.responses
+        }
+    }
+}
+
+impl CompletionModel for ToolsOnResponses {
+    fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> impl Future<Output = Result<CompletionResponse, CompletionError>> + WasmCompatSend {
+        self.pick(&request).completion(request)
+    }
+
+    fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> impl Future<Output = Result<StreamingCompletionResponse, CompletionError>> + WasmCompatSend
+    {
+        self.pick(&request).stream(request)
+    }
+
+    /// The tool-carrying wire's: capabilities describe how tools and
+    /// structured output compose, which only the Responses side sees.
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.responses.capabilities()
     }
 }
 
