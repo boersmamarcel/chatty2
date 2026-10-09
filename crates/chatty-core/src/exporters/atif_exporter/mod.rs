@@ -5,12 +5,14 @@
 //!
 //! # What lives here
 //!
-//! - Top-level `conversation_to_atif` and helpers that map each message,
-//!   tool call, attachment, and feedback record into the ATIF type system.
-//! - Schema versioning, metadata stamping, and tool-call ordering rules.
-//! - `export_swarm`: one document for a whole swarm, every step attributed
-//!   to its agent and every plugin tool call to its plugin (TB-2), and
-//!   `swarm_tree_from_atif`, which reads one back.
+//! - `run_to_atif` (behind `exporters::export_run`): one document for a
+//!   whole run, the root conversation's steps with every agent it delegated
+//!   to nested under the delegation step that started it (AGE-859).
+//! - Helpers that map each message, tool call, attachment, and feedback
+//!   record into the ATIF type system; schema versioning.
+//! - `export_swarm`: the same document from a live swarm trace, every step
+//!   attributed to its agent and every plugin tool call to its plugin
+//!   (TB-2), and `swarm_tree_from_atif`, which reads one back.
 //!
 //! # What does NOT live here
 //!
@@ -26,26 +28,39 @@ use crate::exporters::types::*;
 use crate::models::conversation::{MessageFeedback, RegenerationRecord};
 use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
+use crate::services::swarm_trace::{AGENTS_TRACE_KEY, AgentRecord, UsageLine};
 use crate::settings::models::models_store::ModelConfig;
 
 /// ATIF schema version this exporter produces.
 const SCHEMA_VERSION: &str = "ATIF-v1.6";
 
-/// Convert a persisted conversation into ATIF JSON format.
-///
-/// This is a pure function with no side effects — it takes data and returns
-/// a JSON value without touching global state or performing I/O.
+/// The root conversation of a run, read for [`run_to_atif`]: its steps,
+/// one per message, and the agents each turn delegated to.
+pub(super) struct RootConversation {
+    pub agent: AtifAgent,
+    pub steps: Vec<Built>,
+    /// Each turn that delegated: the index of its step in `steps` and the
+    /// agents its trace kept (AGE-859).
+    pub turns: Vec<(usize, Vec<AgentRecord>)>,
+    /// The root's own usage lines: its turns and its plugins'.
+    pub own_usage: Vec<UsageLine>,
+    pub assistant_turns: u32,
+    pub token_usage: ConversationTokenUsage,
+    pub extra: AtifExtra,
+}
+
+/// Read a persisted conversation into its steps.
 ///
 /// Phases:
 /// 1. Deserialize all double-serialized JSON strings in ConversationData
 /// 2. Build the agent block from model_id and optional ModelConfig
-/// 3. Iterate through message history, building one ATIF step per message
-/// 4. Build final_metrics from ConversationTokenUsage totals
-/// 5. Build the extra block (feedback + regenerations)
-pub fn conversation_to_atif(
+/// 3. Iterate through message history, building one ATIF step per message,
+///    and collect the agents each turn's trace kept
+/// 4. Build the extra block (feedback + regenerations)
+pub(super) fn root_conversation(
     conversation: &ConversationData,
     model_config: Option<&ModelConfig>,
-) -> Result<serde_json::Value> {
+) -> Result<RootConversation> {
     // PHASE 1: Deserialize all parallel arrays
     let history: Vec<Message> = serde_json::from_str(&conversation.message_history)
         .context("Failed to parse message_history")?;
@@ -67,13 +82,19 @@ pub fn conversation_to_atif(
 
     // PHASE 3: Build steps (track assistant turn index for token_usage lookup).
     // A delegated worker's usage is its own line on the record (AGE-415),
-    // not an assistant turn, so only the turns' own usage is aligned here.
+    // not an assistant turn: it is the worker's steps' (AGE-859), so only
+    // the turns' own usage is aligned here.
     let own_usages: Vec<&TokenUsage> = token_usage
         .message_usages
         .iter()
         .filter(|u| u.delegated_to.is_none())
         .collect();
+    let own_usage = own_usages
+        .iter()
+        .flat_map(|u| UsageLine::from_token_usage(u))
+        .collect();
     let mut steps = Vec::with_capacity(history.len());
+    let mut turns = Vec::new();
     let mut assistant_turn_idx: usize = 0;
 
     for (idx, message) in history.iter().enumerate() {
@@ -86,12 +107,18 @@ pub fn conversation_to_atif(
         let timestamp = timestamps.get(idx).copied().flatten();
         let msg_attachments = attachment_paths.get(idx).cloned().unwrap_or_default();
         let trace_json = traces.get(idx).cloned().flatten();
+        let records: Vec<AgentRecord> = trace_json
+            .as_ref()
+            .and_then(|trace| trace.get(AGENTS_TRACE_KEY))
+            .and_then(|records| serde_json::from_value(records.clone()).ok())
+            .unwrap_or_default();
         let step_id = (idx as u32) + 1;
 
-        let step = match message {
-            Message::User { content } => {
-                build_user_step(step_id, content, timestamp, &msg_attachments)
-            }
+        let built = match message {
+            Message::User { content } => Built::new(
+                build_user_step(step_id, content, timestamp, &msg_attachments),
+                Vec::new(),
+            ),
             Message::Assistant { content, .. } => {
                 let metrics = own_usages.get(assistant_turn_idx).map(|u| AtifStepMetrics {
                     prompt_tokens: Some(u.prompt_tokens()),
@@ -99,48 +126,38 @@ pub fn conversation_to_atif(
                     cost_usd: u.estimated_cost_usd,
                 });
                 assistant_turn_idx += 1;
-                build_agent_step(step_id, content, timestamp, trace_json, metrics)
+                Built::new(
+                    build_agent_step(step_id, content, timestamp, trace_json, metrics),
+                    call_refs(content),
+                )
             }
             Message::System { .. } => continue,
         };
-        steps.push(step);
+        if records.len() > 1 {
+            turns.push((steps.len(), records));
+        }
+        steps.push(built);
     }
 
-    // PHASE 4: Build final_metrics
-    let final_metrics = AtifFinalMetrics {
-        total_prompt_tokens: Some(
-            token_usage.total_input_tokens
-                + token_usage.total_cache_read_tokens
-                + token_usage.total_cache_write_tokens,
-        ),
-        total_completion_tokens: Some(token_usage.total_output_tokens),
-        total_cost_usd: Some(token_usage.total_estimated_cost_usd),
-        total_steps: Some(steps.len() as u32),
-        extra: AtifFinalMetricsExtra::from_totals(
-            token_usage.total_cache_read_tokens,
-            token_usage.total_cache_write_tokens,
-        ),
-    };
-
-    // PHASE 5: Build extra (feedback + regenerations)
+    // PHASE 4: Build extra (feedback + regenerations)
     let extra = build_extra(&feedback, &regeneration_records);
 
-    let export = AtifExport {
-        schema_version: SCHEMA_VERSION.to_string(),
-        session_id: conversation.id.clone(),
+    Ok(RootConversation {
         agent,
         steps,
-        final_metrics: Some(final_metrics),
-        extra: Some(extra),
-    };
-
-    serde_json::to_value(&export).context("Failed to serialize ATIF export")
+        turns,
+        own_usage,
+        assistant_turns: assistant_turn_idx as u32,
+        token_usage,
+        extra,
+    })
 }
 
 mod steps;
 use steps::*;
 mod swarm;
-pub use swarm::{export_swarm, swarm_to_atif, swarm_tree_from_atif};
+use swarm::{Built, call_refs};
+pub use swarm::{export_swarm, run_to_atif, swarm_to_atif, swarm_tree_from_atif};
 
 #[cfg(test)]
 mod tests;

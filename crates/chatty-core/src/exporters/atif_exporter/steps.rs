@@ -269,6 +269,7 @@ pub(super) fn build_extra(
         feedback: feedback_strings,
         regenerations: atif_regenerations,
         swarm: None,
+        incomplete: Vec::new(),
     }
 }
 
