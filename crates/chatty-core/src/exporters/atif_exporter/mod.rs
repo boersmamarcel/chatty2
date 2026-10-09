@@ -36,17 +36,17 @@ const SCHEMA_VERSION: &str = "ATIF-v1.6";
 
 /// The root conversation of a run, read for [`run_to_atif`]: its steps,
 /// one per message, and the agents each turn delegated to.
-pub(super) struct RootConversation {
-    pub(super) agent: AtifAgent,
-    pub(super) steps: Vec<Built>,
+struct RootConversation {
+    agent: AtifAgent,
+    steps: Vec<Built>,
     /// Each turn that delegated: the index of its step in `steps` and the
     /// agents its trace kept (AGE-859).
-    pub(super) turns: Vec<(usize, Vec<AgentRecord>)>,
+    turns: Vec<(usize, Vec<AgentRecord>)>,
     /// The root's own usage lines: its turns and its plugins'.
-    pub(super) own_usage: Vec<UsageLine>,
-    pub(super) assistant_turns: u32,
-    pub(super) token_usage: ConversationTokenUsage,
-    pub(super) extra: AtifExtra,
+    own_usage: Vec<UsageLine>,
+    assistant_turns: u32,
+    token_usage: ConversationTokenUsage,
+    extra: AtifExtra,
 }
 
 /// Read a persisted conversation into its steps.
@@ -57,7 +57,7 @@ pub(super) struct RootConversation {
 /// 3. Iterate through message history, building one ATIF step per message,
 ///    and collect the agents each turn's trace kept
 /// 4. Build the extra block (feedback + regenerations)
-pub(super) fn root_conversation(
+fn root_conversation(
     conversation: &ConversationData,
     model_config: Option<&ModelConfig>,
 ) -> Result<RootConversation> {
