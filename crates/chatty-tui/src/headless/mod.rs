@@ -925,6 +925,8 @@ pub async fn run_headless(
         eprintln!("{error:#}");
     }
 
+    engine.write_export();
+
     engine.finish_usage(if unrecovered_error.is_some() {
         RunExit::Error
     } else if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {

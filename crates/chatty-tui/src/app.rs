@@ -741,6 +741,11 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
             );
             None
         }
+        Command::Export(arg) => {
+            let message = engine.export_command(arg.as_deref().unwrap_or_default());
+            engine.add_system_message(message);
+            None
+        }
         Command::Clear => Some(KeyAction::ClearConversation),
         Command::Compact => Some(KeyAction::CompactConversation),
         Command::Context => Some(KeyAction::ShowContext),

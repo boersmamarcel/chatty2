@@ -1483,6 +1483,31 @@ impl ChatEngine {
         }
     }
 
+    /// `/export [path]` (AGE-860): export as ATIF; the reply to show.
+    pub fn export_command(&self, arg: &str) -> String {
+        let path = arg.split_whitespace().next().map(std::path::PathBuf::from);
+        let Some(conversation) = self.session.conversation() else {
+            return "Nothing to export yet.".to_string();
+        };
+        let secrets = crate::export::secret_values(
+            &self.providers,
+            &self.provider_config,
+            &self.user_secrets,
+        );
+        let result = conversation.to_conversation_data().and_then(|data| {
+            let path = match path {
+                Some(p) => p,
+                None => crate::export::default_path(&data.id)?,
+            };
+            let text = crate::export::render(&data, Some(&self.model_config), &secrets)?;
+            crate::export::write(&path, &text)
+        });
+        match result {
+            Ok(wrote) => format!("Exported conversation to {wrote}"),
+            Err(error) => format!("Export failed: {error:#}"),
+        }
+    }
+
     /// Add a system message to the display
     pub fn add_system_message(&mut self, text: String) {
         self.transcript.add_system(text);
@@ -2212,5 +2237,18 @@ mod tests {
         conv.finalize_response("hello".to_string(), vec![], None);
 
         assert!(!engine.should_generate_title());
+    }
+
+    #[tokio::test]
+    async fn interactive_export_command_writes_file() {
+        let (mut engine, _rx) = test_engine().await;
+        engine
+            .session
+            .set_conversation(Some(test_conversation().await));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("out.atif.json");
+        let reply = engine.export_command(&path.display().to_string());
+        assert!(reply.starts_with("Exported conversation to"), "{reply}");
+        assert!(path.exists());
     }
 }

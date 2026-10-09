@@ -2,6 +2,7 @@ mod acp;
 mod app;
 mod engine;
 mod events;
+mod export;
 mod headless;
 mod install_team;
 // Participant mode reaches the broker over a Unix socket; there is no Windows
@@ -271,11 +272,29 @@ struct Cli {
     restore: Option<std::path::PathBuf>,
 
     /// Write a --headless run's whole conversation to PATH when it ends, as
-    /// the JSON array of messages --restore reads.
+    /// the JSON array of messages --restore reads. A restore file, not an
+    /// analysis export; for analysis use --export-atif.
     ///
     /// Example: --save-conversation /tmp/first/conversation.json
     #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_fd"])]
     save_conversation: Option<std::path::PathBuf>,
+
+    /// Write a --headless run's conversation to PATH as ATIF when it ends,
+    /// also when it fails or is stopped. `-` writes to stdout.
+    ///
+    /// Example: --export-atif /tmp/run.atif.json
+    #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_fd"])]
+    export_atif: Option<std::path::PathBuf>,
+
+    /// Export the saved conversation with this id as ATIF and exit.
+    ///
+    /// Example: --export 3f2a... --out /tmp/c.atif.json
+    #[arg(long, value_name = "CONVERSATION_ID", conflicts_with_all = ["headless", "pipe", "participant_fd"])]
+    export: Option<String>,
+
+    /// Where --export writes (default: the exports directory; `-` is stdout).
+    #[arg(long, value_name = "PATH", requires = "export")]
+    out: Option<std::path::PathBuf>,
 
     /// Auto-approve all tool executions without prompting.
     ///
@@ -521,6 +540,14 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
 
     if let Some(team) = &cli.install_team {
         return install_team::run(team).await;
+    }
+
+    if let Some(id) = &cli.export {
+        let repo = chatty_core::repositories::ConversationSqliteRepository::deferred()
+            .map_err(|e| anyhow::anyhow!("cannot open the conversation store: {e}"))?;
+        let wrote = export::export_saved(&repo, id, cli.out.as_deref()).await?;
+        eprintln!("Exported conversation {id} to {wrote}");
+        return Ok(());
     }
 
     // Load providers, models, execution settings, module settings, and A2A agents
@@ -886,6 +913,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             None => engine.init_conversation().await?,
         }
         engine.set_save_conversation(cli.save_conversation.clone());
+        engine.set_export(cli.export_atif.clone());
         if let Some(fd) = cli.participant_fd {
             #[cfg(unix)]
             {
