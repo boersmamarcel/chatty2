@@ -23,6 +23,7 @@
 
 use anyhow::{Context, Result};
 use rig_core::completion::Message;
+use rig_core::completion::message::UserContent;
 
 use crate::exporters::types::*;
 use crate::models::conversation::{MessageFeedback, RegenerationRecord};
@@ -98,10 +99,17 @@ fn root_conversation(
     let mut assistant_turn_idx: usize = 0;
 
     for (idx, message) in history.iter().enumerate() {
-        // Tool round-trips are persisted in history (AGE-247); the steps
-        // derive tool calls and observations from the trace on the final
-        // text message, so the raw messages would only duplicate them.
-        if crate::services::is_persisted_tool_round_trip(&history, idx) {
+        // Tool round-trips are persisted in history (AGE-247): the model
+        // turn that asked for the calls is a step of its own, and each
+        // result joins the step whose call it answers (AGE-863). Their usage
+        // is the turn's, on its final text message.
+        let round_trip = crate::services::is_persisted_tool_round_trip(&history, idx);
+        if round_trip && let Message::User { content } = message {
+            for part in content.iter() {
+                if let UserContent::ToolResult(result) = part {
+                    attach_tool_result(&mut steps, result);
+                }
+            }
             continue;
         }
         let timestamp = timestamps.get(idx).copied().flatten();
@@ -118,6 +126,10 @@ fn root_conversation(
             Message::User { content } => Built::new(
                 build_user_step(step_id, content, timestamp, &msg_attachments),
                 Vec::new(),
+            ),
+            Message::Assistant { content, .. } if round_trip => Built::new(
+                build_agent_step(step_id, content, timestamp, None, None),
+                call_refs(content),
             ),
             Message::Assistant { content, .. } => {
                 let metrics = own_usages.get(assistant_turn_idx).map(|u| AtifStepMetrics {
@@ -156,7 +168,7 @@ fn root_conversation(
 mod steps;
 use steps::*;
 mod swarm;
-use swarm::{Built, call_refs};
+use swarm::{Built, attach_tool_result, call_refs};
 pub use swarm::{export_swarm, run_to_atif, swarm_to_atif, swarm_tree_from_atif};
 
 #[cfg(test)]
