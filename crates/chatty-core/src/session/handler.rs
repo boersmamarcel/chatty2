@@ -220,7 +220,7 @@ impl SeenRoundTrips {
             let Some((_, output)) = results.iter().find(|(r, _)| *r == id) else {
                 continue;
             };
-            let Ok(call_id) = ToolCallId::new(id.clone()) else {
+            let Some(call_id) = ToolCallId::new(id.clone()) else {
                 continue;
             };
             let raw = self.args.remove(&id).unwrap_or_default();
@@ -631,6 +631,107 @@ mod tests {
             id: id.to_string(),
             result: "ok".to_string(),
         }
+    }
+
+    /// AGE-864: a turn cancelled mid-loop (the headless stop after
+    /// `final_answer`) still hands its owner every answered round-trip and
+    /// what its calls spent, ahead of `Cancelled`. A call with no result yet
+    /// is left out, never persisted dangling.
+    #[test]
+    fn cancelled_turn_emits_its_round_trips_and_usage() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        let usage = |input| {
+            StreamChunk::ApiCallUsage(ApiCallUsage {
+                input_tokens: input,
+                output_tokens: 5,
+                ..ApiCallUsage::default()
+            })
+        };
+        for chunk in [
+            StreamChunk::Text("Looking.".to_string()),
+            started("a", "read_file"),
+            StreamChunk::ToolCallInput {
+                id: "a".to_string(),
+                arguments: "{\"path\":\"x\"}".to_string(),
+            },
+            usage(100),
+            result("a"),
+            started("b", "final_answer"),
+            usage(200),
+            result("b"),
+            started("c", "list_directory"),
+        ] {
+            handler.on_chunk(Ok(chunk)).unwrap();
+        }
+        handler.on_cancelled();
+        drop(handler);
+
+        let tail: Vec<&SessionEvent> = events.iter().rev().take(3).rev().collect();
+        let SessionEvent::TurnMessages(messages) = tail[0] else {
+            panic!("round-trips first: {tail:?}");
+        };
+        let SessionEvent::TokenUsage(spent) = tail[1] else {
+            panic!("then usage: {tail:?}");
+        };
+        assert!(matches!(tail[2], SessionEvent::Cancelled), "{tail:?}");
+        assert_eq!((spent.input_tokens, spent.output_tokens), (300, 10));
+
+        assert_eq!(messages.len(), 4, "{messages:?}");
+        let calls: Vec<(String, serde_json::Value)> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant { content, .. } => Some(content.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|c| match c {
+                AssistantContent::ToolCall(call) => {
+                    Some((call.function.name.clone(), call.function.arguments.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("read_file".to_string(), serde_json::json!({ "path": "x" })),
+                ("final_answer".to_string(), serde_json::json!("")),
+            ]
+        );
+        let Message::Assistant { content, .. } = &messages[0] else {
+            panic!("{messages:?}");
+        };
+        assert!(matches!(&content[0], AssistantContent::Text(t) if t.text == "Looking."));
+    }
+
+    /// A turn that ends on its own keeps rig's record; nothing is rebuilt.
+    #[test]
+    fn rigs_record_wins_over_the_rebuilt_one() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        handler.on_chunk(Ok(started("a", "read_file"))).unwrap();
+        handler.on_chunk(Ok(result("a"))).unwrap();
+        handler
+            .on_chunk(Ok(StreamChunk::TurnMessages(vec![Message::assistant("rig")])))
+            .unwrap();
+        handler.on_cancelled();
+        drop(handler);
+        let records = events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::TurnMessages(_)))
+            .count();
+        assert_eq!(records, 1);
     }
 
     /// AGE-485: three parallel tool calls, the first two identical (name and
