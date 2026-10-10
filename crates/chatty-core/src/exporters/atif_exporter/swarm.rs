@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, ToolResultContent, UserContent};
+use rig_core::completion::message::{AssistantContent, ToolResult, ToolResultContent, UserContent};
 
 use super::steps::plugin_extra;
 use super::{SCHEMA_VERSION, root_conversation};
@@ -564,20 +564,7 @@ fn conversation_steps(messages: &[Message]) -> Vec<Built> {
                 let mut text = Vec::new();
                 for part in content {
                     match part {
-                        UserContent::ToolResult(result) => {
-                            let id = result.call.to_string();
-                            let content = result
-                                .content
-                                .iter()
-                                .map(|c| match c {
-                                    ToolResultContent::Text(t) => t.text.clone(),
-                                    ToolResultContent::Json { value } => value.to_string(),
-                                    ToolResultContent::Image(_) => "[image]".to_string(),
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            attach_result(&mut built, &id, content);
-                        }
+                        UserContent::ToolResult(result) => attach_tool_result(&mut built, result),
                         UserContent::Text(t) => text.push(t.text.clone()),
                         _ => {}
                     }
@@ -630,6 +617,21 @@ fn conversation_steps(messages: &[Message]) -> Vec<Built> {
         }
     }
     built
+}
+
+/// Put a tool-result message part on the latest step whose call it answers.
+pub(super) fn attach_tool_result(built: &mut [Built], result: &ToolResult) {
+    let content = result
+        .content
+        .iter()
+        .map(|c| match c {
+            ToolResultContent::Text(t) => t.text.clone(),
+            ToolResultContent::Json { value } => value.to_string(),
+            ToolResultContent::Image(_) => "[image]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    attach_result(built, &result.call.to_string(), content);
 }
 
 /// Put a tool's result on the latest step whose call it answers.

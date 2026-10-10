@@ -187,8 +187,14 @@ fn headless_export_step_count_matches_transcript() {
     // tool results join the step whose call they answer.
     let tool_results = history
         .iter()
-        .filter(|m| m.to_string().contains("\"tool_result\"") || m.to_string().contains("toolresult"))
+        .filter(|m| {
+            m["role"] == "user"
+                && m["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().all(|p| p["type"] == "toolresult"))
+        })
         .count();
+    assert_eq!(tool_results, 2, "{history:#?}");
     assert_eq!(
         steps.len(),
         history.len() - tool_results,
