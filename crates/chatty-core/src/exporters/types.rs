@@ -45,8 +45,8 @@ pub struct AtifStep {
     pub observation: Option<AtifObservation>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metrics: Option<AtifStepMetrics>,
-    /// Who took the step, in a swarm export (TB-2). Absent from a single
-    /// conversation's export, where there is one agent.
+    /// Who took the step and the delegation step that started it
+    /// (TB-2, AGE-859).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra: Option<AtifStepExtra>,
 }
@@ -54,8 +54,22 @@ pub struct AtifStep {
 /// Chatty-specific step data, carried in `steps[].extra`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AtifStepExtra {
-    /// The node that took the step, as the swarm roster names it.
+    /// The agent that took the step, as its path in the tree:
+    /// `root/coder-1/tester-0` (AGE-859).
     pub agent: String,
+    /// The `step_id` of the delegation step that started this agent;
+    /// absent on the root's steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_step: Option<u32>,
+    /// On a `best_of` step: the attempt kept, how, the judge's reason and
+    /// which child agent judged (AGE-853, AGE-859).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub best_of: Option<serde_json::Value>,
+    /// On the step that stands in for a conversation over the capture cap:
+    /// the size of what was cut (RC-0). The agent's tool calls follow it,
+    /// from the swarm trace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_bytes: Option<u64>,
 }
 
 /// Message field — either a plain string or an array of ContentPart (v1.6 multimodal).
@@ -188,9 +202,14 @@ pub struct AtifExtra {
     pub feedback: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regenerations: Vec<AtifRegeneration>,
-    /// Every agent of a swarm export, parents before children (TB-2).
+    /// Every agent of the run, parents before children (TB-2, AGE-859).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swarm: Option<Vec<AtifSwarmAgent>>,
+    /// Why this export is not the whole run, when it is not: step usage
+    /// that does not sum to `final_metrics`, a delegation step with no
+    /// child trajectory, a conversation cut or never captured (AGE-859).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incomplete: Vec<String>,
 }
 
 /// One agent of a swarm export: a node of its `SwarmTrace`, less its tool
@@ -198,6 +217,8 @@ pub struct AtifExtra {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AtifSwarmAgent {
     pub name: String,
+    /// Its path in the tree, as its steps' `extra.agent` names it.
+    pub path: String,
     pub spec: String,
     /// The index of its parent in the roster; `None` for the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]

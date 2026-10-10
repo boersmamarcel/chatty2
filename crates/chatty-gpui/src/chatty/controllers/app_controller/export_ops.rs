@@ -228,8 +228,12 @@ pub(super) async fn write_atif_export(
     conv_data: &ConversationData,
     model_config: Option<&ModelConfig>,
 ) {
-    // Convert to ATIF
-    let atif_json = match conversation_to_atif(conv_data, model_config) {
+    // Convert to ATIF: the one exporter the CLI uses too, every agent the
+    // run delegated to nested under its delegation step (AGE-859).
+    let json_str = match export_run(&ExportRun {
+        root: conv_data,
+        model_config,
+    }) {
         Ok(json) => json,
         Err(e) => {
             warn!(error = ?e, conv_id = %conv_id, "Failed to convert conversation to ATIF");
@@ -255,14 +259,6 @@ pub(super) async fn write_atif_export(
     // Write atomically using temp file + rename
     let file_path = exports_dir.join(format!("{}.atif.json", conv_id));
     let temp_path = file_path.with_extension(format!("json.{}.tmp", std::process::id()));
-
-    let json_str = match serde_json::to_string_pretty(&atif_json) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(error = ?e, conv_id = %conv_id, "Failed to serialize ATIF JSON");
-            return;
-        }
-    };
 
     if let Err(e) = tokio::fs::write(&temp_path, &json_str).await {
         warn!(error = ?e, conv_id = %conv_id, "Failed to write ATIF temp file");

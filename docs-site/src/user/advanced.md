@@ -6,7 +6,7 @@
 
 **Settings → Training Data** turns on automatic export: with **Auto-export ATIF** or **Auto-export JSONL** on, every finished reply re-exports its conversation. Re-exporting replaces that conversation's previous entry rather than duplicating it.
 
-**ATIF** (Agent Trajectory Interchange Format) is structured JSON for agent pipelines, following the [Harbor trajectory format](https://harborframework.com/docs/agents/trajectory-format): messages, tool calls, reasoning, timestamps, token counts, thumbs feedback and regeneration pairs (rejected versus chosen). One file per conversation.
+**ATIF** (Agent Trajectory Interchange Format) is structured JSON for agent pipelines, following the [Harbor trajectory format](https://harborframework.com/docs/agents/trajectory-format): messages, tool calls, reasoning, timestamps, token counts, thumbs feedback and regeneration pairs (rejected versus chosen). One file per conversation. A conversation that delegated to agents includes their turns too, each under the step that delegated to it. The [terminal guide](./terminal.md#export-a-conversation) describes the layout.
 
 **JSONL** produces two append-only files:
 

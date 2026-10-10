@@ -1,4 +1,4 @@
-//! ATIF step builders — pure helpers used by `conversation_to_atif`.
+//! ATIF step builders — pure helpers used by the run exporter (`root_conversation`, `run_to_atif`).
 //!
 //! # What lives here
 //!
@@ -269,6 +269,7 @@ pub(super) fn build_extra(
         feedback: feedback_strings,
         regenerations: atif_regenerations,
         swarm: None,
+        incomplete: Vec::new(),
     }
 }
 

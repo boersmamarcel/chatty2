@@ -203,7 +203,7 @@ pub struct AgentNode {
 }
 
 impl AgentNode {
-    fn new(name: &str, spec: &str, root_task_id: Option<&str>) -> Self {
+    pub fn new(name: &str, spec: &str, root_task_id: Option<&str>) -> Self {
         Self {
             name: name.to_string(),
             spec: spec.to_string(),
@@ -824,8 +824,7 @@ impl SwarmTrace {
     }
 
     /// Every agent of the turn, root first and parents before children,
-    /// as the conversation keeps them for the export (AGE-859). The root's
-    /// own tool calls are left out: they are its conversation's.
+    /// for the export (AGE-859).
     pub fn records(&self) -> Vec<AgentRecord> {
         let order = self.tree.preorder();
         let index: BTreeMap<NodeId, usize> =
@@ -833,11 +832,8 @@ impl SwarmTrace {
         order
             .iter()
             .map(|id| {
-                let mut node = self.tree.get(*id).clone();
+                let node = self.tree.get(*id).clone();
                 let parent = self.tree.parent(*id).map(|p| index[&p]);
-                if parent.is_none() {
-                    node.tool_calls.clear();
-                }
                 AgentRecord {
                     node,
                     parent,

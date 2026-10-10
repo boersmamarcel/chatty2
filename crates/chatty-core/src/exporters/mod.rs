@@ -3,9 +3,6 @@ pub mod jsonl_exporter;
 pub mod run_export;
 pub mod types;
 
-// Pre-built API: re-exports for training data pipeline (not yet wired to UI)
-#[allow(unused_imports)]
-pub use atif_exporter::conversation_to_atif;
 pub use atif_exporter::{export_swarm, swarm_to_atif, swarm_tree_from_atif};
 #[allow(unused_imports)]
 pub(crate) use jsonl_exporter::{

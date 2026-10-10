@@ -1246,6 +1246,34 @@ mod runner {
         );
     }
 
+    /// `--export-atif` on a run that fails: the real end-of-run hook in
+    /// `run_headless` still writes the export, so a failed run can be
+    /// debugged from it (AGE-860, AGE-859).
+    #[tokio::test]
+    async fn headless_failed_run_writes_export_via_run_end_hook() {
+        let turns: Vec<Scenario> = (0..=HEADLESS_STALL_RESUME_ATTEMPTS + 2)
+            .map(|_| stalled_turn())
+            .collect();
+        let (mut runner, event_rx, _started, workspace) = scripted_runner(turns).await;
+        let path = workspace.path().join("failed.atif.json");
+        runner.set_export(Some(path.clone()));
+
+        run_headless(runner, event_rx, "summarize the repo".to_string())
+            .await
+            .expect_err("the run fails");
+
+        let text = std::fs::read_to_string(&path).expect("the hook wrote the export");
+        let export: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(
+            export["schema_version"]
+                .as_str()
+                .unwrap()
+                .starts_with("ATIF"),
+            "{export:#}"
+        );
+        assert_eq!(export["extra"]["swarm"][0]["path"], "root", "{export:#}");
+    }
+
     /// What the resume prompt tells the model: a stalled turn keeps its
     /// text, but rig hands back its tool round-trips only when a turn
     /// finishes, so they are not in the history the resume runs on.
