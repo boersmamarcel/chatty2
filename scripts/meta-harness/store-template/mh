@@ -1,0 +1,4 @@
+#!/bin/sh
+# Read-only view of the experience store for the proposer (plus validate).
+case "$1" in frontier|top|diff|show|status|validate) ;; *) echo "allowed: frontier | top [k] | diff <a> <b> | show <id> | status | validate <id>"; exit 2;; esac
+exec /media/marcel/data/rust/swarm-results/ev7-venv/bin/python /media/marcel/data/rust/swarm-results/age-862/wt/scripts/meta-harness/mh.py "$@"

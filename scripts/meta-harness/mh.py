@@ -171,7 +171,8 @@ def collect_harbor(cand: str, set_name: str, rep: int, complete: bool) -> dict:
         per[tname] = {"reward": 0.0 if rw is None else float(rw),
                       "tokens": usage_tokens(agent / "usage.json"),
                       "error": (exc or {}).get("exception_type") if exc else None}
-        for src, dst in (("atif.json", f"{tnum(tname)}.atif.json"), ("usage.json", f"{tnum(tname)}.usage.json")):
+        for src, dst in (("atif.json", f"{tnum(tname)}.atif.json"), ("usage.json", f"{tnum(tname)}.usage.json"),
+                         ("stdout.txt", f"{tnum(tname)}.trace.txt")):
             if (agent / src).exists():
                 shutil.copyfile(agent / src, trace_dir / dst)
     save_run(cand, set_name, rep, per, complete)
@@ -367,6 +368,7 @@ def make_knob_candidate(parent: str, knob: dict) -> str | None:
     if (CANDS / cid).exists():
         return None
     shutil.copytree(CANDS / parent / "harness", CANDS / cid / "harness")
+    subprocess.call(["chmod", "-R", "u+w", str(CANDS / cid)])
     k = knobs_of(parent)
     k.update(knob)
     (CANDS / cid / "harness" / "knobs.json").write_text(json.dumps(k, indent=1))
