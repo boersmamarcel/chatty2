@@ -631,7 +631,7 @@ pub(super) fn attach_tool_result(built: &mut [Built], result: &ToolResult) {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    attach_result(built, &result.call.to_string(), content);
+    attach_result(built, &result.call, content);
 }
 
 /// Put a tool's result on the latest step whose call it answers.

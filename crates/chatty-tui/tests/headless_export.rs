@@ -121,7 +121,11 @@ fn run_with_two_tool_calls() -> Exported {
         "chatty-tui failed\nstdout:\n{}\nstderr:\n{stderr}",
         String::from_utf8_lossy(&output.stdout)
     );
-    assert_eq!(daemon.requests().len(), 3, "two tool calls, then the answer");
+    assert_eq!(
+        daemon.requests().len(),
+        3,
+        "two tool calls, then the answer"
+    );
 
     let atif = serde_json::from_str(&std::fs::read_to_string(&export).expect("the export"))
         .expect("the export is JSON");
@@ -201,8 +205,14 @@ fn headless_export_step_count_matches_transcript() {
         "history: {history:#?}\nexport: {atif:#}"
     );
     assert_eq!(steps.len(), 4, "{atif:#}");
-    let sources: Vec<&str> = steps.iter().map(|s| s["source"].as_str().unwrap()).collect();
+    let sources: Vec<&str> = steps
+        .iter()
+        .map(|s| s["source"].as_str().unwrap())
+        .collect();
     assert_eq!(sources, ["user", "agent", "agent", "agent"], "{atif:#}");
-    let ids: Vec<u64> = steps.iter().map(|s| s["step_id"].as_u64().unwrap()).collect();
+    let ids: Vec<u64> = steps
+        .iter()
+        .map(|s| s["step_id"].as_u64().unwrap())
+        .collect();
     assert_eq!(ids, [1, 2, 3, 4], "{atif:#}");
 }
