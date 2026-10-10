@@ -226,10 +226,7 @@ fn run_ending_with_final_answer() -> Exported {
         [
             Reply::tool_call("list_directory", json!({ "path": "." })),
             Reply::tool_call("read_file", json!({ "path": "README.md" })),
-            Reply::tool_call(
-                "final_answer",
-                json!({ "answer": "UNIQUE-README-CONTENT" }),
-            ),
+            Reply::tool_call("final_answer", json!({ "answer": "UNIQUE-README-CONTENT" })),
             // Only reached if the stop came too late; never the answer.
             Reply::text("Done."),
         ],

@@ -199,7 +199,10 @@ impl SeenRoundTrips {
     }
 
     fn input(&mut self, id: &str, arguments: &str) {
-        self.args.entry(id.to_string()).or_default().push_str(arguments);
+        self.args
+            .entry(id.to_string())
+            .or_default()
+            .push_str(arguments);
     }
 
     fn result(&mut self, id: String, content: String) {
@@ -723,7 +726,9 @@ mod tests {
         handler.on_chunk(Ok(started("a", "read_file"))).unwrap();
         handler.on_chunk(Ok(result("a"))).unwrap();
         handler
-            .on_chunk(Ok(StreamChunk::TurnMessages(vec![Message::assistant("rig")])))
+            .on_chunk(Ok(StreamChunk::TurnMessages(vec![Message::assistant(
+                "rig",
+            )])))
             .unwrap();
         handler.on_cancelled();
         drop(handler);
