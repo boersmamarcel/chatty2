@@ -42,8 +42,18 @@ CANDS = STORE / "candidates"
 HELD = R / "heldout"
 JOBS = R / "jobs"
 HARBOR = Path("/media/marcel/data/rust/chattyapp/harbor-chatty-dabstep-team")
-SHA = (R / "TARBALL_SHA").read_text().strip() if (R / "TARBALL_SHA").exists() else ""
-BIN = R / "bin" / f"chatty-tui-{SHA}"
+
+
+def cur_sha() -> str:
+    """The binary for jobs starting now (TARBALL_SHA is read at every job start)."""
+    return (R / "TARBALL_SHA").read_text().strip() if (R / "TARBALL_SHA").exists() else ""
+
+
+def cur_bin() -> Path:
+    return R / "bin" / f"chatty-tui-{cur_sha()}"
+
+
+HOLD = R / "HOLD_CANDIDATES"   # while it exists only baseline jobs run (amendment 2: wait for v0.7.1)
 MODEL = "RedHatAI/Qwen3.8-27B-INT4"
 VLLM = "http://172.17.0.1:8000/v1"
 BASE = "c000-baseline"
@@ -112,7 +122,7 @@ def save_run(cand: str, set_name: str, rep: int, per_task: dict, complete: bool)
     sc["runs"][f"{set_name}-r{rep}"] = {
         "complete": complete, "n": len(vals), "mean": statistics.mean(vals) if vals else 0.0,
         "solved": sum(vals), "tokens": sum(v.get("tokens", 0) for v in per_task.values()),
-        "tasks": per_task, "binary": SHA, "at": dt.datetime.now().isoformat(timespec="seconds")}
+        "tasks": per_task, "binary": cur_sha(), "at": dt.datetime.now().isoformat(timespec="seconds")}
     sc["summary"] = {s: summarize(sc, s) for s in ("search", "test", "ev7") if summarize(sc, s)}
     p = scores_path(cand, set_name)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -144,7 +154,7 @@ def job_config(cand: str, set_name: str, rep: int) -> tuple[str, Path]:
         "n_concurrent_trials": 2, "quiet": True,
         "agents": [{"name": "agents.meta_harness:MetaHarnessArm", "kwargs": {
             "provider_url": VLLM, "api_key_env": "OLLAMA_API_KEY", "model": MODEL,
-            "think": bool(knobs.get("think", False)), "tarball_sha": SHA,
+            "think": bool(knobs.get("think", False)), "tarball_sha": cur_sha(),
             "candidate_dir": str(CANDS / cand / "harness"), "pip_packages": "duckdb pandas"}}],
         "tasks": tasks(set_name),
     }
@@ -189,7 +199,7 @@ def run_harbor(cand: str, set_name: str, rep: int) -> int:
         cmd = ["uv", "run", "harbor", "job", "resume", "-p", str(JOBS / name / name)]
     else:
         cmd = ["uv", "run", "harbor", "run", "-c", str(cfg), "--agent-timeout-multiplier", "1.3334", "-y"]
-    log(f"start {name}")
+    log(f"start {name} (binary {cur_sha()[:8]})")
     with open(JOBS / f"{name}.log", "a") as lf:
         rc = subprocess.call(cmd, cwd=HARBOR, env=env, stdout=lf, stderr=subprocess.STDOUT)
     per = collect_harbor(cand, set_name, rep, complete=(rc == 0))
@@ -230,7 +240,7 @@ if "--usage-file" in out and "--participant-fd" not in out:
     out += ["--export-atif", os.path.join(d, "atif.json")]
 if "--participant-fd" not in out:
     out += ["--preamble", open(os.path.join(H, "preamble.md")).read()]
-os.execv({str(BIN)!r}, [{str(BIN)!r}] + out + extra)
+os.execv({str(cur_bin())!r}, [{str(cur_bin())!r}] + out + extra)
 """)
     w.chmod(0o755)
     return w
@@ -422,8 +432,14 @@ def next_job() -> tuple[str, str, int] | None:
         if not job_done(BASE, "search", rep):
             return BASE, "search", rep
     for j in explicit_jobs():
-        if not job_done(*j):
+        if not job_done(*j) and (j[0] == BASE or not HOLD.exists()):
             return j
+    if HOLD.exists():
+        for set_name in ("test", "ev7"):
+            for rep in range(1, TEST_REPS + 1):
+                if not job_done(BASE, set_name, rep):
+                    return BASE, set_name, rep
+        return None
     pending = sorted((c for c in CANDS.iterdir() if c.name.startswith("p") and (c / "VALID").exists()
                       and not job_done(c.name, "search", 1)), key=lambda c: c.stat().st_mtime)
     if pending:
