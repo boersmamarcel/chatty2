@@ -216,3 +216,118 @@ fn headless_export_step_count_matches_transcript() {
         .collect();
     assert_eq!(ids, [1, 2, 3, 4], "{atif:#}");
 }
+
+/// A headless run that ends the way every DABstep and Harbor task does
+/// (AGE-864): two tool calls, then `final_answer` writes `answer.txt` and
+/// the runner stops the stream before the turn ends on its own.
+fn run_ending_with_final_answer() -> Exported {
+    let daemon = FakeDaemon::scripted(Script::new().route(
+        MODEL,
+        [
+            Reply::tool_call("list_directory", json!({ "path": "." })),
+            Reply::tool_call("read_file", json!({ "path": "README.md" })),
+            Reply::tool_call("final_answer", json!({ "answer": "UNIQUE-README-CONTENT" })),
+            // Only reached if the stop came too late; never the answer.
+            Reply::text("Done."),
+        ],
+    ));
+    let home = config_for(&daemon);
+    let export = home.path().join("run.atif.json");
+    let saved = home.path().join("run.json");
+
+    let mut spec = AgentSpec::named("export-user");
+    spec.agent.model = Some(MODEL.to_string());
+    let spec = serde_json::to_string(&spec).unwrap();
+    let output = chatty_tui(
+        home.path(),
+        &[
+            "--headless",
+            "-m",
+            "What does the README say? Write the answer to answer.txt.",
+            "--agent-json",
+            &spec,
+            "--export-atif",
+            export.to_str().unwrap(),
+            "--save-conversation",
+            saved.to_str().unwrap(),
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "chatty-tui failed\nstdout:\n{}\nstderr:\n{stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("final_answer completed and answer file exists; stopping stream."),
+        "the run must end through the final_answer stop\nstderr:\n{stderr}"
+    );
+    let base = home.path().canonicalize().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(base.join("workspace").join("answer.txt"))
+            .expect("final_answer wrote the answer file")
+            .trim(),
+        "UNIQUE-README-CONTENT"
+    );
+
+    let atif = serde_json::from_str(&std::fs::read_to_string(&export).expect("the export"))
+        .expect("the export is JSON");
+    let history = serde_json::from_str(&std::fs::read_to_string(&saved).expect("the history"))
+        .expect("the history is JSON");
+    Exported { atif, history }
+}
+
+#[test]
+fn final_answer_stop_still_persists_tool_round_trips() {
+    let Exported { history, .. } = run_ending_with_final_answer();
+
+    let called: Vec<&str> = history
+        .iter()
+        .filter(|m| m["role"] == "assistant")
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|p| p["type"] == "toolcall")
+        .map(|p| p["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        called,
+        ["list_directory", "read_file", "final_answer"],
+        "{history:#?}"
+    );
+    let results: Vec<&Value> = history
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .filter(|p| p["type"] == "toolresult")
+        .collect();
+    assert_eq!(results.len(), 3, "every call has its result: {history:#?}");
+    assert!(
+        results[1].to_string().contains(README),
+        "the read_file result is the README: {history:#?}"
+    );
+}
+
+#[test]
+fn headless_export_after_final_answer_has_all_tool_calls() {
+    let Exported { atif, .. } = run_ending_with_final_answer();
+    let steps = steps(&atif);
+
+    let calls: Vec<&Value> = steps
+        .iter()
+        .flat_map(|s| s["tool_calls"].as_array().into_iter().flatten())
+        .collect();
+    let names: Vec<&str> = calls
+        .iter()
+        .map(|c| c["function_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["list_directory", "read_file", "final_answer"],
+        "{atif:#}"
+    );
+    for step in steps.iter().filter(|s| s["tool_calls"].is_array()) {
+        let call_id = &step["tool_calls"][0]["tool_call_id"];
+        let result = &step["observation"]["results"][0];
+        assert_eq!(&result["source_call_id"], call_id, "{atif:#}");
+        assert!(result["content"].is_string(), "{atif:#}");
+    }
+}

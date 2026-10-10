@@ -15,6 +15,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
+use rig_core::completion::Message;
+use rig_core::message::{
+    AssistantContent, Text, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
+    UserContent,
+};
 
 use crate::models::token_usage::{ApiCallUsage, TokenUsage};
 use crate::services::llm_service::StreamChunk;
@@ -152,6 +157,101 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     /// The same, for the last request that completed. `true` until one
     /// has, so a stream that yields nothing at all counts as empty.
     last_call_empty: bool,
+    /// Whether rig handed back its own record of the turn (`TurnMessages`).
+    turn_messages_seen: bool,
+    /// The turn's round-trips as they streamed by, for a turn cancelled
+    /// before rig's record arrives (AGE-864).
+    seen: SeenRoundTrips,
+}
+
+/// The tool round-trips of a turn, rebuilt from its stream events.
+///
+/// rig hands back its record of the turn (`TurnMessages`) only when the run
+/// ends on its own. A cancelled turn (the headless runner's stop once
+/// `final_answer` wrote the answer file, a loop-guard pivot, a user's stop)
+/// drops the stream first, and every round-trip it made would be lost to
+/// the history and the ATIF export (AGE-864). This is the same record in
+/// rig's shape: per model call, an assistant message with its text and the
+/// tool calls that got a result, then a user message with those results.
+#[derive(Default)]
+struct SeenRoundTrips {
+    messages: Vec<Message>,
+    text: String,
+    /// (id, name) of the current model call's tool calls, in order.
+    calls: Vec<(String, String)>,
+    args: HashMap<String, String>,
+    results: Vec<(String, String)>,
+}
+
+impl SeenRoundTrips {
+    fn text(&mut self, text: &str) {
+        if !self.results.is_empty() {
+            self.flush();
+        }
+        self.text.push_str(text);
+    }
+
+    fn call(&mut self, id: String, name: String) {
+        if !self.results.is_empty() {
+            self.flush();
+        }
+        self.calls.push((id, name));
+    }
+
+    fn input(&mut self, id: &str, arguments: &str) {
+        self.args
+            .entry(id.to_string())
+            .or_default()
+            .push_str(arguments);
+    }
+
+    fn result(&mut self, id: String, content: String) {
+        self.results.push((id, content));
+    }
+
+    /// Close the current model call: its answered calls and their results.
+    fn flush(&mut self) {
+        let results = std::mem::take(&mut self.results);
+        let calls = std::mem::take(&mut self.calls);
+        let text = std::mem::take(&mut self.text);
+        let mut content = Vec::new();
+        if !text.trim().is_empty() {
+            content.push(AssistantContent::Text(Text::new(text)));
+        }
+        let mut answers = Vec::new();
+        for (id, name) in calls {
+            let Some((_, output)) = results.iter().find(|(r, _)| *r == id) else {
+                continue;
+            };
+            let Some(call_id) = ToolCallId::new(id.clone()) else {
+                continue;
+            };
+            let raw = self.args.remove(&id).unwrap_or_default();
+            let arguments = serde_json::from_str(&raw)
+                .unwrap_or_else(|_| serde_json::Value::String(raw.clone()));
+            content.push(AssistantContent::ToolCall(ToolCall::new(
+                call_id.clone(),
+                ToolFunction::new(name.clone(), arguments),
+            )));
+            answers.push(UserContent::ToolResult(ToolResult {
+                call: call_id,
+                name,
+                content: vec![ToolResultContent::text(output.clone())],
+                provider: None,
+            }));
+        }
+        if answers.is_empty() {
+            return;
+        }
+        self.messages.push(Message::Assistant { id: None, content });
+        self.messages.push(Message::User { content: answers });
+    }
+
+    /// The turn's round-trips so far; `None` when it made none.
+    fn finish(mut self) -> Option<Vec<Message>> {
+        self.flush();
+        (!self.messages.is_empty()).then_some(self.messages)
+    }
 }
 
 impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
@@ -181,6 +281,8 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             text_overflow: false,
             output_in_call: false,
             last_call_empty: true,
+            turn_messages_seen: false,
+            seen: SeenRoundTrips::default(),
         }
     }
 
@@ -350,6 +452,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                         "Text-only response exceeded the verbosity limit; a brevity prompt follows the turn"
                     );
                 }
+                self.seen.text(&text);
                 (self.emit)(SessionEvent::Text(text));
             }
             // Liveness only (AGE-453): the stream loop already reset its
@@ -360,6 +463,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             StreamChunk::ToolCallStarted { id, name } => {
                 self.output_in_call = true;
                 self.pending_tool_names.insert(id.clone(), name.clone());
+                self.seen.call(id.clone(), name.clone());
                 (self.emit)(SessionEvent::ToolCallStarted { id, name });
             }
             StreamChunk::ToolCallInput { id, arguments } => {
@@ -367,9 +471,11 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                     .entry(id.clone())
                     .or_default()
                     .push_str(&arguments);
+                self.seen.input(&id, &arguments);
                 (self.emit)(SessionEvent::ToolCallInput { id, arguments });
             }
             StreamChunk::ToolCallResult { id, result } => {
+                self.seen.result(id.clone(), result.clone());
                 // Forward first: the result is always delivered, whatever the
                 // protocol decides to queue for after the turn.
                 (self.emit)(SessionEvent::ToolCallResult {
@@ -379,6 +485,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 self.on_tool_completed(&id);
             }
             StreamChunk::ToolCallError { id, error } => {
+                self.seen.result(id.clone(), error.clone());
                 (self.emit)(SessionEvent::ToolCallError {
                     id: id.clone(),
                     error,
@@ -424,6 +531,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 (self.emit)(SessionEvent::TokenUsage(usage));
             }
             StreamChunk::TurnMessages(messages) => {
+                self.turn_messages_seen = true;
                 (self.emit)(SessionEvent::TurnMessages(messages));
             }
             StreamChunk::Done => {
@@ -462,7 +570,24 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
         });
     }
 
+    /// A cancelled turn never gets rig's record of it nor the provider's
+    /// usage aggregate: the stream is dropped first. What it did and spent
+    /// is persisted all the same, from what streamed by (AGE-864), ahead of
+    /// the `Cancelled` that makes the owner finish the turn.
     fn on_cancelled(&mut self) {
+        let seen = std::mem::take(&mut self.seen);
+        if !self.turn_messages_seen
+            && let Some(messages) = seen.finish()
+        {
+            (self.emit)(SessionEvent::TurnMessages(messages));
+        }
+        let calls: Vec<ApiCallUsage> = std::mem::take(&mut self.compaction_calls)
+            .into_iter()
+            .chain(std::mem::take(&mut self.calls))
+            .collect();
+        if !calls.is_empty() {
+            (self.emit)(SessionEvent::TokenUsage(TokenUsage::from_calls(calls)));
+        }
         (self.emit)(SessionEvent::Cancelled);
     }
 
@@ -509,6 +634,109 @@ mod tests {
             id: id.to_string(),
             result: "ok".to_string(),
         }
+    }
+
+    /// AGE-864: a turn cancelled mid-loop (the headless stop after
+    /// `final_answer`) still hands its owner every answered round-trip and
+    /// what its calls spent, ahead of `Cancelled`. A call with no result yet
+    /// is left out, never persisted dangling.
+    #[test]
+    fn cancelled_turn_emits_its_round_trips_and_usage() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        let usage = |input| {
+            StreamChunk::ApiCallUsage(ApiCallUsage {
+                input_tokens: input,
+                output_tokens: 5,
+                ..ApiCallUsage::default()
+            })
+        };
+        for chunk in [
+            StreamChunk::Text("Looking.".to_string()),
+            started("a", "read_file"),
+            StreamChunk::ToolCallInput {
+                id: "a".to_string(),
+                arguments: "{\"path\":\"x\"}".to_string(),
+            },
+            usage(100),
+            result("a"),
+            started("b", "final_answer"),
+            usage(200),
+            result("b"),
+            started("c", "list_directory"),
+        ] {
+            handler.on_chunk(Ok(chunk)).unwrap();
+        }
+        handler.on_cancelled();
+        drop(handler);
+
+        let tail: Vec<&SessionEvent> = events.iter().rev().take(3).rev().collect();
+        let SessionEvent::TurnMessages(messages) = tail[0] else {
+            panic!("round-trips first: {tail:?}");
+        };
+        let SessionEvent::TokenUsage(spent) = tail[1] else {
+            panic!("then usage: {tail:?}");
+        };
+        assert!(matches!(tail[2], SessionEvent::Cancelled), "{tail:?}");
+        assert_eq!((spent.input_tokens, spent.output_tokens), (300, 10));
+
+        assert_eq!(messages.len(), 4, "{messages:?}");
+        let calls: Vec<(String, serde_json::Value)> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant { content, .. } => Some(content.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|c| match c {
+                AssistantContent::ToolCall(call) => {
+                    Some((call.function.name.clone(), call.function.arguments.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                ("read_file".to_string(), serde_json::json!({ "path": "x" })),
+                ("final_answer".to_string(), serde_json::json!("")),
+            ]
+        );
+        let Message::Assistant { content, .. } = &messages[0] else {
+            panic!("{messages:?}");
+        };
+        assert!(matches!(&content[0], AssistantContent::Text(t) if t.text == "Looking."));
+    }
+
+    /// A turn that ends on its own keeps rig's record; nothing is rebuilt.
+    #[test]
+    fn rigs_record_wins_over_the_rebuilt_one() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        handler.on_chunk(Ok(started("a", "read_file"))).unwrap();
+        handler.on_chunk(Ok(result("a"))).unwrap();
+        handler
+            .on_chunk(Ok(StreamChunk::TurnMessages(vec![Message::assistant(
+                "rig",
+            )])))
+            .unwrap();
+        handler.on_cancelled();
+        drop(handler);
+        let records = events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::TurnMessages(_)))
+            .count();
+        assert_eq!(records, 1);
     }
 
     /// AGE-485: three parallel tool calls, the first two identical (name and
