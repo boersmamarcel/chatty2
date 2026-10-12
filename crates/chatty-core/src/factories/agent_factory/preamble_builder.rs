@@ -396,13 +396,15 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
             "\n\n## Skills\
              Use `search_memory` to discover relevant skills when a task might benefit from a \
              saved procedure. The search results will show skill names and short descriptions. \
-             Call `read_skill` with the exact skill name before executing any skill procedure \
-             so you have the complete, up-to-date steps."
+             Call `read_skill` with the exact skill name to load a skill's procedure the first \
+             time you need it. Its steps stay in this conversation: do not read the same \
+             skill again unless its result is no longer in the history."
         }
         (true, false) => {
             "\n\n## Skills\
-             Call `read_skill` with the exact skill name before executing any skill procedure \
-             so you have the complete, up-to-date steps."
+             Call `read_skill` with the exact skill name to load a skill's procedure the first \
+             time you need it. Its steps stay in this conversation: do not read the same \
+             skill again unless its result is no longer in the history."
         }
     };
 
@@ -938,6 +940,8 @@ mod tests {
         );
         assert!(result.contains("## Skills"));
         assert!(result.contains("read_skill"));
+        assert!(result.contains("do not read the same skill again"));
+        assert!(!result.contains("up-to-date steps"));
         // An unprofiled agent keeps the discovery sentence whatever its memory
         // state; only a tool profile that withholds `search_memory` drops it.
         assert!(result.contains("search_memory"));
