@@ -4,9 +4,12 @@ use crate::settings::models::extensions_store::ExtensionsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::{ActiveTheme, Icon, Sizable, button::*, h_flex};
 
 // Popover dimensions
+/// Popovers scroll past this height instead of running off screen.
+const POPOVER_MAX_HEIGHT: f32 = 360.0;
 const MCP_POPOVER_MIN_WIDTH: f32 = 200.0;
 const MCP_POPOVER_MAX_WIDTH: f32 = 300.0;
 
@@ -75,6 +78,8 @@ impl RenderOnce for McpIndicatorView {
                             .p_2()
                             .min_w(px(MCP_POPOVER_MIN_WIDTH))
                             .max_w(px(MCP_POPOVER_MAX_WIDTH))
+                            .max_h(px(POPOVER_MAX_HEIGHT))
+                            .overflow_y_scrollbar()
                             .child(
                                 div()
                                     .text_sm()

@@ -4,9 +4,12 @@ use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::{ActiveTheme, Disableable, Icon, Sizable, button::*, h_flex};
 
 // Popover dimensions (same as MCP indicator)
+/// Popovers scroll past this height instead of running off screen.
+const POPOVER_MAX_HEIGHT: f32 = 360.0;
 const TOOLS_POPOVER_MIN_WIDTH: f32 = 200.0;
 const TOOLS_POPOVER_MAX_WIDTH: f32 = 300.0;
 
@@ -78,6 +81,8 @@ impl RenderOnce for ToolsIndicatorView {
                         .p_2()
                         .min_w(px(TOOLS_POPOVER_MIN_WIDTH))
                         .max_w(px(TOOLS_POPOVER_MAX_WIDTH))
+.max_h(px(POPOVER_MAX_HEIGHT))
+.overflow_y_scrollbar()
                         .child(
                             div()
                                 .text_sm()

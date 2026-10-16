@@ -26,6 +26,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::popover::Popover;
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable, h_flex};
 
@@ -265,6 +266,8 @@ impl Render for PrStatusBarView {
                         .shadow_md()
                         .p_1()
                         .min_w(px(220.0))
+                        .max_h(px(360.0))
+                        .overflow_y_scrollbar()
                         .children(checks.into_iter().enumerate().map(move |(ix, check)| {
                             let url = check.url.clone();
                             let color = match check.state {

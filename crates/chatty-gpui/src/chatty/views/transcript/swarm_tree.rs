@@ -809,8 +809,14 @@ fn tool_line(call: &ToolCall, cx: &App) -> AnyElement {
         ToolOutcome::Cancelled => (NodeStatus::Canceled, None, muted),
     };
     let detail = detail
-        .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
+        .map(|text| clip_lines(&text, DETAIL_LINES, DETAIL_CHARS))
         .filter(|text| !text.is_empty());
+    let arguments = call
+        .arguments
+        .as_ref()
+        .map(|args| clip_lines(&args.to_string(), ARGUMENT_LINES, DETAIL_CHARS))
+        .filter(|text| !text.is_empty() && text != "null" && text != "{}");
+    let mono = cx.theme().mono_font_family.clone();
     div()
         .id(ElementId::Name(format!("swarm-call-{}", call.id).into()))
         .flex()
@@ -840,17 +846,56 @@ fn tool_line(call: &ToolCall, cx: &App) -> AnyElement {
                         .text_color(cx.theme().foreground)
                         .child(call.name.clone()),
                 )
-                .when_some(detail, |this, detail| {
+                .when_some(arguments, |this, arguments| {
                     this.child(
                         div()
                             .text_xs()
+                            .font_family(mono.clone())
+                            .text_color(muted)
+                            .child(arguments),
+                    )
+                })
+                .when_some(detail, |this, detail| {
+                    this.child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .font_family(mono)
                             .text_color(detail_color)
-                            .truncate()
                             .child(detail),
                     )
                 }),
         )
         .into_any_element()
+}
+
+/// Lines of a tool's result shown in the agent transcript.
+const DETAIL_LINES: usize = 8;
+/// Lines of a tool's arguments shown in the agent transcript.
+const ARGUMENT_LINES: usize = 3;
+/// Characters kept per shown line, so one minified blob cannot flood the sheet.
+const DETAIL_CHARS: usize = 240;
+
+/// The first `max_lines` lines of `text`, each cut to `max_chars`, with an
+/// ellipsis line when anything was dropped.
+fn clip_lines(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .skip_while(|l| l.trim().is_empty())
+        .collect();
+    let mut out: Vec<String> = lines
+        .iter()
+        .take(max_lines)
+        .map(|line| match line.char_indices().nth(max_chars) {
+            Some((at, _)) => format!("{}…", &line[..at]),
+            None => (*line).to_string(),
+        })
+        .collect();
+    if lines.len() > max_lines {
+        out.push(format!("… {} more lines", lines.len() - max_lines));
+    }
+    out.join("\n")
 }
 
 /// How long an answer is, for a reader.
@@ -1084,6 +1129,7 @@ impl RenderOnce for AgentTranscript {
             .min_w_0()
             .flex()
             .flex_col()
+            .flex_shrink_0()
             .child(crumbs)
             .child(facts)
             .when_some(
@@ -1135,6 +1181,18 @@ impl RenderOnce for AgentTranscript {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clip_lines_keeps_the_head_and_counts_the_rest() {
+        let text = (1..=10)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(super::clip_lines(&text, 3, 10), "1\n2\n3\n… 7 more lines");
+        assert_eq!(super::clip_lines("short", 3, 10), "short");
+        assert_eq!(super::clip_lines("abcdefghij", 3, 4), "abcd…");
+        assert_eq!(super::clip_lines("\n\n  \nx", 3, 10), "x");
+    }
+
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
     use super::{LineKind, SHOWN_WHEN_WIDE, SwarmTree, WIDE, adapt_swarm_tree, delegation_callees};

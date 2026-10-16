@@ -328,9 +328,13 @@ impl Render for SwarmNodeTranscript {
                         })
                         .ok();
                     }));
+                // `flex_shrink_0`: the sheet body is a scroll container, but a
+                // shrinkable child is squeezed to the sheet's height instead of
+                // overflowing it, so a long trace had nothing to scroll.
                 div()
                     .flex()
                     .flex_col()
+                    .flex_shrink_0()
                     .gap_2()
                     .child(transcript)
                     .when(running, |this| this.child(self.message_box(cx)))
