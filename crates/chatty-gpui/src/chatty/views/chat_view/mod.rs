@@ -3794,6 +3794,7 @@ mod fingerprint_tests {
                 turns: 1,
                 text_bytes: 0,
                 tool_calls: Vec::new(),
+                conversation: None,
             })
             .collect();
         turn_with(vec![Block::SwarmTree {
@@ -4714,6 +4715,55 @@ mod delegation_run_tests {
             assert_eq!(tree.nodes.len(), 1);
             assert_eq!(tree.nodes[0].name, "local-agent");
         });
+    }
+
+    /// A finished run's captured conversation reaches the drill-in's node,
+    /// where the sheet reads it as chat; a run with no capture has none.
+    #[gpui::test]
+    fn a_finished_runs_conversation_reaches_the_drill_in(cx: &mut gpui::TestAppContext) {
+        use chatty_fabric::CapturedConversation;
+        use rig_core::completion::Message;
+
+        let (view, _window) = harness(cx);
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.start_delegation_progress("[Agent: local-agent] test", ToolSource::Local, cx);
+                v.note_swarm_row("local-agent");
+            });
+        });
+        let idx = cx.update(|cx| view.read(cx).delegation_progress_msg_idx.expect("row"));
+        let conversation_of = |cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                view.read(cx)
+                    .run_tree(idx)
+                    .and_then(|tree| tree.nodes[0].conversation.clone())
+            })
+        };
+
+        let mut trace = SwarmTrace::new();
+        trace.apply(&SessionEvent::TurnStarted);
+        trace.apply(&started("local-agent"));
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_swarm_trace(&trace, &PriceBook::default(), cx)
+            });
+        });
+        assert!(conversation_of(cx).is_none(), "nothing captured yet");
+
+        let messages = vec![Message::user("find it"), Message::assistant("found it")];
+        trace.apply(&SessionEvent::Delegation(
+            InvokeAgentProgress::Conversation(CapturedConversation::Messages {
+                messages: serde_json::to_value(&messages).unwrap(),
+            }),
+        ));
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_swarm_trace(&trace, &PriceBook::default(), cx)
+            });
+        });
+        let captured = conversation_of(cx).expect("the capture reached the node");
+        let entries = chatty_core::services::captured_chat::chat_entries(&captured.0).unwrap();
+        assert_eq!(entries.len(), 2, "the prompt and the answer");
     }
 
     /// A new chat must not offer the previous chat's worker run.

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -8,7 +10,7 @@ use ratatui::widgets::{
 
 use crate::engine::{
     ApprovalInfo, ChatEngine, DiffStat, DisplayMessage, MessageBlock, MessageRole, ToolCallInfo,
-    ToolCallState,
+    ToolCallState, ToolHit,
 };
 use crate::ui::theme;
 use crate::ui::{plan, tool_summary, verb};
@@ -19,6 +21,8 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
     engine.last_chat_area = area;
 
     let mut lines: Vec<Line> = Vec::new();
+    // Clickable tool headers, as (index into `lines`, key).
+    let mut marks: Vec<(usize, String)> = Vec::new();
 
     if !engine.is_ready {
         lines.push(Line::from(Span::styled("Initializing...", theme::muted())));
@@ -28,8 +32,13 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
         let verbose = engine.verbose_tools;
         // Borders take a column on each side; `inner` is not computed yet.
         let width = area.width.saturating_sub(2);
-        for msg in &engine.transcript.messages {
-            render_message(&mut lines, msg, verbose, width);
+        for (msg_index, msg) in engine.transcript.messages.iter().enumerate() {
+            let mut fold = Fold {
+                msg_index,
+                expanded: &engine.expanded_tools,
+                marks: &mut marks,
+            };
+            render_message(&mut lines, msg, verbose, width, &mut fold);
             lines.push(Line::from("")); // spacing between messages
         }
     }
@@ -66,6 +75,11 @@ pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
         }
         max_scroll.saturating_sub(engine.scroll_offset)
     };
+
+    // Where each clickable header landed once the lines wrap, for the click.
+    engine.tool_hits = hit_rows(marks, &wrapped_heights(&lines, inner_width));
+    engine.chat_scroll_top = scroll;
+    engine.chat_inner = inner;
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(block)
@@ -248,7 +262,47 @@ fn render_welcome_state(lines: &mut Vec<Line>, engine: &ChatEngine) {
     ]);
 }
 
-fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, width: u16) {
+/// What the chat needs to fold tool calls: which ones the reader opened, and
+/// where the clickable headers land so a click can find them.
+struct Fold<'a> {
+    msg_index: usize,
+    expanded: &'a HashSet<String>,
+    /// (index into the rendered lines, key), in line order.
+    marks: &'a mut Vec<(usize, String)>,
+}
+
+impl Fold<'_> {
+    /// The key a header is opened and closed under: unique across messages,
+    /// since a provider's call ids restart per request.
+    fn key(&self, id: &str) -> String {
+        format!("{}/{id}", self.msg_index)
+    }
+
+    /// Make the line about to be pushed clickable; returns whether it is open.
+    fn mark(&mut self, line: usize, key: String) -> bool {
+        let open = self.expanded.contains(&key);
+        self.marks.push((line, key));
+        open
+    }
+}
+
+/// How a settled call's header reads: a plain line, or one the reader can
+/// open to see its result.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolView {
+    /// Nothing to open: a running or failed call, or one with no output.
+    Plain,
+    Folded,
+    Open,
+}
+
+fn render_message(
+    lines: &mut Vec<Line>,
+    msg: &DisplayMessage,
+    verbose: bool,
+    width: u16,
+    fold: &mut Fold,
+) {
     // Role label
     let (label, style) = match msg.role {
         MessageRole::User => ("you", theme::success_bold()),
@@ -260,7 +314,7 @@ fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, wi
 
     // Render blocks in the order they arrived so text and tool calls interleave.
     for block in &msg.blocks {
-        render_block(lines, block, verbose, width, msg.is_streaming);
+        render_block(lines, block, verbose, width, msg.is_streaming, fold);
     }
 
     // Streaming cursor — only when actively streaming text (no trailing tool call).
@@ -281,6 +335,7 @@ fn render_block(
     verbose: bool,
     width: u16,
     streaming: bool,
+    fold: &mut Fold,
 ) {
     match block {
         MessageBlock::Text(text) => {
@@ -297,15 +352,15 @@ fn render_block(
             {
                 return;
             }
-            render_tool_call(lines, tc, verbose, width);
+            render_tool_call(lines, tc, verbose, width, fold);
         }
         MessageBlock::Activity(tools) => {
             if verbose {
                 for tc in tools {
-                    render_tool_call(lines, tc, verbose, width);
+                    render_tool_call(lines, tc, verbose, width, fold);
                 }
             } else {
-                render_activity(lines, tools);
+                render_activity(lines, tools, width, fold);
             }
         }
         MessageBlock::Approval(approval) => render_approval(lines, approval, streaming),
@@ -327,7 +382,10 @@ fn render_block(
 
 /// A folded run of settled tools as one counted sentence, in the desktop's
 /// tally order: `✓ Edited 2 files, explored 3 files, ran 1 command`.
-fn render_activity(lines: &mut Vec<Line>, tools: &[ToolCallInfo]) {
+/// Click it to list the calls, one line each.
+fn render_activity(lines: &mut Vec<Line>, tools: &[ToolCallInfo], width: u16, fold: &mut Fold) {
+    let key = fold.key(&format!("group-{}", tools.first().map_or("", |tc| &tc.id)));
+    let open = fold.mark(lines.len(), key);
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled("✓", theme::success()),
@@ -336,7 +394,18 @@ fn render_activity(lines: &mut Vec<Line>, tools: &[ToolCallInfo]) {
             verb::ActivityTally::from_tools(tools).sentence(),
             theme::tool(),
         ),
+        Span::styled(chevron(open), theme::muted()),
     ]));
+    if open {
+        for tc in tools {
+            render_tool_call(lines, tc, false, width, fold);
+        }
+    }
+}
+
+/// The open/closed marker at the end of a clickable header.
+fn chevron(open: bool) -> &'static str {
+    if open { " ▾" } else { " ▸" }
 }
 
 /// The approval where it happened in the stream. While pending, the input
@@ -433,19 +502,44 @@ fn plan_body_style(tone: plan::Tone) -> Style {
     }
 }
 
-fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo, verbose: bool, width: u16) {
+fn render_tool_call(
+    lines: &mut Vec<Line>,
+    tc: &ToolCallInfo,
+    verbose: bool,
+    width: u16,
+    fold: &mut Fold,
+) {
     if verbose {
         render_tool_call_verbose(lines, tc);
-    } else {
-        render_tool_call_collapsed(lines, tc, width);
+        return;
     }
+    // A settled call with something to show is one line the reader opens.
+    // Running and failed calls stay as they are: the live one is what the
+    // reader is waiting on, and an error is never folded away.
+    let has_output = tc.output.as_ref().is_some_and(|o| !o.trim().is_empty());
+    let view = if matches!(tc.state, ToolCallState::Success) && has_output {
+        let key = fold.key(&tc.id);
+        if fold.mark(lines.len(), key) {
+            ToolView::Open
+        } else {
+            ToolView::Folded
+        }
+    } else {
+        ToolView::Plain
+    };
+    render_tool_call_collapsed(lines, tc, width, view);
 }
 
 /// Columns the folded result body indents by (`    ⎿ ` / six spaces).
 const RESULT_INDENT: usize = 6;
 
 /// One header line plus a folded result — what the user sees by default.
-fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo, width: u16) {
+fn render_tool_call_collapsed(
+    lines: &mut Vec<Line>,
+    tc: &ToolCallInfo,
+    width: u16,
+    view: ToolView,
+) {
     let (icon, tc_style) = tool_state_style(&tc.state);
     let mut badge = tool_badge_span(tc);
 
@@ -465,6 +559,8 @@ fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo, width: u
         None => 6 + tc.name.chars().count() + status_width,
     };
     let badge_width = badge.as_ref().map_or(0, |b| b.content.chars().count() + 1);
+    // The open/closed marker takes its columns before the preview does.
+    let overhead = overhead + if view == ToolView::Plain { 0 } else { 2 };
 
     // On a narrow terminal the badge yields before the preview does — it is the
     // least identifying part of the header, and a header that wraps loses the
@@ -513,11 +609,30 @@ fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo, width: u
         }
         _ => {}
     }
+    if view != ToolView::Plain {
+        header.push(Span::styled(
+            chevron(view == ToolView::Open),
+            theme::muted(),
+        ));
+    }
     lines.push(Line::from(header));
+
+    // The call in flight shows the whole command, not just the part of it
+    // that fits beside its verb.
+    if matches!(tc.state, ToolCallState::Running) {
+        let shown = tool_summary::truncate(&verb::subject_for(&tc.input), budget);
+        let body_width = usize::from(width).saturating_sub(RESULT_INDENT);
+        let detail = running_detail(&tc.input, &shown, body_width);
+        push_result_lines(lines, detail, 0, theme::text_subtle());
+    }
 
     let Some(output) = tc.output.as_ref() else {
         return;
     };
+    // A folded call is its header alone.
+    if view == ToolView::Folded {
+        return;
+    }
 
     // A failure is the one payload worth reading in full — never fold or clip
     // it, even though that means long errors wrap.
@@ -529,6 +644,45 @@ fn render_tool_call_collapsed(lines: &mut Vec<Line>, tc: &ToolCallInfo, width: u
     let body_width = usize::from(width).saturating_sub(RESULT_INDENT);
     let (kept, hidden) = tool_summary::fold(tool_summary::output_lines(output), body_width);
     push_result_lines(lines, kept, hidden, theme::text_subtle());
+}
+
+/// How many rows of a running command show under its header.
+const RUNNING_DETAIL_ROWS: usize = 4;
+
+/// The full command (or query, URL, task) of a call in flight, when its
+/// header could not show all of it, wrapped to `width` columns over at most
+/// [`RUNNING_DETAIL_ROWS`] rows. Empty for a call whose header already says
+/// everything.
+fn running_detail(input: &str, shown: &str, width: usize) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(input) else {
+        return Vec::new();
+    };
+    let Some(full) = ["command", "query", "pattern", "url", "task"]
+        .iter()
+        .find_map(|key| json.get(key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    else {
+        return Vec::new();
+    };
+    if full == shown {
+        return Vec::new();
+    }
+    let width = width.max(8);
+    let mut rows: Vec<String> = Vec::new();
+    for line in full.lines() {
+        let chars: Vec<char> = line.trim_end().chars().collect();
+        if chars.is_empty() {
+            rows.push(String::new());
+        }
+        rows.extend(chars.chunks(width).map(|c| c.iter().collect::<String>()));
+    }
+    if rows.len() > RUNNING_DETAIL_ROWS {
+        let hidden = rows.len() - RUNNING_DETAIL_ROWS;
+        rows.truncate(RUNNING_DETAIL_ROWS);
+        rows.push(tool_summary::hidden_marker(hidden));
+    }
+    rows
 }
 
 /// Result body under the header: `⎿` on the first row, aligned after that,
@@ -671,8 +825,30 @@ fn engine_location_label(
 
 /// Estimate the number of visual rows after word-wrap.
 fn wrapped_line_count(lines: &[Line], wrap_width: u16) -> u16 {
+    wrapped_heights(lines, wrap_width).iter().sum()
+}
+
+/// Where each marked line starts, counted in wrapped rows from the top.
+/// `marks` are (line index, key) in line order; `heights` is each line's
+/// wrapped height.
+fn hit_rows(marks: Vec<(usize, String)>, heights: &[u16]) -> Vec<ToolHit> {
+    let mut row = 0u16;
+    let mut next_line = 0usize;
+    let mut hits = Vec::with_capacity(marks.len());
+    for (line_ix, key) in marks {
+        while next_line < line_ix {
+            row = row.saturating_add(heights[next_line]);
+            next_line += 1;
+        }
+        hits.push(ToolHit { row, key });
+    }
+    hits
+}
+
+/// Rows each line takes once wrapped to `wrap_width`.
+fn wrapped_heights(lines: &[Line], wrap_width: u16) -> Vec<u16> {
     if wrap_width == 0 {
-        return lines.len() as u16;
+        return vec![1; lines.len()];
     }
     let w = wrap_width as usize;
     lines
@@ -685,7 +861,7 @@ fn wrapped_line_count(lines: &[Line], wrap_width: u16) -> u16 {
                 line_width.div_ceil(w) as u16
             }
         })
-        .sum()
+        .collect()
 }
 
 fn welcome_line(label: &str, mut spans: Vec<Span<'static>>) -> Line<'static> {
@@ -746,6 +922,42 @@ mod tests {
     use super::*;
     use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
     use chatty_core::services::snapshot_from_tool_output;
+
+    /// Render a call as the reader sees it after opening it.
+    fn render_tool_call(lines: &mut Vec<Line>, tc: &ToolCallInfo, verbose: bool, width: u16) {
+        let open: HashSet<String> = [format!("0/{}", tc.id)].into();
+        let mut marks = Vec::new();
+        let mut fold = Fold {
+            msg_index: 0,
+            expanded: &open,
+            marks: &mut marks,
+        };
+        super::render_tool_call(lines, tc, verbose, width, &mut fold);
+    }
+
+    /// Render a message with every tool line opened: the full detail.
+    fn render_message(lines: &mut Vec<Line>, msg: &DisplayMessage, verbose: bool, width: u16) {
+        let mut open: HashSet<String> = HashSet::new();
+        for block in &msg.blocks {
+            match block {
+                MessageBlock::ToolCall(tc) => {
+                    open.insert(format!("0/{}", tc.id));
+                }
+                MessageBlock::Activity(tools) => {
+                    open.insert(format!("0/group-{}", tools[0].id));
+                    open.extend(tools.iter().map(|tc| format!("0/{}", tc.id)));
+                }
+                _ => {}
+            }
+        }
+        let mut marks = Vec::new();
+        let mut fold = Fold {
+            msg_index: 0,
+            expanded: &open,
+            marks: &mut marks,
+        };
+        super::render_message(lines, msg, verbose, width, &mut fold);
+    }
 
     #[test]
     fn tool_payload_lines_pretty_print_json() {
@@ -823,7 +1035,7 @@ mod tests {
         assert_eq!(
             render(&tc, false),
             vec![
-                "  ✓ Ran ls -la /notes [shell (local)]".to_string(),
+                "  ✓ Ran ls -la /notes [shell (local)] ▾".to_string(),
                 "    ⎿ DIR entry-1".to_string(),
                 "      DIR entry-2".to_string(),
                 "      DIR entry-3".to_string(),
@@ -916,10 +1128,10 @@ mod tests {
         assert_eq!(rows[0], "[assistant]");
         assert!(rows[1].contains("Plan"), "plan card header: {:?}", rows[1]);
         assert!(
-            rows.contains(&"  ✓ explored 1 file, 1 search".to_string()),
+            rows.contains(&"  ✓ explored 1 file, 1 search ▾".to_string()),
             "activity fold: {rows:?}"
         );
-        assert!(rows.contains(&"  ✓ Ran rm -rf build [shell (local)]".to_string()));
+        assert!(rows.contains(&"  ✓ Ran rm -rf build [shell (local)] ▾".to_string()));
         assert!(rows.contains(&"  ✓ Approve [host] rm -rf build — allowed".to_string()));
         assert!(rows.contains(&"  ± src/lib.rs +3 −1".to_string()));
         assert!(rows.contains(&"  ✗ Error: provider went away".to_string()));
@@ -1052,6 +1264,134 @@ mod tests {
         render_tool_call(&mut lines, &todo, false, 80);
 
         assert!(lines.len() <= 8, "rendered {} lines", lines.len());
+    }
+
+    /// Render one message with nothing opened, as the reader first sees it.
+    fn render_closed(msg: &DisplayMessage, width: u16) -> (Vec<String>, Vec<(usize, String)>) {
+        let open = HashSet::new();
+        let mut marks = Vec::new();
+        let mut lines = Vec::new();
+        let mut fold = Fold {
+            msg_index: 0,
+            expanded: &open,
+            marks: &mut marks,
+        };
+        super::render_message(&mut lines, msg, false, width, &mut fold);
+        (lines.iter().map(line_text).collect(), marks)
+    }
+
+    fn done_call(id: &str, name: &str, input: &str, output: &str) -> ToolCallInfo {
+        ToolCallInfo {
+            id: id.to_string(),
+            name: name.to_string(),
+            input: input.to_string(),
+            output: Some(output.to_string()),
+            state: ToolCallState::Success,
+            source: ToolSource::Local,
+            execution_engine: None,
+        }
+    }
+
+    #[test]
+    fn a_settled_call_is_one_line_until_it_is_opened() {
+        let msg = assistant_with(vec![MessageBlock::ToolCall(done_call(
+            "a",
+            "read_file",
+            r#"{"path":"README.md"}"#,
+            "line one\nline two\nline three",
+        ))]);
+        let (rows, marks) = render_closed(&msg, 80);
+        assert_eq!(
+            rows,
+            vec![
+                "[assistant]".to_string(),
+                "  ✓ Read README.md ▸".to_string()
+            ]
+        );
+        assert_eq!(
+            marks,
+            vec![(1, "0/a".to_string())],
+            "the header is the click target"
+        );
+    }
+
+    #[test]
+    fn a_folded_group_lists_its_calls_one_per_line_once_opened() {
+        let tools = vec![
+            done_call("a", "read_file", r#"{"path":"a.md"}"#, "x"),
+            done_call("b", "read_file", r#"{"path":"b.md"}"#, "y"),
+        ];
+        let msg = assistant_with(vec![MessageBlock::Activity(tools)]);
+        let (closed, marks) = render_closed(&msg, 80);
+        assert_eq!(closed.len(), 2, "label plus one sentence: {closed:?}");
+        assert!(closed[1].ends_with('▸'), "{closed:?}");
+        assert_eq!(marks.len(), 1);
+
+        let open: HashSet<String> = ["0/group-a".to_string()].into();
+        let mut marks = Vec::new();
+        let mut lines = Vec::new();
+        let mut fold = Fold {
+            msg_index: 0,
+            expanded: &open,
+            marks: &mut marks,
+        };
+        super::render_message(&mut lines, &msg, false, 80, &mut fold);
+        let rows: Vec<String> = lines.iter().map(line_text).collect();
+        assert_eq!(rows.len(), 4, "the sentence and its two calls: {rows:?}");
+        assert!(rows[1].ends_with('▾'), "{rows:?}");
+        assert_eq!(rows[2], "  ✓ Read a.md ▸");
+        assert_eq!(marks.len(), 3, "the group and each call are targets");
+    }
+
+    #[test]
+    fn a_running_call_shows_the_whole_command() {
+        let command = "cargo test --workspace --all-features -- --nocapture --test-threads=1 some::very::long::filter::name";
+        let mut call = tool_call(
+            &format!(r#"{{"command":"{command}"}}"#),
+            None,
+            ToolCallState::Running,
+        );
+        call.name = "shell_execute".to_string();
+        let msg = assistant_with(vec![MessageBlock::ToolCall(call)]);
+        let (rows, marks) = render_closed(&msg, 50);
+        assert!(marks.is_empty(), "a running call is not folded");
+        assert!(rows.len() >= 3, "header plus the command: {rows:?}");
+        assert!(
+            rows[2].contains("⎿") || rows[2].contains("cargo"),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_is_never_folded() {
+        let call = tool_call(
+            r#"{"command":"pwd"}"#,
+            Some("boom\nsecond line"),
+            ToolCallState::Error,
+        );
+        let msg = assistant_with(vec![MessageBlock::ToolCall(call)]);
+        let (rows, marks) = render_closed(&msg, 80);
+        assert!(marks.is_empty());
+        assert!(rows.iter().any(|r| r.contains("second line")), "{rows:?}");
+    }
+
+    #[test]
+    fn hit_rows_count_wrapped_rows_above_each_header() {
+        // Lines of 1, 3 and 1 rows; headers at lines 0 and 2.
+        let hits = hit_rows(vec![(0, "a".to_string()), (2, "b".to_string())], &[1, 3, 1]);
+        assert_eq!(
+            hits,
+            vec![
+                ToolHit {
+                    row: 0,
+                    key: "a".into()
+                },
+                ToolHit {
+                    row: 4,
+                    key: "b".into()
+                },
+            ]
+        );
     }
 
     fn line_text(line: &Line<'_>) -> String {

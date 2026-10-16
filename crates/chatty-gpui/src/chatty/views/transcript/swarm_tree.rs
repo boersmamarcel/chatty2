@@ -73,6 +73,19 @@ pub struct SwarmNodeView {
     /// How long its answer is; the text itself stays with its caller.
     pub text_bytes: u64,
     pub tool_calls: Vec<ToolCall>,
+    /// What the run said and did, once its terminal status has carried it.
+    pub conversation: Option<SharedConversation>,
+}
+
+/// A run's captured conversation, shared with the trace. Equal when it is
+/// the same capture, so a tree rebuild does not compare message bodies.
+#[derive(Clone, Debug)]
+pub struct SharedConversation(pub std::sync::Arc<chatty_fabric::CapturedConversation>);
+
+impl PartialEq for SharedConversation {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// A delegation's subtree — its callee first, then every run under it in
@@ -290,6 +303,7 @@ pub fn adapt_swarm_tree(trace: &SwarmTrace, top: NodeId, book: &PriceBook) -> Sw
             turns: node.turns,
             text_bytes: node.text_bytes,
             tool_calls: node.tool_calls.clone(),
+            conversation: trace.conversation_shared(id).map(SharedConversation),
         });
     }
     SwarmTree {
@@ -809,8 +823,14 @@ fn tool_line(call: &ToolCall, cx: &App) -> AnyElement {
         ToolOutcome::Cancelled => (NodeStatus::Canceled, None, muted),
     };
     let detail = detail
-        .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
+        .map(|text| clip_lines(&text, DETAIL_LINES, DETAIL_CHARS))
         .filter(|text| !text.is_empty());
+    let arguments = call
+        .arguments
+        .as_ref()
+        .map(|args| clip_lines(&args.to_string(), ARGUMENT_LINES, DETAIL_CHARS))
+        .filter(|text| !text.is_empty() && text != "null" && text != "{}");
+    let mono = cx.theme().mono_font_family.clone();
     div()
         .id(ElementId::Name(format!("swarm-call-{}", call.id).into()))
         .flex()
@@ -840,17 +860,56 @@ fn tool_line(call: &ToolCall, cx: &App) -> AnyElement {
                         .text_color(cx.theme().foreground)
                         .child(call.name.clone()),
                 )
-                .when_some(detail, |this, detail| {
+                .when_some(arguments, |this, arguments| {
                     this.child(
                         div()
                             .text_xs()
+                            .font_family(mono.clone())
+                            .text_color(muted)
+                            .child(arguments),
+                    )
+                })
+                .when_some(detail, |this, detail| {
+                    this.child(
+                        div()
+                            .mt_1()
+                            .text_xs()
+                            .font_family(mono)
                             .text_color(detail_color)
-                            .truncate()
                             .child(detail),
                     )
                 }),
         )
         .into_any_element()
+}
+
+/// Lines of a tool's result shown in the agent transcript.
+const DETAIL_LINES: usize = 8;
+/// Lines of a tool's arguments shown in the agent transcript.
+const ARGUMENT_LINES: usize = 3;
+/// Characters kept per shown line, so one minified blob cannot flood the sheet.
+const DETAIL_CHARS: usize = 240;
+
+/// The first `max_lines` lines of `text`, each cut to `max_chars`, with an
+/// ellipsis line when anything was dropped.
+fn clip_lines(text: &str, max_lines: usize, max_chars: usize) -> String {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .skip_while(|l| l.trim().is_empty())
+        .collect();
+    let mut out: Vec<String> = lines
+        .iter()
+        .take(max_lines)
+        .map(|line| match line.char_indices().nth(max_chars) {
+            Some((at, _)) => format!("{}…", &line[..at]),
+            None => (*line).to_string(),
+        })
+        .collect();
+    if lines.len() > max_lines {
+        out.push(format!("… {} more lines", lines.len() - max_lines));
+    }
+    out.join("\n")
 }
 
 /// How long an answer is, for a reader.
@@ -871,6 +930,7 @@ pub struct AgentTranscript {
     ix: usize,
     on_navigate: Option<OpenSwarmNode>,
     on_stop: Option<StopSwarmNode>,
+    show_calls: bool,
 }
 
 impl AgentTranscript {
@@ -880,7 +940,15 @@ impl AgentTranscript {
             ix,
             on_navigate: None,
             on_stop: None,
+            show_calls: true,
         }
+    }
+
+    /// Leave the tool-call list out: the caller draws the run's own chat,
+    /// which holds those calls with the text around them.
+    pub fn without_calls(mut self) -> Self {
+        self.show_calls = false;
+        self
     }
 
     /// What its Stop action does, while the agent runs (TB-7).
@@ -1076,6 +1144,7 @@ impl RenderOnce for AgentTranscript {
                 .child(Icon::new(IconName::ChevronRight).size_3().text_color(muted))
         });
 
+        let show_calls = self.show_calls;
         let calls: Vec<AnyElement> = node.tool_calls.iter().map(|c| tool_line(c, cx)).collect();
         let has_calls = !calls.is_empty();
 
@@ -1084,6 +1153,7 @@ impl RenderOnce for AgentTranscript {
             .min_w_0()
             .flex()
             .flex_col()
+            .flex_shrink_0()
             .child(crumbs)
             .child(facts)
             .when_some(
@@ -1110,11 +1180,11 @@ impl RenderOnce for AgentTranscript {
                 this.child(section(format!("Sub-agents · {}", children.len())))
                     .child(div().flex().flex_col().children(sub_agents))
             })
-            .child(section("Tool calls".into()))
-            .when(has_calls, |this| {
+            .when(show_calls, |this| this.child(section("Tool calls".into())))
+            .when(show_calls && has_calls, |this| {
                 this.child(div().flex().flex_col().gap_1().children(calls))
             })
-            .when(!has_calls, |this| {
+            .when(show_calls && !has_calls, |this| {
                 this.child(
                     div()
                         .text_sm()
@@ -1126,15 +1196,29 @@ impl RenderOnce for AgentTranscript {
                         }),
                 )
             })
-            .child(div().w_full().pt_4().text_xs().text_color(muted).child(
-                "A nested run forwards its tool calls and spend, not its text: \
-                     the answer stays with the agent that asked for it.",
-            ))
+            .when(show_calls, |this| {
+                this.child(div().w_full().pt_4().text_xs().text_color(muted).child(
+                    "Its tool calls and spend show while it runs; the conversation \
+                     appears here once the run has finished.",
+                ))
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clip_lines_keeps_the_head_and_counts_the_rest() {
+        let text = (1..=10)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(super::clip_lines(&text, 3, 10), "1\n2\n3\n… 7 more lines");
+        assert_eq!(super::clip_lines("short", 3, 10), "short");
+        assert_eq!(super::clip_lines("abcdefghij", 3, 4), "abcd…");
+        assert_eq!(super::clip_lines("\n\n  \nx", 3, 10), "x");
+    }
+
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
     use super::{LineKind, SHOWN_WHEN_WIDE, SwarmTree, WIDE, adapt_swarm_tree, delegation_callees};
