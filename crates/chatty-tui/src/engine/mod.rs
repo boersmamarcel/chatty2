@@ -57,6 +57,16 @@ pub struct ToolCallInfo {
     pub execution_engine: Option<ExecutionEngine>,
 }
 
+/// A clickable tool header as the chat last drew it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolHit {
+    /// The header's first row, counted in wrapped rows from the top of the
+    /// chat content.
+    pub row: u16,
+    /// What `ChatEngine::expanded_tools` holds when it is open.
+    pub key: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum ToolCallState {
     Running,
@@ -465,6 +475,17 @@ pub struct ChatEngine {
     /// When true, tool calls render their full input/output payloads instead of
     /// the collapsed one-line summary. Toggled with `Ctrl+R` or `/verbose`.
     pub verbose_tools: bool,
+    /// Tool calls (and folded activity groups) the reader opened with a
+    /// click, by [`ToolHit::key`]. A settled call is one line until then.
+    pub expanded_tools: std::collections::HashSet<String>,
+    /// Where each clickable tool header sat on the last render, so a click
+    /// can find the call it landed on.
+    pub tool_hits: Vec<ToolHit>,
+    /// First content row (counted in wrapped rows) the chat showed on the last
+    /// render, and the inner rectangle it was drawn in: with `tool_hits`, what
+    /// turns a click's screen row into a header.
+    pub chat_scroll_top: u16,
+    pub chat_inner: ratatui::layout::Rect,
     /// Long pastes elided out of the input box, kept so they can be expanded
     /// on send and re-read with `/paste <n>` (AGE-341).
     pastes: PasteStore,
@@ -668,6 +689,10 @@ impl ChatEngine {
             last_content_height: 0,
             last_chat_area: ratatui::layout::Rect::default(),
             verbose_tools: false,
+            expanded_tools: Default::default(),
+            tool_hits: Vec::new(),
+            chat_scroll_top: 0,
+            chat_inner: ratatui::layout::Rect::default(),
             pastes: PasteStore::default(),
             event_tx,
             init_generation: 0,
@@ -738,6 +763,30 @@ impl ChatEngine {
 
     /// Scroll the chat up by `lines`. Unpins auto-follow so the view stays put
     /// when new streaming content arrives.
+    /// A click at screen cell (`column`, `row`): open or close the tool
+    /// header under it. Returns whether it landed on one.
+    pub fn click_tool(&mut self, column: u16, row: u16) -> bool {
+        let inner = self.chat_inner;
+        let inside = inner.width > 0
+            && inner.height > 0
+            && column >= inner.x
+            && column < inner.x.saturating_add(inner.width)
+            && row >= inner.y
+            && row < inner.y.saturating_add(inner.height);
+        if !inside {
+            return false;
+        }
+        let content_row = self.chat_scroll_top.saturating_add(row - inner.y);
+        let Some(hit) = self.tool_hits.iter().find(|hit| hit.row == content_row) else {
+            return false;
+        };
+        let key = hit.key.clone();
+        if !self.expanded_tools.remove(&key) {
+            self.expanded_tools.insert(key);
+        }
+        true
+    }
+
     pub fn scroll_up(&mut self, lines: u16) {
         if lines == 0 {
             return;
@@ -1656,6 +1705,30 @@ mod tests {
         )
         .await
         .expect("conversation should build without network access")
+    }
+
+    #[tokio::test]
+    async fn a_click_on_a_tool_header_opens_and_closes_it() {
+        let (mut engine, _rx) = test_engine().await;
+        engine.chat_inner = ratatui::layout::Rect::new(1, 1, 60, 10);
+        engine.chat_scroll_top = 5;
+        engine.tool_hits = vec![ToolHit {
+            row: 7,
+            key: "0/a".into(),
+        }];
+        // Screen row 3 is content row 5 + (3 - 1) = 7.
+        assert!(engine.click_tool(10, 3));
+        assert!(engine.expanded_tools.contains("0/a"));
+        assert!(engine.click_tool(10, 3));
+        assert!(
+            !engine.expanded_tools.contains("0/a"),
+            "a second click closes it"
+        );
+        assert!(
+            !engine.click_tool(10, 4),
+            "a row with no header opens nothing"
+        );
+        assert!(!engine.click_tool(0, 3), "the border is not the chat");
     }
 
     /// A `ChatEngine` wrapping a real (network-free) `Conversation`, for tests

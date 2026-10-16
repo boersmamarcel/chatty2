@@ -5,7 +5,7 @@ use anyhow::Result;
 use chatty_core::session::HOSTED_DISABLED;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+    EventStream, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use futures::StreamExt;
@@ -377,12 +377,17 @@ fn handle_paste(text: &str, engine: &mut ChatEngine, input_state: &mut InputStat
     input_state.insert_paste(&insert);
 }
 
-/// Route mouse wheel events to chat scroll when the pointer is over the chat area.
+/// Route mouse events over the chat area: the wheel scrolls it, a click opens
+/// or closes the tool line under the pointer.
 fn handle_mouse_event(mouse: MouseEvent, engine: &mut ChatEngine) {
     let over_chat = is_point_in_rect(mouse.column, mouse.row, engine.last_chat_area);
     match mouse.kind {
         MouseEventKind::ScrollUp if over_chat => engine.scroll_up(MOUSE_SCROLL_LINES),
         MouseEventKind::ScrollDown if over_chat => engine.scroll_down(MOUSE_SCROLL_LINES),
+        // A click on a tool line opens or closes it.
+        MouseEventKind::Down(MouseButton::Left) if over_chat => {
+            engine.click_tool(mouse.column, mouse.row);
+        }
         _ => {}
     }
 }
