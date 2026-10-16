@@ -44,6 +44,7 @@
 //! types are human-reserved (`RESERVED.md`, AGE-5).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chatty_fabric::{CapturedConversation, EdgeKind, EdgeRow, ROOT_NAME, SwarmEvent, SwarmItem};
@@ -498,7 +499,7 @@ pub struct SwarmTrace {
     waits: BTreeMap<String, (String, WaitingOn)>,
     /// Each run's captured conversation, as its terminal status carried it
     /// (RC-0): what the full-run export nests (AGE-859).
-    conversations: BTreeMap<NodeId, CapturedConversation>,
+    conversations: BTreeMap<NodeId, Arc<CapturedConversation>>,
     /// The id of the root's tool call each of its callees ran under: its
     /// `invoke_agent`, or the `best_of` that fanned it out (AGE-859).
     started_by: BTreeMap<NodeId, String>,
@@ -722,7 +723,8 @@ impl SwarmTrace {
                 let Some(id) = self.open.last().copied() else {
                     return;
                 };
-                self.conversations.insert(id, conversation.clone());
+                self.conversations
+                    .insert(id, Arc::new(conversation.clone()));
             }
             InvokeAgentProgress::Text(text) => {
                 let Some(id) = self.open.last().copied() else {
@@ -820,7 +822,13 @@ impl SwarmTrace {
 
     /// The run's captured conversation, if its terminal status carried one.
     pub fn conversation(&self, id: NodeId) -> Option<&CapturedConversation> {
-        self.conversations.get(&id)
+        self.conversations.get(&id).map(|c| &**c)
+    }
+
+    /// The same conversation, shared: a view keeps it without copying the
+    /// messages each time the tree is rebuilt.
+    pub fn conversation_shared(&self, id: NodeId) -> Option<Arc<CapturedConversation>> {
+        self.conversations.get(&id).cloned()
     }
 
     /// Every agent of the turn, root first and parents before children,
@@ -838,7 +846,7 @@ impl SwarmTrace {
                     node,
                     parent,
                     started_by: self.started_by.get(id).cloned(),
-                    conversation: self.conversations.get(id).cloned(),
+                    conversation: self.conversations.get(id).map(|c| (**c).clone()),
                 }
             })
             .collect()
@@ -901,7 +909,8 @@ impl SwarmTrace {
                     }
                 }
                 SwarmItem::Conversation { conversation } => {
-                    self.conversations.insert(id, conversation.clone());
+                    self.conversations
+                        .insert(id, Arc::new(conversation.clone()));
                 }
                 SwarmItem::Ended { state } => {
                     node.status = NodeStatus::ended(state);

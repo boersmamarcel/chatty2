@@ -27,6 +27,7 @@ pub mod agent_loop_guard;
 pub mod agent_task_controller;
 #[cfg(feature = "browser")]
 pub mod browser;
+pub mod captured_chat;
 pub mod chart_svg_renderer;
 /// The summary a context compaction replaces older messages with.
 pub mod context_compaction;

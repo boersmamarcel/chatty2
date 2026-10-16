@@ -25,15 +25,18 @@
 use std::sync::Arc;
 
 use chatty_core::models::token_usage::PriceBook;
+use chatty_core::services::captured_chat::{ChatEntry, ChatUnavailable, chat_entries};
 use chatty_core::services::swarm_trace::{NodeStatus, SwarmTrace};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::scroll::ScrollableElement as _;
+use gpui_component::text::TextView;
 use gpui_component::{ActiveTheme, WindowExt as _};
 
 use super::ChatView;
 use crate::chatty::views::transcript::{
-    AgentTranscript, SwarmFold, SwarmTree, adapt_swarm_tree, delegation_callees,
+    ActivityGroup, AgentTranscript, SwarmFold, SwarmTree, adapt_swarm_tree, delegation_callees,
 };
 
 /// Stop `name` — a node of the running swarm, or the spec of the root's
@@ -58,6 +61,10 @@ fn swarm_broker(cx: &App) -> Option<Arc<dyn chatty_core::services::lazy_broker::
     cx.try_global::<crate::settings::models::DiscoveredModulesModel>()
         .and_then(|modules| modules.lazy_broker.clone())
 }
+
+/// What the sheet spends above and below its body: the app title bar, the
+/// sheet's own title row and a margin.
+const SHEET_CHROME: Pixels = px(120.);
 
 /// Wide enough for a tool row's headline and its result preview.
 const TRANSCRIPT_SHEET_WIDTH: f32 = 520.;
@@ -223,6 +230,11 @@ struct SwarmNodeTranscript {
     message: Entity<InputState>,
     /// What became of the last message sent from the box.
     sent: Option<SharedString>,
+    /// The run's conversation read as chat, for the capture it was read
+    /// from: parsing happens once per capture, not once per frame.
+    chat: Option<ParsedChat>,
+    /// Tool groups of the chat the reader opened, by entry index.
+    opened_tools: std::collections::HashSet<usize>,
     _observe: Subscription,
     _message: Subscription,
 }
@@ -252,6 +264,8 @@ impl SwarmNodeTranscript {
             name,
             message,
             sent: None,
+            chat: None,
+            opened_tools: Default::default(),
             _observe,
             _message,
         }
@@ -308,8 +322,104 @@ impl SwarmNodeTranscript {
     }
 }
 
+/// A capture and what it reads as.
+struct ParsedChat {
+    capture: Arc<chatty_fabric::CapturedConversation>,
+    entries: Result<Vec<ChatEntry>, ChatUnavailable>,
+}
+
+impl SwarmNodeTranscript {
+    /// Read `capture` as chat on first sight, and keep it until the sheet
+    /// moves to another capture.
+    fn read_chat(&mut self, capture: &Arc<chatty_fabric::CapturedConversation>) {
+        if !self
+            .chat
+            .as_ref()
+            .is_some_and(|c| Arc::ptr_eq(&c.capture, capture))
+        {
+            self.opened_tools.clear();
+            self.chat = Some(ParsedChat {
+                capture: capture.clone(),
+                entries: chat_entries(capture),
+            });
+        }
+    }
+
+    /// The run's chat under its facts: what it was asked, what it wrote and
+    /// the tools it called, the way the main thread draws them.
+    fn chat_view(
+        &self,
+        entries: &[ChatEntry],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let this = cx.entity().downgrade();
+        let rows = entries.iter().enumerate().map(|(ix, entry)| match entry {
+            ChatEntry::Prompt(text) => div()
+                .p_2()
+                .rounded_md()
+                .bg(cx.theme().secondary)
+                .text_sm()
+                .text_color(cx.theme().foreground)
+                .child(text.clone())
+                .into_any_element(),
+            ChatEntry::Thinking(text) => div()
+                .text_xs()
+                .italic()
+                .text_color(muted)
+                .child(text.clone())
+                .into_any_element(),
+            ChatEntry::Text(text) => div()
+                .w_full()
+                .text_sm()
+                .child(
+                    TextView::markdown(
+                        ElementId::NamedInteger("agent-chat-text".into(), ix as u64),
+                        text.clone(),
+                        window,
+                        cx,
+                    )
+                    .selectable(true),
+                )
+                .into_any_element(),
+            ChatEntry::Tools(tools) => {
+                let this = this.clone();
+                ActivityGroup::new(tools.clone())
+                    .open(self.opened_tools.contains(&ix))
+                    .settled(true)
+                    .on_toggle(move |cx| {
+                        this.update(cx, |this, cx| {
+                            if !this.opened_tools.remove(&ix) {
+                                this.opened_tools.insert(ix);
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .into_any_element()
+            }
+        });
+        div()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .gap_2()
+            .child(
+                div()
+                    .pt_2()
+                    .text_xs()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(muted)
+                    .child("Conversation"),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+}
+
 impl Render for SwarmNodeTranscript {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tree = self
             .chat_view
             .upgrade()
@@ -319,7 +429,16 @@ impl Render for SwarmNodeTranscript {
             Some((tree, ix)) => {
                 let this = cx.entity().downgrade();
                 let running = matches!(tree.nodes[ix].status, NodeStatus::Running);
-                let transcript = AgentTranscript::new(tree, ix)
+                // The run's own conversation, once its terminal status has
+                // carried it; until then (and when it cannot be read) the
+                // facts and the tool-call list are all there is.
+                if let Some(capture) = tree.nodes[ix].conversation.clone() {
+                    self.read_chat(&capture.0);
+                } else {
+                    self.chat = None;
+                }
+                let readable = matches!(self.chat.as_ref().map(|c| &c.entries), Some(Ok(_)));
+                let mut transcript = AgentTranscript::new(tree, ix)
                     .on_stop(std::rc::Rc::new(|name, cx| stop_swarm_node(&name, cx)))
                     .on_navigate(std::rc::Rc::new(move |name, _window, cx| {
                         this.update(cx, |this, cx| {
@@ -328,15 +447,39 @@ impl Render for SwarmNodeTranscript {
                         })
                         .ok();
                     }));
-                // `flex_shrink_0`: the sheet body is a scroll container, but a
-                // shrinkable child is squeezed to the sheet's height instead of
-                // overflowing it, so a long trace had nothing to scroll.
+                if readable {
+                    transcript = transcript.without_calls();
+                }
+                let chat_el = match self.chat.as_ref().map(|c| &c.entries) {
+                    Some(Ok(entries)) => Some(self.chat_view(entries, window, cx)),
+                    _ => None,
+                };
+                let too_large = match self.chat.as_ref().map(|c| &c.entries) {
+                    Some(Err(ChatUnavailable::TooLarge { bytes })) => Some(*bytes),
+                    _ => None,
+                };
+                // The sheet's own body does not scroll this content (its
+                // wrapper grows to fit it), so the transcript scrolls itself,
+                // bounded by the window: below the title bar, a margin to spare.
                 div()
                     .flex()
                     .flex_col()
-                    .flex_shrink_0()
+                    .max_h(window.viewport_size().height - SHEET_CHROME)
+                    .overflow_y_scrollbar()
                     .gap_2()
                     .child(transcript)
+                    .when_some(chat_el, |this, chat| this.child(chat))
+                    .when_some(too_large, |this, bytes| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "Its conversation was {bytes} bytes, over the capture cap, \
+                                     so only the tool calls above are kept."
+                                )),
+                        )
+                    })
                     .when(running, |this| this.child(self.message_box(cx)))
                     .into_any_element()
             }

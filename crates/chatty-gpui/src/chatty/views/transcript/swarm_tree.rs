@@ -73,6 +73,19 @@ pub struct SwarmNodeView {
     /// How long its answer is; the text itself stays with its caller.
     pub text_bytes: u64,
     pub tool_calls: Vec<ToolCall>,
+    /// What the run said and did, once its terminal status has carried it.
+    pub conversation: Option<SharedConversation>,
+}
+
+/// A run's captured conversation, shared with the trace. Equal when it is
+/// the same capture, so a tree rebuild does not compare message bodies.
+#[derive(Clone, Debug)]
+pub struct SharedConversation(pub std::sync::Arc<chatty_fabric::CapturedConversation>);
+
+impl PartialEq for SharedConversation {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// A delegation's subtree — its callee first, then every run under it in
@@ -290,6 +303,7 @@ pub fn adapt_swarm_tree(trace: &SwarmTrace, top: NodeId, book: &PriceBook) -> Sw
             turns: node.turns,
             text_bytes: node.text_bytes,
             tool_calls: node.tool_calls.clone(),
+            conversation: trace.conversation_shared(id).map(SharedConversation),
         });
     }
     SwarmTree {
@@ -916,6 +930,7 @@ pub struct AgentTranscript {
     ix: usize,
     on_navigate: Option<OpenSwarmNode>,
     on_stop: Option<StopSwarmNode>,
+    show_calls: bool,
 }
 
 impl AgentTranscript {
@@ -925,7 +940,15 @@ impl AgentTranscript {
             ix,
             on_navigate: None,
             on_stop: None,
+            show_calls: true,
         }
+    }
+
+    /// Leave the tool-call list out: the caller draws the run's own chat,
+    /// which holds those calls with the text around them.
+    pub fn without_calls(mut self) -> Self {
+        self.show_calls = false;
+        self
     }
 
     /// What its Stop action does, while the agent runs (TB-7).
@@ -1121,6 +1144,7 @@ impl RenderOnce for AgentTranscript {
                 .child(Icon::new(IconName::ChevronRight).size_3().text_color(muted))
         });
 
+        let show_calls = self.show_calls;
         let calls: Vec<AnyElement> = node.tool_calls.iter().map(|c| tool_line(c, cx)).collect();
         let has_calls = !calls.is_empty();
 
@@ -1156,11 +1180,11 @@ impl RenderOnce for AgentTranscript {
                 this.child(section(format!("Sub-agents · {}", children.len())))
                     .child(div().flex().flex_col().children(sub_agents))
             })
-            .child(section("Tool calls".into()))
-            .when(has_calls, |this| {
+            .when(show_calls, |this| this.child(section("Tool calls".into())))
+            .when(show_calls && has_calls, |this| {
                 this.child(div().flex().flex_col().gap_1().children(calls))
             })
-            .when(!has_calls, |this| {
+            .when(show_calls && !has_calls, |this| {
                 this.child(
                     div()
                         .text_sm()
@@ -1172,10 +1196,12 @@ impl RenderOnce for AgentTranscript {
                         }),
                 )
             })
-            .child(div().w_full().pt_4().text_xs().text_color(muted).child(
-                "A nested run forwards its tool calls and spend, not its text: \
-                     the answer stays with the agent that asked for it.",
-            ))
+            .when(show_calls, |this| {
+                this.child(div().w_full().pt_4().text_xs().text_color(muted).child(
+                    "Its tool calls and spend show while it runs; the conversation \
+                     appears here once the run has finished.",
+                ))
+            })
     }
 }
 
