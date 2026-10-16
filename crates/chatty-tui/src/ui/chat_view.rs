@@ -646,12 +646,13 @@ fn render_tool_call_collapsed(
     push_result_lines(lines, kept, hidden, theme::text_subtle());
 }
 
-/// How many lines of a running command show under its header.
-const RUNNING_DETAIL_LINES: usize = 3;
+/// How many rows of a running command show under its header.
+const RUNNING_DETAIL_ROWS: usize = 4;
 
 /// The full command (or query, URL, task) of a call in flight, when its
-/// header could not show all of it: up to [`RUNNING_DETAIL_LINES`] lines, each
-/// cut to `width`. Empty for a call whose header already says everything.
+/// header could not show all of it, wrapped to `width` columns over at most
+/// [`RUNNING_DETAIL_ROWS`] rows. Empty for a call whose header already says
+/// everything.
 fn running_detail(input: &str, shown: &str, width: usize) -> Vec<String> {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(input) else {
         return Vec::new();
@@ -667,18 +668,21 @@ fn running_detail(input: &str, shown: &str, width: usize) -> Vec<String> {
     if full == shown {
         return Vec::new();
     }
-    let all: Vec<&str> = full.lines().collect();
-    let mut out: Vec<String> = all
-        .iter()
-        .take(RUNNING_DETAIL_LINES)
-        .map(|line| tool_summary::truncate(line.trim_end(), width))
-        .collect();
-    if all.len() > RUNNING_DETAIL_LINES {
-        out.push(tool_summary::hidden_marker(
-            all.len() - RUNNING_DETAIL_LINES,
-        ));
+    let width = width.max(8);
+    let mut rows: Vec<String> = Vec::new();
+    for line in full.lines() {
+        let chars: Vec<char> = line.trim_end().chars().collect();
+        if chars.is_empty() {
+            rows.push(String::new());
+        }
+        rows.extend(chars.chunks(width).map(|c| c.iter().collect::<String>()));
     }
-    out
+    if rows.len() > RUNNING_DETAIL_ROWS {
+        let hidden = rows.len() - RUNNING_DETAIL_ROWS;
+        rows.truncate(RUNNING_DETAIL_ROWS);
+        rows.push(tool_summary::hidden_marker(hidden));
+    }
+    rows
 }
 
 /// Result body under the header: `⎿` on the first row, aligned after that,
