@@ -3,7 +3,7 @@
 //! S7). Pre-PL-H1 (before AGE-604/#941), F2 predicted fuel-exhaustion errors
 //! would start once *cumulative* fuel ran out, since a `WasmModule`'s fuel
 //! was set once at instantiate and never refilled; the pre-H1 run in
-//! `docs/research/plugin-perf-2026-09-27.md` did not actually observe one in
+//! `experiments/reports/plugin-perf-2026-09-27.md` (harbor-chatty) did not actually observe one in
 //! 3,601 calls (its per-call fuel cost was too low to exhaust the 10⁸
 //! lifetime budget in an hour at 1 call/s). Post-H1, fuel resets before
 //! every call, so this column should show none regardless.

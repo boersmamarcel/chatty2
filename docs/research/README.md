@@ -45,6 +45,17 @@ repo, never against chatty2.
   modules that touch them; [Settings integration map](./settings-integration-map.md)
   lists the settings each promoted mechanism would surface through.
 
+## Experiment reports
+
+Run reports, pre-registrations, spikes and their harnesses live in the private
+[`harbor-chatty`](https://github.com/boersmamarcel/harbor-chatty) repo under
+`experiments/`, not here. This folder keeps what documents chatty2's own code:
+the module notes, the process docs above, and the benchmark baselines that
+chatty2's benches check against
+([fabric-codec-baseline.md](./fabric-codec-baseline.md),
+[fabric-hop-latency-baseline.md](./fabric-hop-latency-baseline.md)). A result a
+shipped feature relies on is summarised in that feature's user guide.
+
 ## Decision records (ADRs)
 
 | Doc | Decision |

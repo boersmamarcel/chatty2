@@ -976,9 +976,9 @@ the answer when the task names a file (the leaders are coordinators). The two te
 differ only in their solvers: Crosscheck: Data's are data analysts that read a
 `BRIEF.md` and the data's documentation first and compute with code. A preset whose
 `team.json` sets `"experimental": true` is left out of `--team` listings unless named by
-its exact id, and running it prints one line pointing at `docs/research/`. The
-pre-registered measurement is `docs/research/crosscheck-prereg.md`; the user page is
-the docs-site's *Crosscheck*.
+its exact id, and running it prints one line pointing at the docs-site's *Crosscheck*
+page, which also summarises the measurements (the pre-registrations and run reports are
+in harbor-chatty (private), `experiments/reports/`).
 
 ```bash
 chatty-tui --team crosscheck-data --headless --model <model> \

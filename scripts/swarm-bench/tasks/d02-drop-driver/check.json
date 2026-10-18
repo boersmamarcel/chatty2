@@ -1,9 +1,0 @@
-{
-  "type": "verdict",
-  "choices": [
-    "VOLUME",
-    "PRICE",
-    "DISCOUNT"
-  ],
-  "label": "DISCOUNT"
-}

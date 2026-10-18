@@ -87,20 +87,9 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/harbor-pivot.md`](research/harbor-pivot.md) | Stage B sandboxes | Harbor pivot decision |
 | [`research/cost-model.md`](research/cost-model.md) | Optimizer economics | Cost model |
 | [`research/appworld-decision.md`](research/appworld-decision.md) | Eval sandbox choice | AppWorld decision |
-| [`research/adr-0011-broker-ab-2026-09-08.md`](research/adr-0011-broker-ab-2026-09-08.md) | ADR-0011 kill criteria | `sub_agent` vs the broker, measured (AGE-302) |
 | [`research/fabric-hop-latency-baseline.md`](research/fabric-hop-latency-baseline.md) | ADR-0020 latency criterion | Hop latency before BI-3, the baseline BI-8 compares against (AGE-632) |
-| [`research/fabric-hop-latency-2026-09-29.md`](research/fabric-hop-latency-2026-09-29.md) | ADR-0020 latency criterion | The new path against the baseline, both on one box; why the hop shrank (AGE-640) |
 | [`research/fabric-codec-baseline.md`](research/fabric-codec-baseline.md) | ADR-0021 kill criterion 3 | The v3 envelope's `FrameCodec` against the v2 frames, one session on one box (AGE-769) |
-| [`research/showcase-runs-2026-09-29.md`](research/showcase-runs-2026-09-29.md) | Shipping or changing a preset team | Real-model reliability runs of `data-analysis` and `research-brief`, the tuning history, and why `coder-reviewer` and the Benford team did not ship (AGE-752) |
-| [`research/dabstep-team-2026-09-30.md`](research/dabstep-team-2026-09-30.md) | Claiming a team beats one agent | E8: `analyst-panel` against a single agent on DABstep subset-80; no gain, and invalid handoffs are the main loss (AGE-754) |
-| [`research/crosscheck-data-confirm-prereg.md`](research/crosscheck-data-confirm-prereg.md) | Running or reading the confirmatory Crosscheck: Data DABstep run (with helpers) | Frozen pre-registration of run 2: 18 mixed + 100 held-out Hard tasks, bootstrap no-harm gate, cost from vLLM counters, claim-2 estimate (AGE-853) |
-| [`research/crosscheck-prereg.md`](research/crosscheck-prereg.md) | Running or reading the Crosscheck DABstep verification, or quoting a DABstep number against a frontier result | The frozen pre-registration: arms, the 18 mixed + 30 no-harm tasks, the ship gate, the claim-2 comparison plan (AGE-853) |
-| [`research/swarm-vs-single-prereg.md`](research/swarm-vs-single-prereg.md) | Running or reading the swarm-vs-single benchmark | The frozen pre-registration: arms, the 30-task set, n = 30, MDE, analysis and decision rule; runner in `scripts/swarm-bench/` (AGE-670) |
-| [`research/swarm-vs-single-2026-10-02.md`](research/swarm-vs-single-2026-10-02.md) | Claiming a team beats one agent | EV-4: shipped team presets vs one agent on the 30-task benchmark; both 30/30, team 3.3x tokens and 6.9x wall time; teams stay experimental (AGE-671) |
-| [`research/crosscheck-evidence-2026-10.md`](research/crosscheck-evidence-2026-10.md) | Claiming Crosscheck finishes more tasks | Pooled evidence: independent attempts + judge beat a single attempt by +8 to +22 points at 2–3.3x tokens; judge beats majority vote; caveats and the pending GAIA check (AGE-853) |
-| [`research/plugin-perf-2026-09-27.md`](research/plugin-perf-2026-09-27.md) | PL-H4, PL-U2, or re-checking PL-H1 | S7 baseline: cold load, per-protocol overhead, concurrency, 1-hour soak (AGE-603) |
-| [`research/resume-spike-2026-10-04.md`](research/resume-spike-2026-10-04.md) | Deciding whether conversation handles get built | RC-2 cold run on local Qwen3.8 (24 pairs): resume costs 25.3 % less per solved task, wall-clock 0.9 % worse, pass rate +4.2 points; PASS pending Marcel's sign-off (AGE-651) |
-| [`research/resume-spike-template.md`](research/resume-spike-template.md) | Running or analysing the resume spike | The frozen re-brief and resume prompts both arms get; runner in `scripts/resume-spike/` (AGE-650) |
+| Experiment reports, pre-registrations and harnesses | Reading a past experiment | Moved to the private `harbor-chatty` repo, `experiments/` (index in its README) |
 | [`research/modules/index.md`](research/modules/index.md) | Per-paper module work | M0–M4 overview and status |
 | [`research/modules/m0-trace.md`](research/modules/m0-trace.md) | chatty-trace | Trace contract |
 | [`research/modules/m1-react.md`](research/modules/m1-react.md) | ReAct substrate | M1 strategy variants |
@@ -108,7 +97,6 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`research/modules/m3-gepa.md`](research/modules/m3-gepa.md) | chatty-optimize | GEPA prompt evolution |
 | [`research/modules/m4-ace.md`](research/modules/m4-ace.md) | chatty-playbook | ACE playbook deltas |
 | [`research/modules/m6-retrieval.md`](research/modules/m6-retrieval.md) | chatty-core, chatty-optimize | Retrieval pipeline: open web + memory |
-| [`research/age-602-host-walkthrough/README.md`](research/age-602-host-walkthrough/README.md) | PL-E7 host walkthrough evidence | GPUI/TUI screenshots and transcript backing the evaluation plan's S4 results table (AGE-602) |
 
 ## Crate READMEs (`crates/*/README.md`, synced to the site under Reference)
 
