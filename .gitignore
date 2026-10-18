@@ -62,3 +62,7 @@ TEST_SUMMARY.md
 *.backup
 *.backup[0-9]
 *.old
+
+# Python bytecode (scripts/ harnesses)
+__pycache__/
+*.pyc
