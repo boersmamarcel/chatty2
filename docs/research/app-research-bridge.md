@@ -265,7 +265,7 @@ Stage B evals run in [`harbor-chatty`](https://github.com/boersmamarcel/harbor-c
 | [M2 AFlow](./modules/m2-aflow.md) | Sub-agent tools + future `FlowSettingsModel` | [component-map.md](../component-map.md) |
 | [M3 GEPA](./modules/m3-gepa.md) | `ModelConfig.preamble` | [settings-integration-map](./settings-integration-map.md) |
 | [M4 ACE](./modules/m4-ace.md) | `memory_service`, skill tools | [agent-memory.md](../agent-memory.md) |
-| [M6 Retrieval](./modules/m6-retrieval.md) | `search_web_tool.rs`, `fetch_tool.rs`, `search_memory_tool.rs`, `doc_retriever_tool.rs` | [agent-memory.md](../agent-memory.md), [`evals/search/README.md`](https://github.com/boersmamarcel/chatty2/blob/main/evals/search/README.md) |
+| [M6 Retrieval](./modules/m6-retrieval.md) | `search_web_tool.rs`, `fetch_tool.rs`, `search_memory_tool.rs`, `doc_retriever_tool.rs` | [agent-memory.md](../agent-memory.md), [`evals/search/README.md` (archived)](https://github.com/boersmamarcel/chatty2/blob/ce57cc906c9819504b5b013bd613512dbc5cee56/evals/search/README.md) |
 
 ## Related
 

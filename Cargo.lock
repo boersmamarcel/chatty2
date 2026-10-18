@@ -1842,7 +1842,6 @@ dependencies = [
  "calamine 0.36.1",
  "chatty-fabric",
  "chatty-module-registry",
- "chatty-optimize",
  "chatty-terminal",
  "chatty-wasm-runtime",
  "chromiumoxide",

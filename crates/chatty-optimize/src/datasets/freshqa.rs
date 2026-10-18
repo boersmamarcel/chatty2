@@ -4,7 +4,8 @@
 //! tuning.
 //!
 //! The upstream release is a Google Sheet (version dated in the file name);
-//! `examples/search_eval_prepare.rs` converts its CSV export to the JSONL
+//! the retrieval eval (AGE-515, removed; archived
+//! at commit `ce57cc906c`) converted its CSV export to the JSONL
 //! this loader reads. Answers are as of that version's date, so
 //! fast-changing items can go stale.
 

@@ -381,7 +381,9 @@ Measured on 2026-09-23, before any Phase 2 change (full numbers below):
 
 ### The eval
 
-Details: [`evals/search/README.md`](https://github.com/boersmamarcel/chatty2/blob/main/evals/search/README.md). The harness calls the
+The harness has since been removed: the eval answered its question and nothing ran it
+automatically. It is preserved at commit `ce57cc906c`; see
+[`evals/search/README.md` at that commit](https://github.com/boersmamarcel/chatty2/blob/ce57cc906c9819504b5b013bd613512dbc5cee56/evals/search/README.md). It called the
 real tool, with no agent loop:
 
 - **SimpleQA (AGE-515):**
@@ -772,4 +774,4 @@ added to [`RESERVED.md`](../../../RESERVED.md).
 
 - [agent-memory.md](../../agent-memory.md): memory architecture.
 - [App ↔ research bridge](../app-research-bridge.md).
-- [`evals/search/README.md`](https://github.com/boersmamarcel/chatty2/blob/main/evals/search/README.md): how to run the eval.
+- [`evals/search/README.md` (archived at `ce57cc906c`)](https://github.com/boersmamarcel/chatty2/blob/ce57cc906c9819504b5b013bd613512dbc5cee56/evals/search/README.md): how the eval was run.

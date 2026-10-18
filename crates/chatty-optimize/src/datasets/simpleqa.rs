@@ -2,7 +2,8 @@
 //! verifiable answer, used to score `search_web` on its own.
 //!
 //! The upstream file is `simple_qa_test_set.csv` (columns `metadata`,
-//! `problem`, `answer`); `examples/search_eval_prepare.rs` converts it to the
+//! `problem`, `answer`); the retrieval eval (AGE-515, removed; archived
+//! at commit `ce57cc906c`) converted it to the
 //! JSONL this loader reads, with `id` = CSV row index.
 
 use super::{DatasetError, DatasetItem, load_json_or_jsonl};
