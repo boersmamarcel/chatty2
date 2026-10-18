@@ -176,8 +176,8 @@ if [[ -d "$ROOT/docs/generated" ]]; then
   done
 fi
 
-# Docs-sized GIFs only. The 15–50 MB walkthroughs stay in assets/animations/
-# and are linked from GitHub, not copied into the book.
+# The GIFs the book embeds. Every GIF in assets/animations/ is on this list.
+# Recorded with `make animations` (scripts/animations/).
 ANIM_SRC="$ROOT/assets/animations"
 ANIM_DEST="$SITE_SRC/assets/animations"
 mkdir -p "$ANIM_DEST"
