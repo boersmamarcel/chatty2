@@ -2,7 +2,8 @@
 //! Wikipedia pages needed to answer it.
 //!
 //! The upstream file is `google/frames-benchmark` `test.tsv` (824 rows);
-//! `examples/search_eval_prepare.rs` converts it to the JSONL this loader
+//! the retrieval eval (AGE-515, removed; archived
+//! at commit `ce57cc906c`) converted it to the JSONL this loader
 //! reads. Upstream quirks handled there: `wiki_links` is a stringified Python
 //! list and `reasoning_types` is `|`-separated.
 

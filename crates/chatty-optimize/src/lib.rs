@@ -23,7 +23,6 @@ pub mod calibration;
 pub mod cost;
 pub mod datasets;
 pub mod gepa;
-pub mod search_eval;
 pub mod stats;
 pub mod strategy;
 pub mod wiki_env;

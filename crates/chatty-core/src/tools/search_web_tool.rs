@@ -8,8 +8,12 @@ use tracing::{info, warn};
 use crate::settings::models::search_settings::SearchProvider;
 use crate::tools::ToolError;
 use crate::tools::html_entities::decode_html_entities;
-use crate::tools::response_cache::{CachedResponse, ResponseCache, capture};
-use std::sync::Arc;
+
+/// Status and body of one backend HTTP exchange.
+struct RawResponse {
+    status: u16,
+    body: String,
+}
 
 /// Request timeout for search API calls
 const SEARCH_TIMEOUT_SECS: u64 = 15;
@@ -175,7 +179,6 @@ pub struct SearchWebTool {
     default_max_results: usize,
     /// Record/replay of raw backend responses for the retrieval eval
     /// (AGE-515); `None` in the product.
-    cache: Option<Arc<ResponseCache>>,
     /// Optional cross-encoder behind a Cohere/Jina-style `/rerank` endpoint
     /// (vLLM, llama.cpp server, …) that orders the keyless candidate pool
     /// instead of BM25. `None` = BM25 order.
@@ -217,7 +220,6 @@ impl SearchWebTool {
             api_key: Some(api_key),
             endpoint: None,
             default_max_results,
-            cache: None,
             reranker: None,
         }
     }
@@ -233,7 +235,6 @@ impl SearchWebTool {
             api_key: None,
             endpoint: None,
             default_max_results,
-            cache: None,
             reranker: None,
         }
     }
@@ -292,8 +293,8 @@ impl SearchWebTool {
             .api_client
             .post(&reranker.url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.clone());
-        let response = self.send("rerank", body, "Reranker", builder).await.ok()?;
+            .body(body);
+        let response = self.send("Reranker", builder).await.ok()?;
         if !is_success(response.status) {
             warn!(
                 status = response.status,
@@ -354,36 +355,21 @@ impl SearchWebTool {
         ))
     }
 
-    /// Route every backend request through `cache` (eval harness only).
-    pub fn with_response_cache(mut self, cache: Arc<ResponseCache>) -> Self {
-        self.cache = Some(cache);
-        self
-    }
-
-    /// Send `request` (or serve it from the eval cache under `source`/`key`)
-    /// and return status + body. Transport failures become
+    /// Send `request` and return status + body. Transport failures become
     /// `"<label> request failed: …"`.
     async fn send(
         &self,
-        source: &str,
-        key: String,
         label: &str,
         request: reqwest::RequestBuilder,
-    ) -> Result<CachedResponse, ToolError> {
-        let response = match &self.cache {
-            Some(cache) => {
-                cache
-                    .get_or_fetch(source, &key, || capture(request))
-                    .await?
-            }
-            None => capture(request).await,
-        };
-        if let Some(e) = &response.transport_error {
-            return Err(ToolError::OperationFailed(format!(
-                "{label} request failed: {e}"
-            )));
+    ) -> Result<RawResponse, ToolError> {
+        let result = async {
+            let response = request.send().await?;
+            let status = response.status().as_u16();
+            let body = response.text().await?;
+            Ok::<_, reqwest::Error>(RawResponse { status, body })
         }
-        Ok(response)
+        .await;
+        result.map_err(|e| ToolError::OperationFailed(format!("{label} request failed: {e}")))
     }
 
     async fn search_tavily(
@@ -398,17 +384,13 @@ impl SearchWebTool {
             search_depth: "basic".to_string(),
         };
 
-        let key = format!(
-            "{}|{}|{}",
-            request.search_depth, request.max_results, request.query
-        );
         let url = self.api_url("https://api.tavily.com", "/search").await?;
         let builder = self
             .client
             .post(url)
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&request);
-        let response = self.send("tavily", key, "Tavily", builder).await?;
+        let response = self.send("Tavily", builder).await?;
 
         if !is_success(response.status) {
             return Err(ToolError::OperationFailed(format!(
@@ -450,8 +432,7 @@ impl SearchWebTool {
             .header("X-Subscription-Token", api_key)
             .header("Accept", "application/json")
             .query(&[("q", query), ("count", &max_results.to_string() as &str)]);
-        let key = format!("{max_results}|{query}");
-        let response = self.send("brave", key, "Brave", builder).await?;
+        let response = self.send("Brave", builder).await?;
 
         if !is_success(response.status) {
             return Err(ToolError::OperationFailed(format!(
@@ -555,8 +536,7 @@ impl SearchWebTool {
                 ("srsearch", search.as_str()),
                 ("srlimit", limit.as_str()),
             ]);
-        let key = format!("{max_results}|{search}");
-        let response = self.send("wikipedia", key, "Wikipedia", builder).await?;
+        let response = self.send("Wikipedia", builder).await?;
         if !is_success(response.status) {
             return Err(ToolError::OperationFailed(format!(
                 "Wikipedia API returned {}",
@@ -745,10 +725,7 @@ impl SearchWebTool {
                     ("formatversion", "2"),
                     ("titles", title.as_str()),
                 ]);
-            let response = self
-                .send("wikipedia_page", title.clone(), "Wikipedia", builder)
-                .await
-                .ok()?;
+            let response = self.send("Wikipedia", builder).await.ok()?;
             let v: serde_json::Value = serde_json::from_str(&response.body).ok()?;
             return v["query"]["pages"][0]["extract"]
                 .as_str()
@@ -761,10 +738,7 @@ impl SearchWebTool {
             .await
             .ok()?
             .ok()?;
-        let response = self
-            .send("page", url.clone(), "Page", self.client.get(&url))
-            .await
-            .ok()?;
+        let response = self.send("Page", self.client.get(&url)).await.ok()?;
         if !is_success(response.status) || response.body.starts_with("%PDF") {
             return None;
         }
@@ -815,9 +789,7 @@ impl SearchWebTool {
             .client
             .get("https://www.bing.com/search")
             .query(&bing_query_params(query));
-        let response = self
-            .send("bing", query.to_string(), "Bing", builder)
-            .await?;
+        let response = self.send("Bing", builder).await?;
 
         if response.status != 200 {
             return Err(ToolError::OperationFailed(format!(
@@ -853,9 +825,7 @@ impl SearchWebTool {
             .client
             .get("https://lite.duckduckgo.com/lite/")
             .query(&[("q", query)]);
-        let response = self
-            .send("duckduckgo", query.to_string(), "DuckDuckGo", builder)
-            .await?;
+        let response = self.send("DuckDuckGo", builder).await?;
 
         // DDG now answers most queries with a 202 "anomaly" bot-challenge
         // page rather than the 200 the lite HTML scraper expects; treat
