@@ -2005,7 +2005,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
- "unicode-normalization",
 ]
 
 [[package]]
