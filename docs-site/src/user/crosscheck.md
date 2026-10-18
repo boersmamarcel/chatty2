@@ -47,4 +47,15 @@ The attempts run at once only if your model endpoint allows several requests at 
 
 ## What it is worth
 
-Measured on DABstep, a benchmark of data questions, before release: the plan and the gate are in [the pre-registration](https://github.com/boersmamarcel/chatty2/blob/main/docs/research/crosscheck-prereg.md); the result note will be listed here when the run finishes. Until then, treat Crosscheck as experimental.
+In our tests, independent attempts plus a judge finished **8 to 22 points** more tasks correctly than a single attempt on the same model, at **2 to 3.3 times the tokens**. All runs used the local `RedHatAI/Qwen3.8-27B-INT4` on vLLM, with both arms sharing the same harness, tools and data:
+
+| Task set | Single attempt | Crosscheck | Gain | Cost |
+|---|---|---|---|---|
+| DABstep Hard, all 378 tasks | 77.2 % | 84.9 % (2 attempts + judge) | +7.7 points | about 2× |
+| DABstep, 80-task subset | 79.6 % | 88.75 % (3 attempts + judge) | +9.2 points | about 3× |
+| DABstep, 18 tasks where attempts disagree | 4 of 18 | 7 of 18 | +16.7 points | 2.1× |
+| Same set, *Crosscheck: Data*, first 9 trials | 5 of 9 | 7 of 9 | +22 points | about 3.3× |
+
+The judge matters: on the subset's disagreeing tasks it picked a correct answer 16 times out of 18, against 9 for a majority vote.
+
+Read these as the size of the gain, not as scores. The first two rows used DABstep-specific helpers in both arms, which raises the absolute numbers but not the gain. The last two rows are small. It is one model in one domain so far, and the pre-registered gate on the 18-task run missed its no-harm check by one task, so Crosscheck ships as opt-in and **experimental**.

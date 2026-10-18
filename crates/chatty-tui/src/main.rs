@@ -265,7 +265,7 @@ struct Cli {
     /// conversation carries (RC-0), as --save-conversation writes it. The
     /// --message is the next turn on that history.
     ///
-    /// Used by the resume spike (`scripts/resume-spike/`, AGE-650).
+    /// Used by the resume spike (harbor-chatty `experiments/resume-spike/`, AGE-650).
     ///
     /// Example: --restore /tmp/first/conversation.json
     #[arg(long, value_name = "PATH", requires = "headless", conflicts_with_all = ["pipe", "participant_fd"])]
@@ -1941,7 +1941,10 @@ mod cli_smoke_tests {
             .expect("an experimental preset loads by its exact id");
         assert_eq!(team.file.leader, "crosscheck-lead");
         let notice = team.experimental_notice().expect("a notice");
-        assert_eq!(notice, "Crosscheck is experimental: see docs/research/");
+        assert_eq!(
+            notice,
+            "Crosscheck is experimental: see https://boersmamarcel.github.io/chatty2/user/crosscheck.html"
+        );
         assert_eq!(notice.lines().count(), 1);
         assert!(chatty_core::services::team::load_team("Crosscheck", None, None).is_err());
     }

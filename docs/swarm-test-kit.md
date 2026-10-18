@@ -98,5 +98,5 @@ criterion, AGE-640).
 The hop-latency baseline (`measure_hop_latency`, run by the ignored
 `fabric_hop_latency_baseline`) is in
 [`research/fabric-hop-latency-baseline.md`](research/fabric-hop-latency-baseline.md);
-the new path, measured the same way, is in
-[`research/fabric-hop-latency-2026-09-29.md`](research/fabric-hop-latency-2026-09-29.md).
+the new path, measured the same way, is in harbor-chatty (private),
+`experiments/reports/fabric-hop-latency-2026-09-29.md`.

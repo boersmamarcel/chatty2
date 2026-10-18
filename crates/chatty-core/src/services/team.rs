@@ -79,8 +79,9 @@ pub const PRESETS: &[TeamPreset] = &[
     },
 ];
 
-/// Where an experimental preset's results are written up (AGE-696).
-pub const EXPERIMENTAL_NOTES: &str = "docs/research/";
+/// Where an experimental preset's results are summarised for users (AGE-696).
+/// Both experimental presets are Crosscheck variants.
+pub const EXPERIMENTAL_NOTES: &str = "https://boersmamarcel.github.io/chatty2/user/crosscheck.html";
 
 /// The presets shown wherever teams are listed. An `experimental` one is
 /// left out: it runs only when asked for by its exact id (AGE-696).
@@ -1380,7 +1381,9 @@ mod tests {
         assert!(team.file.experimental);
         assert_eq!(
             team.experimental_notice().as_deref(),
-            Some("Crosscheck is experimental: see docs/research/")
+            Some(
+                "Crosscheck is experimental: see https://boersmamarcel.github.io/chatty2/user/crosscheck.html"
+            )
         );
     }
 }

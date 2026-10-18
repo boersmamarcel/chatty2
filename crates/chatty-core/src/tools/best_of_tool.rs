@@ -1,7 +1,7 @@
 //! `best_of` (AGE-853): one task to several solvers at once, one attempt kept.
 //!
 //! A coordination team does not buy accuracy on sequential work; independent
-//! attempts plus a selector do (`docs/research/best-of-3-prereg.md`). This
+//! attempts plus a selector do (the user guide's *Crosscheck* page). This
 //! tool is the fan-out and the selection, done by the runtime rather than by
 //! a leader model following a playbook, so neither step can be skipped,
 //! paraphrased or rewritten:

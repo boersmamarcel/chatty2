@@ -104,7 +104,7 @@ the schema lives in `src/headless/usage_file.rs`.
 it ends, as the JSON array of messages a worker's captured conversation carries
 (RC-0). `--restore <PATH>` starts the run from such a file instead of an empty
 conversation, so `--message` is the next turn on that history. Both are
-`--headless` only; the resume spike (`scripts/resume-spike/`) is what uses them.
+`--headless` only; the resume spike (`experiments/resume-spike/` in harbor-chatty (private)) is what uses them.
 
 ### Pipe mode
 

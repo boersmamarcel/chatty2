@@ -244,6 +244,13 @@ examples.
   page in the same PR. `update-agent-docs.yml` only safety-nets
   `AGENTS.md` / `CLAUDE.md`. See the Documentation section of
   [`CONTRIBUTING.md`](CONTRIBUTING.md#documentation).
+- **Experiments live in harbor-chatty, not here** — pre-registrations, run
+  reports, spikes, benchmark harnesses and their task fixtures go in the
+  private `harbor-chatty` repo under `experiments/`. chatty2 keeps the
+  research crates' design notes (`docs/research/modules/`), process docs,
+  baselines its own benches check against, and a short summary in the user
+  guide for any result a shipped feature relies on. Never commit one-off
+  helper scripts or agent work notes (implementation summaries, plans).
 
 ## Known gotchas
 

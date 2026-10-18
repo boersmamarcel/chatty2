@@ -1,8 +1,0 @@
-{
-  "type": "verdict",
-  "choices": [
-    "CONFORMS",
-    "NONCONFORMS"
-  ],
-  "label": "NONCONFORMS"
-}
