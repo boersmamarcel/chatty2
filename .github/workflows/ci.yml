@@ -82,6 +82,7 @@ jobs:
               - 'scripts/check-reserved.sh'
               - 'scripts/check-rig-pins.sh'
               - 'scripts/check-no-core-reexports.sh'
+              - 'scripts/check-hygiene.sh'
               - 'scripts/check-release-authz.sh'
               - 'scripts/setup-linux.sh'
               - '.github/workflows/ci.yml'
@@ -257,6 +258,22 @@ jobs:
       - name: Check no chatty_core re-exports (AGE-177)
         if: needs.changes.outputs.rust == 'true'
         run: bash scripts/check-no-core-reexports.sh
+
+      # Unreferenced scripts and assets, stray root files, and dead_code /
+      # ignore suppressions without a reason (scripts/check-hygiene.sh).
+      - name: Check repository hygiene
+        run: bash scripts/check-hygiene.sh
+
+      - name: Install cargo-machete
+        if: needs.changes.outputs.rust == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      # Only crates/: scripts/ holds standalone demo workspaces.
+      - name: Check for unused dependencies
+        if: needs.changes.outputs.rust == 'true'
+        run: cargo machete crates
 
   # The Windows compile, at PR time. `warm-release-cache` below builds Windows
   # too, but only on pushes to main and only on a cache miss, so the first

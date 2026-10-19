@@ -22,7 +22,7 @@
 //!   refused call; an approval over its cap is denied without asking.
 
 // The socket that reads lines and counts calls is Unix-only (`mod.rs`).
-#![cfg_attr(not(unix), allow(dead_code))]
+#![cfg_attr(not(unix), allow(dead_code, reason = "used only by the unix participant transport"))]
 
 use std::io;
 use std::time::Duration;
