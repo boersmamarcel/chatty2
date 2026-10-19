@@ -22,5 +22,5 @@ Do not implement `todo!("human: …")` markers.
 
 ## Related docs
 
-- [crate-promises-chatty-trace](../../docs/archive/research/crate-promises-chatty-trace.md)
+- [crate-promises-chatty-trace](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/crate-promises-chatty-trace.md)
 - Linear: **Self-improving chatty2**

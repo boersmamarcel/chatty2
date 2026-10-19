@@ -57,7 +57,6 @@
   - [Plugins](./dev/architecture/plugins.md)
   - [Team smoke test](./dev/architecture/team-smoke-test.md)
   - [Swarm test kit](./dev/architecture/swarm-test-kit.md)
-  - [hive API changes](./dev/architecture/hive-api-changes.md)
   - [Research notes](./dev/adrs/README.md)
     - [App ↔ research bridge](./dev/adrs/app-research-bridge.md)
     - [Paper → experiment → product](./dev/adrs/paper-to-product-pipeline.md)

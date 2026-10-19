@@ -54,5 +54,5 @@ warm cache are byte-identical.
 
 ## Further reading
 
-- [`chatty-trace` README](../../../crates/chatty-trace/README.md) — crate scope (the pre-Stage-A promise page is [archived](../../archive/research/crate-promises-chatty-trace.md))
+- [`chatty-trace` README](../../../crates/chatty-trace/README.md) — crate scope (the pre-Stage-A promise page is [archived](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/crate-promises-chatty-trace.md))
 - [Production bar (AGE-26)](https://linear.app/agents-research/issue/AGE-26)

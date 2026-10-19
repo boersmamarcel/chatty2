@@ -54,8 +54,8 @@ change.
 | A tool, event, setting or env var | The tables in `scripts/gen-docs-reference.sh` (CI diffs them against source) |
 | A new file under `docs/` | A row in `docs/INDEX.md` and an entry in `docs-site/src/SUMMARY.md` |
 
-Point-in-time plans, audits and bug lists go to `docs/archive/` (not synced
-to the site) or to Linear, not under `docs/`.
+Point-in-time plans, audits and bug lists go to Linear, not into the repo.
+Experiment write-ups go to the private `harbor-chatty` repo.
 
 Workflows (`update-agent-docs.yml`, `update-readme.yml`) open follow-up PRs
 after a merge to `main` when guidance drifted; they are a safety net, not a

@@ -74,5 +74,5 @@ not this module alone.
 
 ## Further reading
 
-- [`chatty-playbook` README](../../../crates/chatty-playbook/README.md) — crate scope (the pre-Stage-A promise page is [archived](../../archive/research/crate-promises-chatty-playbook.md))
+- [`chatty-playbook` README](../../../crates/chatty-playbook/README.md) — crate scope (the pre-Stage-A promise page is [archived](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/crate-promises-chatty-playbook.md))
 - [agent-memory.md](../../agent-memory.md)

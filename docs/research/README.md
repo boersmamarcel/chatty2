@@ -67,5 +67,5 @@ shipped feature relies on is summarised in that feature's user guide.
 Each research crate's scope is stated in its own `README.md` (linked in the table above).
 
 **Archived:** the empty promotion-log template and the pre-Stage-A crate-promise pages
-are kept under [`docs/archive/research/`](../archive/research/promotion-log.md) for their
+were kept under [`docs/archive/research/`](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/promotion-log.md) for their
 reasoning only; they are not maintained.

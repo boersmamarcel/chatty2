@@ -57,9 +57,6 @@ docs_common=(
   's|](\.\./scripts/|](https://github.com/boersmamarcel/chatty2/blob/main/scripts/|g'
   's|](\.\./modules/|](https://github.com/boersmamarcel/chatty2/tree/main/modules/|g'
   's|](\.\./wit/|](https://github.com/boersmamarcel/chatty2/tree/main/wit/|g'
-  's|](\.\./archive/|](https://github.com/boersmamarcel/chatty2/blob/main/docs/archive/|g'
-  's|](archive/|](https://github.com/boersmamarcel/chatty2/blob/main/docs/archive/|g'
-  's|](\./archive/|](https://github.com/boersmamarcel/chatty2/blob/main/docs/archive/|g'
 )
 
 # Root agent guide → dev/agents.md (links were relative to the repo root)
@@ -70,7 +67,6 @@ rewrite "$SITE_SRC/dev/agents.md" \
   's|](docs/INDEX\.md|](https://github.com/boersmamarcel/chatty2/blob/main/docs/INDEX.md|g' \
   's|](docs/research/modules/|](./research/modules/|g' \
   's|](docs/research/|](./adrs/|g' \
-  's|](docs/archive/|](https://github.com/boersmamarcel/chatty2/blob/main/docs/archive/|g' \
   's|](docs/\([A-Za-z0-9_-]*\)\.md|](./architecture/\1.md|g' \
   's|](crates/\([a-z0-9-]*\)/README\.md|](./crates/\1.md|g' \
   's|](CONTRIBUTING\.md|](https://github.com/boersmamarcel/chatty2/blob/main/CONTRIBUTING.md|g' \
@@ -84,7 +80,7 @@ rewrite "$SITE_SRC/dev/agents.md" \
   's|](Makefile|](https://github.com/boersmamarcel/chatty2/blob/main/Makefile|g'
 
 # Architecture & explanation pages: docs/*.md → dev/architecture/
-# (docs/archive/ and docs/generated/ are deliberately not copied.)
+# (docs/generated/ is deliberately not copied.)
 for f in "$ROOT"/docs/*.md; do
   base="$(basename "$f")"
   [[ "$base" == "INDEX.md" ]] && continue
@@ -113,8 +109,7 @@ for f in "$ROOT"/docs/research/*.md; do
     's|](\.\./\.\./\.github/|](https://github.com/boersmamarcel/chatty2/blob/main/.github/|g' \
     's|](\.\./\.\./scripts/|](https://github.com/boersmamarcel/chatty2/blob/main/scripts/|g' \
     's|](\.\./\.\./modules/|](https://github.com/boersmamarcel/chatty2/tree/main/modules/|g' \
-    's|](\.\./\.\./\.\./harbor-chatty|](https://github.com/boersmamarcel/harbor-chatty|g' \
-    's|](\.\./archive/|](https://github.com/boersmamarcel/chatty2/blob/main/docs/archive/|g'
+    's|](\.\./\.\./\.\./harbor-chatty|](https://github.com/boersmamarcel/harbor-chatty|g'
 done
 
 # Research module pages: docs/research/modules/*.md → dev/research/modules/
@@ -134,8 +129,7 @@ for f in "$ROOT"/docs/research/modules/*.md; do
     's|](\.\./\.\./\.\./\.github/|](https://github.com/boersmamarcel/chatty2/blob/main/.github/|g' \
     's|](\.\./\.\./\.\./scripts/|](https://github.com/boersmamarcel/chatty2/blob/main/scripts/|g' \
     's|](\.\./\.\./\.\./modules/|](https://github.com/boersmamarcel/chatty2/tree/main/modules/|g' \
-    's|](\.\./\.\./\.\./\.\./harbor-chatty|](https://github.com/boersmamarcel/harbor-chatty|g' \
-    's|](\.\./\.\./archive/|](https://github.com/boersmamarcel/chatty2/blob/main/docs/archive/|g'
+    's|](\.\./\.\./\.\./\.\./harbor-chatty|](https://github.com/boersmamarcel/harbor-chatty|g'
 done
 
 # Per-crate READMEs → dev/crates/<crate>.md. Source links point at GitHub.
@@ -147,7 +141,6 @@ for readme in "$ROOT"/crates/*/README.md; do
     "s|](\.\./\([a-z0-9-]*\)/\?)|](./\1.md)|g" \
     "s|](\.\./\.\./docs/research/modules/|](../research/modules/|g" \
     "s|](\.\./\.\./docs/research/|](../adrs/|g" \
-    "s|](\.\./\.\./docs/archive/|](https://github.com/boersmamarcel/chatty2/blob/main/docs/archive/|g" \
     "s|](\.\./\.\./docs/\([A-Za-z0-9_-]*\)\.md|](../architecture/\1.md|g" \
     "s|](\.\./\.\./docs-site/src/dev/guides/|](../guides/|g" \
     "s|](\.\./\.\./AGENTS\.md|](../agents.md|g" \
