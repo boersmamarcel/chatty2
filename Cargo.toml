@@ -119,7 +119,7 @@ docx-rs = "0.4.20"
 # 2026-07-29) and the artifact panel depends on its rendering output, not just
 # on its API compiling. `default-template` and `system-fonts` stay off — we
 # only read and render, and `to_pdf_deterministic` is the bundled-font path.
-zip = "8"
+zip = "9"
 rpptx = { version = "=0.12.1", default-features = false, features = ["render", "system-fonts"] }
 pptx_writer = { package = "pptx", version = "0.1.0" }
 

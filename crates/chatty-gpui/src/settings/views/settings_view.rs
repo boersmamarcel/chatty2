@@ -14,8 +14,10 @@ use crate::settings::views::user_secrets_page::user_secrets_page;
 
 use gpui::*;
 
+#[cfg(not(target_os = "macos"))]
+use gpui_component::Disableable;
 use gpui_component::{
-    ActiveTheme, Disableable, Root, Sizable, Size, Theme, ThemeMode,
+    ActiveTheme, Root, Sizable, Size, Theme, ThemeMode,
     button::Button,
     group_box::GroupBoxVariant,
     menu::{DropdownMenu, PopupMenuItem},

@@ -34,6 +34,18 @@ ignore = [
     "RUSTSEC-2026-0192",
     # yaml-rust: unmaintained, no patched release; replace or wait for upstream
     "RUSTSEC-2024-0320",
+    # unsafe-libyaml: unmaintained, no patched release; pulled in by typst (hayagriva -> serde_yaml)
+    "RUSTSEC-2024-0449",
+    # zip < 9: extract() follows symlinks / keeps SUID bits. chatty's own extract() uses zip 9;
+    # the older versions are pinned by calamine, docx-rs, memvid-core, pptx and the rdocx fork,
+    # which read office documents in memory and do not extract to disk
+    "RUSTSEC-2026-0367",
+    "RUSTSEC-2026-0368",
+    "RUSTSEC-2026-0369",
+    # zvariant / zvariant_derive / zbus_names: unmaintained, no patched release; pulled in by keyring (zbus, Linux secret service)
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
