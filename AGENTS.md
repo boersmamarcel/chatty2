@@ -95,6 +95,8 @@ make wasm-template    # cargo-generate a module from templates/module and build 
 make test-benford     # the benford plugin's own unit tests, on the host target
 make lint-module-sdk  # clippy chatty-module-sdk for wasm32-wasip2
 make test-billing-sdk # hive-billing-sdk's tests, on the host target
+make hygiene          # unreferenced scripts/assets, stray root files, reasonless allow(dead_code)/#[ignore]
+make machete          # unused Cargo dependencies (needs `cargo install cargo-machete --locked`)
 make docs-gen         # regenerate docs/generated reference pages
 make docs             # sync + build mdBook site (docs-site/book/)
 make docs-serve       # local preview at http://localhost:3000
@@ -251,6 +253,11 @@ examples.
   baselines its own benches check against, and a short summary in the user
   guide for any result a shipped feature relies on. Never commit one-off
   helper scripts or agent work notes (implementation summaries, plans).
+  `scripts/check-hygiene.sh` (CI, `make hygiene`) fails on an unreferenced
+  script or asset, a file in the repo root that isn't on its list, and an
+  `allow(dead_code)` or `#[ignore]` without a reason: write
+  `#[expect(dead_code, reason = "...")]` or delete the code. Real
+  exceptions go in `scripts/hygiene-allow.txt` with a comment.
 
 ## Known gotchas
 

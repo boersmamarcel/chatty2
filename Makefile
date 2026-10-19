@@ -16,7 +16,7 @@
         test-benford lint-module-sdk test-billing-sdk example-plugin-benford \
         run-gpui run-tui ci clean docs-gen docs-sync docs docs-serve docs-check-links \
         docs-check-nav docs-check-frontmatter docs-check-leakage \
-        docs-check-reference docs-check animations
+        docs-check-reference docs-check animations hygiene machete
 
 help:
 	@echo "Common targets:"
@@ -98,6 +98,15 @@ test-gateway:
 lint:
 	cargo clippy --all-features --all-targets -- -D warnings
 
+# Unreferenced scripts/assets, stray root files, suppressions without a reason.
+hygiene:
+	bash scripts/check-hygiene.sh
+
+# Unused Cargo dependencies (`cargo install cargo-machete --locked` once).
+# Only crates/: scripts/ holds standalone demo workspaces.
+machete:
+	cargo machete crates
+
 fmt:
 	cargo fmt
 
@@ -161,6 +170,8 @@ ci: wasm-modules wasm-template test test-benford lint-module-sdk test-billing-sd
 	$(MAKE) lint
 	bash scripts/check-reserved.sh
 	bash scripts/check-rig-pins.sh
+	bash scripts/check-hygiene.sh
+	$(MAKE) machete
 
 clean:
 	cargo clean

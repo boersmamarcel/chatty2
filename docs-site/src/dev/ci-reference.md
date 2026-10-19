@@ -37,6 +37,8 @@ The Makefile mirrors `.github/workflows/ci.yml`; the workflow is the ground trut
 | `make docs-check-reference` | `scripts/check-docs-reference-drift.sh` — reference tables match `tool_registry.rs`, `StreamManagerEvent`, event enums and settings structs |
 | `make docs-check` | All five `docs-check-*` targets |
 | `make animations` | `scripts/animations/record.sh --all` — re-records the README/docs GIFs |
+| `make hygiene` | `scripts/check-hygiene.sh` — unreferenced scripts and assets, stray root files, `allow(dead_code)` or `#[ignore]` without a reason |
+| `make machete` | `cargo machete crates` — unused Cargo dependencies (install `cargo-machete` first) |
 
 > [!NOTE]
 > Two things the CI workflow runs that `make ci` does not: clippy is invoked with `--all-targets` as well (`cargo clippy --all-features --all-targets -- -D warnings`, so lints in `tests/` are reported), and `scripts/check-no-core-reexports.sh` runs after the rig-pin check. Run both before pushing a change to test code or to the `chatty-gpui`/`chatty-tui` module trees.
@@ -45,7 +47,7 @@ The Makefile mirrors `.github/workflows/ci.yml`; the workflow is the ground trut
 
 | Workflow | Trigger | Purpose |
 |:---------|:--------|:--------|
-| **CI** (`ci.yml`) | PR / push to `main` | Tests, formatting, clippy, reserved-symbol, rig-pin and re-export checks. Docs-only diffs skip compile (the required `test` job still passes). Stale PR runs are cancelled. `Swatinem/rust-cache` is warmed on `main` (never with `cache-on-failure`: a cancelled run would save a partial `target/` that is then never re-saved). On pushes to `main`, `warm-release-cache` also builds `--release` on Linux, macOS and Windows once per Cargo.lock + rustc and saves each under the key from `scripts/release-cache-key.sh`. |
+| **CI** (`ci.yml`) | PR / push to `main` | Tests, formatting, clippy, reserved-symbol, rig-pin, re-export, hygiene and unused-dependency checks. Docs-only diffs skip compile (the required `test` job still passes). Stale PR runs are cancelled. `Swatinem/rust-cache` is warmed on `main` (never with `cache-on-failure`: a cancelled run would save a partial `target/` that is then never re-saved). On pushes to `main`, `warm-release-cache` also builds `--release` on Linux, macOS and Windows once per Cargo.lock + rustc and saves each under the key from `scripts/release-cache-key.sh`. |
 | **Docs** (`docs.yml`) | Push to `main` / PR touching documentation paths | `gen-docs-reference.sh`, `docs-sync.sh`, then every check behind `make docs-check` (links on sources and built site, nav, frontmatter, user-guide leakage, reference drift); a `deploy` job publishes the site. |
 | **cargo-deny** (`deny.yml`) | PR / push to `main` / merge group / daily 04:17 UTC | `cargo deny check` for advisories, sources, bans and licenses against `deny.toml`. Every advisory exception names its tracking issue (AGE-829). Job name `cargo-deny` (AGE-734). |
 | **Prepare Release** (`prepare-release.yml`) | PR merged with `release:patch`/`release:minor`/`release:major` label, or manual `workflow_dispatch` | Bumps version via a `cut-release` PR (main is protected), generates changelog, tags, creates the GitHub Release, then calls Release via `workflow_call`. |

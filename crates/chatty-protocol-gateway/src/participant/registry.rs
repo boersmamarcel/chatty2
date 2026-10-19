@@ -236,7 +236,7 @@ impl ParticipantRegistry {
     }
 
     /// The tap [`tap_wire`](Self::tap_wire) installed, if any.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    #[cfg_attr(not(unix), allow(dead_code, reason = "used only by the unix participant transport"))]
     pub(crate) fn wire_tap(&self) -> Option<mpsc::UnboundedSender<String>> {
         self.lock().wire_tap.clone()
     }
@@ -386,7 +386,7 @@ impl ParticipantRegistry {
     /// Crate-private on purpose: the only caller is the connection loop, so
     /// nothing can register a name without the broker having made the
     /// connection for it.
-    #[cfg_attr(not(unix), allow(dead_code))]
+    #[cfg_attr(not(unix), allow(dead_code, reason = "used only by the unix participant transport"))]
     pub(crate) fn register(
         &self,
         node: AdmittedNode,
