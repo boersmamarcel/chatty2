@@ -16,8 +16,6 @@
 //! - Local shell execution — `services::shell_service`.
 //! - Docker-backed sandbox — `sandbox/` module.
 //! - User-facing settings (API key, default workspace) — settings UI.
-//!
-//! See `docs/monty-sandbox.md` for the broader sandbox architecture.
 
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};

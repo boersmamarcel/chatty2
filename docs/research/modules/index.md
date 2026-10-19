@@ -39,7 +39,7 @@ flowchart TB
 | Field | Values |
 |-------|--------|
 | **Stage** | `not started` · `stage-a` · `stage-b` · `promotion-pending` |
-| **Promotion** | `pending` · `rejected` · `setting` · `default` — recorded by the human reviewer only (the [archived promotion-log template](../../archive/research/promotion-log.md) shows the fields) |
+| **Promotion** | `pending` · `rejected` · `setting` · `default` — recorded by the human reviewer only (the [archived promotion-log template](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/promotion-log.md) shows the fields) |
 
 ## Cross-module work
 

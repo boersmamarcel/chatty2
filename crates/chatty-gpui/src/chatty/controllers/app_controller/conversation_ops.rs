@@ -20,7 +20,7 @@
 //! - On-disk persistence — `chatty_core::repositories::conversation_*`.
 //! - Streaming and message send — `message_ops`.
 //!
-//! See `docs/architecture-overview.md` for the higher-level conversation flow.
+//! See `docs/system-overview.md` for the higher-level conversation flow.
 
 use super::*;
 

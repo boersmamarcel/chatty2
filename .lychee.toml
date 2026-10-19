@@ -5,8 +5,6 @@ exclude_path = [
   "docs-site/book/**",
   "target/**",
   "docs/generated/**",
-  # Archived notes are historical and not maintained (see docs/archive/README.md).
-  "docs/archive/**",
 ]
 
 # Sibling repo (harbor-chatty) is not in this workspace; links are intentional.

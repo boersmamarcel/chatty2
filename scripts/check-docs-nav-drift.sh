@@ -30,7 +30,6 @@ check_index() {
     fi
   done < <(find docs -name '*.md' \
     ! -path 'docs/generated/*' \
-    ! -path 'docs/archive/*' \
     ! -name 'INDEX.md' \
     -print0)
 

@@ -19,4 +19,4 @@ See [`RESERVED.md`](../../RESERVED.md) for human-only entry points.
 
 ## Related docs
 
-- [crate-promises-chatty-flow](../../docs/archive/research/crate-promises-chatty-flow.md)
+- [crate-promises-chatty-flow](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/crate-promises-chatty-flow.md)

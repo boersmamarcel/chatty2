@@ -22,4 +22,4 @@ only around `todo!("human: …")` markers.
 
 ## Related docs
 
-- [crate-promises-chatty-playbook](../../docs/archive/research/crate-promises-chatty-playbook.md)
+- [crate-promises-chatty-playbook](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/crate-promises-chatty-playbook.md)

@@ -136,7 +136,7 @@ Rigorous docs mirror the pipeline — each layer answers a different question:
 | **Paper fidelity** | What did the paper actually claim? | [`research/modules/`](./modules/index.md) | Built (M0–M4) |
 | **Crate promises** | What does each shipping crate guarantee? | Each crate's `README.md` ([`chatty-trace`](../../crates/chatty-trace/README.md), [`chatty-playbook`](../../crates/chatty-playbook/README.md), [`chatty-flow`](../../crates/chatty-flow/README.md)) | Built |
 | **ADRs** | Why this fork (Harbor, AppWorld, cost model)? | [`docs/research/*.md`](./harbor-pivot.md) | Partial |
-| **Promotion record** | What shipped, as what, with what evidence? | Recorded by the human reviewer per verdict ([archived template](../archive/research/promotion-log.md)) | No verdicts yet |
+| **Promotion record** | What shipped, as what, with what evidence? | Recorded by the human reviewer per verdict ([archived template](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/promotion-log.md)) | No verdicts yet |
 | **Settings map** | Which settings map to which mechanisms? | [`settings-integration-map.md`](./settings-integration-map.md) | Built (gates open) |
 | **Experiment protocol** | How to run Stage A/B rigorously? | [`experiment-protocol.md`](./experiment-protocol.md) | Built |
 | **Reference** | What can I configure today? | Generated tools/CLI/env pages | Partial |
