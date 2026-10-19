@@ -92,7 +92,3 @@ impl Render for HeadlineTicker {
             .child(label)
     }
 }
-
-pub fn new_headline_ticker(cx: &mut App) -> Entity<HeadlineTicker> {
-    cx.new(HeadlineTicker::new)
-}

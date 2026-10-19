@@ -13,12 +13,6 @@ pub fn apply(playbook: &mut Playbook, ops: &[DeltaOp]) -> Result<(), PlaybookErr
     todo!("human: apply — pure deterministic ACE merge (AGE-17)")
 }
 
-/// Re-export bullet helper used by tests once `apply` lands.
-#[allow(dead_code)]
-pub(crate) fn bullet_count(playbook: &Playbook) -> usize {
-    playbook.sections.values().map(Vec::len).sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

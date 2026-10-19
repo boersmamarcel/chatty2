@@ -112,21 +112,9 @@ impl McpServersModel {
         self.servers = servers;
     }
 
-    /// Get auth status for a server
-    pub fn auth_status(&self, server_name: &str) -> &McpAuthStatus {
-        self.auth_statuses
-            .get(server_name)
-            .unwrap_or(&McpAuthStatus::NotRequired)
-    }
-
     /// Set auth status for a server
     pub fn set_auth_status(&mut self, server_name: String, status: McpAuthStatus) {
         self.auth_statuses.insert(server_name, status);
-    }
-
-    /// Remove auth status for a server (e.g. on delete)
-    pub fn remove_auth_status(&mut self, server_name: &str) {
-        self.auth_statuses.remove(server_name);
     }
 }
 

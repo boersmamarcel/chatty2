@@ -49,7 +49,10 @@ use crate::{
 /// `#[derive(JsonSchema)]`'s, never hand-written. Dead code: every field
 /// exists only to be named in the generated schema.
 #[derive(JsonSchema)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "exists only for schemars to derive the wire schema from"
+)]
 struct Catalog {
     #[schemars(rename = "session.hello")]
     session_hello: HelloParams,
@@ -96,9 +99,9 @@ struct Catalog {
 // crate's public schema surface even if `Catalog` stops reaching one of
 // them; a type this crate forgets to wire in here would otherwise compile
 // silently with no `JsonSchema` coverage at all.
-#[allow(dead_code)]
+#[expect(dead_code, reason = "a compile-time check, never called")]
 fn assert_json_schema<T: JsonSchema>() {}
-#[allow(dead_code)]
+#[expect(dead_code, reason = "a compile-time check, never called")]
 fn every_wire_type_has_a_schema() {
     assert_json_schema::<ParticipantCard>();
     assert_json_schema::<ParticipantSkill>();

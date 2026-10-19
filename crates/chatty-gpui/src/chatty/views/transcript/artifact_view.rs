@@ -26,7 +26,6 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::Disableable;
-use gpui_component::Selectable;
 use gpui_component::WindowExt;
 use gpui_component::alert::Alert;
 use gpui_component::button::{Button, ButtonVariants, DropdownButton};
@@ -128,9 +127,7 @@ pub enum ArtifactViewEvent {
 enum PdfPreview {
     #[default]
     Idle,
-    Loading {
-        page: u32,
-    },
+    Loading,
     Ready {
         page: u32,
         total: u32,
@@ -158,9 +155,7 @@ enum PdfPreview {
 enum PptxPreview {
     #[default]
     Idle,
-    Loading {
-        slide: usize,
-    },
+    Loading,
     Ready {
         slide: usize,
         total: usize,
@@ -1727,7 +1722,7 @@ impl ArtifactView {
         self.load_gen = self.load_gen.wrapping_add(1);
         let load_id = self.load_gen;
         let width = self.pdf_raster_width;
-        self.set_pdf(PdfPreview::Loading { page }, cx);
+        self.set_pdf(PdfPreview::Loading, cx);
         cx.spawn(async move |this, cx| {
             let outcome =
                 tokio::task::spawn_blocking(move || load_pdf_page_image(&path, page, width)).await;
@@ -1858,7 +1853,7 @@ impl ArtifactView {
         };
         self.load_gen = self.load_gen.wrapping_add(1);
         let load_id = self.load_gen;
-        self.pptx = PptxPreview::Loading { slide };
+        self.pptx = PptxPreview::Loading;
         // The slide shares the PDF page's raster width, so a wide panel gets
         // a sharp slide from the first turn; unlike the PDF page it is not
         // re-rastered on resize — the fit-to-width canvas scales it instead.
@@ -2868,7 +2863,7 @@ fn pdf_rendered_body(
     cx: &App,
 ) -> AnyElement {
     match pdf {
-        PdfPreview::Idle | PdfPreview::Loading { .. } => div()
+        PdfPreview::Idle | PdfPreview::Loading => div()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child("Rendering page…")
@@ -2982,7 +2977,7 @@ fn pptx_rendered_body(
     cx: &mut App,
 ) -> AnyElement {
     match pptx {
-        PptxPreview::Idle | PptxPreview::Loading { .. } => div()
+        PptxPreview::Idle | PptxPreview::Loading => div()
             .text_xs()
             .text_color(cx.theme().muted_foreground)
             .child("Rendering slide…")

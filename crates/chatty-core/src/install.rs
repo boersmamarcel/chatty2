@@ -225,52 +225,26 @@ pub fn install_remote_module(
     Ok(ext)
 }
 
-/// Install an MCP server extension from registry metadata.
-pub fn install_mcp_extension(
-    name: &str,
-    display_name: &str,
-    description: &str,
-    mcp_config: McpServerConfig,
-    version: &str,
-    extensions: &mut ExtensionsModel,
-) -> Result<InstalledExtension, InstallError> {
-    if extensions.is_installed(name) {
-        return Err(InstallError::AlreadyInstalled(name.to_string()));
-    }
-
-    let ext = InstalledExtension {
-        id: name.to_string(),
-        display_name: display_name.to_string(),
-        description: description.to_string(),
-        kind: ExtensionKind::McpServer(mcp_config),
-        source: ExtensionSource::Hive {
-            module_name: name.to_string(),
-            version: version.to_string(),
-        },
-        pricing_model: None,
-        enabled: true,
-    };
-
-    extensions.add(ext.clone());
-    Ok(ext)
-}
-
 /// Uninstall an extension by ID. Removes a WASM module's directory under
-/// `module_dir` (only for an ID that is a valid module name).
+/// `module_dir` (only for an ID that is a valid module name), or an MCP
+/// server's stored OAuth credentials.
 pub fn uninstall_extension(
     id: &str,
     module_dir: &Path,
     extensions: &mut ExtensionsModel,
 ) -> Result<(), InstallError> {
-    // If it's a WASM module, clean up files on disk
-    if let Some(ext) = extensions.find(id)
-        && matches!(ext.kind, ExtensionKind::WasmModule)
-    {
-        validate_module_name(id)?;
-        let dir = module_dir.join(id);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
+    match extensions.find(id).map(|ext| &ext.kind) {
+        Some(ExtensionKind::WasmModule) => {
+            validate_module_name(id)?;
+            let dir = module_dir.join(id);
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)?;
+            }
         }
+        Some(ExtensionKind::McpServer(config)) => {
+            crate::services::mcp_token_store::FileCredentialStore::delete_for_server(&config.name);
+        }
+        _ => {}
     }
 
     extensions.remove(id);
@@ -1066,6 +1040,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = uninstall_extension("nonexistent", dir.path(), &mut model);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn uninstalling_an_mcp_server_deletes_its_oauth_credentials() {
+        use crate::services::mcp_token_store::FileCredentialStore;
+        // A name no real server uses: the store lives in the user's config dir.
+        let name = format!("chatty-uninstall-test-{}", std::process::id());
+        let path = FileCredentialStore::for_server(&name).path().to_path_buf();
+        std::fs::write(&path, "{}").unwrap();
+        assert!(FileCredentialStore::has_credentials(&name));
+
+        let mut model = ExtensionsModel::default();
+        model.add(InstalledExtension {
+            id: "mcp-under-test".into(),
+            display_name: "MCP under test".into(),
+            description: String::new(),
+            kind: ExtensionKind::McpServer(McpServerConfig {
+                name: name.clone(),
+                url: "https://example.invalid/mcp".into(),
+                api_key: None,
+                enabled: true,
+                is_module: false,
+            }),
+            source: ExtensionSource::Custom,
+            pricing_model: None,
+            enabled: true,
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let result = uninstall_extension("mcp-under-test", dir.path(), &mut model);
+        let left_behind = path.exists();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result.is_ok());
+        assert!(!model.is_installed("mcp-under-test"));
+        assert!(
+            !left_behind,
+            "the server's OAuth token file must go with it"
+        );
     }
 
     #[test]

@@ -383,15 +383,6 @@ impl WasmModule {
         )
     }
 
-    /// Fuel left in the store after the most recent call (each call starts
-    /// from the full per-call budget). Useful for diagnostics and tests.
-    pub fn remaining_fuel(&self) -> u64 {
-        self.instance
-            .as_ref()
-            .and_then(|i| i.store.get_fuel().ok())
-            .unwrap_or(0)
-    }
-
     /// Get the metrics from the most recent invocation.
     pub fn last_invocation_metrics(&self) -> Option<InvocationMetrics> {
         self.last_metrics.clone()

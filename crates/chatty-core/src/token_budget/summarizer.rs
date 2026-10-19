@@ -136,7 +136,6 @@ pub async fn summarize_oldest_half(
 /// # Errors
 /// Always returns an error in the current version. Replace with a real implementation
 /// when the secondary-model path is wired up.
-#[allow(dead_code)]
 pub async fn summarize_with_model(
     _model_id: &str,
     _history: &[Message],

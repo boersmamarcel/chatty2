@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chatty_core::models::message_types::{ApprovalBlock, ApprovalState};
@@ -150,62 +149,5 @@ impl RenderOnce for ApprovalCard {
                     })
             }
         }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct PathChange {
-    pub path: String,
-    pub added: usize,
-    pub removed: usize,
-}
-
-#[derive(IntoElement)]
-pub struct ChangeTray {
-    changes: Vec<PathChange>,
-}
-
-impl ChangeTray {
-    pub fn new(changes: Vec<PathChange>) -> Self {
-        Self { changes }
-    }
-
-    pub fn from_paths(paths: impl IntoIterator<Item = String>) -> Self {
-        let unique: BTreeSet<String> = paths.into_iter().collect();
-        Self {
-            changes: unique
-                .into_iter()
-                .map(|path| PathChange {
-                    path,
-                    added: 0,
-                    removed: 0,
-                })
-                .collect(),
-        }
-    }
-}
-
-impl RenderOnce for ChangeTray {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        if self.changes.is_empty() {
-            return div().into_any_element();
-        }
-        let count = self.changes.len();
-        div()
-            .id("change-tray")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .pt_2()
-            .text_xs()
-            .text_color(cx.theme().muted_foreground)
-            .child(format!("{count} file{}", if count == 1 { "" } else { "s" }))
-            .children(self.changes.into_iter().take(4).map(|change| {
-                div()
-                    .id(ElementId::Name(format!("change-{}", change.path).into()))
-                    .child(change.path)
-            }))
-            .into_any_element()
     }
 }

@@ -1304,10 +1304,6 @@ impl ChatEngine {
                 self.title = title;
                 EngineAction::Redraw
             }
-            AppEvent::ConversationReady => {
-                self.is_ready = true;
-                EngineAction::Redraw
-            }
             AppEvent::ConversationInitialized {
                 conversation,
                 generation,
@@ -1383,10 +1379,6 @@ impl ChatEngine {
             AppEvent::DelegationFinished(message) => {
                 self.transcript.delegation_finished(message);
                 EngineAction::Redraw
-            }
-            AppEvent::TerminalInput(_) | AppEvent::Tick => {
-                // Handled by app.rs, not the engine
-                EngineAction::None
             }
         }
     }

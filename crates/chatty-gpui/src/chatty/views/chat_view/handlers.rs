@@ -26,9 +26,8 @@ use tracing::{debug, trace, warn};
 
 use super::super::message_types::{
     ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, SystemTrace,
-    ThinkingBlock, ThinkingState, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
-    classify_initial_execution_engine, detect_execution_engine, friendly_tool_name,
-    is_denial_result, predict_execution_engine,
+    ToolCallBlock, ToolCallState, ToolSource, TraceItem, classify_initial_execution_engine,
+    detect_execution_engine, friendly_tool_name, is_denial_result, predict_execution_engine,
 };
 use super::super::trace_components::SystemTraceView;
 use super::{ChatView, ChatViewEvent, PendingApprovalInfo, PendingClarificationInfo};
@@ -574,120 +573,6 @@ impl ChatView {
                         cx.notify();
                     });
                 }
-            }
-        }
-
-        cx.notify();
-    }
-
-    /// Handle thinking block started event
-    #[allow(dead_code)]
-    pub fn handle_thinking_started(&mut self, cx: &mut Context<Self>) {
-        debug!("Thinking block started");
-
-        let thinking = ThinkingBlock {
-            content: String::new(),
-            summary: String::new(),
-            duration: None,
-            state: ThinkingState::Processing,
-        };
-
-        // Update live trace
-        if let Some(last) = self.parent_streaming_message_mut() {
-            debug!(
-                has_last_message = true,
-                is_streaming = last.is_streaming,
-                has_live_trace = last.live_trace.is_some(),
-                "Checking live_trace availability"
-            );
-            if last.is_streaming {
-                if let Some(ref mut trace) = last.live_trace {
-                    debug!("Adding tool call to live_trace");
-                    let index = trace.items.len();
-                    trace.add_thinking(thinking);
-                    trace.set_active_tool(index);
-                }
-            } else {
-                debug!("live_trace not available for tool call");
-            }
-        } else {
-            debug!("Last message is not streaming");
-        }
-
-        cx.notify();
-        self.activate_sticky_scroll();
-    }
-
-    /// Helper method to update the active thinking block in the live trace
-    #[allow(dead_code)]
-    fn update_thinking_trace<F>(&mut self, updater: F) -> bool
-    where
-        F: FnOnce(&mut ThinkingBlock),
-    {
-        let last_message = match self.parent_streaming_message_mut() {
-            Some(msg) => msg,
-            None => return false,
-        };
-
-        let trace = match last_message.live_trace.as_mut() {
-            Some(t) => t,
-            None => return false,
-        };
-
-        let active_idx = match trace.active_tool_index {
-            Some(idx) => idx,
-            None => return false,
-        };
-
-        let item = match trace.items.get_mut(active_idx) {
-            Some(i) => i,
-            None => return false,
-        };
-
-        if let TraceItem::Thinking(tb) = item {
-            updater(tb);
-            return true;
-        }
-
-        false
-    }
-
-    /// Handle thinking block content delta event
-    #[allow(dead_code)]
-    pub fn handle_thinking_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
-        self.update_thinking_trace(|tb| {
-            tb.content.push_str(delta);
-        });
-
-        cx.notify();
-    }
-
-    /// Handle thinking block ended event
-    #[allow(dead_code)]
-    pub fn handle_thinking_ended(&mut self, cx: &mut Context<Self>) {
-        debug!("Thinking block ended");
-
-        self.update_thinking_trace(|tb| {
-            tb.state = ThinkingState::Completed;
-            // Generate a summary from the first line or first N characters
-            tb.summary = tb
-                .content
-                .lines()
-                .next()
-                .map(|line| {
-                    if line.len() > 50 {
-                        format!("{}...", &line[..50])
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .unwrap_or_else(|| "Analysis complete".to_string());
-        });
-
-        // Clear active tool after thinking completes
-        if let Some(last) = self.parent_streaming_message_mut() {
-            if let Some(ref mut trace) = last.live_trace {
-                trace.clear_active_tool();
             }
         }
 

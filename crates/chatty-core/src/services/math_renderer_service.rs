@@ -565,7 +565,6 @@ $ {typst_code} $")
     }
 
     /// Clear the math rendering cache (tested in tests::test_clear_cache)
-    #[allow(dead_code)]
     pub fn clear_cache(&self) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.clear();
@@ -678,7 +677,6 @@ $ {typst_code} $")
     }
 
     /// Get the number of cached items (tested in tests::test_cache_*)
-    #[allow(dead_code)]
     pub fn cache_size(&self) -> usize {
         self.cache.lock().map(|c| c.len()).unwrap_or(0)
     }

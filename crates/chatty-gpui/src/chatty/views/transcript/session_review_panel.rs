@@ -142,10 +142,6 @@ impl ReviewFileSection {
         }
     }
 
-    pub fn is_collapsed(&self) -> bool {
-        self.collapsed
-    }
-
     pub fn estimated_height(&self, cx: &App) -> f32 {
         if self.collapsed {
             return REVIEW_HEADER_HEIGHT;

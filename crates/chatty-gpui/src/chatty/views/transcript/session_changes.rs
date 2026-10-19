@@ -94,10 +94,6 @@ pub fn merge_file_changes(changes: impl IntoIterator<Item = FileChange>) -> Vec<
     by_path.into_values().collect()
 }
 
-pub fn collect_file_changes_from_tools(tools: &[ToolCallBlock]) -> Vec<FileChange> {
-    merge_file_changes(tools.iter().filter_map(file_change_from_tool))
-}
-
 /// Edits already counted on Activity blocks — Diff is the same tool again.
 pub fn file_changes_from_turn(turn: &Turn) -> Vec<FileChange> {
     let mut collected = Vec::new();

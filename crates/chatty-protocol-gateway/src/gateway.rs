@@ -52,7 +52,6 @@ pub struct GatewayState {
     /// What runs calls over worker connections (BI-4). Held, never read:
     /// it lives as long as the server does, and the registry only holds it
     /// weakly.
-    #[allow(dead_code)]
     pub(crate) calls: Arc<BrokerCalls>,
     /// How many HTTP requests reached a role or the directory.
     pub(crate) routes: RouteCounter,

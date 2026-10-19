@@ -132,7 +132,6 @@ pub trait ConversationRepository: Send + Sync + 'static {
     ///
     /// No ordering is promised. Callers that need conversations newest-first
     /// want `load_metadata`, or must sort for themselves.
-    #[allow(dead_code)]
     fn load_all(&self) -> BoxFuture<'static, RepositoryResult<Vec<ConversationData>>>;
 
     /// Save a conversation to storage

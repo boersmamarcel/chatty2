@@ -238,18 +238,7 @@ pub struct PlanOverlay {
     max_height: Pixels,
 }
 
-impl PlanOverlay {
-    pub fn new(snapshot: AgentTaskSnapshot) -> Self {
-        Self {
-            snapshot,
-            pending_command: None,
-            on_jump: None,
-            on_decide: None,
-            on_close: None,
-            max_height: px(420.),
-        }
-    }
-}
+impl PlanOverlay {}
 
 impl RenderOnce for PlanOverlay {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {

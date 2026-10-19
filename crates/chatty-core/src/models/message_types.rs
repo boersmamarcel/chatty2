@@ -62,22 +62,14 @@ pub enum TraceEvent {
     /// Tool call state changed (Running → Success/Error)
     ToolCallStateChanged {
         tool_id: String,
-        #[allow(dead_code)]
         old_state: ToolCallState,
-        #[allow(dead_code)]
         new_state: ToolCallState,
     },
     /// Tool call received output
-    ToolCallOutputReceived {
-        tool_id: String,
-        #[allow(dead_code)]
-        has_output: bool,
-    },
+    ToolCallOutputReceived { tool_id: String, has_output: bool },
     /// Thinking block state changed
     ThinkingStateChanged {
-        #[allow(dead_code)]
         old_state: ThinkingState,
-        #[allow(dead_code)]
         new_state: ThinkingState,
     },
 }
@@ -258,11 +250,6 @@ impl SystemTrace {
 
     pub fn add_tool_call(&mut self, tool_call: ToolCallBlock) {
         self.items.push(TraceItem::ToolCall(tool_call));
-    }
-
-    #[allow(dead_code)]
-    pub fn add_thinking(&mut self, thinking: ThinkingBlock) {
-        self.items.push(TraceItem::Thinking(thinking));
     }
 
     pub fn has_items(&self) -> bool {

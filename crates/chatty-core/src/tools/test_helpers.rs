@@ -55,19 +55,6 @@ impl MockMcpRepository {
             last_saved: Mutex::new(None),
         }
     }
-
-    pub fn with_save_error(servers: Vec<McpServerConfig>, error: &str) -> Self {
-        Self {
-            servers: Mutex::new(servers),
-            load_error: Mutex::new(None),
-            save_error: Mutex::new(Some(error.to_string())),
-            last_saved: Mutex::new(None),
-        }
-    }
-
-    pub fn get_last_saved(&self) -> Option<Vec<McpServerConfig>> {
-        self.last_saved.lock().unwrap().clone()
-    }
 }
 
 impl McpRepository for MockMcpRepository {
