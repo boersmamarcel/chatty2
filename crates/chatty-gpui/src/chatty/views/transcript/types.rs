@@ -44,7 +44,6 @@ pub enum Block {
     Text {
         id: BlockId,
         content: String,
-        streaming: bool,
         /// Images the assistant produced this turn (screenshots, charts, rendered
         /// pages). They render inside the bubble, so the virtual list has to
         /// account for them or the next turn paints on top.
@@ -126,8 +125,4 @@ pub struct Turn {
     pub streaming: bool,
 }
 
-impl Turn {
-    pub fn first_block_id(&self) -> Option<BlockId> {
-        self.blocks.first().map(Block::id)
-    }
-}
+impl Turn {}

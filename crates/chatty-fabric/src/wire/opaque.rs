@@ -149,7 +149,7 @@ mod tests {
         ));
         let line = format!(r#"{{"conversation":{big}}}"#);
         #[derive(Debug, Deserialize)]
-        #[allow(dead_code)]
+        #[expect(dead_code, reason = "only deserialized, to hit the size cap")]
         struct Holder {
             conversation: Opaque,
         }

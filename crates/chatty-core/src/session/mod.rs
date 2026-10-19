@@ -301,10 +301,6 @@ impl AgentSession {
         self.conversation = conversation;
     }
 
-    pub fn take_conversation(&mut self) -> Option<Conversation> {
-        self.conversation.take()
-    }
-
     /// Complete a build context with what the session provides: its store
     /// handles, so the agent's tools raise requests on this session, and the
     /// owned conversation's artifact queue. The caller assembles only the

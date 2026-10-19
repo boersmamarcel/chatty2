@@ -30,7 +30,6 @@ pub struct CodeBlockComponent {
 }
 
 impl CodeBlockComponent {
-    #[allow(dead_code)]
     pub fn new(language: Option<String>, code: String, block_index: usize) -> Self {
         Self {
             language,

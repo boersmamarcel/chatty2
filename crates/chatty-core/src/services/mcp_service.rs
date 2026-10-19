@@ -673,17 +673,6 @@ impl McpService {
         Ok(())
     }
 
-    /// Delete stored OAuth credentials for a server.
-    /// Call this when a server is removed from settings.
-    pub async fn delete_server_credentials(server_name: &str) {
-        FileCredentialStore::delete_for_server(server_name).await;
-    }
-
-    /// Check if a server has cached OAuth credentials.
-    pub fn has_cached_credentials(server_name: &str) -> bool {
-        FileCredentialStore::has_credentials(server_name)
-    }
-
     /// Disconnect from a single MCP server.
     pub async fn disconnect_server(&self, name: &str) -> Result<()> {
         let connection = {

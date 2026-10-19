@@ -20,7 +20,6 @@ pub enum BrowserProfile {
     /// A throwaway user-data directory, wiped on teardown. No credentials.
     Ephemeral,
     /// A named directory under app data that survives restarts.
-    #[allow(dead_code)]
     Persistent { name: String },
 }
 
@@ -52,7 +51,6 @@ pub enum NavigationPolicy {
         allow_private_network_access: bool,
     },
     /// Lane B (AGE-158): a per-task origin allowlist. Not constructed yet.
-    #[allow(dead_code)]
     Allowlist { origins: Vec<String> },
 }
 

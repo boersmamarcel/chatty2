@@ -2,26 +2,22 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chatty_core::models::message_types::{
-    ApprovalState, SystemTrace, ToolCallBlock, ToolCallState, TraceItem,
-};
-use gpui::{Pixels, Size, px, size};
+use chatty_core::models::message_types::{SystemTrace, ToolCallState, TraceItem};
 
-use super::activity::{RunTally, classify_tool};
+use super::activity::classify_tool;
 use super::artifact_kind::{
     artifact_old_content_from_tool, attachment_image_path, chart_artifact_path,
     is_produced_file_tool, is_standalone_artifact_path, is_transcript_artifact_receipt,
     produced_path_is_openable, tool_file_path,
 };
-use super::session_changes::{file_change_from_tool, file_changes_from_turn, merge_file_changes};
 use super::table::extract_table_preview;
 use super::types::{Block, BlockId, Turn, TurnRole};
 use crate::chatty::views::message_component::{DisplayMessage, MessageRole};
-use crate::chatty::views::message_parsing::{ContentSegment, parse_content_segments};
 
 /// Fixed height reported by a collapsed finished turn.
 pub const COLLAPSED_TURN_HEIGHT: f32 = 36.0;
 
+#[cfg(test)]
 /// Map one [`DisplayMessage`] onto one [`Turn`].
 pub fn adapt_message(msg: &DisplayMessage, message_index: usize, collapsed: bool) -> Turn {
     adapt_message_with_trace(msg, message_index, collapsed, None)
@@ -70,7 +66,6 @@ pub fn adapt_message_with_trace(
                 blocks.push(Block::Text {
                     id: BlockId::from_parts(namespace, "text"),
                     content: msg.content.clone(),
-                    streaming: msg.is_streaming,
                     attachments: msg.attachments.clone(),
                 });
             }
@@ -361,6 +356,7 @@ pub fn attach_plan_block(turns: &mut [Turn], has_plan: bool) {
     );
 }
 
+#[cfg(test)]
 /// Drop every plan block but the most recent one.
 ///
 /// `adapt_message` emits a plan block per message that called `write_todos`,
@@ -648,10 +644,12 @@ fn artifact_path(
         .filter(|path| produced_path_is_openable(path))
 }
 
+#[cfg(test)]
 pub fn adapt_messages(messages: &[DisplayMessage], collapsed_turns: &[bool]) -> Vec<Turn> {
     adapt_messages_with_traces(messages, collapsed_turns, &[])
 }
 
+#[cfg(test)]
 pub fn adapt_messages_with_traces(
     messages: &[DisplayMessage],
     collapsed_turns: &[bool],
@@ -698,6 +696,10 @@ pub fn format_working_for(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chatty::views::transcript::activity::RunTally;
+    use crate::chatty::views::transcript::session_changes::{
+        file_change_from_tool, merge_file_changes,
+    };
 
     /// A PDF that really is on disk. The adapter refuses to build a card for an
     /// absolute path that is not there, which is the point — a fixture that

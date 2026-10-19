@@ -137,12 +137,17 @@ use chatty_core::tools::PendingArtifacts;
 
 /// Status of a stream lifecycle
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub enum StreamStatus {
     Active,
     Completed,
     Cancelled,
-    Error(String),
+    Error(
+        #[expect(
+            dead_code,
+            reason = "only read through Debug, by the event-sequence goldens"
+        )]
+        String,
+    ),
 }
 
 /// Per-conversation stream state.
@@ -196,7 +201,6 @@ pub struct StreamState {
 /// Events emitted by StreamManager for decoupled UI updates.
 /// Each variant is tagged with `conversation_id` so subscribers can filter.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 // `StreamEnded` carries the turn's `TokenUsage`, which names its model and
 // time (AGE-682); it is emitted once per turn, so boxing it buys nothing.
 #[allow(clippy::large_enum_variant)]
@@ -247,8 +251,14 @@ pub enum StreamManagerEvent {
         id: String,
         questions: Vec<chatty_core::models::clarification_store::ClarifyingQuestion>,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "production reads usage at stream end; the session characterization tests read these"
+        )
+    )]
     TokenUsage {
-        conversation_id: String,
         input_tokens: u32,
         output_tokens: u32,
         cache_read_tokens: u32,
@@ -742,7 +752,6 @@ impl StreamManager {
                     state.token_usage = Some(usage);
                 }
                 cx.emit(StreamManagerEvent::TokenUsage {
-                    conversation_id: conv_id.to_string(),
                     input_tokens,
                     output_tokens,
                     cache_read_tokens,
@@ -758,10 +767,8 @@ impl StreamManager {
             }
             StreamChunk::Error(error) => {
                 // Buffered text was already flushed above (any non-text chunk
-                // flushes first), so it lands before this StreamEnded.
-                // StreamStatus stays a display string (AGE-244 / D5's typed
-                // `kind` is for recovery decisions, made in on_chunk before
-                // this point; nothing downstream of StreamManager re-classifies).
+                // flushes first), so it lands before this StreamEnded. The
+                // error itself was already classified in on_chunk.
                 let message = error.message;
                 let (token_usage, trace_json, epoch) =
                     if let Some(state) = self.streams.get_mut(conv_id) {
@@ -861,7 +868,6 @@ impl StreamManager {
                     state.token_usage = Some(usage.clone());
                 }
                 cx.emit(StreamManagerEvent::TokenUsage {
-                    conversation_id: conv_id.to_string(),
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
                     cache_read_tokens: usage.cache_read_tokens,
@@ -1076,8 +1082,8 @@ impl StreamManager {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     /// Check if any stream is active.
-    #[allow(dead_code)]
     pub fn has_active_streams(&self) -> bool {
         !self.streams.is_empty()
     }
@@ -1619,7 +1625,7 @@ mod tests {
     /// Run: `cargo test --release -p chatty-gpui --all-features -- \
     /// --ignored --nocapture age_166_measured_self_time_and_notify_rate`
     #[gpui::test]
-    #[ignore]
+    #[ignore = "timing measurement; run with --release --ignored"]
     async fn age_166_measured_self_time_and_notify_rate(cx: &mut gpui::TestAppContext) {
         let (manager, events) = subscribed_manager(cx);
         let cancel_flag = Arc::new(AtomicBool::new(false));

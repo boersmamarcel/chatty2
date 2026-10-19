@@ -135,7 +135,6 @@ typst-pdf = "0.15.1"
 typst-layout = "0.15.1"
 mitex = "0.2.4"
 typst-assets = { version = "0.15.1", features = ["fonts"] }
-comemo = "0.5.1"
 
 # Mermaid / SVG
 mermaid-rs-renderer = { version = "0.3", default-features = false }

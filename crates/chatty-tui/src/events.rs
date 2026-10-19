@@ -1,5 +1,3 @@
-use crossterm::event::Event as CrosstermEvent;
-
 use chatty_core::models::Conversation;
 use chatty_core::services::github_pr_service::PullRequestSummary;
 use chatty_core::services::{EmbeddingService, McpService, MemoryService, StreamError};
@@ -18,7 +16,6 @@ pub struct DeferredServices {
 /// Unified event type for the TUI application.
 /// All async tasks (streaming, settings loading) send events through a single channel.
 /// The main loop drains events between frames.
-#[allow(dead_code)] // Variants constructed by async tasks, matched in engine/app
 pub enum AppEvent {
     // ── Stream events ────────────────────────────────────────────────────
     StreamStarted,
@@ -76,7 +73,6 @@ pub enum AppEvent {
     AgentProtocolFollowUp(String),
 
     // ── Lifecycle events ─────────────────────────────────────────────────
-    ConversationReady,
     /// Background conversation initialization completed successfully.
     ConversationInitialized {
         conversation: Box<Conversation>,
@@ -99,10 +95,6 @@ pub enum AppEvent {
     /// A batch of what a run nested under a delegation did, tagged by the
     /// broker (TB-1).
     SwarmEvent(chatty_fabric::SwarmEvent),
-
-    // ── Terminal events ──────────────────────────────────────────────────
-    TerminalInput(CrosstermEvent),
-    Tick,
 }
 
 impl std::fmt::Debug for AppEvent {
@@ -165,7 +157,6 @@ impl std::fmt::Debug for AppEvent {
             Self::AgentProtocolFollowUp(s) => {
                 f.debug_tuple("AgentProtocolFollowUp").field(s).finish()
             }
-            Self::ConversationReady => write!(f, "ConversationReady"),
             Self::ConversationInitialized { generation, .. } => f
                 .debug_struct("ConversationInitialized")
                 .field("generation", generation)
@@ -183,8 +174,6 @@ impl std::fmt::Debug for AppEvent {
             Self::DelegationFinished(s) => f.debug_tuple("DelegationFinished").field(s).finish(),
             Self::Delegation(p) => f.debug_tuple("Delegation").field(p).finish(),
             Self::SwarmEvent(e) => f.debug_tuple("SwarmEvent").field(e).finish(),
-            Self::TerminalInput(e) => f.debug_tuple("TerminalInput").field(e).finish(),
-            Self::Tick => write!(f, "Tick"),
         }
     }
 }

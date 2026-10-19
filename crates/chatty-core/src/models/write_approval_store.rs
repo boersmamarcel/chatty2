@@ -19,7 +19,6 @@ pub enum WriteApprovalDecision {
 ///
 /// Pre-built API: variant fields and `is_destructive()` will be read by the
 /// write approval UI (not yet wired). See `docs/pre-built-apis.md`.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum WriteOperation {
     /// Writing/overwriting a file
@@ -106,7 +105,6 @@ impl WriteOperation {
     /// Whether this is a destructive operation (delete, overwrite)
     ///
     /// Pre-built API: will be called by the write approval UI (not yet wired).
-    #[allow(dead_code)]
     pub fn is_destructive(&self) -> bool {
         matches!(
             self,
@@ -123,7 +121,6 @@ impl WriteOperation {
 ///
 /// Pre-built API: `id` and `operation` will be read by the write approval UI
 /// (not yet wired). See `docs/pre-built-apis.md`.
-#[allow(dead_code)]
 pub struct WriteApprovalRequest {
     /// Unique ID for tracking this request
     pub id: String,

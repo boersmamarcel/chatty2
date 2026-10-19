@@ -220,7 +220,6 @@ impl PathValidator {
 
     /// Validate a path that may not exist yet (for glob patterns).
     /// Returns the resolved path without canonicalization.
-    #[allow(dead_code)]
     pub async fn validate_parent(&self, path: &str) -> Result<PathBuf> {
         if path.is_empty() {
             return Err(anyhow!("Path cannot be empty"));

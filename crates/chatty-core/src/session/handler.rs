@@ -294,12 +294,6 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
         !self.output_in_call && self.last_call_empty
     }
 
-    /// Hand the emitter back once the loop is done, so a caller that gave the
-    /// handler a closure over its own state can have that state back.
-    pub fn into_emitter(self) -> F {
-        self.emit
-    }
-
     /// The loop guard's reaction to a finished tool call, success or error.
     ///
     /// A loop-guard pivot cancels the in-flight turn: it fires precisely

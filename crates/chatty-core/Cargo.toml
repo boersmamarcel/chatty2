@@ -93,7 +93,6 @@ typst-pdf = { workspace = true, optional = true }
 typst-layout = { workspace = true, optional = true }
 mitex = { workspace = true, optional = true }
 typst-assets = { workspace = true, optional = true }
-comemo = { workspace = true, optional = true }
 
 # Mermaid / SVG (optional — enable with "mermaid" feature)
 mermaid-rs-renderer = { workspace = true, optional = true }
@@ -167,7 +166,7 @@ pdf = ["dep:pdfium-render", "dep:image", "dep:lopdf"]
 # Slide rasterisation renders the deck to a PDF and pages it with pdfium,
 # so "pptx" pulls in "pdf" rather than silently degrading without it.
 pptx = ["dep:rpptx", "dep:pptx_writer", "pdf"]
-math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:typst-layout", "dep:mitex", "dep:typst-assets", "dep:comemo"]
+math-render = ["dep:typst", "dep:typst-svg", "dep:typst-pdf", "dep:typst-layout", "dep:mitex", "dep:typst-assets"]
 mermaid = ["dep:mermaid-rs-renderer", "dep:resvg", "dep:usvg"]
 duckdb = ["dep:duckdb"]
 # Built-in browser control (AGE-142). Pulls chromiumoxide for CDP, zip for

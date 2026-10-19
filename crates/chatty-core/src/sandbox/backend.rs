@@ -235,7 +235,6 @@ pub trait SandboxBackend: Send + Sync {
     fn has_port_exposed(&self, port: u16) -> bool;
 
     /// Health check — is the backend available?
-    #[allow(dead_code)]
     async fn is_available(docker_host: Option<&str>) -> Result<bool>
     where
         Self: Sized;

@@ -138,10 +138,6 @@ impl SwarmTree {
         self.nodes.iter().position(|n| n.name == name)
     }
 
-    pub fn node(&self, name: &str) -> Option<&SwarmNodeView> {
-        self.index_of(name).map(|ix| &self.nodes[ix])
-    }
-
     pub fn children(&self, ix: usize) -> impl Iterator<Item = usize> + '_ {
         (ix + 1..self.nodes.len()).filter(move |&c| self.nodes[c].parent == Some(ix))
     }

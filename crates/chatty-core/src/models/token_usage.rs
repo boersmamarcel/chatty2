@@ -307,7 +307,6 @@ impl Default for TokenUsage {
 }
 
 impl TokenUsage {
-    #[allow(dead_code)]
     pub fn new(input_tokens: u32, output_tokens: u32) -> Self {
         Self {
             input_tokens,

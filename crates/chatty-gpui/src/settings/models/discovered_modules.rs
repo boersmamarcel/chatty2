@@ -14,13 +14,11 @@ pub enum ModuleLoadStatus {
     Remote,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct DiscoveredModuleEntry {
     pub directory_name: String,
     pub name: String,
     pub version: String,
-    pub description: String,
     pub wasm_file: String,
     pub tools: Vec<String>,
     pub mcp: bool,

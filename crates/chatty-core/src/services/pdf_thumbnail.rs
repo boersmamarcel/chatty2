@@ -9,8 +9,6 @@ use super::pdfium_utils::{PdfiumHandle, create_pdfium};
 const THUMBNAIL_SIZE: u32 = 64;
 /// Width used by the artifact-panel page preview (fits a ~380px dock at 2x).
 pub const PREVIEW_WIDTH: u32 = 720;
-/// Cap extracted text so a 200-page PDF does not stall the panel.
-pub const PREVIEW_TEXT_PAGES: u32 = 50;
 
 /// Session-scoped temp directory for PDF thumbnails
 static THUMBNAIL_DIR: std::sync::LazyLock<Arc<Mutex<Option<PathBuf>>>> =

@@ -1686,7 +1686,6 @@ impl ShellSession {
     }
 
     /// Shut down the shell session, killing the bash process.
-    #[allow(dead_code)]
     pub async fn shutdown(&self) {
         let mut process = self.process.lock().await;
         if let Some(proc) = process.take() {
@@ -1697,7 +1696,6 @@ impl ShellSession {
     }
 
     /// Check if the session has a running process
-    #[allow(dead_code)]
     pub async fn is_running(&self) -> bool {
         let process = self.process.lock().await;
         process.is_some()

@@ -32,11 +32,12 @@ impl FileCredentialStore {
         }
     }
 
-    /// Delete stored credentials for a server.
-    pub async fn delete_for_server(server_name: &str) {
+    /// Delete stored credentials for a server. Called when the server is
+    /// uninstalled, so a later server with the same name starts signed out.
+    pub fn delete_for_server(server_name: &str) {
         let store = Self::for_server(server_name);
         if store.path.exists() {
-            if let Err(e) = tokio::fs::remove_file(&store.path).await {
+            if let Err(e) = std::fs::remove_file(&store.path) {
                 warn!(
                     server = %server_name,
                     error = ?e,
@@ -46,6 +47,11 @@ impl FileCredentialStore {
                 debug!(server = %server_name, "Deleted OAuth credentials");
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
     }
 
     /// Check if stored credentials exist for a server (without loading them).

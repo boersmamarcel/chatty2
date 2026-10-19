@@ -85,11 +85,6 @@ impl A2aAgentsModel {
         &self.agents
     }
 
-    /// Mutable access to the agent list (for in-place updates).
-    pub fn agents_mut(&mut self) -> &mut Vec<A2aAgentConfig> {
-        &mut self.agents
-    }
-
     /// Replace the entire list (used when loading from disk).
     pub fn replace_all(&mut self, agents: Vec<A2aAgentConfig>) {
         self.agents = agents;

@@ -55,11 +55,11 @@ impl GlobalTokenBudget {
         }
     }
 
+    #[cfg(test)]
     /// Publish a freshly-computed snapshot to all readers.
     ///
     /// This is a `&self` operation — `watch::Sender::send` does not require mutation of
     /// `GlobalTokenBudget`, so it can be called directly via `cx.global::<GlobalTokenBudget>()`.
-    #[allow(dead_code)]
     pub fn publish(&self, snapshot: TokenBudgetSnapshot) {
         // Ignore SendError — it only occurs when all receivers have been dropped (i.e. shutdown).
         let _ = self.sender.send(Some(snapshot));
@@ -96,11 +96,11 @@ impl GlobalTokenBudget {
         });
     }
 
+    #[cfg(test)]
     /// Borrow the current snapshot without cloning.
     ///
     /// Returns a `watch::Ref` — zero-copy, holds a read lock until dropped.
     /// For the render path, prefer calling this directly on the `receiver` field.
-    #[allow(dead_code)]
     pub fn snapshot(&self) -> watch::Ref<'_, Option<TokenBudgetSnapshot>> {
         self.receiver.borrow()
     }
@@ -126,20 +126,11 @@ pub struct SnapshotInputs {
     pub preamble: String,
     pub history: Vec<rig_core::completion::Message>,
     pub user_message_text: String,
-    // Populated for potential future use (e.g. re-running tool estimation in-task).
-    #[allow(dead_code)]
-    pub exec_settings: crate::settings::models::ExecutionSettingsModel,
-    #[allow(dead_code)]
-    pub mcp_server_count: usize,
     /// Pre-computed cached preamble tokens (read from `GlobalTokenBudget::cache` on
     /// the GPUI thread before `spawn_blocking`). Zero if the cache was cold.
     pub cached_preamble_tokens: usize,
     /// Pre-computed cached tool tokens. Zero if the cache was cold.
     pub cached_tool_tokens: usize,
-    /// The tool hint string used to produce `cached_tool_tokens`. Stored for
-    /// diagnostics; not consumed by `compute_snapshot_background`.
-    #[allow(dead_code)]
-    pub tool_hint: String,
     pub tool_count: usize,
     /// True when the preamble cache was warm for these inputs.
     pub preamble_cache_hit: bool,
@@ -380,11 +371,8 @@ pub fn gather_snapshot_inputs(
         preamble,
         history: history.to_vec(),
         user_message_text,
-        exec_settings,
-        mcp_server_count,
         cached_preamble_tokens,
         cached_tool_tokens,
-        tool_hint,
         tool_count,
         preamble_cache_hit,
         tool_cache_hit,
@@ -560,11 +548,8 @@ mod tests {
             preamble: "You are a helpful assistant.".to_string(),
             history: vec![],
             user_message_text: "Hello!".to_string(),
-            exec_settings: crate::settings::models::ExecutionSettingsModel::default(),
-            mcp_server_count: 0,
             cached_preamble_tokens: 0,
             cached_tool_tokens: 0,
-            tool_hint: "tools:6,mcp:0".to_string(),
             tool_count: 6,
             preamble_cache_hit: false,
             tool_cache_hit: false,
@@ -597,11 +582,8 @@ mod tests {
             preamble: "You are a helpful assistant.".to_string(),
             history: vec![],
             user_message_text: "Hello".to_string(),
-            exec_settings: crate::settings::models::ExecutionSettingsModel::default(),
-            mcp_server_count: 0,
             cached_preamble_tokens: cached_pre,
             cached_tool_tokens: cached_tools,
-            tool_hint: "t:6".to_string(),
             tool_count: 6,
             preamble_cache_hit: true, // cache is warm
             tool_cache_hit: true,     // cache is warm

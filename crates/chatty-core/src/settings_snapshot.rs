@@ -669,7 +669,7 @@ mod two_process_determinism {
     /// as hex between markers, gated by an env var so it never runs as part
     /// of the normal test sweep.
     #[test]
-    #[ignore]
+    #[ignore = "child process entry point for the snapshot fixture test; does nothing unless DUMP_ENV is set"]
     fn dump_fixture_for_parent() {
         if std::env::var(DUMP_ENV).is_err() {
             return;

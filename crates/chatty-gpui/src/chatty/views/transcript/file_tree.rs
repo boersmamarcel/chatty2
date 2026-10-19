@@ -110,6 +110,7 @@ pub struct TreeRow {
 }
 
 impl TreeRow {
+    #[cfg(test)]
     pub fn is_dir(&self) -> bool {
         matches!(self.kind, RowKind::Entry { is_dir: true, .. })
     }
@@ -176,6 +177,7 @@ impl FileTree {
         &self.root
     }
 
+    #[cfg(test)]
     /// The primary selected entry (the most recently selected one).
     pub fn selected(&self) -> Option<&Path> {
         self.selection.last().map(PathBuf::as_path)
@@ -186,6 +188,7 @@ impl FileTree {
         &self.selection
     }
 
+    #[cfg(test)]
     pub fn is_selected(&self, path: &Path) -> bool {
         self.selection.iter().any(|p| p == path)
     }
@@ -198,12 +201,7 @@ impl FileTree {
         self.error.as_deref()
     }
 
-    /// Surface a failure from outside the tree (a save that could not
-    /// write) in the same slot its own operations use.
-    pub fn set_error(&mut self, message: String) {
-        self.error = Some(message);
-    }
-
+    #[cfg(test)]
     pub fn is_expanded(&self, dir: &Path) -> bool {
         self.expanded.contains(dir)
     }
@@ -275,26 +273,6 @@ impl FileTree {
         if !self.dirs.contains_key(dir) {
             self.dirs.insert(dir.to_path_buf(), list_dir(dir));
         }
-    }
-
-    /// Expand every directory between the root and `path`, so a file the
-    /// panel opened from elsewhere can be shown selected in the tree.
-    pub fn reveal(&mut self, path: &Path) {
-        if !path.starts_with(&self.root) {
-            return;
-        }
-        let mut dir = self.root.clone();
-        self.expand(&dir);
-        if let Ok(rel) = path.strip_prefix(&self.root) {
-            let mut components: Vec<_> = rel.components().collect();
-            // The last component is the entry itself, not a directory to open.
-            components.pop();
-            for component in components {
-                dir.push(component);
-                self.expand(&dir);
-            }
-        }
-        self.select(Some(path.to_path_buf()));
     }
 
     /// Re-list any expanded directory whose mtime moved since it was read.
@@ -389,20 +367,6 @@ impl FileTree {
         }
     }
 
-    /// The directory a "new entry" from the current selection lands in: the
-    /// selected directory, the selected file's parent, or the root.
-    pub fn target_dir(&self) -> PathBuf {
-        match self.selection.last() {
-            Some(path) if path.is_dir() => path.clone(),
-            Some(path) => path
-                .parent()
-                .filter(|parent| parent.starts_with(&self.root))
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| self.root.clone()),
-            None => self.root.clone(),
-        }
-    }
-
     /// Start an inline edit; the directory it sits in is expanded so the
     /// row is visible.
     pub fn begin_edit(&mut self, edit: PendingEdit) {
@@ -433,22 +397,6 @@ impl FileTree {
             Ok(op) => {
                 self.pending = None;
                 self.error = None;
-                self.after_change(&op);
-                Some(op)
-            }
-            Err(message) => {
-                self.error = Some(message);
-                None
-            }
-        }
-    }
-
-    /// Delete `path` (a file, or a directory and everything in it).
-    pub fn delete(&mut self, path: &Path) -> Option<FileOp> {
-        match delete_entry(path) {
-            Ok(()) => {
-                self.error = None;
-                let op = FileOp::Deleted(path.to_path_buf());
                 self.after_change(&op);
                 Some(op)
             }
@@ -766,27 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn reveal_expands_the_way_down_and_selects() {
-        let tmp = workspace();
-        let mut tree = FileTree::new(tmp.path().to_path_buf());
-        let deep = tmp.path().join("src/nested/deep.rs");
-        tree.reveal(&deep);
-        assert!(tree.is_expanded(&tmp.path().join("src")));
-        assert!(tree.is_expanded(&tmp.path().join("src/nested")));
-        assert_eq!(tree.selected(), Some(deep.as_path()));
-        assert!(tree.rows().iter().any(|row| row.path == deep));
-    }
-
-    #[test]
-    fn reveal_outside_the_root_is_ignored() {
-        let tmp = workspace();
-        let mut tree = FileTree::new(tmp.path().to_path_buf());
-        tree.reveal(Path::new("/definitely/elsewhere/x.rs"));
-        assert_eq!(tree.selected(), None);
-        assert_eq!(tree.rows().len(), 5);
-    }
-
-    #[test]
     fn a_forced_sync_picks_up_files_written_behind_its_back() {
         let tmp = workspace();
         let mut tree = FileTree::new(tmp.path().to_path_buf());
@@ -817,18 +744,6 @@ mod tests {
         tree.sync(true);
         assert!(!tree.is_expanded(&docs));
         assert!(!tree.rows().iter().any(|row| row.name == "docs"));
-    }
-
-    #[test]
-    fn target_dir_follows_the_selection() {
-        let tmp = workspace();
-        let root = tmp.path().to_path_buf();
-        let mut tree = FileTree::new(root.clone());
-        assert_eq!(tree.target_dir(), root);
-        tree.select(Some(root.join("src/main.rs")));
-        assert_eq!(tree.target_dir(), root.join("src"));
-        tree.select(Some(root.join("src")));
-        assert_eq!(tree.target_dir(), root.join("src"));
     }
 
     #[test]
@@ -925,41 +840,6 @@ mod tests {
         assert!(tree.is_expanded(&root.join("lib")));
         assert!(!tree.is_expanded(&src));
         assert!(tree.rows().iter().any(|row| row.name == "main.rs"));
-    }
-
-    #[test]
-    fn delete_removes_files_and_whole_folders() {
-        let tmp = workspace();
-        let root = tmp.path().to_path_buf();
-        let mut tree = FileTree::new(root.clone());
-        let src = root.join("src");
-        tree.expand(&src);
-        tree.select(Some(src.join("main.rs")));
-        assert_eq!(
-            tree.delete(&root.join("Cargo.toml")),
-            Some(FileOp::Deleted(root.join("Cargo.toml")))
-        );
-        assert!(!root.join("Cargo.toml").exists());
-        assert_eq!(tree.delete(&src), Some(FileOp::Deleted(src.clone())));
-        assert!(!src.exists());
-        assert!(!tree.is_expanded(&src));
-        assert_eq!(tree.selected(), None);
-        assert_eq!(
-            names(&tree.rows()),
-            vec![
-                ("docs".to_string(), 0),
-                (".env".to_string(), 0),
-                ("README.md".to_string(), 0),
-            ]
-        );
-    }
-
-    #[test]
-    fn deleting_something_already_gone_reports_instead_of_panicking() {
-        let tmp = workspace();
-        let mut tree = FileTree::new(tmp.path().to_path_buf());
-        assert_eq!(tree.delete(&tmp.path().join("nope")), None);
-        assert!(tree.error().unwrap().starts_with("Could not delete"));
     }
 
     #[test]

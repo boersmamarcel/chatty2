@@ -121,7 +121,6 @@ impl TokenTrackingSettings {
     ///
     /// Called after deserialisation to guard against corrupted config files.
     /// Returns a corrected copy; does not mutate `self`.
-    #[allow(dead_code)]
     pub fn validated(mut self) -> Self {
         // Clamp thresholds to [0.0, 1.0]
         self.high_threshold = self.high_threshold.clamp(0.0, 1.0);
@@ -142,19 +141,16 @@ impl TokenTrackingSettings {
 
     /// Return `true` if the bar should be rendered for a conversation whose model
     /// has `max_context_window` configured.
-    #[allow(dead_code)]
     pub fn should_show_bar(&self) -> bool {
         self.enabled
     }
 
     /// Return `true` if the given utilization ratio crosses the high threshold.
-    #[allow(dead_code)]
     pub fn is_high(&self, utilization: f64) -> bool {
         utilization >= self.high_threshold
     }
 
     /// Return `true` if the given utilization ratio crosses the critical threshold.
-    #[allow(dead_code)]
     pub fn is_critical(&self, utilization: f64) -> bool {
         utilization >= self.critical_threshold
     }

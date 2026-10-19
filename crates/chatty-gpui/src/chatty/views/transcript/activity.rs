@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
+use chatty_core::models::message_types::{ToolCallBlock, ToolCallState};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::collapsible::Collapsible as CollapsibleEl;

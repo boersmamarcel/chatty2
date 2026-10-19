@@ -30,18 +30,6 @@ use chatty_fabric::{AgentOrigin, CallEvent, CallRequest, CallResult, Transport};
 #[derive(Deserialize, Serialize)]
 pub struct ListAgentsToolArgs {}
 
-/// Summary of a single configured remote A2A agent, safe for display to the LLM.
-#[derive(Debug, Serialize, Clone)]
-pub struct A2aAgentSummary {
-    pub name: String,
-    pub url: String,
-    /// `true` if an API key is configured (value is never exposed).
-    pub has_api_key: bool,
-    pub enabled: bool,
-    /// Skills advertised by the agent card (may be empty if not yet fetched).
-    pub skills: Vec<String>,
-}
-
 /// One of the broker's local-worker agents, when the gateway publishes
 /// any (ADR-0011 C2; several, by name, under C10).
 #[derive(Debug, Serialize, Clone)]

@@ -269,26 +269,6 @@ impl SandboxManager {
     pub async fn destroy(&self) -> Result<()> {
         destroy_all(&self.sandboxes).await
     }
-
-    /// Check if Docker is available on this system.
-    #[allow(dead_code)]
-    pub async fn is_docker_available(docker_host: Option<&str>) -> bool {
-        DockerSandbox::is_available(docker_host)
-            .await
-            .unwrap_or(false)
-    }
-
-    /// Check if the Monty fast path is available on this system.
-    ///
-    /// Returns `true` when `python3` is found in `PATH`.
-    ///
-    /// Exposed for diagnostics (e.g. settings UI showing which backends are
-    /// available).  The manager performs this check implicitly on each
-    /// execution attempt via [`try_monty`] and falls back to Docker on failure.
-    #[allow(dead_code)]
-    pub async fn is_monty_available() -> bool {
-        MontySandbox::is_available(None).await.unwrap_or(false)
-    }
 }
 
 /// Drain `sandboxes` and destroy every container in it.

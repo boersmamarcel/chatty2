@@ -124,15 +124,6 @@ impl ExtensionsModel {
             .collect()
     }
 
-    /// Return IDs of all enabled WASM module extensions.
-    pub fn wasm_module_ids(&self) -> Vec<&str> {
-        self.extensions
-            .iter()
-            .filter(|e| e.enabled && matches!(e.kind, ExtensionKind::WasmModule))
-            .map(|e| e.id.as_str())
-            .collect()
-    }
-
     pub fn find(&self, id: &str) -> Option<&InstalledExtension> {
         self.extensions.iter().find(|e| e.id == id)
     }
@@ -168,30 +159,6 @@ impl ExtensionsModel {
             .collect()
     }
 
-    /// Find an MCP extension by its server name.
-    pub fn find_mcp_by_name(&self, name: &str) -> Option<&InstalledExtension> {
-        self.extensions.iter().find(|e| match &e.kind {
-            ExtensionKind::McpServer(cfg) => cfg.name == name,
-            _ => false,
-        })
-    }
-
-    /// Find an MCP extension mutably by its server name.
-    pub fn find_mcp_by_name_mut(&mut self, name: &str) -> Option<&mut InstalledExtension> {
-        self.extensions.iter_mut().find(|e| match &e.kind {
-            ExtensionKind::McpServer(cfg) => cfg.name == name,
-            _ => false,
-        })
-    }
-
-    /// Remove an MCP extension by its server name.
-    pub fn remove_mcp_by_name(&mut self, name: &str) {
-        self.extensions.retain(|e| match &e.kind {
-            ExtensionKind::McpServer(cfg) => cfg.name != name,
-            _ => true,
-        });
-    }
-
     /// Count of enabled MCP server extensions.
     pub fn enabled_mcp_count(&self) -> usize {
         self.extensions
@@ -200,21 +167,9 @@ impl ExtensionsModel {
             .count()
     }
 
-    /// Get the runtime auth status for an MCP server.
-    pub fn mcp_auth_status(&self, server_name: &str) -> &McpAuthStatus {
-        self.mcp_auth_statuses
-            .get(server_name)
-            .unwrap_or(&McpAuthStatus::NotRequired)
-    }
-
     /// Set the runtime auth status for an MCP server.
     pub fn set_mcp_auth_status(&mut self, server_name: String, status: McpAuthStatus) {
         self.mcp_auth_statuses.insert(server_name, status);
-    }
-
-    /// Remove the runtime auth status for an MCP server.
-    pub fn remove_mcp_auth_status(&mut self, server_name: &str) {
-        self.mcp_auth_statuses.remove(server_name);
     }
 
     // ── A2A convenience methods ────────────────────────────────────────────
@@ -249,22 +204,6 @@ impl ExtensionsModel {
         })
     }
 
-    /// Find an A2A extension mutably by its agent name.
-    pub fn find_a2a_by_name_mut(&mut self, name: &str) -> Option<&mut InstalledExtension> {
-        self.extensions.iter_mut().find(|e| match &e.kind {
-            ExtensionKind::A2aAgent(cfg) => cfg.name == name,
-            _ => false,
-        })
-    }
-
-    /// Remove an A2A extension by its agent name.
-    pub fn remove_a2a_by_name(&mut self, name: &str) {
-        self.extensions.retain(|e| match &e.kind {
-            ExtensionKind::A2aAgent(cfg) => cfg.name != name,
-            _ => true,
-        });
-    }
-
     /// Look up an enabled A2A agent config by name.
     pub fn find_enabled_a2a(&self, name: &str) -> Option<&A2aAgentConfig> {
         self.extensions.iter().find_map(|e| match &e.kind {
@@ -281,21 +220,9 @@ impl ExtensionsModel {
             .count()
     }
 
-    /// Get the runtime connection status for an A2A agent.
-    pub fn a2a_status(&self, agent_name: &str) -> &A2aAgentStatus {
-        self.a2a_statuses
-            .get(agent_name)
-            .unwrap_or(&A2aAgentStatus::Unknown)
-    }
-
     /// Set the runtime connection status for an A2A agent.
     pub fn set_a2a_status(&mut self, agent_name: String, status: A2aAgentStatus) {
         self.a2a_statuses.insert(agent_name, status);
-    }
-
-    /// Remove the runtime connection status for an A2A agent.
-    pub fn remove_a2a_status(&mut self, agent_name: &str) {
-        self.a2a_statuses.remove(agent_name);
     }
 
     // ── Generic helpers ────────────────────────────────────────────────────

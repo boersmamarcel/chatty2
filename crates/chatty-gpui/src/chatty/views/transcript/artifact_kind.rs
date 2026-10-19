@@ -260,36 +260,6 @@ pub fn chart_artifact_path(
     }
 }
 
-/// True when a tool produced an image the artifact panel should preview.
-pub fn is_chart_artifact_tool(tool_name: &str, _input: &str, output: Option<&str>) -> bool {
-    if tool_name != "create_chart" {
-        return false;
-    }
-    let Some(output) = output else {
-        return false;
-    };
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(output) else {
-        return false;
-    };
-    let Some(path) = json.get("saved_path").and_then(|v| v.as_str()) else {
-        return false;
-    };
-    is_image_path(Path::new(path)) && Path::new(path).exists()
-}
-
-/// Produced-file or chart tool whose result is an image path.
-pub fn is_image_artifact_tool(tool_name: &str, input: &str, output: Option<&str>) -> bool {
-    if is_chart_artifact_tool(tool_name, input, output) {
-        return true;
-    }
-    if !is_produced_file_tool(tool_name, input) {
-        return false;
-    }
-    tool_file_path(input)
-        .or_else(|| output.and_then(tool_file_path))
-        .is_some_and(|path| is_image_path(&path))
-}
-
 /// Image path from a successful `add_attachment` tool call.
 pub fn attachment_image_path(
     tool: &chatty_core::models::message_types::ToolCallBlock,
@@ -393,12 +363,6 @@ pub fn artifact_file_name(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-/// Display title kept as a separate field from [`artifact_file_name`].
-/// Default is the filename; do not title-case or unslugify.
-pub fn artifact_display_title(path: &Path) -> String {
-    artifact_file_name(path)
 }
 
 /// Format token (`MD`, `RS`, `CSV`, `PNG`, `PDF`, `FILE`).
@@ -537,12 +501,11 @@ pub fn markdown_headings(source: &str) -> Vec<ArtifactHeading> {
         .collect()
 }
 
-/// Content position for rendered↔source toggle. Prefer a heading over pixels.
+/// Content position for the rendered↔source toggle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ViewAnchor {
     SourceLine(u32),
     BlockIndex(usize),
-    ScrollFraction(f32),
 }
 
 /// Nearest heading at or before `line`.
@@ -556,25 +519,10 @@ pub fn heading_index_for_line(headings: &[ArtifactHeading], line: u32) -> Option
         .or_else(|| headings.first().map(|_| 0))
 }
 
-pub fn anchor_from_source_line(headings: &[ArtifactHeading], line: u32) -> ViewAnchor {
-    match heading_index_for_line(headings, line) {
-        Some(ix) => ViewAnchor::BlockIndex(ix),
-        None => ViewAnchor::SourceLine(line),
-    }
-}
-
 pub fn source_line_from_anchor(headings: &[ArtifactHeading], anchor: ViewAnchor) -> u32 {
     match anchor {
         ViewAnchor::SourceLine(line) => line,
         ViewAnchor::BlockIndex(ix) => headings.get(ix).map(|h| h.line).unwrap_or(0),
-        ViewAnchor::ScrollFraction(fraction) => {
-            if headings.is_empty() {
-                return 0;
-            }
-            let ix = ((fraction.clamp(0.0, 1.0) * headings.len() as f32) as usize)
-                .min(headings.len().saturating_sub(1));
-            headings[ix].line
-        }
     }
 }
 
@@ -583,15 +531,6 @@ pub fn block_index_from_anchor(headings: &[ArtifactHeading], anchor: ViewAnchor)
         ViewAnchor::BlockIndex(ix) if ix < headings.len() => Some(ix),
         ViewAnchor::BlockIndex(_) => headings.len().checked_sub(1),
         ViewAnchor::SourceLine(line) => heading_index_for_line(headings, line),
-        ViewAnchor::ScrollFraction(fraction) => {
-            if headings.is_empty() {
-                return None;
-            }
-            Some(
-                ((fraction.clamp(0.0, 1.0) * headings.len() as f32) as usize)
-                    .min(headings.len().saturating_sub(1)),
-            )
-        }
     }
 }
 
@@ -981,21 +920,6 @@ mod tests {
             execution_engine: None,
         };
         assert_eq!(chart_artifact_path(&tool), Some(png.clone()));
-        assert!(is_chart_artifact_tool(
-            "create_chart",
-            &tool.input,
-            tool.output.as_deref()
-        ));
-        assert!(is_image_artifact_tool(
-            "create_chart",
-            &tool.input,
-            tool.output.as_deref()
-        ));
-        assert!(is_image_artifact_tool(
-            "write_file",
-            r#"{"path":"out/chart.png"}"#,
-            None
-        ));
         // Missing file must not become an artifact path.
         let missing = ToolCallBlock {
             output: Some(
@@ -1012,7 +936,6 @@ mod tests {
     fn display_title_is_not_unslugified() {
         let path = Path::new("docs/agentic-chat-ui-gpui.md");
         assert_eq!(artifact_file_name(path), "agentic-chat-ui-gpui.md");
-        assert_eq!(artifact_display_title(path), "agentic-chat-ui-gpui.md");
         assert_eq!(artifact_meta_line(path), "Document · MD");
         assert_eq!(artifact_panel_title(path), "agentic-chat-ui-gpui.md · MD");
         assert_eq!(artifact_type_token(Path::new("lib.rs")), "Code");
@@ -1041,13 +964,10 @@ mod tests {
         assert_eq!(headings[1].title, "Details");
         assert_eq!(headings[1].line, 3);
 
-        let mut anchor = ViewAnchor::BlockIndex(1);
-        for _ in 0..3 {
-            let line = source_line_from_anchor(&headings, anchor);
-            assert_eq!(line, 3);
-            anchor = anchor_from_source_line(&headings, line);
-        }
-        assert_eq!(anchor, ViewAnchor::BlockIndex(1));
+        assert_eq!(
+            source_line_from_anchor(&headings, ViewAnchor::BlockIndex(1)),
+            3
+        );
         assert_eq!(heading_index_for_line(&headings, 4), Some(1));
         assert_eq!(
             block_index_from_anchor(&headings, ViewAnchor::SourceLine(4)),

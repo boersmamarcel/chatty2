@@ -238,10 +238,6 @@ impl ConversationsStore {
         Some((session, self.hosted.get_mut(id)))
     }
 
-    pub fn get_hosted_mut(&mut self, id: &str) -> Option<&mut HostedSession> {
-        self.hosted.get_mut(id)
-    }
-
     /// Record where a conversation runs after a move completed.
     ///
     /// Called with the conversation's new mode *after* the history transfer
@@ -322,11 +318,6 @@ impl ConversationsStore {
 
     pub fn unmark_streaming(&mut self, id: &str) {
         self.streaming_ids.remove(id);
-    }
-
-    /// Number of full conversations currently cached in memory.
-    pub fn cached_count(&self) -> usize {
-        self.sessions.len()
     }
 
     /// Get a conversation by ID (immutable). Returns `None` if not yet loaded.
@@ -472,7 +463,6 @@ impl ConversationsStore {
     ///
     /// Prefer this over `set_active_by_id` when the ID comes from an external source and
     /// you want to guard against setting a stale or invalid active conversation.
-    #[allow(dead_code)]
     pub fn set_active(&mut self, id: String) -> bool {
         if self.metadata.iter().any(|m| m.id == id) {
             self.active_conversation_id = Some(id);

@@ -1,8 +1,6 @@
 //! Inline table preview cards and artifact-panel table grid.
 
-use chatty_core::tools::data_query_tool::{
-    INLINE_TABLE_MAX_HEIGHT_PX, INLINE_TABLE_PREVIEW_ROWS, TablePreview, TableSource,
-};
+use chatty_core::tools::data_query_tool::{INLINE_TABLE_MAX_HEIGHT_PX, TablePreview, TableSource};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};

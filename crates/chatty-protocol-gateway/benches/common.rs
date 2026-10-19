@@ -1,7 +1,7 @@
 //! Shared setup for the S7 performance benches (AGE-603 / plugin evaluation
 //! plan §3 S7). Not a real module of the crate — `#[path]`-included by each
 //! bench binary — so some helpers are unused in any one bench.
-#![allow(dead_code)]
+#![allow(dead_code, reason = "included by several benches; each uses a subset")]
 
 use std::path::PathBuf;
 use std::sync::Arc;
