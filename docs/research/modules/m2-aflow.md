@@ -72,5 +72,5 @@ over best manual design reported in paper; do not treat as binding until the hum
 
 ## Further reading
 
-- [`chatty-flow` README](../../../crates/chatty-flow/README.md) — crate scope (the pre-Stage-A promise page is [archived](../../archive/research/crate-promises-chatty-flow.md))
+- [`chatty-flow` README](../../../crates/chatty-flow/README.md) — crate scope (the pre-Stage-A promise page is [archived](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/crate-promises-chatty-flow.md))
 - [Sandbox source](https://github.com/boersmamarcel/chatty2/tree/main/crates/chatty-core/src/sandbox) — `monty.rs`, `monty_bridge.rs`, `manager.rs`

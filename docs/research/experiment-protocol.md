@@ -62,7 +62,7 @@ Agents may build plumbing; the human reviewer runs and interprets.
 ## Promotion decision inputs
 
 After Stage A + B, the human reviewer records (fields per the
-[archived promotion-log template](../archive/research/promotion-log.md)):
+[archived promotion-log template](https://github.com/boersmamarcel/chatty2/blob/5cd0874909dd36318f542bce39e7249b79800e56/docs/archive/research/promotion-log.md)):
 
 1. **Effect size** — paired stats, MDE met?
 2. **Cost / latency** — acceptable on desktop agent?

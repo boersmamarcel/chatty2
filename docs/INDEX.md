@@ -73,7 +73,6 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, pruning |
 | [`team-smoke-test.md`](team-smoke-test.md) | Touching the broker, `--team` or the worker tree | One-command local run of the `coder-reviewer` test-fixture team against Ollama, with the verifier's reward |
 | [`swarm-test-kit.md`](swarm-test-kit.md) | Writing a test that spans a leader, its broker and real workers | The scriptable fake model server and the multi-process swarm harness; the pre-fabric goldens |
-| [`hive-api-changes.md`](hive-api-changes.md) | hive re-pin after this branch merges | Public `chatty-core` API changes hive must adapt to, one-line fix each |
 
 ## Research notes (`docs/research/`, synced to the site under Explanation)
 
@@ -135,19 +134,7 @@ Regenerate with `make docs-gen`; the tables live in
 | `singleton-inventory.md` | Process-global state and repositories |
 | `llms.txt`, `llms-full.txt` | Agent discovery index and concatenated key pages |
 
-## Upstream patch proposals (`docs/upstream/`, not synced)
-
-| File | What it covers |
-|---|---|
-| [`upstream/rig-core-prompt-caching-latest-message.md`](upstream/rig-core-prompt-caching-latest-message.md) | Drafted rig-core patch marking the latest message inside `finalize_openrouter_request_body`, which would let chatty delete the `PromptCachingHttpClient` workaround (AGE-239, origin AGE-205). Not yet submitted upstream. |
-
-## Archived (`docs/archive/`, not synced)
-
-Point-in-time plans and audits kept for their reasoning; open items live in
-Linear. See [`archive/README.md`](archive/README.md).
-
 ---
 
 **Adding a doc?** A new file under `docs/` needs a row above and an entry in
-`docs-site/src/SUMMARY.md`; CI checks both. Working notes go to
-`docs/archive/` instead.
+`docs-site/src/SUMMARY.md`; CI checks both. Working notes go to Linear.

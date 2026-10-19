@@ -17,8 +17,6 @@ pub enum WriteApprovalDecision {
 
 /// Types of write operations that require approval
 ///
-/// Pre-built API: variant fields and `is_destructive()` will be read by the
-/// write approval UI (not yet wired). See `docs/pre-built-apis.md`.
 #[derive(Clone, Debug)]
 pub enum WriteOperation {
     /// Writing/overwriting a file
@@ -118,9 +116,6 @@ impl WriteOperation {
 }
 
 /// Request for user approval to perform a filesystem write operation
-///
-/// Pre-built API: `id` and `operation` will be read by the write approval UI
-/// (not yet wired). See `docs/pre-built-apis.md`.
 pub struct WriteApprovalRequest {
     /// Unique ID for tracking this request
     pub id: String,

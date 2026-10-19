@@ -35,7 +35,7 @@ Hand-written pages, edited in place under `docs-site/src/`: `index.md`, `user/*`
 - **Explanation** (`docs/*.md`, synced to `dev/architecture/`): why it is built this way.
 - **Reference** (`dev/reference/`, `dev/crates/`, `dev/ci-reference.md`, `dev/glossary.md`): lookup tables.
 
-Working notes — point-in-time plans, audits, bug lists — go to `docs/archive/` (not synced, not in `docs/INDEX.md`) or to Linear, never under `docs/`.
+Working notes — point-in-time plans, audits, bug lists — go to Linear, never into the repo. Experiment write-ups go to the private `harbor-chatty` repo.
 
 ### 3. Write to the template
 
@@ -117,6 +117,6 @@ CI runs the same scripts from `.github/workflows/docs.yml`. Docs-only PRs do not
 | Editing `docs-site/src/dev/architecture/foo.md` | Edit `docs/foo.md`; the sync overwrites the copy |
 | Editing a `reference/*.md` table by hand | Edit `scripts/gen-docs-reference.sh`, run `make docs-gen` |
 | A link that works in the repo but 404s on the site | Run `make docs-check-links`; it checks the built site |
-| A plan or audit added under `docs/` | `docs/archive/` or Linear |
+| A plan or audit added under `docs/` | Linear |
 | Ticket ids or crate paths in `src/user/` | Move the detail to a dev page; `docs-check-leakage` blocks it |
 | New page without a `SUMMARY.md` entry | mdBook does not render it; `docs-check-nav` fails |
