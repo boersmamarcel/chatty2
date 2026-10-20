@@ -485,8 +485,14 @@ pub struct SwarmTrace {
     /// [`settle_steps`](Self::settle_steps)).
     callees: BTreeMap<NodeId, Vec<String>>,
     /// The root's delegations that have started and not finished, latest
-    /// last.
-    open: Vec<NodeId>,
+    /// last, each with the `invoke_agent` call that made it (`None` from a
+    /// source that tags none).
+    open: Vec<(Option<u64>, NodeId)>,
+    /// The call the delegation progress arriving now belongs to, as the last
+    /// [`InvokeAgentProgress::Call`] named it. Calls run side by side share
+    /// one stream, so a step or an answer is the open delegation of this
+    /// call, not the latest one.
+    call: Option<u64>,
     /// The lines the root's delegations reported, as its conversation
     /// records them.
     delegated: Vec<UsageLine>,
@@ -544,6 +550,7 @@ impl SwarmTrace {
             unnamed: Vec::new(),
             callees: BTreeMap::new(),
             open: Vec::new(),
+            call: None,
             delegated: Vec::new(),
             seen: vec![SystemTime::now()],
             waits: BTreeMap::new(),
@@ -717,23 +724,23 @@ impl SwarmTrace {
                 if let Some(call) = call {
                     self.started_by.insert(id, call);
                 }
-                self.open.push(id);
+                self.open.push((self.call, id));
             }
             InvokeAgentProgress::Conversation(conversation) => {
-                let Some(id) = self.open.last().copied() else {
+                let Some(id) = self.open_node() else {
                     return;
                 };
                 self.conversations
                     .insert(id, Arc::new(conversation.clone()));
             }
             InvokeAgentProgress::Text(text) => {
-                let Some(id) = self.open.last().copied() else {
+                let Some(id) = self.open_node() else {
                     return;
                 };
                 self.tree.get_mut(id).text_bytes += text.len() as u64;
             }
             InvokeAgentProgress::Step(step) => {
-                let Some(id) = self.open.last().copied() else {
+                let Some(id) = self.open_node() else {
                     return;
                 };
                 self.callees.entry(id).or_default().push(step.clone());
@@ -747,7 +754,7 @@ impl SwarmTrace {
                 let lines: Vec<UsageLine> =
                     usage.iter().flat_map(UsageLine::from_token_usage).collect();
                 self.delegated = merge_lines(self.delegated.iter().chain(&lines));
-                if let Some(id) = self.open.pop() {
+                if let Some(id) = self.close_open() {
                     self.reported.insert(id, lines);
                     self.settle_usage(id);
                     let node = self.tree.get_mut(id);
@@ -765,6 +772,10 @@ impl SwarmTrace {
                     }
                 }
             }
+            InvokeAgentProgress::Call(call) => {
+                self.call = Some(*call);
+                return;
+            }
             InvokeAgentProgress::Swarm(batch) => return self.apply_swarm(batch),
             // Rename the just-opened node to the concrete name the broker
             // admitted it under, as soon as that is known (AGE-762): two
@@ -772,7 +783,7 @@ impl SwarmTrace {
             // node's id until this arrives, so a stop by the shared spec
             // name would otherwise hit both.
             InvokeAgentProgress::Admitted(node) => {
-                if let Some(&id) = self.open.last() {
+                if let Some(id) = self.open_node() {
                     self.tree.get_mut(id).name = node.clone();
                 }
             }
@@ -786,6 +797,29 @@ impl SwarmTrace {
             }
         }
         self.bump();
+    }
+
+    /// The open delegation the progress arriving now belongs to: its call's,
+    /// else the latest.
+    fn open_node(&self) -> Option<NodeId> {
+        let call = self.call;
+        self.open
+            .iter()
+            .rev()
+            .find(|(open, _)| call.is_some() && *open == call)
+            .or(self.open.last())
+            .map(|&(_, id)| id)
+    }
+
+    /// Take the open delegation that just finished off the list.
+    fn close_open(&mut self) -> Option<NodeId> {
+        let call = self.call;
+        let at = self
+            .open
+            .iter()
+            .rposition(|(open, _)| call.is_some() && *open == call)
+            .or(self.open.len().checked_sub(1))?;
+        Some(self.open.remove(at).1)
     }
 
     /// The root's tool call a delegation to `agent` with `prompt` runs
@@ -1409,6 +1443,56 @@ mod tests {
 
         assert_eq!(trace.node_named("kit-stuck-0"), Some(first));
         assert_eq!(trace.node_named("kit-stuck-1"), Some(second));
+    }
+
+    /// Calls the model asked for in one response run side by side and share
+    /// one stream of progress: each event is the call the last `Call` marker
+    /// named, so a finish ends its own node, not the latest one.
+    #[test]
+    fn parallel_calls_each_keep_their_own_node() {
+        let mut trace = SwarmTrace::new();
+        let call = |n| delegation(InvokeAgentProgress::Call(n));
+        let admitted = |node: &str| delegation(InvokeAgentProgress::Admitted(node.to_string()));
+
+        trace.apply(&call(1));
+        trace.apply(&started("builder"));
+        trace.apply(&admitted("builder-0"));
+        trace.apply(&call(2));
+        trace.apply(&started("builder"));
+        trace.apply(&admitted("builder-1"));
+        trace.apply(&call(1));
+        trace.apply(&step("⟳ read_file"));
+        trace.apply(&call(2));
+        trace.apply(&delegation(InvokeAgentProgress::Finished {
+            success: true,
+            result: None,
+            usage: Vec::new(),
+        }));
+        trace.apply(&call(1));
+        trace.apply(&step("⟳ write_file"));
+
+        let status = |trace: &SwarmTrace, name: &str| {
+            let id = trace.node_named(name).expect(name);
+            trace.tree().get(id).status.clone()
+        };
+        assert_eq!(status(&trace, "builder-1"), NodeStatus::Completed);
+        assert!(
+            status(&trace, "builder-0").is_running(),
+            "the first is still going"
+        );
+        assert_eq!(
+            calls(&trace, "builder-0").len(),
+            2,
+            "both steps are the first's"
+        );
+        assert!(calls(&trace, "builder-1").is_empty());
+
+        trace.apply(&delegation(InvokeAgentProgress::Finished {
+            success: true,
+            result: None,
+            usage: Vec::new(),
+        }));
+        assert_eq!(status(&trace, "builder-0"), NodeStatus::Completed);
     }
 
     /// A stopped root callee's open tool call is marked cancelled, not

@@ -59,7 +59,7 @@ use crate::factories::agent_factory::{AgentBuildContext, BuiltAgent};
 use crate::models::clarification_store::{
     ClarificationStore, ClarifyingQuestion, PendingClarifications,
 };
-use crate::models::conversation::{Conversation, TurnOutcome};
+use crate::models::conversation::{Conversation, TurnOutcome, UNTAGGED_CALL};
 use crate::models::execution_approval_store::{ExecutionApprovalStore, PendingApprovals};
 use crate::models::message_types::{
     ApprovalBlock, ApprovalState, ClarificationBlock, ClarificationState, ToolCallBlock,
@@ -222,6 +222,10 @@ pub struct AgentSession {
     /// status and captured conversations — persisted on the turn's trace
     /// by `finish_turn` for the full-run export (AGE-859).
     swarm: SwarmTrace,
+    /// The `invoke_agent` call the delegation progress arriving now belongs
+    /// to, as the last [`InvokeAgentProgress::Call`] named it: calls run
+    /// side by side share one stream, and each keeps a card of its own.
+    delegation_call: u64,
 }
 
 impl AgentSession {
@@ -242,6 +246,7 @@ impl AgentSession {
             price_book: PriceBook::default(),
             recovery_attempts: HashMap::new(),
             swarm: SwarmTrace::new(),
+            delegation_call: UNTAGGED_CALL,
         }
     }
 
@@ -818,10 +823,21 @@ impl AgentSession {
         }
     }
 
+    /// The `invoke_agent` call the delegation progress seen last belongs to
+    /// ([`UNTAGGED_CALL`] before any is tagged): what a frontend keys the
+    /// row of that progress by.
+    pub fn delegation_call(&self) -> u64 {
+        self.delegation_call
+    }
+
     /// `SessionEvent::Delegation`: the sub-agent's row on the conversation.
     pub fn note_delegation(&mut self, progress: &InvokeAgentProgress) {
         self.swarm
             .apply(&SessionEvent::Delegation(progress.clone()));
+        if let InvokeAgentProgress::Call(call) = progress {
+            self.delegation_call = *call;
+        }
+        let call = self.delegation_call;
         let Some(conversation) = self.conversation.as_mut() else {
             return;
         };
@@ -832,19 +848,20 @@ impl AgentSession {
                 source,
             } => {
                 conversation.start_delegation_progress(
+                    call,
                     &format!("[Agent: {agent_name}] {prompt}"),
                     source.clone(),
                 );
             }
             InvokeAgentProgress::Text(text) | InvokeAgentProgress::Step(text) => {
-                conversation.append_delegation_progress(text)
+                conversation.append_delegation_progress(call, text)
             }
             InvokeAgentProgress::Finished {
                 success,
                 result,
                 usage,
             } => {
-                conversation.finalize_delegation_progress(*success, result.clone());
+                conversation.finalize_delegation_progress(call, *success, result.clone());
                 // The bill follows the bearer (AGE-415): what the worker
                 // spent is this conversation's spend, priced at the models
                 // it was spent on (AGE-682).
@@ -862,6 +879,8 @@ impl AgentSession {
             InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => {}
             // Kept by the turn's swarm trace, for the export (AGE-859).
             InvokeAgentProgress::Conversation(_) => {}
+            // Named above, for the events that follow.
+            InvokeAgentProgress::Call(_) => {}
         }
     }
 
@@ -966,7 +985,7 @@ impl AgentSession {
         let outcome = conversation.finalize_turn(response, artifacts, trace);
         conversation.set_streaming_message(None);
         conversation.set_streaming_trace(None);
-        conversation.set_streaming_delegation_trace(None);
+        conversation.clear_streaming_delegation_traces();
 
         conversation.add_tool_calls(tool_calls);
         // The conversation's bound price is newer than the book's snapshot

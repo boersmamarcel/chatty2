@@ -9,8 +9,9 @@
 //! and the headless runner apply the same stream events to it (AGE-196),
 //! so a tool row is shaped the same way whichever mode is running.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use chatty_core::models::conversation::UNTAGGED_CALL;
 use chatty_core::models::message_types::{
     classify_initial_execution_engine, classify_tool_source, detect_execution_engine,
     predict_execution_engine,
@@ -28,6 +29,10 @@ pub struct Transcript {
     /// Index into `messages` of the system message showing sub-agent progress.
     /// `None` when no sub-agent is running.
     pub delegation_msg_idx: Option<usize>,
+    /// Each in-flight call's own row, by the `invoke_agent` call that made
+    /// it: calls the model asked for in one response run side by side, so
+    /// their progress cannot share one row.
+    delegation_rows: HashMap<u64, usize>,
     /// Tracks `invoke_agent` tool call IDs to suppress their
     /// ToolCallBlock rendering (progress goes through the sub-agent channel).
     active_invoke_agent_ids: HashSet<String>,
@@ -45,6 +50,7 @@ impl Transcript {
     pub fn clear(&mut self) {
         self.messages.clear();
         self.delegation_msg_idx = None;
+        self.delegation_rows.clear();
         self.active_invoke_agent_ids.clear();
         self.plan = None;
     }
@@ -68,11 +74,27 @@ impl Transcript {
 
     /// Route sub-agent progress into the last row from now on.
     pub fn mark_last_as_delegation_row(&mut self) {
+        self.mark_delegation_row(UNTAGGED_CALL);
+    }
+
+    fn mark_delegation_row(&mut self, call: u64) {
         self.delegation_msg_idx = self.messages.len().checked_sub(1);
+        if let Some(idx) = self.delegation_msg_idx {
+            self.delegation_rows.insert(call, idx);
+        }
     }
 
     pub fn reset_delegation_row(&mut self) {
         self.delegation_msg_idx = None;
+        self.delegation_rows.clear();
+    }
+
+    /// The row `call`'s progress goes to, once it has one.
+    fn delegation_row(&self, call: u64) -> Option<usize> {
+        self.delegation_rows
+            .get(&call)
+            .copied()
+            .filter(|idx| *idx < self.messages.len())
     }
 
     /// Number of assistant rows, streaming or not.
@@ -241,28 +263,34 @@ impl Transcript {
 
     /// A (sanitized, non-empty) line of sub-agent progress: the first opens
     /// the sub-agent row, later ones append to it.
-    pub fn delegation_progress(&mut self, line: String) {
-        if self.delegation_msg_idx.is_none() {
-            self.seal_parent_before_delegation_progress();
-            self.add_system(line);
-            self.mark_last_as_delegation_row();
-        } else if let Some(idx) = self.delegation_msg_idx
-            && let Some(msg) = self.messages.get_mut(idx)
-        {
-            msg.push_text("\n");
-            msg.push_text(&line);
+    pub fn delegation_progress(&mut self, call: u64, line: String) {
+        match self.delegation_row(call) {
+            None => {
+                self.seal_parent_before_delegation_progress();
+                self.add_system(line);
+                self.mark_delegation_row(call);
+            }
+            Some(idx) => {
+                if let Some(msg) = self.messages.get_mut(idx) {
+                    msg.push_text("\n");
+                    msg.push_text(&line);
+                }
+            }
         }
     }
 
-    pub fn delegation_finished(&mut self, message: String) {
-        if let Some(idx) = self.delegation_msg_idx
-            && let Some(msg) = self.messages.get_mut(idx)
-        {
-            msg.push_text("\n");
-            msg.push_text(&message);
-        } else {
-            self.add_system(message);
-            self.mark_last_as_delegation_row();
+    pub fn delegation_finished(&mut self, call: u64, message: String) {
+        match self.delegation_row(call) {
+            Some(idx) => {
+                if let Some(msg) = self.messages.get_mut(idx) {
+                    msg.push_text("\n");
+                    msg.push_text(&message);
+                }
+            }
+            None => {
+                self.add_system(message);
+                self.mark_delegation_row(call);
+            }
         }
     }
 
@@ -552,13 +580,34 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.start_assistant();
         transcript.tool_started("c1".into(), "invoke_agent".into());
-        transcript.delegation_progress("[local agent] task".into());
-        transcript.delegation_progress("reading".into());
+        transcript.delegation_progress(UNTAGGED_CALL, "[local agent] task".into());
+        transcript.delegation_progress(UNTAGGED_CALL, "reading".into());
         transcript.tool_result("c1", "answer".into());
-        transcript.delegation_finished("answer".into());
+        transcript.delegation_finished(UNTAGGED_CALL, "answer".into());
 
         assert!(transcript.tool_call("c1").is_none());
         let row = &transcript.messages[transcript.delegation_msg_idx.unwrap()];
         assert_eq!(row.text(), "[local agent] task\nreading\nanswer");
+    }
+
+    /// Delegations the model asked for in one response run side by side: each
+    /// call's progress lands in the row of its own.
+    #[test]
+    fn parallel_delegations_each_keep_a_row() {
+        let mut transcript = Transcript::new();
+        transcript.delegation_progress(1, "[local agent: builder] one".into());
+        transcript.delegation_progress(2, "[local agent: builder] two".into());
+        transcript.delegation_progress(1, "reading".into());
+        transcript.delegation_finished(2, "two done".into());
+        transcript.delegation_finished(1, "one done".into());
+
+        let rows: Vec<String> = transcript.messages.iter().map(|m| m.text()).collect();
+        assert_eq!(
+            rows,
+            [
+                "[local agent: builder] one\nreading\none done",
+                "[local agent: builder] two\ntwo done",
+            ]
+        );
     }
 }

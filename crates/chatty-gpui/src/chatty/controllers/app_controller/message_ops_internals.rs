@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::chatty::models::stream_manager::{SharedTextBatch, TextBatch};
+use chatty_core::models::conversation::UNTAGGED_CALL;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
 /// Parameters for one turn on the desktop.
@@ -153,6 +154,7 @@ pub(super) async fn run_llm_stream(
         stream_manager,
         weak_ctrl,
         text_batch,
+        delegation_call: UNTAGGED_CALL,
     };
     debug!(conv_id = %conv_id, "Beginning turn on the session");
     let turn = cx
@@ -204,6 +206,9 @@ struct DesktopSink {
     stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
     weak_ctrl: gpui::WeakEntity<ChattyApp>,
     text_batch: SharedTextBatch,
+    /// The `invoke_agent` call the delegation progress arriving now belongs
+    /// to, as the last [`InvokeAgentProgress::Call`] named it.
+    delegation_call: u64,
 }
 
 impl DesktopSink {
@@ -384,6 +389,7 @@ impl DesktopSink {
 
     fn on_progress(&mut self, progress: InvokeAgentProgress) {
         let conv_id = self.conv_id.clone();
+        let call = self.delegation_call;
         match progress {
             InvokeAgentProgress::Started {
                 agent_name,
@@ -394,7 +400,7 @@ impl DesktopSink {
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.start_delegation_progress(&label, source, cx);
+                            view.start_delegation_progress(call, &label, source, cx);
                             view.note_swarm_row(&agent_name);
                         }
                     })
@@ -405,7 +411,7 @@ impl DesktopSink {
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.append_delegation_progress(&text, cx);
+                            view.append_delegation_progress(call, &text, cx);
                         }
                     })
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent progress"))
@@ -417,7 +423,7 @@ impl DesktopSink {
                 self.chat_view
                     .update(&mut self.cx, |view, cx| {
                         if view.conversation_id().map(|id| id.as_str()) == Some(conv_id.as_str()) {
-                            view.finalize_delegation_progress(success, result, cx);
+                            view.finalize_delegation_progress(call, success, result, cx);
                         }
                     })
                     .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to update chat view with sub-agent finish"))
@@ -435,6 +441,8 @@ impl DesktopSink {
             InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => {}
             // The session keeps it for the export (AGE-859).
             InvokeAgentProgress::Conversation(_) => {}
+            // Names the call the events after it belong to.
+            InvokeAgentProgress::Call(call) => self.delegation_call = call,
         }
     }
 }
@@ -893,6 +901,7 @@ mod tests {
             stream_manager: manager,
             weak_ctrl: gpui::WeakEntity::new_invalid(),
             text_batch,
+            delegation_call: UNTAGGED_CALL,
         }
     }
 

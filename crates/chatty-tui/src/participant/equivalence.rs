@@ -175,7 +175,8 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
             | InvokeAgentProgress::Admitted(_)
             | InvokeAgentProgress::Waiting { .. }
             | InvokeAgentProgress::Resumed { .. }
-            | InvokeAgentProgress::Conversation(_) => {}
+            | InvokeAgentProgress::Conversation(_)
+            | InvokeAgentProgress::Call(_) => {}
         }
     }
 

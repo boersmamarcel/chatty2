@@ -171,7 +171,12 @@ pub struct ChatView {
     /// `finalize_delegation_progress` — otherwise a `/agent` turn's
     /// `total_duration` is never set, and the transcript always shows
     /// "Worked for a moment" regardless of how long it actually ran.
-    delegation_started_at: Option<Instant>,
+    delegation_started_at: HashMap<u64, Instant>,
+    /// The in-flight delegation rows, by the `invoke_agent` call that made
+    /// each: calls the model asked for in one response run side by side, so
+    /// each call's progress goes to the row of its own. A row leaves this
+    /// when its call finishes; `delegation_progress_msg_idx` keeps the latest.
+    delegation_rows: HashMap<u64, usize>,
     /// The running stream's delegation rows, in the order they opened: each
     /// row's message index and the spec it delegated to. The swarm tree
     /// (TB-4) hangs each row's callee subtree under it; see `swarm.rs`.
@@ -652,7 +657,8 @@ impl ChatView {
             stick_to_bottom: true,
             _slash_menu_interceptor: slash_menu_interceptor,
             delegation_progress_msg_idx: None,
-            delegation_started_at: None,
+            delegation_started_at: HashMap::new(),
+            delegation_rows: HashMap::new(),
             swarm_rows: Vec::new(),
             delegation_runs: HashMap::new(),
             thinking_indicator: new_thinking_indicator(cx),
@@ -1234,7 +1240,7 @@ impl ChatView {
         // not hide the pre-tool parent's tool calls (or the Conversation
         // model's streaming_trace fallback).
         for i in (0..self.messages.len()).rev() {
-            if Some(i) == self.delegation_progress_msg_idx {
+            if Some(i) == self.delegation_progress_msg_idx || self.is_running_delegation_row(i) {
                 continue;
             }
             if let Some(ref mut trace) = self.messages[i].live_trace {
@@ -3448,6 +3454,7 @@ mod show_artifact_integration_tests {
     // built-in `#[test]` with `gpui::test`, and the attribute then expands
     // into itself (see `fingerprint_tests` below).
     use super::{ArtifactMode, ChatView, ExecutionSettingsModel};
+    use chatty_core::models::conversation::UNTAGGED_CALL;
     use gpui::{AppContext as _, Entity};
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -3602,6 +3609,7 @@ mod show_artifact_integration_tests {
         cx.update(|cx| {
             chat_view.update(cx, |view, cx| {
                 view.start_delegation_progress(
+                    UNTAGGED_CALL,
                     "[Agent: worker] do the thing",
                     ToolSource::Local,
                     cx,
@@ -3615,7 +3623,12 @@ mod show_artifact_integration_tests {
 
         cx.update(|cx| {
             chat_view.update(cx, |view, cx| {
-                view.finalize_delegation_progress(true, Some("done".to_string()), cx);
+                view.finalize_delegation_progress(
+                    UNTAGGED_CALL,
+                    true,
+                    Some("done".to_string()),
+                    cx,
+                );
             });
         });
 
@@ -4584,6 +4597,7 @@ mod delegation_run_tests {
     // Named imports, not a glob (see `show_artifact_integration_tests`).
     use super::{ChatView, ExecutionSettingsModel};
     use crate::chatty::views::transcript::SwarmTree;
+    use chatty_core::models::conversation::UNTAGGED_CALL;
     use chatty_core::models::message_types::ToolSource;
     use chatty_core::models::token_usage::PriceBook;
     use chatty_core::services::swarm_trace::SwarmTrace;
@@ -4631,7 +4645,12 @@ mod delegation_run_tests {
         let mut vcx = gpui::VisualTestContext::from_window(window, cx);
         vcx.update(|_, cx| {
             view.update(cx, |v, cx| {
-                v.start_delegation_progress("[Agent: local-agent] test", ToolSource::Local, cx);
+                v.start_delegation_progress(
+                    UNTAGGED_CALL,
+                    "[Agent: local-agent] test",
+                    ToolSource::Local,
+                    cx,
+                );
                 v.note_swarm_row("local-agent");
                 // Unfold the turn's work trace, as the reader would.
                 let idx = v.delegation_progress_msg_idx.expect("row");
@@ -4675,7 +4694,12 @@ mod delegation_run_tests {
         let (view, window) = harness(cx);
         cx.update(|cx| {
             view.update(cx, |v, cx| {
-                v.start_delegation_progress("[Agent: local-agent] test", ToolSource::Local, cx);
+                v.start_delegation_progress(
+                    UNTAGGED_CALL,
+                    "[Agent: local-agent] test",
+                    ToolSource::Local,
+                    cx,
+                );
                 v.note_swarm_row("local-agent");
             });
         });
@@ -4727,7 +4751,12 @@ mod delegation_run_tests {
         let (view, _window) = harness(cx);
         cx.update(|cx| {
             view.update(cx, |v, cx| {
-                v.start_delegation_progress("[Agent: local-agent] test", ToolSource::Local, cx);
+                v.start_delegation_progress(
+                    UNTAGGED_CALL,
+                    "[Agent: local-agent] test",
+                    ToolSource::Local,
+                    cx,
+                );
                 v.note_swarm_row("local-agent");
             });
         });
@@ -4775,7 +4804,12 @@ mod delegation_run_tests {
         trace.apply(&started("local-agent"));
         cx.update(|cx| {
             view.update(cx, |v, cx| {
-                v.start_delegation_progress("[Agent: local-agent] t", ToolSource::Local, cx);
+                v.start_delegation_progress(
+                    UNTAGGED_CALL,
+                    "[Agent: local-agent] t",
+                    ToolSource::Local,
+                    cx,
+                );
                 v.note_swarm_row("local-agent");
                 v.set_swarm_trace(&trace, &PriceBook::default(), cx);
             });
@@ -4783,7 +4817,12 @@ mod delegation_run_tests {
             assert!(view.read(cx).delegation_run_name(idx).is_some());
             view.update(cx, |v, cx| {
                 v.clear_messages(cx);
-                v.start_delegation_progress("[Agent: other] t", ToolSource::Local, cx);
+                v.start_delegation_progress(
+                    UNTAGGED_CALL,
+                    "[Agent: other] t",
+                    ToolSource::Local,
+                    cx,
+                );
                 v.note_swarm_row("other");
             });
             let idx = view.read(cx).delegation_progress_msg_idx.unwrap();

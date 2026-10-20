@@ -595,6 +595,23 @@ fn strip_unsupported_images(
     (history, contents)
 }
 
+/// How many of a leader's tool calls in one response run at once.
+///
+/// Only a delegating agent gets more than one: the calls it runs side by
+/// side are `invoke_agent`s, each a worker in its own process, and the
+/// broker's per-endpoint budget (ADR-0011 C6) still bounds what reaches the
+/// model server. Any other agent's tools touch one workspace and one approval
+/// queue, so they stay in call order.
+const MAX_PARALLEL_DELEGATIONS: usize = 4;
+
+fn tool_concurrency(agent: &AgentClient) -> usize {
+    if agent.delegator().is_some() {
+        MAX_PARALLEL_DELEGATIONS
+    } else {
+        1
+    }
+}
+
 /// Stream a prompt with an agent
 ///
 /// # Arguments
@@ -641,8 +658,11 @@ pub async fn stream_prompt(
     // The turn budget sets rig's call cap (the tool turns plus one tool-free
     // wrap-up call) and tells the model how many tool turns it has left.
     // A delegation whose worker never started ends the run (AGE-822).
+    // A leader that asks for several delegations in one response gets them
+    // run side by side; every other agent keeps its tools in call order.
     let mut agent_stream = turn_budget
         .apply(agent.agent.stream_prompt(user_message).history(history))
+        .tool_concurrency(tool_concurrency(agent))
         .add_hook(StopOnWorkerStartFailure)
         .await;
 

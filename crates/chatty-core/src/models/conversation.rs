@@ -171,10 +171,12 @@ pub struct Conversation {
     streaming_message: Option<String>,
     /// Partial streaming trace being composed (None if no active stream)
     streaming_trace: Option<SystemTrace>,
-    /// Transient sub-agent progress trace shown as a separate in-progress UI message.
-    /// This is kept in-memory so switching conversations during an active
-    /// sub-agent run can restore the trace and its source badge.
-    streaming_delegation_trace: Option<SystemTrace>,
+    /// Transient sub-agent progress traces, each shown as a separate
+    /// in-progress UI message, in the order they opened and keyed by the
+    /// `invoke_agent` call that made them ([`UNTAGGED_CALL`] when the source
+    /// names none). Kept in-memory so switching conversations during an
+    /// active sub-agent run can restore the traces and their source badges.
+    streaming_delegation_traces: Vec<(u64, SystemTrace)>,
     /// rig's record of the turn in flight — its tool-call and tool-result
     /// messages are persisted behind the final text (AGE-247). Set from the
     /// stream's `TurnMessages` chunk, consumed by `finalize_response`.
@@ -255,7 +257,7 @@ impl Conversation {
             updated_at: now,
             streaming_message: None,
             streaming_trace: None,
-            streaming_delegation_trace: None,
+            streaming_delegation_traces: Vec::new(),
             streaming_turn_messages: None,
             pending_artifacts,
             shell_session: built.shell_session,
@@ -382,7 +384,7 @@ impl Conversation {
             updated_at,
             streaming_message: None, // Always start fresh, streaming state is transient
             streaming_trace: None,
-            streaming_delegation_trace: None,
+            streaming_delegation_traces: Vec::new(),
             streaming_turn_messages: None,
             pending_artifacts,
             shell_session: built.shell_session,
@@ -924,24 +926,41 @@ impl Conversation {
         self.streaming_trace = trace;
     }
 
-    pub fn streaming_delegation_trace(&self) -> Option<&SystemTrace> {
-        self.streaming_delegation_trace.as_ref()
+    /// The sub-agent progress traces of the turn in flight, in the order
+    /// they opened, each with the call that made it.
+    pub fn streaming_delegation_traces(&self) -> &[(u64, SystemTrace)] {
+        &self.streaming_delegation_traces
     }
 
-    pub fn set_streaming_delegation_trace(&mut self, trace: Option<SystemTrace>) {
-        self.streaming_delegation_trace = trace;
+    pub fn clear_streaming_delegation_traces(&mut self) {
+        self.streaming_delegation_traces.clear();
     }
 
-    pub fn start_delegation_progress(&mut self, prompt: &str, source: ToolSource) {
-        start_delegation_progress_state(&mut self.streaming_delegation_trace, prompt, source);
+    pub fn start_delegation_progress(&mut self, call: u64, prompt: &str, source: ToolSource) {
+        start_delegation_progress_state(
+            &mut self.streaming_delegation_traces,
+            call,
+            prompt,
+            source,
+        );
     }
 
-    pub fn append_delegation_progress(&mut self, line: &str) {
-        append_delegation_progress_state(&mut self.streaming_delegation_trace, line);
+    pub fn append_delegation_progress(&mut self, call: u64, line: &str) {
+        append_delegation_progress_state(&mut self.streaming_delegation_traces, call, line);
     }
 
-    pub fn finalize_delegation_progress(&mut self, success: bool, result: Option<String>) {
-        finalize_delegation_progress_state(&mut self.streaming_delegation_trace, success, result);
+    pub fn finalize_delegation_progress(
+        &mut self,
+        call: u64,
+        success: bool,
+        result: Option<String>,
+    ) {
+        finalize_delegation_progress_state(
+            &mut self.streaming_delegation_traces,
+            call,
+            success,
+            result,
+        );
     }
 
     /// Get or create the streaming trace, returning a mutable reference
@@ -1200,29 +1219,35 @@ fn append_trace_item_state(entries: &mut [MessageEntry], item: TraceItem) -> boo
     }
 }
 
+/// The call key of delegation progress from a source that tags none.
+pub const UNTAGGED_CALL: u64 = 0;
+
 fn start_delegation_progress_state(
-    streaming_delegation_trace: &mut Option<SystemTrace>,
+    traces: &mut Vec<(u64, SystemTrace)>,
+    call: u64,
     prompt: &str,
     source: ToolSource,
 ) {
-    *streaming_delegation_trace = Some(SystemTrace::new_delegation(prompt, source));
+    let trace = SystemTrace::new_delegation(prompt, source);
+    match traces.iter_mut().find(|(open, _)| *open == call) {
+        Some((_, slot)) => *slot = trace,
+        None => traces.push((call, trace)),
+    }
 }
 
-fn append_delegation_progress_state(
-    streaming_delegation_trace: &mut Option<SystemTrace>,
-    line: &str,
-) {
-    if let Some(trace) = streaming_delegation_trace.as_mut() {
+fn append_delegation_progress_state(traces: &mut [(u64, SystemTrace)], call: u64, line: &str) {
+    if let Some((_, trace)) = traces.iter_mut().find(|(open, _)| *open == call) {
         trace.append_delegation_progress(line);
     }
 }
 
 fn finalize_delegation_progress_state(
-    streaming_delegation_trace: &mut Option<SystemTrace>,
+    traces: &mut [(u64, SystemTrace)],
+    call: u64,
     success: bool,
     result: Option<String>,
 ) {
-    if let Some(trace) = streaming_delegation_trace.as_mut() {
+    if let Some((_, trace)) = traces.iter_mut().find(|(open, _)| *open == call) {
         trace.finalize_delegation_progress(success, result);
     }
 }
@@ -1572,16 +1597,22 @@ mod tests {
     fn delegation_progress_does_not_touch_parent_body() {
         let streaming_message = Some("assistant body".to_string());
         let streaming_trace = Some(SystemTrace::new());
-        let mut streaming_delegation_trace = None;
+        let mut streaming_delegation_traces = Vec::new();
 
         start_delegation_progress_state(
-            &mut streaming_delegation_trace,
+            &mut streaming_delegation_traces,
+            UNTAGGED_CALL,
             "investigate",
             ToolSource::Local,
         );
-        append_delegation_progress_state(&mut streaming_delegation_trace, "working...");
+        append_delegation_progress_state(
+            &mut streaming_delegation_traces,
+            UNTAGGED_CALL,
+            "working...",
+        );
         finalize_delegation_progress_state(
-            &mut streaming_delegation_trace,
+            &mut streaming_delegation_traces,
+            UNTAGGED_CALL,
             true,
             Some("done".to_string()),
         );
@@ -1594,8 +1625,8 @@ mod tests {
             "parent streaming_trace must not be replaced by the sub-agent progress card"
         );
 
-        let trace = streaming_delegation_trace
-            .as_ref()
+        let (_, trace) = streaming_delegation_traces
+            .first()
             .expect("sub-agent trace should persist");
         let tc = match &trace.items[0] {
             TraceItem::ToolCall(tc) => tc,
@@ -1603,6 +1634,26 @@ mod tests {
         };
         assert_eq!(tc.output.as_deref(), Some("working...\n\n---\n\ndone"));
         assert!(!trace.is_running_delegation());
+    }
+
+    /// Two delegations in flight at once each keep their own card: progress
+    /// and the finish go to the call they name, not to the latest one.
+    #[test]
+    fn parallel_delegations_keep_separate_cards() {
+        let mut traces = Vec::new();
+        start_delegation_progress_state(&mut traces, 1, "first", ToolSource::Local);
+        start_delegation_progress_state(&mut traces, 2, "second", ToolSource::Local);
+        append_delegation_progress_state(&mut traces, 1, "reading");
+        finalize_delegation_progress_state(&mut traces, 2, true, Some("two done".to_string()));
+
+        assert!(traces[0].1.is_running_delegation());
+        assert!(!traces[1].1.is_running_delegation());
+        let output = |trace: &SystemTrace| match &trace.items[0] {
+            TraceItem::ToolCall(tc) => tc.output.clone(),
+            _ => panic!("expected ToolCall"),
+        };
+        assert_eq!(output(&traces[0].1).as_deref(), Some("reading"));
+        assert_eq!(output(&traces[1].1).as_deref(), Some("two done"));
     }
 
     fn entry(message: Message, system_trace: Option<serde_json::Value>) -> MessageEntry {

@@ -26,14 +26,31 @@ pub(super) fn format_tool_call_lines(tc: &ToolCallInfo) -> Vec<String> {
     lines
 }
 
+/// The agents the turn's delegations run, by the call that made each, and the
+/// call the progress arriving now belongs to.
+#[derive(Default)]
+pub(super) struct DelegatedAgents {
+    call: u64,
+    names: std::collections::HashMap<u64, String>,
+}
+
+impl DelegatedAgents {
+    /// Whether no call is waiting on its finish line.
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+}
+
 /// The trace lines for one `invoke_agent` progress event (AGE-401): the
 /// delegation's input when it starts and its output when it finishes, in
 /// the shape [`format_tool_call_lines`] gives every other tool. The
 /// worker's own progress text is its stderr's business and is not repeated.
-/// `agent` remembers which agent is running between the two events.
+/// `agents` remembers which agent each call runs between the two events:
+/// calls run side by side, and a finish names the call it ends.
 pub(super) fn format_delegation_lines(
     progress: &InvokeAgentProgress,
-    agent: &mut Option<String>,
+    agents: &mut DelegatedAgents,
 ) -> Vec<String> {
     match progress {
         InvokeAgentProgress::Started {
@@ -41,7 +58,7 @@ pub(super) fn format_delegation_lines(
             prompt,
             source,
         } => {
-            *agent = Some(agent_name.clone());
+            agents.names.insert(agents.call, agent_name.clone());
             let badge = source_badge_label(source).unwrap_or("local");
             let mut lines = vec![
                 String::new(),
@@ -49,6 +66,10 @@ pub(super) fn format_delegation_lines(
             ];
             append_tool_payload(&mut lines, "input", prompt);
             lines
+        }
+        InvokeAgentProgress::Call(call) => {
+            agents.call = *call;
+            Vec::new()
         }
         InvokeAgentProgress::Text(_)
         | InvokeAgentProgress::Step(_)
@@ -60,7 +81,10 @@ pub(super) fn format_delegation_lines(
         InvokeAgentProgress::Finished {
             success, result, ..
         } => {
-            let name = agent.take().unwrap_or_else(|| "agent".to_string());
+            let name = agents
+                .names
+                .remove(&agents.call)
+                .unwrap_or_else(|| "agent".to_string());
             let (icon, status, label) = if *success {
                 ("\u{2713}", "completed", "output")
             } else {

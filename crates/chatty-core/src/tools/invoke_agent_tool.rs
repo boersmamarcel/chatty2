@@ -2,6 +2,7 @@ use parking_lot::Mutex;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
@@ -32,6 +33,13 @@ use chatty_fabric::{
     CallRequest, CallResult, InvokeAgentOutcome, InvokeAgentParams, Question, QuestionOrigin,
     Refusal, Remaining, Transport,
 };
+
+static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
+
+tokio::task_local! {
+    /// The `invoke_agent` call the running task is part of.
+    static CALL: u64;
+}
 
 /// The agent name the broker publishes for "a chatty agent in its own
 /// process" (ADR-0011 C2).
@@ -103,6 +111,11 @@ pub enum InvokeAgentProgress {
     /// [`Finished`](Self::Finished) when its terminal status carried one:
     /// what the full-run export nests under this delegation (AGE-859).
     Conversation(CapturedConversation),
+    /// The call the events that follow belong to, until the next `Call`.
+    /// Calls the model asked for in one response run side by side and share
+    /// one stream of progress; without this, a step or an answer cannot be
+    /// told from another call's.
+    Call(u64),
 }
 
 /// What a run is waiting on the human for (TB-6).
@@ -272,6 +285,8 @@ pub struct InvokeAgentTool {
     client: A2aClient,
     /// Shared slot for sending progress events to the UI stream loop.
     progress_slot: InvokeAgentProgressSlot,
+    /// The call whose events the slot's channel last carried.
+    marked_call: Arc<AtomicU64>,
     /// Names of the broker's local-worker agents, when any are published
     /// (ADR-0011 C2): the roster's specs (C10, PL-U5). Resolved after remote
     /// agents.
@@ -326,6 +341,7 @@ impl InvokeAgentTool {
             remote_agents,
             client: A2aClient::for_delegation(),
             progress_slot: Arc::new(Mutex::new(None)),
+            marked_call: Arc::new(AtomicU64::new(0)),
             local_agents: Vec::new(),
             warn_outside_fleet: false,
             clarifications: None,
@@ -495,9 +511,18 @@ impl InvokeAgentTool {
     }
 
     /// Send a progress event through the slot (if a sender is installed).
+    ///
+    /// Under the slot's lock, a call's first event after another call's is
+    /// preceded by [`InvokeAgentProgress::Call`], so a stream of interleaved
+    /// calls reads as runs each headed by its call.
     fn send_progress(&self, event: InvokeAgentProgress) {
         let guard = self.progress_slot.lock();
         if let Some(tx) = guard.as_ref() {
+            if let Ok(call) = CALL.try_with(|call| *call)
+                && self.marked_call.swap(call, Ordering::Relaxed) != call
+            {
+                let _ = tx.send(InvokeAgentProgress::Call(call));
+            }
             let _ = tx.send(event);
         }
     }
@@ -564,6 +589,15 @@ impl Tool for InvokeAgentTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        // Calls that run side by side share one progress channel: every
+        // event a call sends is announced with the call it belongs to.
+        let call = NEXT_CALL.fetch_add(1, Ordering::Relaxed);
+        CALL.scope(call, self.run(args)).await
+    }
+}
+
+impl InvokeAgentTool {
+    async fn run(&self, args: InvokeAgentArgs) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let agent_name = args.agent.trim().to_string();
         let prompt = args.prompt.trim().to_string();
 
@@ -1379,6 +1413,38 @@ mod tests {
             }
         });
         rx
+    }
+
+    /// Calls that run side by side share the slot's channel: a call's events
+    /// are headed by its `Call` marker whenever another call sent last, and
+    /// by none while it keeps the channel to itself.
+    #[tokio::test]
+    async fn interleaved_calls_are_told_apart_by_their_markers() {
+        let tool = InvokeAgentTool::new(vec![]);
+        let rx = watch_progress(&tool);
+
+        let send = |call: u64, text: &str| {
+            let tool = tool.clone();
+            let text = text.to_string();
+            CALL.scope(call, async move {
+                tool.send_progress(InvokeAgentProgress::Text(text));
+            })
+        };
+        send(1, "a1").await;
+        send(1, "a2").await;
+        send(2, "b1").await;
+        send(1, "a3").await;
+        tokio::task::yield_now().await;
+
+        let seen: Vec<String> = rx
+            .try_iter()
+            .map(|event| match event {
+                InvokeAgentProgress::Call(call) => format!("call {call}"),
+                InvokeAgentProgress::Text(text) => text,
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(seen, ["call 1", "a1", "a2", "call 2", "b1", "call 1", "a3"]);
     }
 
     fn warnings(rx: &std::sync::mpsc::Receiver<InvokeAgentProgress>) -> Vec<String> {
