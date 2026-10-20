@@ -825,16 +825,17 @@ impl HeadlessRunner {
                     }
                 }
                 self.session.note_delegation(&progress);
+                let call = self.session.delegation_call();
                 let line = crate::engine::helpers::delegation_line(&progress);
                 if matches!(
                     progress,
                     chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
                 ) {
-                    self.transcript.delegation_finished(line);
+                    self.transcript.delegation_finished(call, line);
                 } else {
                     let line = crate::engine::sanitize_progress_line(&line);
                     if !line.is_empty() {
-                        self.transcript.delegation_progress(line);
+                        self.transcript.delegation_progress(call, line);
                     }
                 }
             }

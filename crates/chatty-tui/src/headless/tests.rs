@@ -43,7 +43,7 @@ fn formats_tool_call_with_pretty_json_and_error_output() {
 fn logs_a_delegation_with_its_input_and_output() {
     use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
-    let mut agent = None;
+    let mut agent = DelegatedAgents::default();
     let started = format_delegation_lines(
         &InvokeAgentProgress::Started {
             agent_name: "local-coder".to_string(),
@@ -83,7 +83,7 @@ fn logs_a_delegation_with_its_input_and_output() {
             "      ⚠️ Agent 'local-coder' reported failure".to_string(),
         ]
     );
-    assert!(agent.is_none(), "the finish line consumes the name");
+    assert!(agent.is_empty(), "the finish line consumes the name");
 }
 
 /// AGE-136: the headless trace shows the approval and the plan as their own

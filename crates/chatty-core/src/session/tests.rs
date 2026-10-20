@@ -829,6 +829,7 @@ fn describe(event: &SessionEvent) -> String {
             InvokeAgentProgress::Conversation(conversation) => {
                 format!("Delegation(Conversation {conversation:?})")
             }
+            InvokeAgentProgress::Call(call) => format!("Delegation(Call {call})"),
         },
         SessionEvent::SwarmEvent(event) => format!(
             "SwarmEvent(node={:?}, chain={:?}, items={})",

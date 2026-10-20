@@ -10,6 +10,7 @@ use chatty_core::hive::ModuleMeter;
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
+use chatty_core::models::conversation::UNTAGGED_CALL;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::paste::PasteStore;
 use chatty_core::services::github_pr_service::{PullRequestSummary, resolve_pull_request};
@@ -1353,7 +1354,7 @@ impl ChatEngine {
                 if line.is_empty() {
                     return EngineAction::None;
                 }
-                self.transcript.delegation_progress(line);
+                self.transcript.delegation_progress(UNTAGGED_CALL, line);
                 EngineAction::Redraw
             }
             // The swarm tree's input (TB-1): `SwarmTrace::apply` folds it
@@ -1361,23 +1362,24 @@ impl ChatEngine {
             AppEvent::SwarmEvent(_) => EngineAction::None,
             AppEvent::Delegation(progress) => {
                 self.session.note_delegation(&progress);
+                let call = self.session.delegation_call();
                 let line = helpers::delegation_line(&progress);
                 if matches!(
                     progress,
                     chatty_core::tools::invoke_agent_tool::InvokeAgentProgress::Finished { .. }
                 ) {
-                    self.transcript.delegation_finished(line);
+                    self.transcript.delegation_finished(call, line);
                 } else {
                     let line = sanitize_progress_line(&line);
                     if line.is_empty() {
                         return EngineAction::None;
                     }
-                    self.transcript.delegation_progress(line);
+                    self.transcript.delegation_progress(call, line);
                 }
                 EngineAction::Redraw
             }
             AppEvent::DelegationFinished(message) => {
-                self.transcript.delegation_finished(message);
+                self.transcript.delegation_finished(UNTAGGED_CALL, message);
                 EngineAction::Redraw
             }
         }

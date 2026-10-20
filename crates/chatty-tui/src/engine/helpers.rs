@@ -112,6 +112,8 @@ pub(crate) fn delegation_line(
         InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => String::new(),
         // The export's, not the transcript's (AGE-859).
         InvokeAgentProgress::Conversation(_) => String::new(),
+        // Names the call the lines after it belong to; not a line itself.
+        InvokeAgentProgress::Call(_) => String::new(),
     }
 }
 

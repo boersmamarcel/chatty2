@@ -1,5 +1,6 @@
 use super::*;
 use chatty_core::agent_spec::AgentSpec;
+use chatty_core::models::conversation::UNTAGGED_CALL;
 use chatty_core::services::agent_command::{
     AgentCommandTarget, preflight, resolve_agent_command, workspace_line,
 };
@@ -399,6 +400,7 @@ impl ChattyApp {
         self.chat_view.update(cx, |view, cx| {
             let source = classify_agent_source(&agent_name, cx);
             view.start_delegation_progress(
+                UNTAGGED_CALL,
                 &format!("[Agent: {agent_name}] {prompt_for_display}"),
                 source,
                 cx,
@@ -439,7 +441,7 @@ impl ChattyApp {
                                     && let Some(ref msg) = message {
                                         chat_view
                                             .update(cx, |view, cx| {
-                                                view.append_delegation_progress(msg, cx);
+                                                view.append_delegation_progress(UNTAGGED_CALL, msg, cx);
                                             })
                                             .map_err(|e| warn!(error = ?e, "Failed to update chat view with A2A progress"))
                                             .ok();
@@ -501,7 +503,7 @@ impl ChattyApp {
             // Finalize the progress trace.
             chat_view
                 .update(cx, |view, cx| {
-                    view.finalize_delegation_progress(success, result_text, cx)
+                    view.finalize_delegation_progress(UNTAGGED_CALL, success, result_text, cx)
                 })
                 .map_err(|e| warn!(error = ?e, "Failed to finalize A2A progress in chat view"))
                 .ok();

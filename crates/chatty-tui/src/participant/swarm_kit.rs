@@ -682,6 +682,8 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             InvokeAgentProgress::Waiting { .. } | InvokeAgentProgress::Resumed { .. } => continue,
             // Newer than the goldens too (AGE-859).
             InvokeAgentProgress::Conversation(_) => continue,
+            // The call a run's events belong to: a counter, not behaviour.
+            InvokeAgentProgress::Call(_) => continue,
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),

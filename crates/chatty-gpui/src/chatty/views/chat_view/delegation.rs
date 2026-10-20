@@ -21,6 +21,12 @@ use super::super::trace_components::SystemTraceView;
 use super::ChatView;
 
 impl ChatView {
+    /// Whether message `idx` is the row of a delegation still running: its
+    /// progress card streams like the parent does, but is not the parent.
+    pub(super) fn is_running_delegation_row(&self, idx: usize) -> bool {
+        self.delegation_rows.values().any(|row| *row == idx)
+    }
+
     /// Remove the last assistant message from the display (used for regeneration)
     pub fn remove_last_assistant_message(&mut self, cx: &mut Context<Self>) {
         if self
@@ -43,7 +49,8 @@ impl ChatView {
         self.parsed_cache.clear();
         self.streaming_parse_cache = None;
         self.delegation_progress_msg_idx = None;
-        self.delegation_started_at = None;
+        self.delegation_started_at.clear();
+        self.delegation_rows.clear();
         self.swarm_rows.clear();
         self.delegation_runs.clear();
         self.pending_approval = None;
@@ -60,6 +67,7 @@ impl ChatView {
     /// the user can expand it to see live stderr output while the sub-agent runs.
     pub fn start_delegation_progress(
         &mut self,
+        call: u64,
         prompt: &str,
         source: ToolSource,
         cx: &mut Context<Self>,
@@ -67,12 +75,18 @@ impl ChatView {
         // Not `restore_delegation_progress`'s job: that also runs when
         // switching back to a conversation with an already-running
         // delegation, where "now" is not when the row actually started.
-        self.delegation_started_at = Some(std::time::Instant::now());
+        self.delegation_started_at
+            .insert(call, std::time::Instant::now());
         let trace = SystemTrace::new_delegation(prompt, source);
-        self.restore_delegation_progress(trace, cx);
+        self.restore_delegation_progress(call, trace, cx);
     }
 
-    pub fn restore_delegation_progress(&mut self, trace: SystemTrace, cx: &mut Context<Self>) {
+    pub fn restore_delegation_progress(
+        &mut self,
+        call: u64,
+        trace: SystemTrace,
+        cx: &mut Context<Self>,
+    ) {
         // Freeze or drop the pre-tool parent so follow-up tokens land in a
         // new bubble *below* this progress row, not above it.
         self.seal_parent_before_delegation_progress();
@@ -96,6 +110,9 @@ impl ChatView {
 
         let idx = self.messages.len() - 1;
         self.delegation_progress_msg_idx = is_streaming.then_some(idx);
+        if is_streaming {
+            self.delegation_rows.insert(call, idx);
+        }
 
         // Start expanded so live progress output is visible while the sub-agent runs.
         self.collapsed_tool_calls.insert((idx, 0), false);
@@ -109,8 +126,8 @@ impl ChatView {
     /// Called repeatedly while a sub-agent subprocess runs to accumulate live
     /// tool-call activity (e.g. "⟳ web_search", "✓ web_search") in the
     /// collapsible trace so the user can expand it to follow along.
-    pub fn append_delegation_progress(&mut self, line: &str, cx: &mut Context<Self>) {
-        let Some(idx) = self.delegation_progress_msg_idx else {
+    pub fn append_delegation_progress(&mut self, call: u64, line: &str, cx: &mut Context<Self>) {
+        let Some(idx) = self.delegation_rows.get(&call).copied() else {
             return;
         };
         let Some(msg) = self.messages.get_mut(idx) else {
@@ -141,14 +158,18 @@ impl ChatView {
     /// in the expanded trace body instead of as a separate message.
     pub fn finalize_delegation_progress(
         &mut self,
+        call: u64,
         success: bool,
         result: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(idx) = self.delegation_progress_msg_idx else {
+        let Some(idx) = self.delegation_rows.remove(&call) else {
             return;
         };
-        let elapsed = self.delegation_started_at.take().map(|t| t.elapsed());
+        let elapsed = self
+            .delegation_started_at
+            .remove(&call)
+            .map(|t| t.elapsed());
 
         if let Some(msg) = self.messages.get_mut(idx) {
             if let Some(ref mut trace) = msg.live_trace {
@@ -191,7 +212,10 @@ impl ChatView {
     /// inserting the sub-agent progress row.
     fn seal_parent_before_delegation_progress(&mut self) {
         let Some(idx) = self.messages.iter().enumerate().rev().find_map(|(i, m)| {
-            (matches!(m.role, MessageRole::Assistant) && m.is_streaming).then_some(i)
+            (matches!(m.role, MessageRole::Assistant)
+                && m.is_streaming
+                && !self.is_running_delegation_row(i))
+            .then_some(i)
         }) else {
             return;
         };

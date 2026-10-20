@@ -236,7 +236,7 @@ pub async fn run_headless(
     // (AGE-401): the exit code says so, not an empty stdout.
     let mut unrecovered_error: Option<StreamError> = None;
     // The agent the turn is delegating to, for the trace's finish line.
-    let mut delegated_agent: Option<String> = None;
+    let mut delegated_agent = DelegatedAgents::default();
     let mut infer_missing_answer = should_infer_missing_answer(&message);
     // Shared loop guard handles: repeated-tool-call detection, late-game deadline,
     // and per-turn verbosity tracking.

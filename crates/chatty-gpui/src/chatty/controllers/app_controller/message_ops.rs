@@ -912,7 +912,7 @@ impl ChattyApp {
                     if let Some(conv) = store.get_conversation_mut(conversation_id) {
                         conv.set_streaming_message(None);
                         conv.set_streaming_trace(None);
-                        conv.set_streaming_delegation_trace(None);
+                        conv.clear_streaming_delegation_traces();
                         conv.set_streaming_turn_messages(None);
                     }
                 });

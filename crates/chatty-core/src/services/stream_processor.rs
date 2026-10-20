@@ -946,6 +946,7 @@ mod tests {
                 InvokeAgentProgress::Waiting { .. } => "Waiting",
                 InvokeAgentProgress::Resumed { .. } => "Resumed",
                 InvokeAgentProgress::Conversation(_) => "Conversation",
+                InvokeAgentProgress::Call(_) => "Call",
             };
             self.calls.push(format!("on_progress({name})"));
         }
