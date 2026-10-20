@@ -12,9 +12,11 @@ name: PR nurse
 # One PR per run. scripts/pr-nurse-triage.sh (no AI) picks it; a headless
 # Claude Code session (CLI, not the action, so no branch or commit management
 # happens behind the workflow's back) edits the tree and never commits or
-# pushes; the last step validates the tree (no conflict markers, no forbidden
-# paths) and pushes with AUTO_UPDATE_TOKEN, because pushes made with
-# GITHUB_TOKEN do not trigger CI.
+# pushes. Two jobs keep PR code away from the write token: `work` runs the PR's
+# code and the session with a read-only token and emits a patch; `push` holds
+# AUTO_UPDATE_TOKEN, runs no PR code, applies the patch as data, validates it
+# (no conflict markers, no forbidden paths) and pushes, because pushes made
+# with GITHUB_TOKEN do not trigger CI.
 
 on:
   schedule:
@@ -90,11 +92,25 @@ jobs:
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
           if [ -n "$pr" ]; then echo "Nursing PR #$pr ($reason)."; else echo "Nothing needs care."; fi
 
-  nurse:
+  # Runs the PR's code (cargo build scripts, tests) and the headless session.
+  # It holds no write token: the workflow token is read-only, AUTO_UPDATE_TOKEN
+  # is not available here, and the checkout does not persist credentials. Its
+  # only output is a patch, handed to the push job below as data.
+  work:
     needs: triage
     if: needs.triage.outputs.pr != ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      branch: ${{ steps.pr.outputs.branch }}
+      sha: ${{ steps.pr.outputs.sha }}
+      main_sha: ${{ steps.merge.outputs.main_sha }}
+      conflicted: ${{ steps.merge.outputs.conflicted }}
+      blocked: ${{ steps.claude_conflict.outputs.blocked }}${{ steps.claude_ci.outputs.blocked }}
     env:
       PR: ${{ needs.triage.outputs.pr }}
       REASON: ${{ needs.triage.outputs.reason }}
@@ -103,18 +119,24 @@ jobs:
       - name: Resolve the PR branch
         id: pr
         env:
-          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          branch="$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)"
+          # Same-repo re-check: this job runs the PR's code. Pin the commit, not
+          # the branch name, so a push after triage cannot swap in untriaged code.
+          read -r branch sha owner < <(gh pr view "$PR" --repo "$REPO" \
+            --json headRefName,headRefOid,headRepositoryOwner \
+            --jq '[.headRefName, .headRefOid, .headRepositoryOwner.login] | @tsv')
+          [ "$owner" = "${REPO%%/*}" ] || { echo "::error::PR #$PR head is not in $REPO"; exit 1; }
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          echo "PR #$PR is on $branch"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "PR #$PR is on $branch at $sha"
 
-      - name: Checkout the PR branch with the nurse token
+      - name: Checkout the PR head commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.pr.outputs.branch }}
-          token: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          ref: ${{ steps.pr.outputs.sha }}
+          persist-credentials: false
           fetch-depth: 0
 
       - name: Start merging main (conflict)
@@ -125,6 +147,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch origin main
+          echo "main_sha=$(git rev-parse origin/main)" >> "$GITHUB_OUTPUT"
           if git merge --no-commit --no-ff origin/main; then
             echo "Merge is clean; nothing for Claude to resolve."
             echo "conflicted=" >> "$GITHUB_OUTPUT"
@@ -170,12 +193,21 @@ jobs:
         if: env.REASON == 'ci-failed' || steps.merge.outputs.conflicted != ''
         run: npm install -g @anthropic-ai/claude-code
 
+      - name: Snapshot the base tree
+        run: |
+          set -euo pipefail
+          # Tracked state only (conflicted paths included, markers and all), so
+          # the push job can rebuild the same tree from the same two commits.
+          git add -u
+          git write-tree > /tmp/base-tree
+          git ls-files --others --exclude-standard > /tmp/untracked-before
+
       - name: Resolve conflicts (Claude)
         id: claude_conflict
         if: env.REASON == 'conflict' && steps.merge.outputs.conflicted != ''
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PROMPT: |
             You are the PR nurse for ${{ github.repository }}. PR #${{ env.PR }} is being
             merged with `origin/main` and the merge stopped on conflicts in these files:
@@ -220,7 +252,7 @@ jobs:
         if: env.REASON == 'ci-failed'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PROMPT: |
             You are the PR nurse for ${{ github.repository }}. A required check failed on the
             head of PR #${{ env.PR }} (required checks: ${{ env.REQUIRED_CHECKS }}). Use the
@@ -252,17 +284,74 @@ jobs:
             echo "blocked=$(grep -o 'NURSE_BLOCKED:.*' <<<"$result" | head -1)" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Collect the patch
+        run: |
+          set -euo pipefail
+          git add -u
+          # New files are kept only under source, test and docs trees; any
+          # other untracked file is the session's scratch and is dropped.
+          : > /tmp/dropped
+          for f in $(git ls-files --others --exclude-standard); do
+            grep -qxF -- "$f" /tmp/untracked-before && continue
+            case "$f" in
+              crates/*|docs/*|scripts/*) git add -- "$f" ;;
+              *) echo "$f" >> /tmp/dropped ;;
+            esac
+          done
+          mkdir -p /tmp/nurse-out
+          git diff --cached --binary "$(cat /tmp/base-tree)" > /tmp/nurse-out/nurse.patch
+          cp /tmp/dropped /tmp/nurse-out/dropped
+          wc -c /tmp/nurse-out/nurse.patch
+
+      - name: Upload the patch
+        uses: actions/upload-artifact@v4
+        with:
+          name: nurse-patch
+          path: /tmp/nurse-out
+          retention-days: 1
+
+  # Holds the write token and never executes PR code: it rebuilds the tree
+  # from two pinned commits, applies the patch as data, validates, commits and
+  # pushes. Git does not run anything from a checkout, and no build step
+  # follows it.
+  push:
+    needs: [triage, work]
+    if: needs.triage.outputs.pr != '' && needs.work.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PR: ${{ needs.triage.outputs.pr }}
+      REASON: ${{ needs.triage.outputs.reason }}
+      REPO: ${{ github.repository }}
+      BRANCH: ${{ needs.work.outputs.branch }}
+      SHA: ${{ needs.work.outputs.sha }}
+      MAIN_SHA: ${{ needs.work.outputs.main_sha }}
+      CONFLICTED: ${{ needs.work.outputs.conflicted }}
+      BLOCKED: ${{ needs.work.outputs.blocked }}
+      GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+    steps:
+      - name: Checkout the PR head commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.work.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download the patch
+        uses: actions/download-artifact@v4
+        with:
+          name: nurse-patch
+          path: /tmp/nurse-out
+
       - name: Validate and push, or hand to a human
-        env:
-          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
-          BRANCH: ${{ steps.pr.outputs.branch }}
-          CONFLICTED: ${{ steps.merge.outputs.conflicted }}
-          BLOCKED: ${{ steps.claude_conflict.outputs.blocked }}${{ steps.claude_ci.outputs.blocked }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git fetch -q origin main
+          git checkout -q -B "$BRANCH"
 
           # Count locally: the API may not list a commit pushed seconds ago.
           attempts() {
@@ -285,42 +374,44 @@ jobs:
 
           FORBIDDEN='^(\.github/workflows/|RESERVED\.md$|scripts/check-.*\.sh$|scripts/pr-nurse.*\.sh$|scripts/update-next-queued-pr\.sh$|\.cursor/rules/)'
 
+          [ "$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid)" = "$SHA" ] \
+            || hand_over "the PR head moved while the nurse worked"
+
+          DROPPED="$(tr '\n' ' ' < /tmp/nurse-out/dropped)"
+          patch=/tmp/nurse-out/nurse.patch
+
           if [ "$REASON" = "conflict" ]; then
-            if grep -rIl --exclude-dir=.git --exclude-dir=target --exclude-dir=node_modules -e '^<<<<<<< ' -e '^>>>>>>> ' . >/dev/null; then
-              hand_over "conflict markers left in: $(grep -rIl --exclude-dir=.git --exclude-dir=target --exclude-dir=node_modules -e '^<<<<<<< ' . | tr '\n' ' ')"
+            # Rebuild the exact conflicted tree the work job started from.
+            git merge --no-commit --no-ff "$MAIN_SHA" >/dev/null 2>&1 || true
+            if [ "$(git diff --name-only --diff-filter=U | tr '\n' ' ')" != "$CONFLICTED" ]; then
+              hand_over "main moved or the merge differs from the one the nurse resolved"
             fi
+            git add -u
+          fi
+
+          if [ -s "$patch" ]; then
+            touched="$(git apply --numstat "$patch" | awk '{print $3}')"
+            if printf '%s\n' $touched | grep -Eq "$FORBIDDEN"; then
+              hand_over "the fix touches a forbidden path: $(printf '%s\n' $touched | grep -E "$FORBIDDEN" | tr '\n' ' ')" final
+            fi
+            git apply --index --binary "$patch" || hand_over "the patch does not apply to the pinned tree"
+          fi
+
+          if [ "$REASON" = "conflict" ]; then
             if printf '%s\n' $CONFLICTED | grep -Eq "$FORBIDDEN"; then
               hand_over "a conflicted file is on the nurse's forbidden list ($CONFLICTED)" final
             fi
-            # The session may not `git add`, so the index still lists the
-            # conflicted paths as unmerged until we stage the resolved tree.
-            # Stage tracked paths only: files main added are already staged by
-            # the merge, and anything untracked is the session's scratch.
-            DROPPED="$(git ls-files --others --exclude-standard | tr '\n' ' ')"
-            git clean -fdq
-            git add -u
+            if git grep --cached -Iq -e '^<<<<<<< ' -e '^>>>>>>> '; then
+              hand_over "conflict markers left in: $(git grep --cached -Il -e '^<<<<<<< ' | tr '\n' ' ')"
+            fi
             if [ -n "$(git ls-files -u)" ]; then
               hand_over "unmerged index entries remain: $(git ls-files -u | awk '{print $4}' | sort -u | tr '\n' ' ')"
             fi
-            git commit -m "nurse: merge main into $BRANCH (#$PR)"
+            git commit -qm "nurse: merge main into $BRANCH (#$PR)"
           else
-            # New files are kept only under source, test and docs trees; any
-            # other untracked file is the session's scratch and is dropped.
-            DROPPED=""
-            for f in $(git ls-files --others --exclude-standard); do
-              case "$f" in
-                crates/*|docs/*|scripts/*) ;;
-                *) rm -f -- "$f"; DROPPED="$DROPPED $f" ;;
-              esac
-            done
-            changed="$(git status --porcelain | awk '{print $2}')"
-            [ -n "$changed" ] || hand_over "no change produced"
-            if printf '%s\n' $changed | grep -Eq "$FORBIDDEN"; then
-              hand_over "the fix touches a forbidden path: $(printf '%s\n' $changed | grep -E "$FORBIDDEN" | tr '\n' ' ')" final
-            fi
-            git add -A
-            git commit -m "nurse: fix red required check (#$PR)"
+            [ -s "$patch" ] || hand_over "no change produced"
+            git commit -qm "nurse: fix red required check (#$PR)"
           fi
 
-          git push origin "HEAD:$BRANCH"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:$BRANCH"
           gh pr comment "$PR" --repo "$REPO" --body "**PR nurse:** pushed \`$(git rev-parse --short HEAD)\` to $REASON. CI reruns on the new head; auto-merge lands it when green. Attempt $(attempts) of $NURSE_MAX_ATTEMPTS.${DROPPED:+ Dropped scratch files: \`$DROPPED\`.}"
