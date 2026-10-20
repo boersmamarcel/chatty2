@@ -59,7 +59,7 @@ Task: "Refactor all modules and write tests for each"
 > A child asks before its side effects the way the parent does. When a worker, however deep in the tree, wants to run a command or write a file, the request climbs the chain to your approval card. The card names the agent that asked and its path (`data-coder-0 (root › coordinator › data-coder)`). Your answer goes back down to that worker only. See [Security & approvals](./security.md).
 
 > [!NOTE]
-> Children of one model server queue rather than run all at once, so a local model is not thrashed by a wide fan-out. The limit is `default_endpoint_budget` in your module settings.
+> Children of one local model server queue rather than run all at once, so a local model is not thrashed by a wide fan-out. The limit is `default_endpoint_budget` in your module settings (hosted APIs such as OpenRouter allow four at a time).
 
 ## From the terminal
 

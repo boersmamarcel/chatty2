@@ -658,13 +658,15 @@ on `chatty_fabric::EndpointBudget`.
 
 The size, in order: an explicit override in `endpoint_budgets` in `module_settings.json`
 (keyed by base URL, e.g. `http://localhost:11434`; no UI yet), then what the provider
-reports about itself (`num_parallel` in its `extra_config`, or a local Ollama's `OLLAMA_NUM_PARALLEL`
-from the environment), then `default_endpoint_budget`, which is **1**. Every wait is a
+reports about itself (`num_parallel` in its `extra_config`, a local Ollama's `OLLAMA_NUM_PARALLEL`
+from the environment, or **4** for a hosted API: OpenRouter at its own address, a public host, an
+Azure deployment), then `default_endpoint_budget`, which is **1**. Every wait is a
 `tracing` event carrying the endpoint, its limit and the queue depth at that moment, so
 a budget that is too tight looks like a queue that never empties.
 
-> A cloud endpoint gets the same default of 1 unless it is overridden. It is the knob
-> to turn first if delegation feels serialised on OpenRouter.
+> A server on this machine or the local network (a vLLM behind the OpenRouter-compatible
+> type, say) reports nothing and gets the default of 1. Set `num_parallel` on its provider,
+> or an `endpoint_budgets` entry, to let a server that batches serve several workers at once.
 
 **Headless leaders need `--broker` (AGE-376).** The wiring above is started by
 chatty-gpui's module-settings controller, so only the desktop had a `local-agent` to

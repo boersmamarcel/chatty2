@@ -140,6 +140,9 @@ impl ProviderConfig {
     /// user session, so it is right often enough to be worth reading and
     /// never fabricates a number when it is absent.
     ///
+    /// A hosted API serves many requests at once, so it answers
+    /// [`HOSTED_PARALLEL_REQUESTS`] without being told.
+    ///
     /// `None` means "nothing known", which the caller turns into its
     /// configured default rather than a guess.
     pub fn parallel_requests(&self) -> Option<usize> {
@@ -150,6 +153,25 @@ impl ProviderConfig {
             .or_else(|| {
                 self.ollama_env_parallel(std::env::var("OLLAMA_NUM_PARALLEL").ok().as_deref())
             })
+            .or_else(|| self.is_hosted().then_some(HOSTED_PARALLEL_REQUESTS))
+    }
+
+    /// Whether this provider talks to a hosted API rather than a model
+    /// server of the user's own: OpenRouter at its own address or any public
+    /// host, or an Azure deployment. A server on this machine or the local
+    /// network (a vLLM behind the OpenRouter-compatible type, say) says
+    /// nothing about how much it serves at once, so it is not hosted.
+    fn is_hosted(&self) -> bool {
+        let url = self
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        match (&self.provider_type, url) {
+            (ProviderType::Ollama, _) => false,
+            (ProviderType::OpenRouter | ProviderType::AzureOpenAI, None) => true,
+            (_, Some(url)) => !is_private_host(url_host(url)),
+        }
     }
 
     /// The `OLLAMA_NUM_PARALLEL` half of [`parallel_requests`](Self::parallel_requests),
@@ -177,19 +199,10 @@ impl ProviderConfig {
             // No URL means the loopback default.
             return true;
         };
-        let host = url
-            .split_once("://")
-            .map_or(url, |(_, rest)| rest)
-            .split('/')
-            .next()
-            .unwrap_or("");
-        // An IPv6 host is bracketed, so the port is whatever follows the
-        // closing bracket; anything else splits on the last colon.
-        let host = match host.find(']') {
-            Some(end) => &host[..=end],
-            None => host.rsplit_once(':').map_or(host, |(h, _)| h),
-        };
-        matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]")
+        matches!(
+            url_host(url),
+            "localhost" | "127.0.0.1" | "0.0.0.0" | "[::1]"
+        )
     }
 
     /// Get Azure authentication method from extra_config
@@ -272,6 +285,52 @@ impl ProviderModel {
             _ => p.api_key.as_ref().is_some_and(|key| !key.trim().is_empty()),
         })
     }
+}
+
+/// What a hosted API is assumed to serve at once.
+pub const HOSTED_PARALLEL_REQUESTS: usize = 4;
+
+/// The host of `url`, without scheme, path or port; an IPv6 host keeps its
+/// brackets.
+fn url_host(url: &str) -> &str {
+    let host = url
+        .split_once("://")
+        .map_or(url, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or("");
+    // An IPv6 host is bracketed, so the port is whatever follows the closing
+    // bracket; anything else splits on the last colon.
+    match host.find(']') {
+        Some(end) => &host[..=end],
+        None => host.rsplit_once(':').map_or(host, |(h, _)| h),
+    }
+}
+
+/// Whether `host` is this machine or the local network: loopback, a private
+/// or link-local address, or a name only a LAN resolves.
+fn is_private_host(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+            }
+            std::net::IpAddr::V6(ip) => {
+                // fc00::/7 is unique-local, fe80::/10 link-local.
+                ip.is_loopback()
+                    || ip.is_unspecified()
+                    || (ip.segments()[0] & 0xfe00) == 0xfc00
+                    || (ip.segments()[0] & 0xffc0) == 0xfe80
+            }
+        };
+    }
+    let host = host.to_ascii_lowercase();
+    host == "localhost"
+        || !host.contains('.')
+        || [".local", ".lan", ".internal", ".home.arpa"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
 }
 
 #[cfg(test)]
@@ -520,5 +579,55 @@ mod tests {
 
         let mistral: ProviderType = serde_json::from_str("\"mistral\"").unwrap();
         assert_eq!(mistral, ProviderType::OpenRouter);
+    }
+
+    fn openrouter(base_url: Option<&str>) -> ProviderConfig {
+        let mut config = ProviderConfig::new("p".to_string(), ProviderType::OpenRouter);
+        config.base_url = base_url.map(str::to_string);
+        config
+    }
+
+    /// A hosted API serves several requests at once; a server of the user's
+    /// own, even one behind the OpenRouter-compatible type, says nothing.
+    #[test]
+    fn a_hosted_provider_reports_parallel_requests_and_a_local_server_does_not() {
+        assert_eq!(
+            openrouter(None).parallel_requests(),
+            Some(HOSTED_PARALLEL_REQUESTS)
+        );
+        assert_eq!(
+            openrouter(Some("https://api.example.com/v1")).parallel_requests(),
+            Some(HOSTED_PARALLEL_REQUESTS)
+        );
+        for local in [
+            "http://127.0.0.1:8000/v1",
+            "http://172.17.0.1:8000/v1",
+            "http://192.168.1.20:8000/v1",
+            "http://10.0.0.5/v1",
+            "http://[::1]:8000/v1",
+            "http://gpubox:8000/v1",
+            "http://gpubox.local:8000/v1",
+        ] {
+            assert_eq!(openrouter(Some(local)).parallel_requests(), None, "{local}");
+        }
+        assert_eq!(
+            ollama(None).parallel_requests(),
+            None,
+            "Ollama keeps its own answer"
+        );
+        assert_eq!(
+            ollama(Some("https://ollama.example.com")).parallel_requests(),
+            None
+        );
+    }
+
+    /// What the user configured still beats the hosted assumption.
+    #[test]
+    fn a_configured_num_parallel_beats_the_hosted_assumption() {
+        let mut config = openrouter(None);
+        config
+            .extra_config
+            .insert("num_parallel".to_string(), "2".to_string());
+        assert_eq!(config.parallel_requests(), Some(2));
     }
 }

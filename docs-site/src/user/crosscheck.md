@@ -43,7 +43,7 @@ About three and a half single runs: three attempts, plus a judge when they disag
 
 ## Speed
 
-The attempts run at once only if your model endpoint allows several requests at a time. Chatty sends one request at a time per endpoint unless you raise its budget: set `num_parallel` in the provider's `extra_config`, or `default_endpoint_budget` (or a per-endpoint entry in `endpoint_budgets`) in `module_settings.json`, to 3 or more. With a budget of one, the attempts queue and the run takes about three times as long.
+The attempts run at once only if your model endpoint allows several requests at a time. Chatty sends one request at a time to a model server of your own (on this machine or your network) unless you raise its budget; a hosted API such as OpenRouter already gets four at a time. To raise it: set `num_parallel` in the provider's `extra_config`, or `default_endpoint_budget` (or a per-endpoint entry in `endpoint_budgets`) in `module_settings.json`, to 3 or more. With a budget of one, the attempts queue and the run takes about three times as long.
 
 ## What it is worth
 
