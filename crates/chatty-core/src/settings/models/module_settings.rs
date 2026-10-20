@@ -28,7 +28,8 @@ pub struct ModuleSettingsModel {
     /// One, because the endpoint that needs a budget is a local model server
     /// and a local model server that has not said otherwise serves one
     /// request at a time; more workers than that on it queue inside the
-    /// server and evict each other's weights.
+    /// server and evict each other's weights. A hosted API says otherwise
+    /// for itself (`ProviderConfig::parallel_requests`).
     #[serde(default = "default_endpoint_budget")]
     pub default_endpoint_budget: usize,
     /// Per-endpoint overrides, keyed by the model server's base URL as
