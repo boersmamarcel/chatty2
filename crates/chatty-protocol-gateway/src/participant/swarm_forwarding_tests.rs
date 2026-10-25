@@ -23,6 +23,9 @@ type Asked = Arc<Mutex<Option<bool>>>;
 enum Behaviour {
     /// Call `leaf` over its connection, wait for the result, complete.
     Delegate,
+    /// Call `agent` twice at once over its connection, wait for both
+    /// results, complete.
+    DelegateTwice(&'static str),
     /// Send one tool event carrying a forged tag, which does not decode:
     /// the broker closes the connection.
     Forge,
@@ -65,6 +68,24 @@ async fn serve(stream: UnixStream, behaviour: Behaviour, asked: Asked) {
                     let reply: Value = serde_json::from_str(&text).unwrap();
                     if reply["id"] == 2 && reply.get("method").is_none() {
                         break;
+                    }
+                }
+            }
+            Behaviour::DelegateTwice(agent) => {
+                for id in [2, 3] {
+                    let call = json!({"id": id, "method": "agent.invoke",
+                                      "params": {"agent": agent, "prompt": "go",
+                                                 "run": frame["params"]["taskId"]}});
+                    write.write_all(line(call).as_bytes()).await.unwrap();
+                }
+                let mut answered = 0;
+                while answered < 2 {
+                    let Ok(Some(text)) = lines.next_line().await else {
+                        break;
+                    };
+                    let reply: Value = serde_json::from_str(&text).unwrap();
+                    if (reply["id"] == 2 || reply["id"] == 3) && reply.get("method").is_none() {
+                        answered += 1;
                     }
                 }
             }
@@ -171,13 +192,26 @@ impl VirtualAgent for Scripted {
 /// A broker whose `mid` delegates to a `leaf` that does `leaf`, and whether
 /// each was asked for `swarm` task events.
 fn broker(leaf: Behaviour) -> (Arc<BrokerCalls>, [Asked; 2]) {
+    let (calls, [mid, leaf_asked, _]) = broker_of(Behaviour::Delegate, leaf, None);
+    (calls, [mid, leaf_asked])
+}
+
+/// Like [`broker`], with the behaviour of `mid` given and, when `sub` is
+/// `Some`, a `sub` runner with that behaviour.
+fn broker_of(
+    mid_behaviour: Behaviour,
+    leaf: Behaviour,
+    sub: Option<Behaviour>,
+) -> (Arc<BrokerCalls>, [Asked; 3]) {
     let registry = ParticipantRegistry::new();
-    let asked: [Asked; 2] = [Arc::default(), Arc::default()];
+    let asked: [Asked; 3] = [Arc::default(), Arc::default(), Arc::default()];
     let runners: BTreeMap<String, Arc<dyn VirtualAgent>> = [
-        ("mid", Behaviour::Delegate, asked[0].clone()),
-        ("leaf", leaf, asked[1].clone()),
+        Some(("mid", mid_behaviour, asked[0].clone())),
+        Some(("leaf", leaf, asked[1].clone())),
+        sub.map(|sub| ("sub", sub, asked[2].clone())),
     ]
     .into_iter()
+    .flatten()
     .map(|(name, behaviour, asked)| {
         let runner: Arc<dyn VirtualAgent> = Arc::new(Scripted {
             name: name.to_string(),
@@ -196,11 +230,19 @@ fn broker(leaf: Behaviour) -> (Arc<BrokerCalls>, [Asked; 2]) {
 /// The root delegates to `mid`: every swarm batch its call received, and
 /// how long the call took.
 async fn root_call(calls: &BrokerCalls) -> (Vec<chatty_fabric::SwarmEvent>, Duration) {
+    root_call_to(calls, "mid").await
+}
+
+/// The root delegates to `agent`.
+async fn root_call_to(
+    calls: &BrokerCalls,
+    agent: &str,
+) -> (Vec<chatty_fabric::SwarmEvent>, Duration) {
     let started = Instant::now();
     let mut stream = calls.call(
         Peer::Root,
         CallRequest::InvokeAgent(InvokeAgentParams {
-            agent: "mid".into(),
+            agent: agent.into(),
             prompt: "delegate".into(),
             handle: None,
             include_trace: false,
@@ -302,4 +344,51 @@ async fn a_burst_is_one_batch_per_interval() {
         .sum();
     assert_eq!(bytes, (N * "chunk".len()) as u64, "the text, as its length");
     assert!(!serde_json::to_string(&batches).unwrap().contains("chunk"));
+}
+
+/// DP-4 (AGE-645): one `root_task_id` travels on every local hop. The root
+/// calls `mid`, which calls `sub` over its worker socket, which calls two
+/// `leaf`s at once (a sub-leader fanning out in parallel). Every run under
+/// the root call is reported to it under the root call's `root_task_id`,
+/// the broker's, whatever the node, the depth or the sibling; and a second
+/// root call is a root of its own. No bearer rides along: the batches
+/// carry the id and the chain, nothing else to authorise with.
+#[tokio::test]
+async fn root_task_id_is_stable_across_hops() {
+    let (calls, _) = broker_of(
+        Behaviour::DelegateTwice("sub"),
+        Behaviour::Burst(1),
+        Some(Behaviour::DelegateTwice("leaf")),
+    );
+    let (batches, _) = root_call(&calls).await;
+
+    let root_task_id = batches
+        .first()
+        .expect("nested runs reached the root")
+        .root_task_id
+        .clone();
+    assert!(!root_task_id.is_empty());
+    let mut nodes = std::collections::BTreeSet::new();
+    let mut depths = std::collections::BTreeSet::new();
+    for batch in &batches {
+        assert_eq!(batch.root_task_id, root_task_id, "node {}", batch.node);
+        assert_eq!(
+            batch.chain.root_task_id, root_task_id,
+            "node {}",
+            batch.node
+        );
+        nodes.insert(batch.node.clone());
+        depths.insert(batch.chain.depth);
+    }
+    assert!(
+        depths.contains(&2) && depths.contains(&3),
+        "sub-leaders and their parallel leaves all reported: {depths:?}"
+    );
+    assert!(nodes.len() >= 3, "several nodes shared the id: {nodes:?}");
+
+    let (again, _) = root_call(&calls).await;
+    assert!(
+        again.iter().all(|b| b.root_task_id != root_task_id),
+        "a new root call is a new root"
+    );
 }
