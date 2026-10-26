@@ -72,6 +72,7 @@ page; the agent-facing version is [`CLAUDE.md`](../CLAUDE.md).
 | [`release-signing.md`](release-signing.md) | Release key, signed updates | Ed25519 `checksums.txt.sig`, macOS Team-ID check, key runbook and rotation |
 | [`build-disk-usage.md`](build-disk-usage.md) | `target/` eating the disk | Where build space goes, pruning |
 | [`team-smoke-test.md`](team-smoke-test.md) | Touching the broker, `--team` or the worker tree | One-command local run of the `coder-reviewer` test-fixture team against Ollama, with the verifier's reward |
+| [`delegation.md`](delegation.md) | Changing who may call whom, the call chain, run budgets or approval relay | Delegation by policy: `delegates_to`, the broker-stamped chain and depth 4, budgets, `human.approve` / `human.ask` |
 | [`swarm-test-kit.md`](swarm-test-kit.md) | Writing a test that spans a leader, its broker and real workers | The scriptable fake model server and the multi-process swarm harness; the pre-fabric goldens |
 
 ## Research notes (`docs/research/`, synced to the site under Explanation)
