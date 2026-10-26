@@ -55,6 +55,7 @@
   - [Agent memory](./dev/architecture/agent-memory.md)
   - [Agents and specs](./dev/architecture/agents-and-specs.md)
   - [Plugins](./dev/architecture/plugins.md)
+  - [Delegation by policy](./dev/architecture/delegation.md)
   - [Team smoke test](./dev/architecture/team-smoke-test.md)
   - [Swarm test kit](./dev/architecture/swarm-test-kit.md)
   - [Research notes](./dev/adrs/README.md)
