@@ -7,11 +7,6 @@
 //! on load the reference is resolved back. A secret whose reference
 //! disappears from the file (provider removed or renamed, Hive logout) is
 //! deleted from the store.
-//!
-//! **One-time migration.** A file written by an older version still has the
-//! plaintext field. Loading it moves each value into the store and rewrites
-//! the file with references, so after the first start of this version no key
-//! is left in the JSON. Remove this move code in v0.7.0 (AGE-832).
 
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
@@ -113,34 +108,11 @@ fn externalize(
     Ok(refs)
 }
 
-/// Resolve every reference back into its plain field. Returns whether the
-/// file still had a plaintext secret that is now in the store (the one-time
-/// migration, AGE-832), in which case the caller rewrites the file.
-fn resolve(root: &mut Value, fields: &[SecretField], store: &dyn SecretStore) -> bool {
-    let mut migrated = false;
+/// Resolve every reference back into its plain field.
+fn resolve(root: &mut Value, fields: &[SecretField], store: &dyn SecretStore) {
     for object in objects_mut(root) {
         for field in fields {
             let reference = object.remove(&field.ref_field());
-
-            // One-time migration (AGE-832): a plaintext value from an older
-            // version goes into the store; the rewrite drops it from the file.
-            if let Some(Value::String(plain)) = object.get(field.field)
-                && !plain.is_empty()
-            {
-                let plain = plain.clone();
-                match field
-                    .key_for(object)
-                    .and_then(|key| store.set(&key, &plain).map_err(store_error))
-                {
-                    Ok(()) => migrated = true,
-                    Err(e) => tracing::warn!(
-                        "could not move a plaintext {} into the secret store, leaving it in place: {e}",
-                        field.field
-                    ),
-                }
-                continue;
-            }
-
             let Some(Value::String(key)) = reference else {
                 continue;
             };
@@ -156,7 +128,6 @@ fn resolve(root: &mut Value, fields: &[SecretField], store: &dyn SecretStore) ->
             }
         }
     }
-    migrated
 }
 
 /// A JSON settings file with secret fields; the typed repositories below
@@ -182,27 +153,13 @@ impl SecretJsonFile {
 
         let store = self.store.clone();
         let fields = self.fields;
-        let (value, migrated) = tokio::task::spawn_blocking(move || {
+        let value = tokio::task::spawn_blocking(move || {
             let mut value = value;
-            let migrated = resolve(&mut value, fields, store.as_ref());
-            (value, migrated)
+            resolve(&mut value, fields, store.as_ref());
+            value
         })
         .await
         .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-
-        if migrated {
-            match self.save(value.clone()).await {
-                Ok(()) => tracing::info!(
-                    "moved the plaintext secrets of {} into the {}",
-                    self.path.display(),
-                    self.store.describe()
-                ),
-                Err(e) => tracing::warn!(
-                    "could not rewrite {} without its plaintext secrets: {e}",
-                    self.path.display()
-                ),
-            }
-        }
         Ok(Some(value))
     }
 
@@ -459,52 +416,17 @@ mod tests {
         assert_eq!(loaded[1].api_key, None);
     }
 
-    /// The AGE-741 "done when": an existing plaintext `providers.json` has no
-    /// key left in it after the first start, and the key still works.
     #[tokio::test]
-    async fn plaintext_provider_key_moves_to_the_store_on_first_load() {
-        let dir = tempfile::tempdir().unwrap();
-        let (path, store, repo) = providers(&dir);
-        std::fs::write(
-            &path,
-            r#"[{"name":"openrouter","provider_type":"open_router","api_key":"sk-legacy"},
-                {"name":"azure","provider_type":"azure_openai","api_key":"az-legacy","base_url":"https://x.openai.azure.com"}]"#,
-        )
-        .unwrap();
-
-        let loaded = repo.load_all().await.unwrap();
-        assert_eq!(loaded[0].api_key.as_deref(), Some("sk-legacy"));
-        assert_eq!(loaded[1].api_key.as_deref(), Some("az-legacy"));
-
-        let file = read(&path);
-        assert!(!file.contains("legacy"), "plaintext left behind: {file}");
-        assert!(!file.contains("\"api_key\""), "{file}");
-        assert_eq!(
-            store.get("provider/openrouter").unwrap().as_deref(),
-            Some("sk-legacy")
-        );
-        assert_eq!(
-            store.get("provider/azure").unwrap().as_deref(),
-            Some("az-legacy")
-        );
-
-        // The second start reads the references; nothing is rewritten.
-        let again = repo.load_all().await.unwrap();
-        assert_eq!(again[0].api_key.as_deref(), Some("sk-legacy"));
-        assert_eq!(read(&path), file);
-    }
-
-    #[tokio::test]
-    async fn hive_tokens_move_to_the_store_and_round_trip() {
+    async fn hive_tokens_round_trip_through_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hive_settings.json");
         let store = Arc::new(InMemorySecretStore::new());
         let repo = HiveSettingsJsonRepository::with_path_and_store(path.clone(), store.clone());
-        std::fs::write(
-            &path,
+        let initial: HiveSettingsModel = serde_json::from_str(
             r#"{"registry_url":"https://hive.example","runner_url":"https://runner.example","token":"jwt-old","refresh_token":"rt-old","username":"marcel"}"#,
         )
         .unwrap();
+        repo.save(initial).await.unwrap();
 
         let loaded = repo.load().await.unwrap();
         assert_eq!(loaded.token.as_deref(), Some("jwt-old"));
