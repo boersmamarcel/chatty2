@@ -45,8 +45,6 @@ The caches can be deleted at any time; they are rebuilt on demand (the first bro
 
 Provider API keys, MCP and A2A tokens and your Hive sign-in are kept in the operating system's keychain, filed under `chatty:<settings folder>`. The settings files only name them (`"api_key_ref": "provider/OpenRouter"`), so copying or syncing the settings folder does not copy a key. On a new machine, enter the keys again in **Settings**.
 
-When you first start this version, any key still written in `providers.json`, `mcp_servers.json`, `a2a_agents.json` or `hive_settings.json` is moved into the keychain and removed from the file.
-
 A Linux machine without a Secret Service (a server, a container) has no keychain. Chatty then keeps the keys in `secrets.json` in the settings folder, readable only by you, and logs one warning saying so. To control this, set `CHATTY_SECRET_STORE`:
 
 - `keychain` — use the keychain or refuse to start; never write `secrets.json`.

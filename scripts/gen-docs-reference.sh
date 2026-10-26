@@ -225,9 +225,7 @@ the plain field; on disk it becomes `<field>_ref` (`"api_key_ref":
 (`settings/secret_store.rs`): the OS keychain under the service
 `chatty:<config dir>`, or, when no keychain answers, the owner-only
 `secrets.json` in the config dir (one warning line; `CHATTY_SECRET_STORE=keychain`
-refuses the fallback, `=file` forces it). A file from an older version that
-still holds a plaintext secret is moved into the store and rewritten on its
-first load (one-shot; removal tracked in AGE-832). Docs examples use `"****"` or omit the field.
+refuses the fallback, `=file` forces it). Docs examples use `"****"` or omit the field.
 
 ---
 
