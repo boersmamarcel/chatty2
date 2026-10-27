@@ -535,8 +535,15 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     }
 
     // Initialize repositories
-    chatty_core::init_repositories()
-        .context("Failed to initialize settings repositories (is HOME set?)")?;
+    // A run without a human must never wait on the OS keychain (AGE-914); the
+    // interactive TUI waits, since an unlock prompt takes longer than any
+    // timeout and a fallback would lose the keys it cannot resolve.
+    let non_interactive = acp_mode || cli.headless || cli.pipe || cli.participant_fd.is_some();
+    chatty_core::init_repositories_with(
+        non_interactive
+            .then_some(chatty_core::settings::secret_store::NON_INTERACTIVE_KEYCHAIN_TIMEOUT),
+    )
+    .context("Failed to initialize settings repositories (is HOME set?)")?;
 
     if let Some(team) = &cli.install_team {
         return install_team::run(team).await;

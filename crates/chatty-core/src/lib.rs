@@ -101,6 +101,12 @@ static REPOSITORY_REGISTRY: OnceLock<RepositoryRegistry> = OnceLock::new();
 /// be determined (e.g., missing HOME), allowing the host to show a proper error
 /// dialog instead of panicking.
 pub fn init_repositories() -> anyhow::Result<()> {
+    init_repositories_with(None)
+}
+
+/// [`init_repositories`] for a run without a human: `keychain_timeout` bounds
+/// the OS keychain probe (AGE-914). Interactive hosts pass `None` and wait.
+pub fn init_repositories_with(keychain_timeout: Option<std::time::Duration>) -> anyhow::Result<()> {
     use settings::repositories::*;
 
     if is_initialized() {
@@ -110,8 +116,9 @@ pub fn init_repositories() -> anyhow::Result<()> {
     // Provider keys, MCP/A2A tokens and the Hive tokens go to the OS
     // keychain (or its announced file fallback); the JSON keeps references
     // (AGE-741).
-    let secrets = settings::secret_store::select_secret_store(
+    let secrets = settings::secret_store::select_secret_store_with_timeout(
         &generic_json_repository::chatty_config_dir()?,
+        keychain_timeout,
     )?;
 
     let registry = RepositoryRegistry {
