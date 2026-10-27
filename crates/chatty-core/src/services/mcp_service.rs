@@ -598,20 +598,15 @@ impl McpConnection {
 
     /// Open a URL in the user's default browser.
     fn open_browser(url: &str) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            std::process::Command::new("open").arg(url).spawn()?;
-        }
-        #[cfg(target_os = "linux")]
-        {
-            std::process::Command::new("xdg-open").arg(url).spawn()?;
-        }
-        #[cfg(target_os = "windows")]
-        {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", url])
-                .spawn()?;
-        }
+        let platform = if cfg!(target_os = "windows") {
+            BrowserPlatform::Windows
+        } else if cfg!(target_os = "macos") {
+            BrowserPlatform::MacOs
+        } else {
+            BrowserPlatform::Other
+        };
+        let (program, args) = browser_launch_argv(platform, url)?;
+        std::process::Command::new(program).args(args).spawn()?;
         Ok(())
     }
 
@@ -852,6 +847,38 @@ impl Default for McpService {
     }
 }
 
+/// Platform families that launch the default browser differently.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowserPlatform {
+    Windows,
+    MacOs,
+    Other,
+}
+
+/// Build the program and argv that open `url` in the default browser.
+///
+/// The URL is always a single argument and never passes through a shell:
+/// on Windows `cmd /C start` would re-parse `&` (the authorization URL is
+/// partly server-controlled, so that was command injection), hence
+/// `rundll32 url.dll,FileProtocolHandler`. Only http(s) URLs are accepted.
+fn browser_launch_argv(
+    platform: BrowserPlatform,
+    url: &str,
+) -> Result<(&'static str, Vec<String>)> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        anyhow::bail!("refusing to open a non-http(s) URL in the browser");
+    }
+    Ok(match platform {
+        BrowserPlatform::Windows => (
+            "rundll32",
+            vec!["url.dll,FileProtocolHandler".to_string(), url.to_string()],
+        ),
+        BrowserPlatform::MacOs => ("open", vec![url.to_string()]),
+        BrowserPlatform::Other => ("xdg-open", vec![url.to_string()]),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -986,5 +1013,35 @@ mod tests {
         let r1 = svc.get_all_tools_with_sinks().await.unwrap();
         let r2 = svc.get_all_tools_with_sinks().await.unwrap();
         assert_eq!(r1.len(), r2.len());
+    }
+
+    #[test]
+    fn browser_argv_keeps_full_url_as_one_argument() {
+        let url = "https://x/auth?client_id=a&state=b&calc.exe&";
+        let (prog, args) = browser_launch_argv(BrowserPlatform::Windows, url).unwrap();
+        assert_eq!(prog, "rundll32");
+        assert_eq!(args, vec!["url.dll,FileProtocolHandler", url]);
+        assert_eq!(
+            browser_launch_argv(BrowserPlatform::MacOs, url).unwrap(),
+            ("open", vec![url.to_string()])
+        );
+        assert_eq!(
+            browser_launch_argv(BrowserPlatform::Other, url).unwrap(),
+            ("xdg-open", vec![url.to_string()])
+        );
+    }
+
+    #[test]
+    fn browser_argv_refuses_non_http_schemes() {
+        for url in [
+            "file:///C:/Windows/System32/calc.exe",
+            "javascript:alert(1)",
+            "calc.exe",
+            "ms-msdt:/id",
+            "",
+        ] {
+            assert!(browser_launch_argv(BrowserPlatform::Windows, url).is_err());
+        }
+        assert!(browser_launch_argv(BrowserPlatform::Windows, "HTTP://x/?a=1").is_ok());
     }
 }
