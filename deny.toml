@@ -36,6 +36,10 @@ ignore = [
     "RUSTSEC-2024-0320",
     # unsafe-libyaml: unmaintained, no patched release; pulled in by typst (hayagriva -> serde_yaml)
     "RUSTSEC-2024-0449",
+    # zstd 0.13 / zstd-safe 7: pinned by memvid-core (fixed in zstd 0.14.3 / zstd-safe 8.2.0, which the rest of the tree already uses)
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0403",
     # zip < 9: extract() follows symlinks / keeps SUID bits. chatty's own extract() uses zip 9;
     # the older versions are pinned by calamine, docx-rs, memvid-core, pptx and the rdocx fork,
     # which read office documents in memory and do not extract to disk
