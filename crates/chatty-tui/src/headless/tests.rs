@@ -528,6 +528,37 @@ mod runner {
         (runner, event_rx)
     }
 
+    /// AGE-917: a lone headless agent and a team leader have no human to
+    /// approve; a worker's approvals go up its broker, and a run a parent
+    /// follows has its parent. The stderr line is printed once.
+    #[tokio::test]
+    async fn only_a_run_nobody_follows_is_unattended() {
+        let (mut runner, _event_rx) = test_runner().await;
+        assert!(runner.is_unattended());
+        assert!(runner.note_unanswerable_approval());
+        assert!(!runner.note_unanswerable_approval(), "once per run");
+
+        runner.set_event_observer(Arc::new(|_| {}));
+        assert!(!runner.is_unattended());
+    }
+
+    #[tokio::test]
+    async fn a_turn_marks_its_approval_store_unattended_only_when_nobody_follows() {
+        for (observed, unattended) in [(false, true), (true, false)] {
+            let (mut runner, _event_rx) = test_runner().await;
+            runner.scripted_turns = vec![answer_turn("done")].into();
+            if observed {
+                runner.set_event_observer(Arc::new(|_| {}));
+            }
+            runner.send_message("hi".into());
+            assert_eq!(
+                runner.session.execution_approvals().is_unattended(),
+                unattended,
+                "observed: {observed}"
+            );
+        }
+    }
+
     /// AGE-196 acceptance: a headless turn runs on the session directly —
     /// no `ChatEngine`, no terminal state — and every event of it reaches
     /// the parent that delegated it, which since ADR-0011's C4 means the
