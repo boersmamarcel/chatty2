@@ -2,7 +2,9 @@ use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::models::execution_approval_store::{PendingApprovals, request_execution_approval};
+use crate::models::execution_approval_store::{
+    NonInteractiveDenial, PendingApprovals, request_execution_approval,
+};
 use crate::models::message_types::ExecutionEngine;
 use crate::services::shell_service::{
     MAX_SHELL_CALL_TIMEOUT_SECONDS, ShellOutput, ShellSession, ShellStatus,
@@ -101,6 +103,13 @@ impl ShellExecuteTool {
             is_sandboxed,
         )
         .await
+        .map_err(|error| match error.downcast_ref::<NonInteractiveDenial>() {
+            // Say why the shell is unsandboxed, not just that it is (AGE-917).
+            Some(denial) => anyhow::anyhow!(
+                denial.message(self.session.sandbox_unavailable_reason().as_deref())
+            ),
+            None => error,
+        })
     }
 }
 
