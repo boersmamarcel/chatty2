@@ -50,6 +50,8 @@ A Linux machine without a Secret Service (a server, a container) has no keychain
 - `keychain` — use the keychain or refuse to start; never write `secrets.json`.
 - `file` — always use `secrets.json`, without touching the keychain.
 
+Runs without a person at the keyboard (`chatty-tui --headless`, `--pipe`, and ACP) wait at most 2 seconds for the keychain. If it does not answer, for example because no Secret Service session is unlocked, they fall back to `secrets.json` and print one `warning:` line on stderr. The desktop app and the interactive TUI keep waiting, so a slow first unlock does not switch them to the file.
+
 Environment variables and command-line flags that pass a key to `chatty-tui` (for example `--api-key`) work as before and are never stored.
 
 ## Auto-update
