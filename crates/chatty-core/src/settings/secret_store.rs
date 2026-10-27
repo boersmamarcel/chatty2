@@ -270,31 +270,95 @@ impl SecretStore for KeychainSecretStore {
 /// - `keychain`: the OS keychain or an error, never the file;
 /// - `file`: the file, without touching the keychain.
 pub fn select_secret_store(config_dir: &Path) -> SecretResult<Arc<dyn SecretStore>> {
+    select_secret_store_with_timeout(config_dir, None)
+}
+
+/// [`select_secret_store`] for a run without a human (`--headless`, `--pipe`,
+/// a participant, ACP): the keychain probe gets `timeout` (`None` waits as
+/// long as it takes, which interactive hosts need for an unlock prompt), and
+/// a fallback to the file is also printed once on stderr, because those runs
+/// install no log subscriber (AGE-914).
+pub fn select_secret_store_with_timeout(
+    config_dir: &Path,
+    timeout: Option<std::time::Duration>,
+) -> SecretResult<Arc<dyn SecretStore>> {
+    let service_dir = config_dir.to_path_buf();
+    let (store, fallback) = select_secret_store_with(config_dir, timeout, move || {
+        KeychainSecretStore::for_config_dir(&service_dir).probe()
+    })?;
+    if let Some(line) = fallback {
+        tracing::warn!("{line}");
+        if timeout.is_some() {
+            eprintln!("warning: {line}");
+        }
+    }
+    Ok(store)
+}
+
+/// The probe timeout non-interactive runs use.
+pub const NON_INTERACTIVE_KEYCHAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Run `probe` on its own thread and give up after `timeout`. A probe that
+/// never returns is abandoned (its thread stays parked until the process
+/// exits) and reported as an error.
+fn probe_with_timeout(
+    timeout: Option<std::time::Duration>,
+    probe: impl FnOnce() -> SecretResult<()> + Send + 'static,
+) -> SecretResult<()> {
+    let Some(timeout) = timeout else {
+        return probe();
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("keychain-probe".to_string())
+        .spawn(move || {
+            let _ = tx.send(probe());
+        });
+    if let Err(e) = spawned {
+        return Err(SecretStoreError(format!(
+            "cannot start keychain probe: {e}"
+        )));
+    }
+    rx.recv_timeout(timeout).unwrap_or_else(|_| {
+        Err(SecretStoreError(format!(
+            "OS keychain did not answer within {}s (no unlocked Secret Service session?)",
+            timeout.as_secs_f32()
+        )))
+    })
+}
+
+/// The selection with the keychain probe injected. Also returns the
+/// fallback warning line when the file was chosen because no keychain answered.
+fn select_secret_store_with(
+    config_dir: &Path,
+    timeout: Option<std::time::Duration>,
+    probe: impl FnOnce() -> SecretResult<()> + Send + 'static,
+) -> SecretResult<(Arc<dyn SecretStore>, Option<String>)> {
     let choice = std::env::var(SECRET_STORE_ENV).unwrap_or_default();
     let file = || FileSecretStore::new(config_dir.join(SECRETS_FILE_NAME));
     match choice.trim().to_ascii_lowercase().as_str() {
         "" | "auto" => {
             let keychain = KeychainSecretStore::for_config_dir(config_dir);
-            match keychain.probe() {
-                Ok(()) => Ok(Arc::new(keychain)),
+            match probe_with_timeout(timeout, probe) {
+                Ok(()) => Ok((Arc::new(keychain), None)),
                 Err(e) => {
                     let file = file();
-                    tracing::warn!(
+                    let line = format!(
                         "no OS keychain available ({e}); keeping provider keys and Hive tokens in the owner-only file {} instead (set {SECRET_STORE_ENV}=keychain to refuse this fallback)",
                         file.path().display()
                     );
-                    Ok(Arc::new(file))
+                    Ok((Arc::new(file), Some(line)))
                 }
             }
         }
         "keychain" => {
             let keychain = KeychainSecretStore::for_config_dir(config_dir);
-            keychain.probe().map_err(|e| {
+            probe_with_timeout(timeout, probe).map_err(|e| {
                 SecretStoreError(format!(
                     "{SECRET_STORE_ENV}=keychain but the OS keychain is unavailable: {e}. Start a Secret Service (e.g. gnome-keyring) or unset {SECRET_STORE_ENV} to allow the owner-only file fallback"
                 ))
             })?;
-            Ok(Arc::new(keychain))
+            Ok((Arc::new(keychain), None))
         }
         "file" => {
             let file = file();
@@ -302,7 +366,7 @@ pub fn select_secret_store(config_dir: &Path) -> SecretResult<Arc<dyn SecretStor
                 "{SECRET_STORE_ENV}=file: keeping secrets in {}",
                 file.path().display()
             );
-            Ok(Arc::new(file))
+            Ok((Arc::new(file), None))
         }
         other => Err(SecretStoreError(format!(
             "{SECRET_STORE_ENV}={other} is not one of auto, keychain, file"
@@ -343,6 +407,74 @@ mod tests {
             .filter(|n| n != SECRETS_FILE_NAME)
             .collect();
         assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+    }
+
+    /// AGE-914: a keychain whose probe never returns must not hang startup;
+    /// the owner-only file is chosen instead. (The env var is left to the
+    /// caller; `auto` is the default, so this runs unless it is set.)
+    #[test]
+    fn blocking_keychain_probe_falls_back_to_file() {
+        if !std::env::var(SECRET_STORE_ENV)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return; // an explicit choice bypasses the probe
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (_hold, parked) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let (store, fallback) = select_secret_store_with(
+            dir.path(),
+            Some(std::time::Duration::from_millis(100)),
+            move || {
+                let _ = parked.recv(); // blocks until the sender drops, i.e. the end of the test
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let line = fallback.expect("a fallback line for the caller to print");
+        assert!(
+            line.contains("no OS keychain available") && line.contains(SECRETS_FILE_NAME),
+            "{line}"
+        );
+        assert_eq!(
+            store.describe(),
+            dir.path().join(SECRETS_FILE_NAME).display().to_string()
+        );
+        store.set("provider/x", "k").unwrap();
+        assert_eq!(store.get("provider/x").unwrap().as_deref(), Some("k"));
+    }
+
+    /// Interactive hosts pass no timeout and wait for a slow (unlocking)
+    /// keychain instead of falling back to the file.
+    #[test]
+    fn no_timeout_waits_for_a_slow_keychain() {
+        if !std::env::var(SECRET_STORE_ENV)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (store, fallback) = select_secret_store_with(dir.path(), None, || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(())
+        })
+        .unwrap();
+        assert!(fallback.is_none());
+        assert_eq!(store.describe(), "OS keychain");
+    }
+
+    #[test]
+    fn probe_timeout_reports_an_error() {
+        let (_hold, parked) = std::sync::mpsc::channel::<()>();
+        let err = probe_with_timeout(Some(std::time::Duration::from_millis(50)), move || {
+            let _ = parked.recv();
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(err.0.contains("did not answer"), "{err}");
     }
 
     /// Talks to the real OS keychain, which CI does not have. Run by hand on
