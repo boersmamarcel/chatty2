@@ -436,6 +436,12 @@ pub struct ChatEngine {
     /// the loop's own follow-ups (AGE-242 / D3) — sent one turn at a time
     /// once the in-flight turn ends (AGE-482).
     mailbox: Mailbox<QueuedSend>,
+    /// How the turn in flight ended, when it ended by `Cancelled` or `Error`.
+    /// Those are always followed by the turn's `TurnEnded`, and only that one
+    /// tells the mailbox the turn is over: one `TurnEnd` per turn, so a
+    /// trailing `TurnEnded` can never finalize the turn an interrupt started
+    /// (AGE-522).
+    ended_as: Option<TurnEnd>,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub total_cache_read_tokens: u32,
@@ -671,6 +677,7 @@ impl ChatEngine {
             pending_restore_text: None,
             swarm_trace: chatty_core::services::swarm_trace::SwarmTrace::new(),
             mailbox: Mailbox::new(),
+            ended_as: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_read_tokens: 0,
@@ -1263,16 +1270,20 @@ impl ChatEngine {
                 EngineAction::None
             }
             AppEvent::StreamCompleted => {
+                let end = self.ended_as.take().unwrap_or(TurnEnd::Completed);
                 self.finalize_stream();
-                self.drain_mailbox(TurnEnd::Completed);
+                self.drain_mailbox(end);
                 EngineAction::Redraw
             }
+            // `Error` and `Cancelled` are always followed by the turn's
+            // `TurnEnded`. The partial response is committed now, but the
+            // turn stays in flight — nothing new starts and the mailbox is
+            // not drained — until that `TurnEnded` arrives (AGE-522).
             AppEvent::StreamError(error) => {
                 error!(error = %error, "Stream error");
                 self.transcript.mark_error(&error.to_string());
                 self.finalize_partial_response();
-                self.reset_stream_state();
-                self.drain_mailbox(TurnEnd::Error);
+                self.ended_as = Some(TurnEnd::Error);
                 EngineAction::Redraw
             }
             AppEvent::AgentProtocolFollowUp(prompt) => {
@@ -1294,8 +1305,7 @@ impl ChatEngine {
             AppEvent::StreamCancelled => {
                 self.transcript.mark_cancelled();
                 self.finalize_partial_response();
-                self.reset_stream_state();
-                self.drain_mailbox(TurnEnd::Cancelled);
+                self.ended_as = Some(TurnEnd::Cancelled);
                 EngineAction::Redraw
             }
             AppEvent::TitleGenerated(title) => {
@@ -1911,8 +1921,9 @@ mod tests {
             .unwrap();
         engine.send_message("second".to_string());
         engine.stop_stream();
-        // The cancelled end arrives; nothing runs.
+        // The cancelled end arrives, then the turn's `TurnEnded`; nothing runs.
         engine.handle_event(AppEvent::StreamCancelled);
+        engine.handle_event(AppEvent::StreamCompleted);
         assert_eq!(engine.queued_count(), 1);
         assert!(!engine.is_streaming);
         assert_eq!(
@@ -1926,6 +1937,66 @@ mod tests {
         engine.send_message("third".to_string());
         assert_eq!(user_texts(&engine), ["second"]);
         assert_eq!(engine.queued_count(), 1);
+    }
+
+    /// AGE-522: `/now` mid-turn with a message already queued. The cancelled
+    /// turn ends with `Cancelled` *and* `TurnEnded`; the interrupt must run
+    /// once, after the turn has really ended, and the trailing `TurnEnded`
+    /// must not roll the interrupting turn back or dispatch the queue again.
+    #[tokio::test]
+    async fn now_mid_turn_runs_the_interrupt_once_and_keeps_it() {
+        let (mut engine, mut event_rx) = test_engine().await;
+        let input = engine
+            .prepare_send(QueuedSend::message("first".to_string()), true)
+            .expect("engine is ready and idle");
+        engine.send_message("Y".to_string());
+        assert_eq!(engine.queued_count(), 1);
+
+        let event_tx = engine.event_tx.clone();
+        let turn = engine
+            .session
+            .begin_scripted_turn(input, scenario("cancelled_mid_stream"), move |event| {
+                let _ = event_tx.send(AppEvent::from(event));
+            })
+            .expect("turn starts");
+        // The turn runs to its cancelled end before the engine sees any of
+        // it, so `/now` lands while the engine still has it streaming and its
+        // `Cancelled` and trailing `TurnEnded` are both already in the
+        // channel.
+        turn.await;
+        engine.interrupt("X".to_string());
+
+        let mut ends = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            ends += usize::from(matches!(
+                event,
+                AppEvent::StreamCancelled | AppEvent::StreamCompleted
+            ));
+            engine.handle_event(event);
+        }
+        assert_eq!(ends, 2, "a cancelled turn emits Cancelled and TurnEnded");
+
+        // Exactly one turn dispatched: the interrupt. Its user message is
+        // committed and its turn is still running; Y still waits.
+        assert_eq!(user_texts(&engine), ["first", "X"]);
+        assert!(engine.is_streaming, "the interrupting turn is running");
+        assert!(engine.session.is_turn_active());
+        assert_eq!(engine.queued_count(), 1, "Y is still queued");
+
+        // The interrupting turn's own end persists its reply, then Y runs.
+        engine.handle_event(AppEvent::TextChunk("done".to_string()));
+        engine.handle_event(AppEvent::StreamCompleted);
+        let messages = engine.session.conversation().unwrap().messages();
+        assert!(
+            messages.contains(&rig_core::completion::Message::Assistant {
+                id: None,
+                content: vec![rig_core::completion::message::AssistantContent::text(
+                    "done"
+                )],
+            })
+        );
+        assert_eq!(user_texts(&engine), ["first", "X", "Y"]);
+        assert_eq!(engine.queued_count(), 0);
     }
 
     /// A completed turn is committed to history and the display closes: the
