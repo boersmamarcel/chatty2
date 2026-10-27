@@ -574,7 +574,10 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
 
     let mut providers = providers_result.context("Failed to load providers")?;
     let mut models_list = models_result.context("Failed to load models")?;
-    let mut execution_settings = exec_settings_result.unwrap_or_default();
+    // A settings file that exists but does not parse is an error naming the
+    // file, not defaults (shell off) the run then silently works with (AGE-919).
+    let mut execution_settings = exec_settings_result
+        .map_err(|e| anyhow::anyhow!("Failed to load execution settings: {e}"))?;
     // A module settings file in a shape no longer read (agent objects in
     // `virtual_agents`, AGE-614) is an error to fix, not a default to run.
     let module_settings = module_settings_result.context("Failed to load module settings")?;
@@ -1134,7 +1137,10 @@ async fn load_deferred_services(
         async {
             match chatty_core::user_secrets_repository().load().await {
                 Ok(secrets) => secrets.as_env_pairs(),
-                Err(_) => vec![],
+                Err(e) => {
+                    eprintln!("warning: user secrets not loaded: {e}");
+                    vec![]
+                }
             }
         },
         start_mcp_servers(),
