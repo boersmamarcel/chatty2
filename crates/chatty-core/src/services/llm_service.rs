@@ -746,12 +746,7 @@ pub async fn stream_prompt(
                         sandboxed = approval.is_sandboxed,
                         "Stream received approval notification, emitting ApprovalRequested chunk"
                     );
-                    yield Ok(StreamChunk::ApprovalRequested {
-                        id: approval.id,
-                        command: approval.command,
-                        is_sandboxed: approval.is_sandboxed,
-                        detail: approval.detail,
-                    });
+                    yield Ok(approval_chunk(approval));
                 }
 
                 // Process resolution notifications
@@ -761,10 +756,9 @@ pub async fn stream_prompt(
                         approved = resolution.approved,
                         "Stream received resolution notification, emitting ApprovalResolved chunk"
                     );
-                    yield Ok(StreamChunk::ApprovalResolved {
-                        id: resolution.id,
-                        approved: resolution.approved,
-                    });
+                    for chunk in requests_before_resolution(&mut approval_rx, resolution) {
+                        yield Ok(chunk);
+                    }
                 }
 
                 // Process clarifying-question notifications
@@ -786,8 +780,72 @@ pub async fn stream_prompt(
     Ok(stream)
 }
 
+fn approval_chunk(approval: ApprovalNotification) -> StreamChunk {
+    StreamChunk::ApprovalRequested {
+        id: approval.id,
+        command: approval.command,
+        is_sandboxed: approval.is_sandboxed,
+        detail: approval.detail,
+    }
+}
+
+/// The chunks for a resolution just received: every approval request already
+/// queued first, then the resolution. The two channels are raced by a
+/// non-biased `select!`, and a request answered at once (an unattended run,
+/// AGE-917) would otherwise be resolved before it was shown, leaving its
+/// block pending for good.
+fn requests_before_resolution(
+    approval_rx: &mut mpsc::UnboundedReceiver<ApprovalNotification>,
+    resolution: ApprovalResolution,
+) -> Vec<StreamChunk> {
+    let mut chunks = Vec::new();
+    while let Ok(approval) = approval_rx.try_recv() {
+        chunks.push(approval_chunk(approval));
+    }
+    chunks.push(StreamChunk::ApprovalResolved {
+        id: resolution.id,
+        approved: resolution.approved,
+    });
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
+    /// AGE-917: a request denied the moment it is raised puts its request
+    /// and its resolution on the two channels back to back; whichever the
+    /// stream's `select!` picks, the request must be emitted first.
+    #[test]
+    fn a_resolution_is_preceded_by_the_requests_already_queued() {
+        use crate::models::execution_approval_store::{
+            ApprovalDetail, ApprovalNotification, ApprovalResolution,
+        };
+        use crate::services::StreamChunk;
+
+        let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+        approval_tx
+            .send(ApprovalNotification {
+                id: "a1".into(),
+                command: "[shell] echo hi".into(),
+                is_sandboxed: false,
+                detail: ApprovalDetail::exec("[shell] echo hi"),
+            })
+            .unwrap();
+        let chunks = super::requests_before_resolution(
+            &mut approval_rx,
+            ApprovalResolution {
+                id: "a1".into(),
+                approved: false,
+            },
+        );
+        assert!(matches!(
+            chunks.as_slice(),
+            [
+                StreamChunk::ApprovalRequested { id: requested, .. },
+                StreamChunk::ApprovalResolved { id: resolved, approved: false },
+            ] if requested == "a1" && resolved == "a1"
+        ));
+    }
+
     use rig_agent::agent::CompletionCall;
     use rig_core::completion::CompletionError;
     use rig_core::completion::message::{

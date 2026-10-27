@@ -176,6 +176,9 @@ pub struct PendingApprovalsState {
     requests: HashMap<String, oneshot::Sender<ApprovalDecision>>,
     notifier: Option<mpsc::UnboundedSender<ApprovalNotification>>,
     resolution_notifier: Option<mpsc::UnboundedSender<ApprovalResolution>>,
+    /// No human can answer on this run (AGE-917): a request is announced,
+    /// then denied at once with a tool error instead of waiting.
+    unattended: bool,
 }
 
 impl PendingApprovalsState {
@@ -184,6 +187,7 @@ impl PendingApprovalsState {
             requests: HashMap::new(),
             notifier: None,
             resolution_notifier: None,
+            unattended: false,
         }
     }
 }
@@ -244,6 +248,44 @@ pub async fn request_relayed_execution_approval(
     ask(pending, command, false, detail).await
 }
 
+/// The error an unattended run's approval request fails with (AGE-917). A
+/// tool that knows more about why (the shell, why it is unsandboxed) can
+/// downcast to it and call [`NonInteractiveDenial::message`].
+#[derive(Debug)]
+pub struct NonInteractiveDenial {
+    pub is_sandboxed: bool,
+}
+
+impl NonInteractiveDenial {
+    /// The text the model reads; `sandbox_reason` is why the shell is not
+    /// sandboxed, when known.
+    pub fn message(&self, sandbox_reason: Option<&str>) -> String {
+        let (shell, reason) = match (self.is_sandboxed, sandbox_reason) {
+            (true, _) => (
+                "the shell is sandboxed",
+                "the approval mode asks for every command".to_string(),
+            ),
+            (false, Some(reason)) => ("the shell is not sandboxed", reason.to_string()),
+            (false, None) => (
+                "the shell is not sandboxed",
+                "the approval mode asks for commands outside a sandbox".to_string(),
+            ),
+        };
+        format!(
+            "command needs approval, and this run is non-interactive; {shell} \
+             (reason: {reason}). Do not retry it; report that it was blocked."
+        )
+    }
+}
+
+impl std::fmt::Display for NonInteractiveDenial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message(None))
+    }
+}
+
+impl std::error::Error for NonInteractiveDenial {}
+
 async fn ask(
     pending: &PendingApprovals,
     label: String,
@@ -258,6 +300,7 @@ async fn ask(
     {
         let mut state = pending.lock();
         state.requests.insert(request_id.clone(), tx);
+        let unattended = state.unattended;
         match &state.notifier {
             Some(notifier) => {
                 if let Err(e) = notifier.send(ApprovalNotification {
@@ -272,6 +315,18 @@ async fn ask(
             None => {
                 warn!(id = %request_id, "Approval notifier not set - notification not sent!");
             }
+        }
+        if unattended {
+            // Nobody can answer: deny now, so the tool reports back instead
+            // of waiting out the turn (AGE-917).
+            state.requests.remove(&request_id);
+            if let Some(tx) = &state.resolution_notifier {
+                let _ = tx.send(ApprovalResolution {
+                    id: request_id.clone(),
+                    approved: false,
+                });
+            }
+            return Err(NonInteractiveDenial { is_sandboxed }.into());
         }
     }
 
@@ -362,6 +417,17 @@ impl ExecutionApprovalStore {
         } else {
             false
         }
+    }
+
+    /// Mark this store's run as one no human can answer (AGE-917): a request
+    /// is denied at once with a tool error. Shared with every clone.
+    pub fn set_unattended(&self, unattended: bool) {
+        self.pending_requests.lock().unattended = unattended;
+    }
+
+    /// Whether no human can answer this store's requests.
+    pub fn is_unattended(&self) -> bool {
+        self.pending_requests.lock().unattended
     }
 
     /// The ids waiting on an answer.
