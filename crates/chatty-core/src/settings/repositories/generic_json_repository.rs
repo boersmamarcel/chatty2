@@ -172,8 +172,12 @@ where
                 .await
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
-            let value: T = serde_json::from_str(&contents)
-                .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
+            // A file that exists but does not parse is an error naming the
+            // file and the serde message (line, unknown variant), never
+            // `T::default()` (AGE-919).
+            let value: T = serde_json::from_str(&contents).map_err(|e| {
+                RepositoryError::SerializationError(format!("{}: {e}", path.display()))
+            })?;
 
             Ok(value)
         })
@@ -271,6 +275,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing file is the defaults; a file that exists but does not parse
+    /// is an error naming the file and the serde message (AGE-919).
+    #[tokio::test]
+    async fn unparseable_file_is_an_error_naming_the_path_missing_is_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("execution_settings.json");
+        let repo = GenericJsonRepository::<u32>::with_path(path.clone());
+        assert_eq!(repo.load().await.unwrap(), 0);
+
+        std::fs::write(&path, "\n\nnope").unwrap();
+        let err = repo.load().await.unwrap_err().to_string();
+        assert!(err.contains("execution_settings.json"), "{err}");
+        assert!(err.contains("line 3"), "{err}");
+    }
 
     /// Overlapping saves of one file all succeed and the last *call* wins,
     /// even when the futures are polled in reverse (AGE-562).

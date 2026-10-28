@@ -119,6 +119,9 @@ pub struct HeadlessRunner {
     handoff_ledger: Option<HandoffLedger>,
     /// The owner the broker's `welcome` named, set with `fabric_transport`.
     fabric_owner: Option<String>,
+    /// The stderr line for an approval nobody can answer has been printed
+    /// (AGE-917); it is printed once per run.
+    unanswerable_approval_noted: bool,
     /// What the run has left to hand its callees (DP-3): its turn cap, its
     /// clock, the tool turns and dollars it has spent. Its `invoke_agent`
     /// reads it on every call; a delegated worker's is narrowed by its task.
@@ -188,6 +191,7 @@ impl HeadlessRunner {
             handoff: None,
             handoff_ledger,
             fabric_owner: None,
+            unanswerable_approval_noted: false,
             #[cfg(test)]
             scripted_budgets: Vec::new(),
             #[cfg(test)]
@@ -312,6 +316,29 @@ impl HeadlessRunner {
     /// gets `--team`, so it — like a lone `--headless` agent — is not one.
     pub fn is_team_leader(&self) -> bool {
         self.config.team.is_some()
+    }
+
+    /// Whether no human can answer an approval on this run (AGE-917): no
+    /// parent follows its events (`event_observer`) and no broker relays its
+    /// requests up (`fabric_transport`). A worker's approvals go up to the
+    /// root, so only a lone `--headless`/`--pipe` agent or a `--team`
+    /// leader is unattended.
+    pub(super) fn is_unattended(&self) -> bool {
+        self.event_observer.is_none() && self.fabric_transport.is_none()
+    }
+
+    /// Say, once per run, that approvals are denied because nobody can give
+    /// them. Returns whether it printed.
+    pub(super) fn note_unanswerable_approval(&mut self) -> bool {
+        if self.unanswerable_approval_noted {
+            return false;
+        }
+        self.unanswerable_approval_noted = true;
+        eprintln!(
+            "headless: shell commands need approval but nobody can approve; pass --auto-approve \
+             or fix the sandbox"
+        );
+        true
     }
 
     /// Whether this run is a worker a broker started (`--participant-fd`):
@@ -641,6 +668,9 @@ impl HeadlessRunner {
 
     fn spawn_turn(&mut self, input: TurnInput) {
         self.in_tool_turn = false;
+        self.session
+            .execution_approvals()
+            .set_unattended(self.is_unattended());
         #[cfg(test)]
         self.scripted_budgets.push(input.turn_budget);
         #[cfg(test)]
@@ -738,6 +768,9 @@ impl HeadlessRunner {
                 is_sandboxed,
                 asker,
             } => {
+                if self.is_unattended() {
+                    self.note_unanswerable_approval();
+                }
                 self.session
                     .note_approval_requested(&id, &command, is_sandboxed, asker.clone());
                 self.transcript
