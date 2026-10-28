@@ -157,6 +157,8 @@ A worker's side effects come to you for approval like the leader's own, whatever
 
 `--team <id>` packages a roster like the one above with a leader and a verification command into one directory, so a run is reproducible and the leader has a role too: a named leader plus co-workers, each with its own model, role and standing instructions, defined once in `teams/<id>/team.json`, which names the leader's spec and the workers' specs. It implies `--broker`, and for that run the team's `agents` replace whatever `virtual_agents` your module settings declare.
 
+In an unattended run (`--headless`, `--pipe`), `chatty-tui` prints one line to stderr per agent, before the first turn, when that agent's tool profile (for example `coder` or `reviewer`) wants the shell or git but `execution_settings.json` has it off (`enabled=false`, `git_enabled=false`). It also prints a line when the team's verification command is set but shell is off. Workers are separate processes that read `execution_settings.json` themselves and do not inherit `--enable`, so turn shell and git on in that file. These are warnings only; the run goes on unchanged.
+
 Two teams ship built in, both **experimental**: they are free, run on your own model, and become documented defaults only once a measured result supports them.
 
 | Team | Start it with | What it does |
