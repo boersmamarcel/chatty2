@@ -1799,6 +1799,85 @@ async fn a_shell_that_spawns_unsandboxed_asks_for_its_first_command() {
     assert!(!waiter.await.unwrap().unwrap());
 }
 
+/// AGE-917: a headless run whose shell fell back to a plain bash, under
+/// `AutoApproveSandboxed`, used to wait on an approval nobody could give
+/// until the run's clock ran out. Marked unattended, the call fails at once
+/// with an error the model reads, and the request is announced and retired.
+#[tokio::test]
+async fn an_unsandboxed_command_on_an_unattended_run_is_denied_at_once() {
+    use crate::models::execution_approval_store::ExecutionApprovalStore;
+    use crate::settings::models::ExecutionSettingsModel;
+    use crate::settings::models::execution_settings::ApprovalMode;
+    use crate::tools::shell_tool::{ShellExecuteArgs, ShellExecuteTool};
+    use rig_agent::tool::{Tool, ToolContext};
+
+    let mut session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    session.test_shell = Some(Box::new(|_| TerminalConfig {
+        shell: Some("/bin/bash".into()),
+        args: bash_args(),
+        ..TerminalConfig::default()
+    }));
+    let mut store = ExecutionApprovalStore::new();
+    let (approval_tx, mut approval_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (resolution_tx, mut resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+    store.set_notifiers(approval_tx, resolution_tx);
+    store.set_unattended(true);
+    let settings = ExecutionSettingsModel {
+        enabled: true,
+        approval_mode: ApprovalMode::AutoApproveSandboxed,
+        ..ExecutionSettingsModel::default()
+    };
+    let tool = ShellExecuteTool::new(Arc::new(session), settings, store.get_pending_approvals());
+
+    let args = ShellExecuteArgs {
+        command: "echo sandbox-ok".into(),
+        timeout_seconds: None,
+    };
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tool.call(&mut ToolContext::new(), args),
+    )
+    .await
+    .expect("an unattended run must not wait for an approval");
+    let error = result.expect_err("the command is denied").to_string();
+    assert!(
+        error.contains("needs approval, and this run is non-interactive")
+            && error.contains("the shell is not sandboxed"),
+        "{error}"
+    );
+
+    let request = approval_rx.try_recv().expect("the request is announced");
+    assert!(!request.is_sandboxed);
+    let resolution = resolution_rx.try_recv().expect("and retired as denied");
+    assert_eq!(resolution.id, request.id);
+    assert!(!resolution.approved);
+    assert!(store.pending_ids().is_empty());
+}
+
+/// AGE-917: an unattended run still approves what its mode approves
+/// (`--auto-approve`, or a command that really is sandboxed).
+#[tokio::test]
+async fn an_unattended_run_still_approves_what_its_mode_approves() {
+    use crate::models::execution_approval_store::{
+        ExecutionApprovalStore, request_execution_approval,
+    };
+    use crate::settings::models::execution_settings::ApprovalMode;
+
+    let store = ExecutionApprovalStore::new();
+    store.set_unattended(true);
+    let pending = store.get_pending_approvals();
+    for (mode, sandboxed) in [
+        (ApprovalMode::AutoApproveAll, false),
+        (ApprovalMode::AutoApproveSandboxed, true),
+    ] {
+        assert!(
+            request_execution_approval(&pending, &mode, "[shell] ls", sandboxed)
+                .await
+                .unwrap()
+        );
+    }
+}
+
 // ── AGE-687: probe the sandbox for real, fall back when it can't run ─────────
 
 /// Write `script` as an executable fake `bwrap` in a fresh directory. Waits
@@ -1874,6 +1953,54 @@ async fn bwrap_without_user_namespaces_falls_back_to_an_unsandboxed_shell() {
         let reason = session.sandbox_unavailable_reason().expect("a reason");
         assert!(reason.contains("setting up uid map"), "{reason}");
     }
+}
+
+/// AGE-918: with `sandbox_required` a bwrap that cannot run is an error that
+/// names why, not a shell on the host; the default still falls back.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_required_sandbox_refuses_to_fall_back_to_the_host() {
+    let (_dir, bwrap) = fake_bwrap(BWRAP_WITHOUT_USERNS);
+    let mut session =
+        ShellSession::with_secrets(None, 30, 51200, false, vec![]).with_sandbox_required(true);
+    session.test_bwrap = Some(bwrap);
+    let error = session.execute("echo ok").await.unwrap_err().to_string();
+    assert!(
+        error.contains("sandbox required but unavailable"),
+        "{error}"
+    );
+    assert!(error.contains("setting up uid map"), "{error}");
+    assert!(session.running_sandboxed().is_none(), "no shell was kept");
+}
+
+/// AGE-918: the notice carries the reason, says commands run on the host,
+/// and for the AppArmor case names the fix.
+#[test]
+fn the_sandbox_notice_names_the_reason_and_the_apparmor_fix() {
+    let apparmor = "bwrap can't create a user namespace on this system (AppArmor): bwrap: setting up uid map: Permission denied";
+    let notice = sandbox_notice(apparmor);
+    assert!(
+        notice.starts_with("shell: sandbox unavailable ("),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("setting up uid map: Permission denied"),
+        "{notice}"
+    );
+    assert!(notice.contains("commands run on the host"), "{notice}");
+    assert!(
+        notice.contains("apparmor_restrict_unprivileged_userns=1"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("AppArmor profile") && notice.contains("container or VM"),
+        "{notice}"
+    );
+    assert!(!notice.contains('\n'), "one line: {notice}");
+
+    let other = sandbox_notice("bubblewrap (bwrap) is not installed");
+    assert!(!other.contains("apparmor_restrict"), "{other}");
+    assert!(other.contains("container or VM"), "{other}");
 }
 
 /// A bwrap that works keeps the sandboxed path, with no reason.

@@ -371,13 +371,16 @@ impl AgentClient {
                         workspace = ?settings.workspace_dir,
                         "Creating shell session in factory (caller did not provide one)"
                     );
-                    Some(std::sync::Arc::new(ShellSession::with_secrets(
-                        settings.workspace_dir.clone(),
-                        settings.timeout_seconds,
-                        settings.max_output_bytes,
-                        settings.network_isolation,
-                        user_secrets,
-                    )))
+                    Some(std::sync::Arc::new(
+                        ShellSession::with_secrets(
+                            settings.workspace_dir.clone(),
+                            settings.timeout_seconds,
+                            settings.max_output_bytes,
+                            settings.network_isolation,
+                            user_secrets,
+                        )
+                        .with_sandbox_required(settings.sandbox_required),
+                    ))
                 } else {
                     tracing::info!(
                         enabled = settings.enabled,

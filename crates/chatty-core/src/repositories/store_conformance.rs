@@ -546,6 +546,7 @@ mod tests {
                 timeout_seconds: 120,
                 max_output_bytes: 102_400,
                 network_isolation: true,
+                sandbox_required: false,
                 max_agent_turns: 25,
                 memory_enabled: false,
                 warn_on_external_agent: true,

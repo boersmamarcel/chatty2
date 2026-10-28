@@ -283,3 +283,108 @@ fn a_spec_with_the_benford_plugin_gives_the_chi_square_verdict() {
     );
     assert!(stdout.contains("LOW"), "{stdout}");
 }
+
+/// AGE-917: the sandbox cannot run (a `bwrap` that always fails, so the
+/// shell falls back to a plain one) and `AutoApproveSandboxed` asks for the
+/// command. Nobody can answer a lone `--headless` run, so it must be denied
+/// at once: the model reads why, the transcript shows the denial, and the
+/// run ends long before its budget instead of waiting it out.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unsandboxed_command_in_a_headless_run_is_denied_not_awaited() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let daemon = FakeDaemon::scripted(Script::new().route(
+        MODEL,
+        [
+            Reply::tool_call(
+                "shell_execute",
+                serde_json::json!({ "command": "echo sandbox-ok" }),
+            ),
+            Reply::text("The command was blocked."),
+        ],
+    ));
+    let home = config_for(&daemon);
+    let config = home
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("config")
+        .join("chatty");
+    let execution: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(config.join("execution_settings.json")).unwrap(),
+    )
+    .unwrap();
+    let mut execution = execution;
+    execution["approval_mode"] = serde_json::json!("auto_approve_sandboxed");
+    write_json(&config, "execution_settings.json", execution);
+
+    let fake_bin = tempfile::tempdir().unwrap();
+    let bwrap = fake_bin.path().join("bwrap");
+    std::fs::write(
+        &bwrap,
+        "#!/bin/sh\necho 'bwrap: no permission' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bwrap, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        fake_bin.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let base = home.path().canonicalize().unwrap();
+    let started = std::time::Instant::now();
+    let output = Command::new(env!("CARGO_BIN_EXE_chatty-tui"))
+        .args([
+            "--headless",
+            "-m",
+            "Run echo sandbox-ok.",
+            "--max-duration",
+            "300",
+            "--enable",
+            "shell",
+        ])
+        .env("PATH", path)
+        .env("HOME", &base)
+        .env("XDG_CONFIG_HOME", base.join("config"))
+        .env("XDG_DATA_HOME", base.join("data"))
+        .env("XDG_CACHE_HOME", base.join("cache"))
+        .env("XDG_STATE_HOME", base.join("state"))
+        .env("XDG_RUNTIME_DIR", base.join("run"))
+        .env("CHATTY_SECRET_STORE", "file")
+        .output()
+        .expect("chatty-tui runs");
+    let elapsed = started.elapsed();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let both = format!("stdout:\n{stdout}\nstderr:\n{stderr}");
+
+    assert!(output.status.success(), "{both}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(120),
+        "the run waited on an approval: {elapsed:?}\n{both}"
+    );
+    assert_eq!(
+        stderr.matches("nobody can approve").count(),
+        1,
+        "the notice is printed once\n{both}"
+    );
+    let requests = daemon.requests();
+    assert_eq!(requests.len(), 2, "a tool call, then the answer\n{both}");
+    let result = String::from_utf8_lossy(&requests[1].body);
+    assert!(
+        result.contains("this run is non-interactive") && result.contains("bwrap"),
+        "the model reads why: {result}"
+    );
+    let lines: Vec<&str> = stderr.lines().collect();
+    let asked = lines
+        .iter()
+        .position(|l| l.contains("? Approve [host] [shell] echo sandbox-ok"))
+        .unwrap_or_else(|| panic!("the request is shown\n{both}"));
+    let denied = lines
+        .iter()
+        .position(|l| l.contains("\u{2717} denied"))
+        .unwrap_or_else(|| panic!("the request reads denied, not pending\n{both}"));
+    assert!(asked < denied, "shown before it is resolved\n{both}");
+}

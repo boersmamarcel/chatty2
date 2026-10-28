@@ -6,10 +6,13 @@ use serde::{Deserialize, Serialize};
 pub enum ApprovalMode {
     /// Require approval for all commands (default, most secure)
     #[default]
+    #[serde(alias = "always_ask")]
     AlwaysAsk,
     /// Auto-approve sandboxed commands, ask for unsandboxed
+    #[serde(alias = "auto_approve_sandboxed")]
     AutoApproveSandboxed,
     /// Auto-approve all commands (dangerous, opt-in only)
+    #[serde(alias = "auto_approve_all")]
     AutoApproveAll,
 }
 
@@ -102,6 +105,11 @@ pub struct ExecutionSettingsModel {
     pub max_output_bytes: usize,
     /// Enable network isolation in sandbox (when available)
     pub network_isolation: bool,
+    /// Refuse to run shell commands on the host when the sandbox is
+    /// unavailable (bwrap blocked, not installed), instead of falling back to
+    /// an unsandboxed shell. Off by default; hosted runs should turn it on.
+    #[serde(default)]
+    pub sandbox_required: bool,
     /// Maximum number of agentic turns (tool-call rounds) per response;
     /// `0` (the default) is no cap. An interactive user has Stop; headless
     /// runs get a wall-clock budget instead (`chatty-tui --max-duration`).
@@ -283,6 +291,7 @@ impl Default for ExecutionSettingsModel {
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
+            sandbox_required: false,
             max_agent_turns: default_max_agent_turns(),
             memory_enabled: true, // Enabled by default for cross-conversation recall
             warn_on_external_agent: false,
@@ -299,7 +308,23 @@ impl Default for ExecutionSettingsModel {
 
 #[cfg(test)]
 mod ask_user_serde_tests {
-    use super::ExecutionSettingsModel;
+    use super::{ApprovalMode, ExecutionSettingsModel};
+
+    /// The other keys of the file are snake_case, so `approval_mode` accepts
+    /// snake_case too; an unknown value still fails (AGE-919).
+    #[test]
+    fn approval_mode_accepts_snake_case_aliases() {
+        for (text, want) in [
+            ("always_ask", ApprovalMode::AlwaysAsk),
+            ("auto_approve_sandboxed", ApprovalMode::AutoApproveSandboxed),
+            ("auto_approve_all", ApprovalMode::AutoApproveAll),
+            ("AutoApproveSandboxed", ApprovalMode::AutoApproveSandboxed),
+        ] {
+            let got: ApprovalMode = serde_json::from_str(&format!("\"{text}\"")).unwrap();
+            assert_eq!(got, want, "{text}");
+        }
+        assert!(serde_json::from_str::<ApprovalMode>("\"x\"").is_err());
+    }
 
     /// A settings file or snapshot written before `ask_user_enabled` existed
     /// must serialize to the same bytes, and a missing key reads as on.
