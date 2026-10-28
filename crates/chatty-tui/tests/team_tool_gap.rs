@@ -12,6 +12,7 @@ use chatty_core::testing::fake_model::{FakeDaemon, Reply, Script};
 use serde_json::json;
 
 const MODEL: &str = "tool-gap-model";
+const DEV_MODEL: &str = "tool-gap-dev-model";
 
 fn write(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).expect("parent dir");
@@ -23,6 +24,15 @@ fn write(path: &Path, text: &str) {
 /// started with `extra` flags.
 fn team_stderr(file_on: bool, extra: &[&str]) -> String {
     let daemon = FakeDaemon::scripted(Script::new().route(MODEL, [Reply::text("done")]));
+    let stderr = team_run(&daemon, file_on, extra);
+    assert_eq!(daemon.requests().len(), 1, "the run itself is unchanged");
+    stderr
+}
+
+/// As [`team_stderr`] over a given daemon: the lead and the developer run
+/// different models (`MODEL`, `DEV_MODEL`), so a script can tell their
+/// requests apart.
+fn team_run(daemon: &FakeDaemon, file_on: bool, extra: &[&str]) -> String {
     let root = tempfile::tempdir().expect("a temp dir");
     let base = root.path().canonicalize().expect("the temp dir resolves");
     let workspace = base.join("workspace");
@@ -30,12 +40,17 @@ fn team_stderr(file_on: bool, extra: &[&str]) -> String {
 
     let provider = ProviderConfig::new("Fake".to_string(), ProviderType::Ollama)
         .with_base_url(daemon.base_url());
-    let model = ModelConfig::new(
-        MODEL.to_string(),
-        MODEL.to_string(),
-        ProviderType::Ollama,
-        MODEL.to_string(),
-    );
+    let models: Vec<ModelConfig> = [MODEL, DEV_MODEL]
+        .iter()
+        .map(|m| {
+            ModelConfig::new(
+                m.to_string(),
+                m.to_string(),
+                ProviderType::Ollama,
+                m.to_string(),
+            )
+        })
+        .collect();
     let execution = ExecutionSettingsModel {
         enabled: file_on,
         git_enabled: file_on,
@@ -49,7 +64,7 @@ fn team_stderr(file_on: bool, extra: &[&str]) -> String {
         &config.join("providers.json"),
         &json!([provider]).to_string(),
     );
-    write(&config.join("models.json"), &json!([model]).to_string());
+    write(&config.join("models.json"), &json!(models).to_string());
     write(
         &config.join("execution_settings.json"),
         &serde_json::to_string(&execution).unwrap(),
@@ -58,13 +73,13 @@ fn team_stderr(file_on: bool, extra: &[&str]) -> String {
     write(
         &agents.join("lead.toml"),
         &format!(
-            "[agent]\nname = \"lead\"\nmodel = \"{MODEL}\"\n[tools]\nprofile = \"coordinator\"\n"
+            "[agent]\nname = \"lead\"\nmodel = \"{MODEL}\"\n[tools]\nprofile = \"coordinator\"\n[swarm]\ndelegates_to = [\"developer\"]\n"
         ),
     );
     write(
         &agents.join("developer.toml"),
         &format!(
-            "[agent]\nname = \"developer\"\nmodel = \"{MODEL}\"\n[tools]\nprofile = \"coder\"\n"
+            "[agent]\nname = \"developer\"\nmodel = \"{DEV_MODEL}\"\n[tools]\nprofile = \"coder\"\n"
         ),
     );
     write(
@@ -89,7 +104,6 @@ fn team_stderr(file_on: bool, extra: &[&str]) -> String {
         output.status.success(),
         "chatty-tui failed\nstderr:\n{stderr}"
     );
-    assert_eq!(daemon.requests().len(), 1, "the run itself is unchanged");
     stderr.into_owned()
 }
 
@@ -99,9 +113,8 @@ fn a_headless_team_with_a_coder_and_shell_off_warns_before_the_first_turn() {
     assert!(
         stderr.contains(
             "team devteam: developer's profile 'coder' wants shell and git, but shell is \
-             disabled (execution_settings.json enabled=false) and git is disabled \
-             (execution_settings.json git_enabled=false); set shell and git in \
-             execution_settings.json (workers do not inherit --enable)"
+             disabled (execution_settings.enabled=false) and git is disabled \
+             (execution_settings.git_enabled=false); enable with --enable shell,git"
         ),
         "stderr:\n{stderr}"
     );
@@ -112,16 +125,49 @@ fn a_headless_team_with_a_coder_and_shell_off_warns_before_the_first_turn() {
 }
 
 #[test]
-fn enable_on_the_command_line_does_not_reach_the_workers() {
+fn enable_on_the_command_line_reaches_the_workers_so_nothing_is_missing() {
     let stderr = team_stderr(false, &["--enable", "shell,git"]);
+    assert!(!stderr.contains("team devteam:"), "{stderr}");
+}
+
+#[test]
+fn disable_on_the_command_line_warns_for_the_workers_too() {
+    let stderr = team_stderr(true, &["--disable", "shell"]);
     assert!(
-        stderr.contains("developer's profile 'coder' wants shell and git"),
+        stderr.contains("developer's profile 'coder' wants shell, but shell is disabled"),
         "{stderr}"
     );
 }
 
+/// AGE-924: `--enable` on the leader is forwarded to its workers. The lead
+/// delegates to the developer; the developer is a separate `chatty-tui`
+/// process that reads execution_settings.json (shell off) itself, so it is
+/// offered `shell_execute` only because the flag rode along.
 #[test]
-fn disable_on_the_command_line_warns_for_no_worker_that_the_file_enables() {
-    let stderr = team_stderr(true, &["--disable", "shell"]);
-    assert!(!stderr.contains("team devteam:"), "{stderr}");
+fn enable_on_the_command_line_gives_the_worker_a_shell() {
+    let offered = |extra: &[&str]| {
+        let daemon = FakeDaemon::scripted(
+            Script::new()
+                .route(
+                    MODEL,
+                    [
+                        Reply::tool_call(
+                            "invoke_agent",
+                            json!({ "agent": "developer", "prompt": "list the files" }),
+                        ),
+                        Reply::text("done"),
+                    ],
+                )
+                .route(DEV_MODEL, [Reply::text("listed")]),
+        );
+        team_run(&daemon, false, extra);
+        let requests = daemon.requests_for(DEV_MODEL);
+        assert_eq!(requests.len(), 1, "the developer ran once");
+        String::from_utf8_lossy(&requests[0].body).contains("shell_execute")
+    };
+    assert!(
+        offered(&["--enable", "shell,git"]),
+        "the worker has a shell"
+    );
+    assert!(!offered(&[]), "without the flag the file decides: no shell");
 }

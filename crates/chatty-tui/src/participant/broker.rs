@@ -405,6 +405,27 @@ impl Broker {
     }
 }
 
+/// The leader's `--enable`/`--disable`/`--only` tool-group flags, to forward
+/// to every worker (AGE-924). A worker is its own process and reads
+/// `execution_settings.json` itself, so a leader started with
+/// `--enable shell,git` over a file that has them off would otherwise be the
+/// only one of the team with a shell. The groups are joined with commas, as
+/// the flags take them; an empty list forwards nothing.
+pub fn execution_flags(enable: &[String], disable: &[String], only: &[String]) -> Vec<String> {
+    let mut flags = Vec::new();
+    for (flag, groups) in [
+        ("--enable", enable),
+        ("--disable", disable),
+        ("--only", only),
+    ] {
+        if !groups.is_empty() {
+            flags.push(flag.to_string());
+            flags.push(groups.join(","));
+        }
+    }
+    flags
+}
+
 /// The leader's own provider flags, to forward to every worker (ADR-0011
 /// C10, Do item 4): a leader started with `--ollama`, `--openai-compat-url`
 /// or `--api-key` was configured by those flags and nothing else, and a
@@ -1048,6 +1069,25 @@ mod tests {
             "this process's argv carries the token"
         );
         broker.shutdown();
+    }
+
+    /// AGE-924: the leader's tool-group flags reach the workers, comma-joined,
+    /// and nothing is forwarded when none is set.
+    #[test]
+    fn execution_flags_are_forwarded_comma_joined_and_only_when_set() {
+        assert!(execution_flags(&[], &[], &[]).is_empty());
+        assert_eq!(
+            execution_flags(
+                &["shell".to_string(), "git".to_string()],
+                &["fetch".to_string()],
+                &[]
+            ),
+            vec!["--enable", "shell,git", "--disable", "fetch"]
+        );
+        assert_eq!(
+            execution_flags(&[], &[], &["fs-read".to_string(), "fs-write".to_string()]),
+            vec!["--only", "fs-read,fs-write"]
+        );
     }
 
     /// Do item 4: a flag-configured leader forwards exactly its provider

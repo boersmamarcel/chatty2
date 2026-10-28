@@ -685,15 +685,13 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         team.as_ref(),
         execution_settings.workspace_dir.as_deref().map(Path::new),
     )?;
-    // Workers read the file themselves and do not inherit --enable (AGE-921).
-    let file_execution_settings = execution_settings.clone();
     let max_duration = apply_run_limits(&cli, team.as_ref(), &mut spec, &mut execution_settings)?;
     // AGE-921: an unattended team run says up front which tools its agents
     // expect but the run has off; nobody is there to notice them missing.
     if cli.headless || cli.pipe || cli.participant_fd.is_some() {
         for line in team
             .iter()
-            .flat_map(|team| team.tool_gap_warnings(&execution_settings, &file_execution_settings))
+            .flat_map(|team| team.tool_gap_warnings(&execution_settings))
         {
             eprintln!("{line}");
         }
@@ -823,12 +821,22 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                     execution_settings.approval_mode,
                     chatty_core::settings::models::execution_settings::ApprovalMode::AutoApproveAll
                 ),
+                // The leader's tool-group flags ride along with its provider
+                // flags: a worker reads the settings file itself, so without
+                // them `--enable shell` would reach the leader only (AGE-924).
                 participant::broker::provider_flags(
                     cli.ollama.as_deref(),
                     cli.openai_compat_url.as_deref(),
                     cli.api_key.as_deref(),
                     cli.think,
-                ),
+                )
+                .into_iter()
+                .chain(participant::broker::execution_flags(
+                    &cli.enable,
+                    &cli.disable,
+                    &cli.only,
+                ))
+                .collect(),
             )) as Arc<dyn chatty_core::services::lazy_broker::LazyBroker>
         });
     #[cfg(not(unix))]
