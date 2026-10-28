@@ -309,21 +309,14 @@ impl Team {
     /// are simply not offered; this is how the operator hears of it before
     /// the first turn. Warning only: nothing about the run changes.
     ///
-    /// The leader is judged against `leader` (this process's final settings,
-    /// `--enable` and all); workers are separate processes that read
-    /// `execution_settings.json` themselves and do not inherit `--enable`,
-    /// so they are judged against `workers` (the settings as loaded from
-    /// the file, before any flag).
-    pub fn tool_gap_warnings(
-        &self,
-        leader: &ExecutionSettingsModel,
-        workers: &ExecutionSettingsModel,
-    ) -> Vec<String> {
+    /// `settings` are this run's final execution settings (`--enable` and
+    /// the rest applied): the leader's `--enable/--disable/--only` are
+    /// forwarded to every worker, so they run with the same settings
+    /// (AGE-924).
+    pub fn tool_gap_warnings(&self, settings: &ExecutionSettingsModel) -> Vec<String> {
         let id = &self.id;
         let mut lines = Vec::new();
-        let specs = std::iter::once((&self.leader, leader, false))
-            .chain(self.agents.iter().map(|spec| (spec, workers, true)));
-        for (spec, settings, is_worker) in specs {
+        for spec in std::iter::once(&self.leader).chain(self.agents.iter()) {
             let Some(profile) = spec.tools.profile.as_deref().and_then(tool_profile) else {
                 continue;
             };
@@ -333,45 +326,33 @@ impl Team {
                     .iter()
                     .any(|disabled| canonical_tool_group(disabled) == group)
             };
-            let file = if is_worker {
-                "execution_settings.json "
-            } else {
-                "execution_settings."
-            };
             let mut wants = Vec::new();
             let mut gaps = Vec::new();
             if profile.allows("shell_execute") && !off("shell") && !settings.enabled {
                 wants.push("shell");
-                gaps.push(format!("shell is disabled ({file}enabled=false)"));
+                gaps.push("shell is disabled (execution_settings.enabled=false)");
             }
             if profile.allows("git_commit") && !off("git") && !settings.git_enabled {
                 wants.push("git");
-                gaps.push(format!("git is disabled ({file}git_enabled=false)"));
+                gaps.push("git is disabled (execution_settings.git_enabled=false)");
             }
             if !wants.is_empty() {
-                let advice = if is_worker {
-                    format!(
-                        "set {} in execution_settings.json (workers do not inherit --enable)",
-                        wants.join(" and ")
-                    )
-                } else {
-                    format!("enable with --enable {}", wants.join(","))
-                };
                 lines.push(format!(
-                    "team {id}: {}'s profile '{}' wants {}, but {}; {advice}",
+                    "team {id}: {}'s profile '{}' wants {}, but {}; enable with --enable {}",
                     spec.agent.name,
                     profile.name(),
                     wants.join(" and "),
                     gaps.join(" and "),
+                    wants.join(","),
                 ));
             }
         }
-        if !workers.enabled
+        if !settings.enabled
             && let Some(command) = self.file.verification.as_deref()
         {
             lines.push(format!(
                 "team {id}: verification command `{command}` is set, but agents cannot run it \
-                 themselves: shell is disabled (execution_settings.json enabled=false)"
+                 themselves: shell is disabled (execution_settings.enabled=false)"
             ));
         }
         lines
@@ -1499,37 +1480,30 @@ mod tests {
             ..ExecutionSettingsModel::default()
         };
         assert_eq!(
-            team.tool_gap_warnings(&off, &off),
+            team.tool_gap_warnings(&off),
             vec![
                 "team devteam: developer's profile 'coder' wants shell and git, but shell is \
-                 disabled (execution_settings.json enabled=false) and git is disabled \
-                 (execution_settings.json git_enabled=false); set shell and git in \
-                 execution_settings.json (workers do not inherit --enable)"
+                 disabled (execution_settings.enabled=false) and git is disabled \
+                 (execution_settings.git_enabled=false); enable with --enable shell,git"
                     .to_string(),
                 "team devteam: tester's profile 'reviewer' wants shell, but shell is disabled \
-                 (execution_settings.json enabled=false); set shell in execution_settings.json \
-                 (workers do not inherit --enable)"
+                 (execution_settings.enabled=false); enable with --enable shell"
                     .to_string(),
                 "team devteam: verification command `cargo test` is set, but agents cannot run \
-                 it themselves: shell is disabled (execution_settings.json enabled=false)"
+                 it themselves: shell is disabled (execution_settings.enabled=false)"
                     .to_string(),
             ]
         );
-        assert!(team.tool_gap_warnings(&on, &on).is_empty());
-
-        // `--enable shell,git` reaches the leader only: the workers still
-        // read the file, so their lines stay.
-        assert_eq!(team.tool_gap_warnings(&on, &off).len(), 3);
-        // The opposite: file on, `--disable shell` on the command line
-        // changes the leader's view, and no worker is warned.
-        assert!(team.tool_gap_warnings(&off, &on).is_empty());
+        // The final settings (`--enable` applied) are what the whole team runs with.
+        assert!(team.tool_gap_warnings(&on).is_empty());
 
         // A leader that wants the shell is told which flag fixes it.
         let mut coder_lead = team.clone();
         coder_lead.leader = spec("lead", "coder");
+        coder_lead.agents.clear();
         coder_lead.file.verification = None;
         assert_eq!(
-            coder_lead.tool_gap_warnings(&off, &on),
+            coder_lead.tool_gap_warnings(&off),
             vec![
                 "team devteam: lead's profile 'coder' wants shell and git, but shell is \
                  disabled (execution_settings.enabled=false) and git is disabled \
@@ -1543,6 +1517,6 @@ mod tests {
         narrowed.agents[0].tools.disable = vec!["shell".to_string(), "git".to_string()];
         narrowed.agents.truncate(1);
         narrowed.file.verification = None;
-        assert!(narrowed.tool_gap_warnings(&on, &off).is_empty());
+        assert!(narrowed.tool_gap_warnings(&off).is_empty());
     }
 }
