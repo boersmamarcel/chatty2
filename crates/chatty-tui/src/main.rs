@@ -682,7 +682,19 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         team.as_ref(),
         execution_settings.workspace_dir.as_deref().map(Path::new),
     )?;
+    // Workers read the file themselves and do not inherit --enable (AGE-921).
+    let file_execution_settings = execution_settings.clone();
     let max_duration = apply_run_limits(&cli, team.as_ref(), &mut spec, &mut execution_settings)?;
+    // AGE-921: an unattended team run says up front which tools its agents
+    // expect but the run has off; nobody is there to notice them missing.
+    if cli.headless || cli.pipe || cli.participant_fd.is_some() {
+        for line in team
+            .iter()
+            .flat_map(|team| team.tool_gap_warnings(&execution_settings, &file_execution_settings))
+        {
+            eprintln!("{line}");
+        }
+    }
 
     let models = {
         let mut m = ModelsModel::new();

@@ -33,7 +33,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_spec::{AgentSpec, load_agent_spec_from};
+use crate::factories::tool_profile;
 use crate::services::handoff::{self, HandoffContract};
+use crate::settings::models::execution_settings::canonical_tool_group;
 use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
 use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
 use crate::settings::models::{ExecutionSettingsModel, ModuleSettingsModel, ProviderModel};
@@ -298,6 +300,81 @@ impl Team {
             text.push_str(&format!(" The team's verification command is: `{command}`"));
         }
         Some(text)
+    }
+
+    /// One line per agent whose tool profile wants the shell or `git_commit`
+    /// while that group is off for it, and one for a verification command
+    /// the agents cannot run themselves (AGE-921). A profile only ever
+    /// narrows what the settings allow, so a disabled group means the tools
+    /// are simply not offered; this is how the operator hears of it before
+    /// the first turn. Warning only: nothing about the run changes.
+    ///
+    /// The leader is judged against `leader` (this process's final settings,
+    /// `--enable` and all); workers are separate processes that read
+    /// `execution_settings.json` themselves and do not inherit `--enable`,
+    /// so they are judged against `workers` (the settings as loaded from
+    /// the file, before any flag).
+    pub fn tool_gap_warnings(
+        &self,
+        leader: &ExecutionSettingsModel,
+        workers: &ExecutionSettingsModel,
+    ) -> Vec<String> {
+        let id = &self.id;
+        let mut lines = Vec::new();
+        let specs = std::iter::once((&self.leader, leader, false))
+            .chain(self.agents.iter().map(|spec| (spec, workers, true)));
+        for (spec, settings, is_worker) in specs {
+            let Some(profile) = spec.tools.profile.as_deref().and_then(tool_profile) else {
+                continue;
+            };
+            let off = |group: &str| {
+                spec.tools
+                    .disable
+                    .iter()
+                    .any(|disabled| canonical_tool_group(disabled) == group)
+            };
+            let file = if is_worker {
+                "execution_settings.json "
+            } else {
+                "execution_settings."
+            };
+            let mut wants = Vec::new();
+            let mut gaps = Vec::new();
+            if profile.allows("shell_execute") && !off("shell") && !settings.enabled {
+                wants.push("shell");
+                gaps.push(format!("shell is disabled ({file}enabled=false)"));
+            }
+            if profile.allows("git_commit") && !off("git") && !settings.git_enabled {
+                wants.push("git");
+                gaps.push(format!("git is disabled ({file}git_enabled=false)"));
+            }
+            if !wants.is_empty() {
+                let advice = if is_worker {
+                    format!(
+                        "set {} in execution_settings.json (workers do not inherit --enable)",
+                        wants.join(" and ")
+                    )
+                } else {
+                    format!("enable with --enable {}", wants.join(","))
+                };
+                lines.push(format!(
+                    "team {id}: {}'s profile '{}' wants {}, but {}; {advice}",
+                    spec.agent.name,
+                    profile.name(),
+                    wants.join(" and "),
+                    gaps.join(" and "),
+                ));
+            }
+        }
+        if !workers.enabled
+            && let Some(command) = self.file.verification.as_deref()
+        {
+            lines.push(format!(
+                "team {id}: verification command `{command}` is set, but agents cannot run it \
+                 themselves: shell is disabled (execution_settings.json enabled=false)"
+            ));
+        }
+        lines
     }
 
     /// The one line a run of an `experimental` team prints when it starts
@@ -1385,5 +1462,87 @@ mod tests {
                 "Crosscheck is experimental: see https://boersmamarcel.github.io/chatty2/user/crosscheck.html"
             )
         );
+    }
+
+    /// AGE-921: a coder-profile agent with shell and git off is named, one
+    /// line per agent, with the flag that fixes it; a coordinator leader
+    /// (no shell) is not; a verification command with shell off is named;
+    /// with both groups on there is nothing to say.
+    #[test]
+    fn tool_gap_warnings_name_each_agent_whose_profile_wants_a_disabled_group() {
+        fn spec(name: &str, profile: &str) -> AgentSpec {
+            let mut spec = AgentSpec::default();
+            spec.agent.name = name.to_string();
+            spec.tools.profile = Some(profile.to_string());
+            spec
+        }
+        let team = Team {
+            id: "devteam".to_string(),
+            source: TeamSource::Preset,
+            file: TeamFile {
+                verification: Some("cargo test".to_string()),
+                ..TeamFile::default()
+            },
+            skill_content: None,
+            leader: spec("lead", "coordinator"),
+            agents: vec![spec("developer", "coder"), spec("tester", "reviewer")],
+            handoffs: BTreeMap::new(),
+        };
+        let off = ExecutionSettingsModel {
+            enabled: false,
+            git_enabled: false,
+            ..ExecutionSettingsModel::default()
+        };
+        let on = ExecutionSettingsModel {
+            enabled: true,
+            git_enabled: true,
+            ..ExecutionSettingsModel::default()
+        };
+        assert_eq!(
+            team.tool_gap_warnings(&off, &off),
+            vec![
+                "team devteam: developer's profile 'coder' wants shell and git, but shell is \
+                 disabled (execution_settings.json enabled=false) and git is disabled \
+                 (execution_settings.json git_enabled=false); set shell and git in \
+                 execution_settings.json (workers do not inherit --enable)"
+                    .to_string(),
+                "team devteam: tester's profile 'reviewer' wants shell, but shell is disabled \
+                 (execution_settings.json enabled=false); set shell in execution_settings.json \
+                 (workers do not inherit --enable)"
+                    .to_string(),
+                "team devteam: verification command `cargo test` is set, but agents cannot run \
+                 it themselves: shell is disabled (execution_settings.json enabled=false)"
+                    .to_string(),
+            ]
+        );
+        assert!(team.tool_gap_warnings(&on, &on).is_empty());
+
+        // `--enable shell,git` reaches the leader only: the workers still
+        // read the file, so their lines stay.
+        assert_eq!(team.tool_gap_warnings(&on, &off).len(), 3);
+        // The opposite: file on, `--disable shell` on the command line
+        // changes the leader's view, and no worker is warned.
+        assert!(team.tool_gap_warnings(&off, &on).is_empty());
+
+        // A leader that wants the shell is told which flag fixes it.
+        let mut coder_lead = team.clone();
+        coder_lead.leader = spec("lead", "coder");
+        coder_lead.file.verification = None;
+        assert_eq!(
+            coder_lead.tool_gap_warnings(&off, &on),
+            vec![
+                "team devteam: lead's profile 'coder' wants shell and git, but shell is \
+                 disabled (execution_settings.enabled=false) and git is disabled \
+                 (execution_settings.git_enabled=false); enable with --enable shell,git"
+                    .to_string()
+            ]
+        );
+
+        // A spec that turns the group off itself is not warned about it.
+        let mut narrowed = team.clone();
+        narrowed.agents[0].tools.disable = vec!["shell".to_string(), "git".to_string()];
+        narrowed.agents.truncate(1);
+        narrowed.file.verification = None;
+        assert!(narrowed.tool_gap_warnings(&on, &off).is_empty());
     }
 }
