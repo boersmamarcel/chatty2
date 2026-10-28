@@ -632,6 +632,9 @@ pub struct ShellSession {
     load_login_profile: AtomicBool,
     /// `HOME` for the shell when set; tests point it at a scratch profile.
     home_override: Option<String>,
+    /// Refuse to start a shell outside the sandbox (`sandbox_required`)
+    /// instead of falling back to the host.
+    sandbox_required: bool,
     /// Tests: run this instead of (sandboxed) `/bin/bash`, given the session
     /// directory (another bash version in a container).
     #[cfg(test)]
@@ -673,11 +676,25 @@ impl ShellSession {
             secret_key_names,
             load_login_profile: AtomicBool::new(true),
             home_override: None,
+            sandbox_required: false,
             #[cfg(test)]
             test_shell: None,
             #[cfg(test)]
             test_bwrap: None,
         }
+    }
+
+    /// Fail to start a shell that would run outside the sandbox, rather than
+    /// fall back to the host (the `sandbox_required` setting, AGE-918).
+    pub fn with_sandbox_required(mut self, required: bool) -> Self {
+        self.sandbox_required = required;
+        self
+    }
+
+    /// Why a shell cannot be sandboxed here right now, `None` when it can.
+    /// Runs (once per process) the same probe a session does.
+    pub fn sandbox_blocker(network_isolation: bool) -> Option<String> {
+        Self::sandbox_check(BWRAP, network_isolation).err()
     }
 
     /// Run the shell with `HOME` set to `home` (tests: a scratch profile).
@@ -921,8 +938,17 @@ impl ShellSession {
                 dir,
                 custom,
             )?;
+            if self.sandbox_required
+                && let Some(reason) = &proc.unsandboxed_reason
+            {
+                proc.kill();
+                return Err(anyhow!("{}", sandbox_required_error(reason)));
+            }
             match Self::wait_ready(&proc).await {
                 Ok(()) => {
+                    if let Some(reason) = &proc.unsandboxed_reason {
+                        announce_unsandboxed(reason);
+                    }
                     info!(pid = ?proc.terminal.pid(), sandboxed = proc.is_sandboxed, "Shell session started");
                     self.set_live(Some(&proc));
                     *process = Some(proc);
@@ -1820,6 +1846,56 @@ fn run_bwrap_probe(bwrap: &str, network_isolation: bool) -> Result<(), String> {
     } else {
         format!("{what}: {said}")
     })
+}
+
+/// Where a frontend wants the one-time "shell is not sandboxed" notice
+/// (headless: a stderr line; the TUI: a transcript notice). Without a sink
+/// the reason stays in [`ShellSession::sandbox_unavailable_reason`] and the log.
+static SANDBOX_NOTICE_SINK: std::sync::OnceLock<Box<dyn Fn(String) + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Set once per process the sink that [`announce_unsandboxed`] calls.
+pub fn set_sandbox_notice_sink(sink: impl Fn(String) + Send + Sync + 'static) {
+    let _ = SANDBOX_NOTICE_SINK.set(Box::new(sink));
+}
+
+/// Tell the sink, once per process, that a shell runs on the host.
+fn announce_unsandboxed(reason: &str) {
+    static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    if let Some(sink) = SANDBOX_NOTICE_SINK.get()
+        && !ANNOUNCED.swap(true, Ordering::Relaxed)
+    {
+        sink(sandbox_notice(reason));
+    }
+}
+
+/// What to name once a user's "sandboxed" setup is not: the fix for
+/// Ubuntu's AppArmor restriction on user namespaces, else just the reason.
+fn sandbox_fix_hint(reason: &str) -> &'static str {
+    if reason.contains("AppArmor") {
+        "Ubuntu's apparmor_restrict_unprivileged_userns=1 blocks bwrap. Fix: add an AppArmor \
+         profile that allows bwrap to create user namespaces (Ubuntu documents one for 24.04), \
+         or run the team in a container or VM."
+    } else {
+        "Install bubblewrap (bwrap) and make sure it can create user namespaces, or run the \
+         team in a container or VM."
+    }
+}
+
+/// The one line shown when a shell runs on the host.
+pub fn sandbox_notice(reason: &str) -> String {
+    format!(
+        "shell: sandbox unavailable ({reason}); commands run on the host. {}",
+        sandbox_fix_hint(reason)
+    )
+}
+
+/// The error for `sandbox_required` when no sandbox can be had.
+pub fn sandbox_required_error(reason: &str) -> String {
+    format!(
+        "shell: sandbox required but unavailable ({reason}). {} Or set sandbox_required to false to run on the host.",
+        sandbox_fix_hint(reason)
+    )
 }
 
 /// A fresh private directory for one shell: [`RUNNER`] in it, and room for

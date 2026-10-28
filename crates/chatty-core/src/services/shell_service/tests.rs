@@ -1955,6 +1955,54 @@ async fn bwrap_without_user_namespaces_falls_back_to_an_unsandboxed_shell() {
     }
 }
 
+/// AGE-918: with `sandbox_required` a bwrap that cannot run is an error that
+/// names why, not a shell on the host; the default still falls back.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_required_sandbox_refuses_to_fall_back_to_the_host() {
+    let (_dir, bwrap) = fake_bwrap(BWRAP_WITHOUT_USERNS);
+    let mut session =
+        ShellSession::with_secrets(None, 30, 51200, false, vec![]).with_sandbox_required(true);
+    session.test_bwrap = Some(bwrap);
+    let error = session.execute("echo ok").await.unwrap_err().to_string();
+    assert!(
+        error.contains("sandbox required but unavailable"),
+        "{error}"
+    );
+    assert!(error.contains("setting up uid map"), "{error}");
+    assert!(session.running_sandboxed().is_none(), "no shell was kept");
+}
+
+/// AGE-918: the notice carries the reason, says commands run on the host,
+/// and for the AppArmor case names the fix.
+#[test]
+fn the_sandbox_notice_names_the_reason_and_the_apparmor_fix() {
+    let apparmor = "bwrap can't create a user namespace on this system (AppArmor): bwrap: setting up uid map: Permission denied";
+    let notice = sandbox_notice(apparmor);
+    assert!(
+        notice.starts_with("shell: sandbox unavailable ("),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("setting up uid map: Permission denied"),
+        "{notice}"
+    );
+    assert!(notice.contains("commands run on the host"), "{notice}");
+    assert!(
+        notice.contains("apparmor_restrict_unprivileged_userns=1"),
+        "{notice}"
+    );
+    assert!(
+        notice.contains("AppArmor profile") && notice.contains("container or VM"),
+        "{notice}"
+    );
+    assert!(!notice.contains('\n'), "one line: {notice}");
+
+    let other = sandbox_notice("bubblewrap (bwrap) is not installed");
+    assert!(!other.contains("apparmor_restrict"), "{other}");
+    assert!(other.contains("container or VM"), "{other}");
+}
+
 /// A bwrap that works keeps the sandboxed path, with no reason.
 #[cfg(target_os = "linux")]
 #[tokio::test]

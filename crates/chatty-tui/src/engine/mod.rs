@@ -1359,6 +1359,10 @@ impl ChatEngine {
                 self.pull_request = pull_request.map(|pr| *pr);
                 EngineAction::Redraw
             }
+            AppEvent::Notice(notice) => {
+                self.add_system_message(notice);
+                EngineAction::Redraw
+            }
             AppEvent::DelegationProgress(line) => {
                 let line = sanitize_progress_line(&line);
                 if line.is_empty() {

@@ -88,6 +88,8 @@ pub enum AppEvent {
     PullRequestDetected(Option<Box<PullRequestSummary>>),
     TitleGenerated(String),
     DelegationProgress(String),
+    /// A one-time notice for the transcript (the shell runs unsandboxed).
+    Notice(String),
     DelegationFinished(String),
     /// A turn's sub-agent progress, typed: the session records it in the
     /// trace and the transcript renders it as a line (AGE-274).
@@ -170,6 +172,7 @@ impl std::fmt::Debug for AppEvent {
                 f.debug_tuple("PullRequestDetected").field(pr).finish()
             }
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
+            Self::Notice(s) => f.debug_tuple("Notice").field(s).finish(),
             Self::DelegationProgress(s) => f.debug_tuple("DelegationProgress").field(s).finish(),
             Self::DelegationFinished(s) => f.debug_tuple("DelegationFinished").field(s).finish(),
             Self::Delegation(p) => f.debug_tuple("Delegation").field(p).finish(),
