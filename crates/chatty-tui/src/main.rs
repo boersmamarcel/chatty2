@@ -826,6 +826,33 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
+    // A shell that runs on the host although a sandbox was expected is said
+    // once: a stderr line in a headless run, a transcript notice in the TUI.
+    // `sandbox_required` fails the run up front instead (AGE-918).
+    if execution_settings.enabled {
+        if execution_settings.sandbox_required
+            && let Some(reason) =
+                chatty_core::services::shell_service::ShellSession::sandbox_blocker(
+                    execution_settings.network_isolation,
+                )
+        {
+            bail!(
+                "{}",
+                chatty_core::services::shell_service::sandbox_required_error(&reason)
+            );
+        }
+        if non_interactive {
+            chatty_core::services::shell_service::set_sandbox_notice_sink(|notice| {
+                eprintln!("{notice}")
+            });
+        } else {
+            let tx = event_tx.clone();
+            chatty_core::services::shell_service::set_sandbox_notice_sink(move |notice| {
+                let _ = tx.send(AppEvent::Notice(notice));
+            });
+        }
+    }
+
     // Route based on mode — headless/pipe load all services eagerly (latency
     // doesn't matter for non-interactive use), while the interactive TUI defers
     // heavy services to a background task so the UI appears instantly.

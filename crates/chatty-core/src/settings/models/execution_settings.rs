@@ -102,6 +102,11 @@ pub struct ExecutionSettingsModel {
     pub max_output_bytes: usize,
     /// Enable network isolation in sandbox (when available)
     pub network_isolation: bool,
+    /// Refuse to run shell commands on the host when the sandbox is
+    /// unavailable (bwrap blocked, not installed), instead of falling back to
+    /// an unsandboxed shell. Off by default; hosted runs should turn it on.
+    #[serde(default)]
+    pub sandbox_required: bool,
     /// Maximum number of agentic turns (tool-call rounds) per response;
     /// `0` (the default) is no cap. An interactive user has Stop; headless
     /// runs get a wall-clock budget instead (`chatty-tui --max-duration`).
@@ -283,6 +288,7 @@ impl Default for ExecutionSettingsModel {
             timeout_seconds: 30,
             max_output_bytes: 51200, // 50KB
             network_isolation: false,
+            sandbox_required: false,
             max_agent_turns: default_max_agent_turns(),
             memory_enabled: true, // Enabled by default for cross-conversation recall
             warn_on_external_agent: false,
