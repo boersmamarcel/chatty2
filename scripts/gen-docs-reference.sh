@@ -267,6 +267,7 @@ opt-in (`false`) for security.
 | `timeout_seconds` | `u32` | `30` | Execution timeout |
 | `max_output_bytes` | `usize` | `51200` | 50 KiB cap |
 | `network_isolation` | `bool` | `false` | Sandbox network isolation when available |
+| `sandbox_required` | `bool` | `false` | Refuse to start a shell outside the sandbox instead of falling back to the host (AGE-918) |
 | `max_agent_turns` | `u32` | `0` | Tool-call rounds per response; `0` = no cap (headless runs get a wall-clock budget instead, `chatty-tui --max-duration`) |
 | `memory_enabled` | `bool` | `true` | `remember` / `search_memory` |
 | `warn_on_external_agent` | `bool` | `false` | say so before `invoke_agent` sends a prompt outside the fleet (ADR-0011 C5) |

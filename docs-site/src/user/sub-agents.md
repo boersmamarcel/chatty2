@@ -177,5 +177,6 @@ A team can also make what one role hands the next explicit and checkable: `team.
 - [Tutorial: from one agent to a team](./tutorial-swarm.md): the desktop walkthrough with a data team, approvals, the bill and mixed models
 - [Tutorial: your first named worker](./tutorial-named-worker.md) — twenty minutes, one reviewer, real hand-off
 - [Tutorial: a small agentic team](./tutorial-team.md) — a coding team directory of your own, with its own playbook
+- [Tutorial: an autonomous dev team](./tutorial-devteam.md) — five agents run unattended in a loop, story by story
 - [Terminal interface](./terminal.md)
 - [Agents & tools](./agents-and-tools.md)

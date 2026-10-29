@@ -19,6 +19,7 @@
   - [Tutorial: from one agent to a team](./user/tutorial-swarm.md)
   - [Tutorial: your first named worker](./user/tutorial-named-worker.md)
   - [Tutorial: a small agentic team](./user/tutorial-team.md)
+  - [Tutorial: an autonomous dev team](./user/tutorial-devteam.md)
 - [Security & approvals](./user/security.md)
 - [Terminal interface](./user/terminal.md)
 - [Advanced](./user/advanced.md)
