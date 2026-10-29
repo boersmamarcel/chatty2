@@ -10,7 +10,7 @@ The example product is `logslice`, a command-line tool that filters and summaris
 
 ## Prerequisites
 
-- `chatty-tui` ([install](./terminal.md#install)), version 0.7.8 or later. The leader's `--enable` flag reaching the workers, which this page relies on, arrived in the release after 0.7.8; on 0.7.8 itself, turn the shell and git on in the execution settings instead (see [Run it in a box](#2-run-it-in-a-box)).
+- `chatty-tui` ([install](./terminal.md#install)), version 0.7.9 or later. Everything this page relies on is in it: the sandbox notice, denying approvals nobody can answer, the team warnings and the leader's `--enable` reaching the workers. On an older version, turn the shell and git on in the execution settings instead (see [Run it in a box](#2-run-it-in-a-box)).
 - A model server: [Ollama](https://ollama.com), or any OpenAI-compatible server (vLLM, llama.cpp, LM Studio). Use the strongest model you can run; this team makes dozens of tool calls per story. The results below came from a 27B model on one GPU.
 - Python 3.9 or later (with `venv`) and git in the environment that runs the team. The example product is written in Python, so the tests are pytest.
 - A container, or a throwaway VM or user account. The run uses `--auto-approve`: read [step 2](#2-run-it-in-a-box) before you start it.
@@ -148,10 +148,10 @@ The `pip install` needs network access once; after that the agents never do. The
 
 Two things to know about the shell tool in a box:
 
-- **The shell sandbox.** Chatty runs shell commands inside a `bubblewrap` sandbox when it can. On Ubuntu 24.04 the default AppArmor setting blocks the user namespaces that sandbox needs, so commands run unsandboxed. Since 0.7.8, a headless run prints one line to stderr saying so and why. In a container that is expected, and the container is your boundary. If you would rather a run refuse to start unsandboxed, set `"sandbox_required": true` in `execution_settings.json`; Chatty then stops at startup with the reason, before any model call. See [Security & approvals](./security.md).
-- **No one to ask.** In an unattended run (`--headless`), an approval request nobody can answer is denied at once instead of waiting for five minutes (0.7.8 and later). `--auto-approve` is what stops requests from arising in the first place.
+- **The shell sandbox.** Chatty runs shell commands inside a `bubblewrap` sandbox when it can. On Ubuntu 24.04 the default AppArmor setting blocks the user namespaces that sandbox needs, so commands run unsandboxed. Since 0.7.9, a headless run prints one line to stderr saying so and why. In a container that is expected, and the container is your boundary. If you would rather a run refuse to start unsandboxed, set `"sandbox_required": true` in `execution_settings.json`; Chatty then stops at startup with the reason, before any model call. See [Security & approvals](./security.md).
+- **No one to ask.** In an unattended run (`--headless`), an approval request nobody can answer is denied at once instead of waiting for five minutes (0.7.9 and later). `--auto-approve` is what stops requests from arising in the first place.
 
-Workers read `execution_settings.json` themselves, so a worker's shell and git come from those settings unless the leader's flags are forwarded: in the release after 0.7.8 the leader's `--enable`, `--disable` and `--only` reach every worker. A headless team also prints one stderr line per agent whose profile wants the shell or git that the run has off, which is the line to look for if a worker says it has no shell.
+Workers read `execution_settings.json` themselves, so a worker's shell and git come from those settings unless the leader's flags are forwarded: since 0.7.9 the leader's `--enable`, `--disable` and `--only` reach every worker. A headless team also prints one stderr line per agent whose profile wants the shell or git that the run has off, which is the line to look for if a worker says it has no shell.
 
 ### 3. Write the team
 
