@@ -194,7 +194,11 @@ examples.
   can't tear down a newer turn, and a shared stall watchdog
   (`chatty-core/src/services/stream_processor.rs`) ends a turn after 180s
   of silence; `--headless` auto-resumes a stalled turn itself, up to
-  `HEADLESS_STALL_RESUME_ATTEMPTS` (2) times, before failing the run.
+  `HEADLESS_STALL_RESUME_ATTEMPTS` (2) times, before failing the run. A
+  delegated worker's unrendered model output (reasoning, tool-call
+  deltas) reaches its caller as a rate-limited
+  `InvokeAgentProgress::Heartbeat` (at most one per `HEARTBEAT_INTERVAL`
+  = 30s) that counts as activity and nothing else (AGE-932).
   See [`docs/stream-manager.md`](docs/stream-manager.md).
 - **Turn budget** — `TurnBudget` (`chatty-core/src/services/turn_budget.rs`)
   is a rig hook every `stream_prompt` call registers: it tells the model
