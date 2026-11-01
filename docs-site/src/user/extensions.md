@@ -35,7 +35,7 @@ A handful of well-known services are pre-loaded under **Installed**, disabled un
 | **Notion** | Pages, databases and comments | Sign in to your Notion workspace when prompted |
 | **Atlassian (Jira + Confluence)** | Issues, comments and Confluence pages | Atlassian Cloud sign-in in the browser on first connect |
 | **Google Calendar**, **Gmail**, **Google Drive** | Events, mail, files | Sign in with your Google account when prompted |
-| **GitHub** | Repositories, issues and pull requests | Paste a GitHub personal access token as the API key |
+| **GitHub** | Repositories, issues and pull requests | Required — paste a GitHub personal access token as the API key (browser sign-in is not available) |
 | **Linear** | Issues, projects and comments | Sign in to your Linear workspace, or paste a Linear API key |
 
 Sign-in tokens stay on your machine. The maintained list, with each service's connection notes, is on the [curated MCP catalog](../dev/architecture/curated-mcp-catalog.md) page.
