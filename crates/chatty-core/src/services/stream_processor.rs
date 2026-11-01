@@ -240,6 +240,105 @@ pub const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(18
 pub const TOOL_STALL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(MAX_SHELL_CALL_TIMEOUT_SECONDS as u64 + STALL_TIMEOUT.as_secs());
 
+/// How often, at most, a turn reports that its model is still producing
+/// output nothing renders — reasoning, a tool call's arguments — as an
+/// [`InvokeAgentProgress::Heartbeat`] (AGE-932).
+///
+/// A worker inside one long model call sends its parent nothing else, and
+/// the root's watchdog ([`TOOL_STALL_TIMEOUT`] while its `invoke_agent`
+/// runs) would end the whole turn under a worker that is busy thinking. Far
+/// below that timeout, so a heartbeat held back by the rate limit never
+/// matters; far above a delta's spacing, so the wire carries one line per
+/// interval, not one per token.
+pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Divides every watchdog duration ([`STALL_TICK`], [`STALL_TIMEOUT`],
+/// [`TOOL_STALL_TIMEOUT`], [`HEARTBEAT_INTERVAL`]) by its value, an integer
+/// from 1 to 1000, in a process that has it in its environment. A test
+/// seam, like `CHATTY_WORKER_EXE`: the swarm kit sets it on the workers it
+/// spawns so a stall test runs in seconds with production's ratios
+/// (AGE-932).
+pub const STALL_SCALE_ENV: &str = "CHATTY_TEST_STALL_SCALE";
+
+#[cfg(any(test, feature = "test-support"))]
+tokio::task_local! {
+    /// [`with_stall_scale`]'s divisor for the task it scopes.
+    static STALL_SCALE: u32;
+}
+
+/// Run `future` with every watchdog duration divided by `scale`, as
+/// [`STALL_SCALE_ENV`] does for a whole process: for a test whose root turn
+/// shares its process with other tests (AGE-932).
+#[cfg(any(test, feature = "test-support"))]
+pub async fn with_stall_scale<F: std::future::Future>(scale: u32, future: F) -> F::Output {
+    STALL_SCALE.scope(scale.clamp(1, 1000), future).await
+}
+
+/// The divisor [`with_stall_scale`] or [`STALL_SCALE_ENV`] set; 1 otherwise.
+fn stall_scale() -> u32 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Ok(scale) = STALL_SCALE.try_with(|scale| *scale) {
+        return scale;
+    }
+    static FROM_ENV: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
+        let scale = std::env::var(STALL_SCALE_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .map_or(1, |scale| scale.clamp(1, 1000));
+        // Once per process: a stray variable must not shorten every
+        // watchdog silently.
+        if scale != 1 {
+            tracing::warn!(
+                scale,
+                "{STALL_SCALE_ENV} is set: every stall timeout and the heartbeat interval are divided by it"
+            );
+        }
+        scale
+    });
+    *FROM_ENV
+}
+
+/// [`HEARTBEAT_INTERVAL`], under the stall scale.
+pub fn heartbeat_interval() -> std::time::Duration {
+    HEARTBEAT_INTERVAL / stall_scale()
+}
+
+/// At most one heartbeat per interval (AGE-932): [`due`](Self::due) says
+/// yes to the first activity at least an interval after the throttle
+/// started or last said yes. A call shorter than one interval therefore
+/// sends none, and an ordinary delegation's frames stay what they were.
+#[derive(Debug, Clone)]
+pub struct HeartbeatThrottle {
+    interval: std::time::Duration,
+    last: std::time::Instant,
+}
+
+impl HeartbeatThrottle {
+    /// One heartbeat per `interval`, counted from now;
+    /// [`heartbeat_interval`] in production.
+    pub fn every(interval: std::time::Duration) -> Self {
+        Self::starting_at(std::time::Instant::now(), interval)
+    }
+
+    /// One heartbeat per `interval`, counted from `start`.
+    pub fn starting_at(start: std::time::Instant, interval: std::time::Duration) -> Self {
+        Self {
+            interval,
+            last: start,
+        }
+    }
+
+    /// Whether activity at `now` should send a heartbeat; when it should,
+    /// `now` starts the next interval.
+    pub fn due(&mut self, now: std::time::Instant) -> bool {
+        if now.saturating_duration_since(self.last) < self.interval {
+            return false;
+        }
+        self.last = now;
+        true
+    }
+}
+
 /// The watchdog's timing, so a test can run it in milliseconds; production
 /// callers go through [`run_stream_loop`], which uses the constants above.
 #[derive(Debug, Clone, Copy)]
@@ -256,6 +355,16 @@ impl StallPolicy {
         timeout: STALL_TIMEOUT,
         tool_timeout: TOOL_STALL_TIMEOUT,
     };
+
+    /// [`DEFAULT`](Self::DEFAULT) under the stall scale (AGE-932).
+    fn current() -> Self {
+        let scale = stall_scale();
+        Self {
+            tick: Self::DEFAULT.tick / scale,
+            timeout: Self::DEFAULT.timeout / scale,
+            tool_timeout: Self::DEFAULT.tool_timeout / scale,
+        }
+    }
 }
 
 /// Whether `chunk` changes what the watchdog is waiting on: `Some(true)` once
@@ -331,7 +440,7 @@ pub async fn run_stream_loop(
         progress_rx,
         cancel_flag,
         handler,
-        StallPolicy::DEFAULT,
+        StallPolicy::current(),
     )
     .await
 }
@@ -358,6 +467,9 @@ async fn run_stream_loop_with(
         tokio::select! {
             biased;
 
+            // A delegation's progress is activity, a worker's `Heartbeat`
+            // included: a worker deep in one model call sends nothing else,
+            // and its own watchdog bounds its silence (AGE-932).
             Some(progress) = progress_rx.recv() => {
                 last_activity = std::time::Instant::now();
                 handler.on_progress(progress);
@@ -776,6 +888,97 @@ mod tests {
         }
     }
 
+    /// AGE-932: a worker's heartbeats keep the root's watchdog from ending a
+    /// turn whose `invoke_agent` runs past the tool timeout; when they stop,
+    /// the watchdog fires as before.
+    #[tokio::test]
+    async fn heartbeats_keep_a_long_delegation_alive() {
+        let stall = StallPolicy {
+            tick: std::time::Duration::from_millis(10),
+            timeout: std::time::Duration::from_millis(60),
+            tool_timeout: std::time::Duration::from_millis(100),
+        };
+        let chunks = futures::stream::iter(vec![Ok(StreamChunk::ToolCallStarted {
+            id: "call_1".into(),
+            name: "invoke_agent".into(),
+        })])
+        .chain(futures::stream::pending());
+        let mut stream: ResponseStream = Box::pin(chunks);
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        // Four tool timeouts of heartbeats, 40 ms apart, then silence.
+        let beats = tokio::spawn(async move {
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                let _ = progress_tx.send(InvokeAgentProgress::Heartbeat);
+            }
+            progress_tx
+        });
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+
+        let started = std::time::Instant::now();
+        let mut handler = TestHandler::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_stream_loop_with(
+                &mut stream,
+                &mut progress_rx,
+                &cancel_flag,
+                &mut handler,
+                stall,
+            ),
+        )
+        .await
+        .expect("the watchdog fires once the heartbeats stop")
+        .unwrap();
+        let _sender = beats.await.unwrap();
+
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(400),
+            "the turn was ended while heartbeats arrived: {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(
+            handler.chunks.last(),
+            Some(StreamChunk::Error(e)) if e.kind == StreamErrorKind::Stalled
+        ));
+        assert_eq!(handler.progress_events.len(), 10);
+    }
+
+    /// AGE-932: the rate limit says no within an interval of its start,
+    /// yes once one has passed, and yes again an interval after the last
+    /// yes — not after the last activity.
+    #[test]
+    fn heartbeat_throttle_allows_one_per_interval() {
+        let interval = std::time::Duration::from_secs(30);
+        let t0 = std::time::Instant::now();
+        let at = |secs| t0 + std::time::Duration::from_secs(secs);
+        let mut throttle = HeartbeatThrottle::starting_at(t0, interval);
+
+        assert!(!throttle.due(t0), "a short call sends none");
+        assert!(!throttle.due(at(29)));
+        assert!(throttle.due(at(30)), "an interval after the start");
+        assert!(!throttle.due(at(31)));
+        assert!(!throttle.due(at(59)));
+        assert!(throttle.due(at(65)), "an interval after the last beat");
+        assert!(!throttle.due(at(94)));
+        // A clock that reads earlier than the last beat never beats.
+        assert!(!throttle.due(t0));
+    }
+
+    /// AGE-932: the stall scale divides every watchdog duration, the
+    /// heartbeat's included, so a scaled test keeps production's ratios.
+    #[tokio::test]
+    async fn the_stall_scale_divides_every_duration() {
+        assert_eq!(heartbeat_interval(), HEARTBEAT_INTERVAL);
+        let (policy, heartbeat) =
+            with_stall_scale(60, async { (StallPolicy::current(), heartbeat_interval()) }).await;
+        assert_eq!(policy.tick, STALL_TICK / 60);
+        assert_eq!(policy.timeout, STALL_TIMEOUT / 60);
+        assert_eq!(policy.tool_timeout, TOOL_STALL_TIMEOUT / 60);
+        assert_eq!(heartbeat, HEARTBEAT_INTERVAL / 60);
+        assert!(heartbeat < policy.timeout && policy.timeout < policy.tool_timeout);
+    }
+
     #[test]
     fn the_tool_timeout_outlasts_the_longest_shell_call() {
         assert!(
@@ -954,6 +1157,7 @@ mod tests {
                 InvokeAgentProgress::Resumed { .. } => "Resumed",
                 InvokeAgentProgress::Conversation(_) => "Conversation",
                 InvokeAgentProgress::Call(_) => "Call",
+                InvokeAgentProgress::Heartbeat => "Heartbeat",
             };
             self.calls.push(format!("on_progress({name})"));
         }

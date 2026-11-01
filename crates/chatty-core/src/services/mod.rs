@@ -148,10 +148,13 @@ pub use spend_gate::{CapExceeded, LocalSpendGate, SpendGate};
 pub use stream_fixtures::{
     Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios, scripted_stream,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use stream_processor::with_stall_scale;
 pub use stream_processor::{
     ChunkAction, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS, HEADLESS_STALL_RESUME_ATTEMPTS,
-    HEADLESS_TRANSPORT_RETRY_ATTEMPTS, RecoveryAction, STALL_TICK, STALL_TIMEOUT,
-    StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
-    install_progress_channel, run_stream_loop, stalled_stream_message,
+    HEADLESS_TRANSPORT_RETRY_ATTEMPTS, HEARTBEAT_INTERVAL, HeartbeatThrottle, RecoveryAction,
+    STALL_SCALE_ENV, STALL_TICK, STALL_TIMEOUT, StreamChunkHandler, StreamError, StreamErrorKind,
+    StreamSurface, decide_recovery, heartbeat_interval, install_progress_channel, run_stream_loop,
+    stalled_stream_message,
 };
 pub use title_generator::generate_title;

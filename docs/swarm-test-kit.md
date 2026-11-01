@@ -30,6 +30,7 @@ matching route wins.
 | `Error(status)` | Answer with that HTTP status |
 | `ErrorBody(status, json)` | Answer with that HTTP status and JSON body (e.g. a `402` budget refusal) |
 | `Say(s)` | Stream `s` as text ahead of the next answer (before its tool calls) |
+| `Reason { deltas, every_ms }` / `Reply::reason(deltas, every_ms)` | Stream `deltas` reasoning deltas, `every_ms` apart, ahead of the next answer (`Text` or `ToolCalls`): a thinking model in one long call. SSE `delta.reasoning`, NDJSON `message.thinking`; the response has no `Content-Length` |
 
 Replies are OpenAI-compatible SSE on `…/chat/completions` and Ollama NDJSON on
 `/api/chat`. A request no route matches, or whose queue ran dry, gets HTTP 500
@@ -83,6 +84,12 @@ async fn my_swarm_feature() {
   never reads your real settings. `cargo test -p chatty-tui` builds the
   binary (`tests/worker_binary.rs` is what makes it); `CHATTY_WORKER_EXE`
   overrides which binary `worker_executable()` picks.
+- `SwarmKit::start_stall_scaled(scale, …)` divides every worker's stall
+  timeouts and heartbeat interval by `scale` (it sets
+  `CHATTY_TEST_STALL_SCALE` in the worker wrapper); scope the root's turn with
+  `chatty_core::services::with_stall_scale(scale, turn)` for the same scale.
+  `worker_heartbeat.rs` uses both, at 60: a 3 s stall, a 13 s tool stall and a
+  0.5 s heartbeat (AGE-932).
 - `normalize` / `parent_trace` strip the temp dir, ports and uuids; request
   bodies are otherwise byte-stable run to run (`swarm_kit_is_deterministic`).
 

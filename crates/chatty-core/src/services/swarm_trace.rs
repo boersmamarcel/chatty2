@@ -776,6 +776,8 @@ impl SwarmTrace {
                 self.call = Some(*call);
                 return;
             }
+            // Liveness only (AGE-932): the tree does not change.
+            InvokeAgentProgress::Heartbeat => return,
             InvokeAgentProgress::Swarm(batch) => return self.apply_swarm(batch),
             // Rename the just-opened node to the concrete name the broker
             // admitted it under, as soon as that is known (AGE-762): two

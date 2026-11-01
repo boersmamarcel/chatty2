@@ -443,6 +443,8 @@ impl DesktopSink {
             InvokeAgentProgress::Conversation(_) => {}
             // Names the call the events after it belong to.
             InvokeAgentProgress::Call(call) => self.delegation_call = call,
+            // Liveness for the stall watchdog only, never a row (AGE-932).
+            InvokeAgentProgress::Heartbeat => {}
         }
     }
 }

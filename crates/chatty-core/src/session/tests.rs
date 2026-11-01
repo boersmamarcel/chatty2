@@ -41,6 +41,7 @@ fn policy() -> TurnPolicy {
         loop_guard: false,
         already_asked_to_retry: false,
         think_disabled: false,
+        report_liveness: false,
     }
 }
 
@@ -830,6 +831,7 @@ fn describe(event: &SessionEvent) -> String {
                 format!("Delegation(Conversation {conversation:?})")
             }
             InvokeAgentProgress::Call(call) => format!("Delegation(Call {call})"),
+            InvokeAgentProgress::Heartbeat => "Delegation(Heartbeat)".to_string(),
         },
         SessionEvent::SwarmEvent(event) => format!(
             "SwarmEvent(node={:?}, chain={:?}, items={})",

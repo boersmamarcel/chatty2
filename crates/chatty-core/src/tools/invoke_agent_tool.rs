@@ -119,6 +119,15 @@ pub enum InvokeAgentProgress {
     /// one stream of progress; without this, a step or an answer cannot be
     /// told from another call's.
     Call(u64),
+    /// Liveness only (AGE-932): the model under this delegation — or, in a
+    /// delegated worker's own turn, its own — is still producing output nothing renders (reasoning, a
+    /// tool call's arguments), at most once per
+    /// [`HEARTBEAT_INTERVAL`](crate::services::HEARTBEAT_INTERVAL). The
+    /// stall watchdog counts it as activity; nothing else does. It is never
+    /// a row, never text, never usage, and never in a captured
+    /// conversation. On the fabric wire it is an empty
+    /// [`WireProgress::Text`] (see [`WireProgress`]'s `From` impl).
+    Heartbeat,
 }
 
 /// What a run is waiting on the human for (TB-6).
@@ -137,6 +146,10 @@ impl From<WireProgress> for InvokeAgentProgress {
         match progress {
             WireProgress::Admitted(node) => Self::Admitted(node),
             WireProgress::Step(step) => Self::Step(step),
+            // The broker never sends an empty answer chunk; an empty one is
+            // a heartbeat (AGE-932). Encoded so the wire's schema, and so
+            // its hash in `session.hello`, stays as it was.
+            WireProgress::Text(text) if text.is_empty() => Self::Heartbeat,
             WireProgress::Text(text) => Self::Text(text),
         }
     }
@@ -1507,6 +1520,20 @@ fn undeliverable(agent: &str, error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AGE-932: an empty answer chunk on the wire is a heartbeat, never
+    /// text; every other chunk is the text it carries.
+    #[test]
+    fn an_empty_wire_text_is_a_heartbeat() {
+        assert!(matches!(
+            InvokeAgentProgress::from(WireProgress::heartbeat()),
+            InvokeAgentProgress::Heartbeat
+        ));
+        assert!(matches!(
+            InvokeAgentProgress::from(WireProgress::Text("hi".into())),
+            InvokeAgentProgress::Text(text) if text == "hi"
+        ));
+    }
     use crate::settings::models::a2a_store::A2aAgentConfig;
 
     fn make_agent(name: &str, url: &str, enabled: bool) -> A2aAgentConfig {

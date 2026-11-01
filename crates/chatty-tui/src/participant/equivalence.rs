@@ -54,6 +54,7 @@ fn policy() -> TurnPolicy {
         loop_guard: false,
         already_asked_to_retry: false,
         think_disabled: false,
+        report_liveness: true,
     }
 }
 
@@ -176,7 +177,8 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
             | InvokeAgentProgress::Waiting { .. }
             | InvokeAgentProgress::Resumed { .. }
             | InvokeAgentProgress::Conversation(_)
-            | InvokeAgentProgress::Call(_) => {}
+            | InvokeAgentProgress::Call(_)
+            | InvokeAgentProgress::Heartbeat => {}
         }
     }
 
@@ -807,6 +809,7 @@ pub(super) mod named_virtual_agents {
                 loop_guard: false,
                 already_asked_to_retry: false,
                 think_disabled: false,
+                report_liveness: true,
             },
         )
         .await

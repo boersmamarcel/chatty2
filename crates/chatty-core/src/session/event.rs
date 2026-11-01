@@ -95,7 +95,12 @@ pub enum SessionEvent {
     /// rig's record of the turn's messages, for persisting the tool
     /// round-trips behind the final text (AGE-247).
     TurnMessages(Vec<Message>),
-    /// Progress from a sub-agent the turn invoked.
+    /// Progress from a sub-agent the turn invoked — or, as
+    /// [`InvokeAgentProgress::Heartbeat`] in a delegated worker's turn
+    /// (`AgentSession::set_report_liveness`), the turn's own model still
+    /// producing output nothing renders, which the worker's mapper sends
+    /// its caller (AGE-932). A root's turn never emits its own. Frontends
+    /// ignore a heartbeat.
     Delegation(InvokeAgentProgress),
     /// What a run nested under one of the turn's delegations did: a batch
     /// of one node's items, tagged by the broker with

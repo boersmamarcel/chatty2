@@ -65,6 +65,8 @@ mod team_preset;
 mod tui_swarm;
 #[cfg(test)]
 mod typed_handoffs;
+#[cfg(test)]
+mod worker_heartbeat;
 
 use anyhow::{Context, Result, bail};
 use chatty_protocol_gateway::worker::{InputStores, WorkerConnection, answer_inputs, worker_card};
@@ -159,6 +161,9 @@ pub async fn run_participant(
                 None => task.text,
             };
             engine.set_handoff(task.handoff);
+            // Its caller's stall watchdog hears a busy model through the
+            // turn's heartbeats (AGE-932); a root's session sends none.
+            engine.session.set_report_liveness(true);
             // It runs under the tighter of its own budget and what its
             // caller left it (DP-3), before its clock starts.
             engine.narrow_budget(&task.budget);

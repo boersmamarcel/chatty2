@@ -26,8 +26,9 @@ use crate::models::token_usage::{ApiCallUsage, TokenUsage};
 use crate::services::budget_stop::find_budget_exhausted;
 use crate::services::llm_service::StreamChunk;
 use crate::services::{
-    AgentLoopGuard, AgentTaskController, ChunkAction, RecoveryAction, StreamChunkHandler,
-    StreamError, StreamErrorKind, StreamSurface, decide_recovery,
+    AgentLoopGuard, AgentTaskController, ChunkAction, HeartbeatThrottle, RecoveryAction,
+    StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
+    heartbeat_interval,
 };
 use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentTool};
 
@@ -117,6 +118,12 @@ pub struct TurnPolicy {
     /// Whether the bound model's `extra_params.think` is `"false"`, which
     /// picks the empty-completion error text (AGE-404).
     pub think_disabled: bool,
+    /// Whether a caller is listening for this turn's liveness: a delegated
+    /// worker's turn, whose unrendered model output (reasoning, tool-call
+    /// deltas) becomes a rate-limited [`InvokeAgentProgress::Heartbeat`]
+    /// its mapper sends up (AGE-932). Off for a root's turn, where nobody
+    /// listens and a hosted frontend would read the event as a delegation.
+    pub report_liveness: bool,
 }
 
 /// Turn-orchestration logic shared by every frontend. See the module docs.
@@ -168,6 +175,10 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     /// refused, or a delegation came back budget-stopped. No follow-up
     /// prompt goes out after it — each would be another paid call.
     budget_stopped: bool,
+    /// The rate limit on the heartbeats this turn's own unrendered model
+    /// output sends (AGE-932); `None` when nobody listens
+    /// ([`TurnPolicy::report_liveness`]).
+    heartbeat: Option<HeartbeatThrottle>,
 }
 
 /// The tool round-trips of a turn, rebuilt from its stream events.
@@ -290,6 +301,9 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             turn_messages_seen: false,
             seen: SeenRoundTrips::default(),
             budget_stopped: false,
+            heartbeat: policy
+                .report_liveness
+                .then(|| HeartbeatThrottle::every(heartbeat_interval())),
         }
     }
 
@@ -476,7 +490,15 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             // stall watchdog on the way here. Neither is rendered, and
             // neither counts as output — a call that only thinks and then
             // answers nothing is still the empty completion AGE-401 nudges.
-            StreamChunk::Reasoning(_) | StreamChunk::ToolCallDelta => {}
+            // A worker's caller hears nothing else while it lasts, so it
+            // becomes a rate-limited heartbeat its mapper sends up (AGE-932).
+            StreamChunk::Reasoning(_) | StreamChunk::ToolCallDelta => {
+                if let Some(heartbeat) = self.heartbeat.as_mut()
+                    && heartbeat.due(std::time::Instant::now())
+                {
+                    (self.emit)(SessionEvent::Delegation(InvokeAgentProgress::Heartbeat));
+                }
+            }
             StreamChunk::ToolCallStarted { id, name } => {
                 self.output_in_call = true;
                 self.pending_tool_names.insert(id.clone(), name.clone());
@@ -645,6 +667,7 @@ mod tests {
             loop_guard: true,
             already_asked_to_retry: false,
             think_disabled: false,
+            report_liveness: true,
         }
     }
 
@@ -660,6 +683,68 @@ mod tests {
             id: id.to_string(),
             result: "ok".to_string(),
         }
+    }
+
+    /// AGE-932: a model busy thinking or writing a tool call's arguments
+    /// sends one heartbeat per interval, not one per delta — none before
+    /// the first interval is up — and it never counts as the call's output.
+    #[test]
+    fn unrendered_output_sends_one_heartbeat_per_interval() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        handler.heartbeat = Some(HeartbeatThrottle::every(std::time::Duration::from_millis(
+            50,
+        )));
+        let deltas = |handler: &mut SessionStreamHandler<_>| {
+            for _ in 0..50 {
+                handler
+                    .on_chunk(Ok(StreamChunk::Reasoning("hmm ".to_string())))
+                    .unwrap();
+                handler.on_chunk(Ok(StreamChunk::ToolCallDelta)).unwrap();
+            }
+        };
+        deltas(&mut handler);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        deltas(&mut handler);
+        assert!(!handler.output_in_call, "a heartbeat is not output");
+        drop(handler);
+
+        let heartbeats = events
+            .iter()
+            .filter(|e| matches!(e, SessionEvent::Delegation(InvokeAgentProgress::Heartbeat)))
+            .count();
+        assert_eq!(heartbeats, 1, "{events:?}");
+        assert_eq!(events.len(), 1, "nothing else is emitted: {events:?}");
+    }
+
+    /// AGE-932: a turn nobody listens to for liveness — a root's — emits no
+    /// heartbeat, however long its model thinks.
+    #[test]
+    fn a_root_turn_emits_no_heartbeat() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            TurnPolicy {
+                report_liveness: false,
+                ..test_policy()
+            },
+        );
+        assert!(handler.heartbeat.is_none());
+        for _ in 0..50 {
+            handler
+                .on_chunk(Ok(StreamChunk::Reasoning("hmm ".to_string())))
+                .unwrap();
+            handler.on_chunk(Ok(StreamChunk::ToolCallDelta)).unwrap();
+        }
+        drop(handler);
+        assert!(events.is_empty(), "{events:?}");
     }
 
     /// AGE-864: a turn cancelled mid-loop (the headless stop after

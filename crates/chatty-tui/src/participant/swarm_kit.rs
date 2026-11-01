@@ -41,9 +41,9 @@ use std::time::Duration;
 
 use chatty_core::agent_spec::AgentSpec;
 use chatty_core::models::token_usage::{PriceBook, TokenPricing, TokenUsage};
-use chatty_core::services::install_progress_channel;
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::services::worker_start::{STOP_NOTE, WorkerStartFailure, parse_card};
+use chatty_core::services::{STALL_SCALE_ENV, install_progress_channel};
 use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::models_store::ModelConfig;
@@ -179,7 +179,7 @@ impl SwarmKit {
         sse: Script,
         ndjson: Script,
     ) -> Self {
-        Self::start_opts(None, roster, sse, ndjson, false, false, budget, None).await
+        Self::start_opts(None, roster, sse, ndjson, false, false, budget, None, None).await
     }
 
     /// As [`start`](Self::start), with the root running as `leader` — a
@@ -214,6 +214,7 @@ impl SwarmKit {
             true,
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
+            None,
         )
         .await
     }
@@ -238,6 +239,7 @@ impl SwarmKit {
             false,
             budget,
             Some(verification.to_string()),
+            None,
         )
         .await
     }
@@ -258,6 +260,31 @@ impl SwarmKit {
             false,
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// As [`start`](Self::start), with every worker's watchdog durations —
+    /// the stall timeouts and the heartbeat interval — divided by `scale`
+    /// ([`STALL_SCALE_ENV`]), so a stall test runs in seconds. Scope the
+    /// root's turn with `with_stall_scale` for the same scale (AGE-932).
+    pub async fn start_stall_scaled(
+        scale: u32,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_opts(
+            None,
+            roster,
+            sse,
+            ndjson,
+            false,
+            false,
+            ModuleSettingsModel::default().default_endpoint_budget,
+            None,
+            Some(scale),
         )
         .await
     }
@@ -272,6 +299,7 @@ impl SwarmKit {
         asking: bool,
         endpoint_budget: usize,
         verification: Option<String>,
+        stall_scale: Option<u32>,
     ) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
@@ -397,7 +425,7 @@ impl SwarmKit {
             std::fs::write(config.join(file), json).expect("settings file");
         }
 
-        let executable = wrapper(&base, &worker_executable());
+        let executable = wrapper(&base, &worker_executable(), stall_scale);
         let common_args: Vec<String> = if asking {
             Vec::new()
         } else {
@@ -573,7 +601,7 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
 /// A `chatty-tui` that runs `real` with the kit's home and XDG dirs, so the
 /// worker reads the kit's settings and keeps any secret in the kit's config
 /// dir (`CHATTY_SECRET_STORE=file`). Everything else is inherited.
-fn wrapper(base: &Path, real: &Path) -> PathBuf {
+fn wrapper(base: &Path, real: &Path, stall_scale: Option<u32>) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     assert!(
@@ -590,10 +618,13 @@ fn wrapper(base: &Path, real: &Path) -> PathBuf {
             .expect("xdg dir is owner-only");
         path.to_string_lossy().into_owned()
     };
+    let scale = stall_scale
+        .map(|scale| format!(" {STALL_SCALE_ENV}={scale}"))
+        .unwrap_or_default();
     let script = format!(
         "#!/bin/sh\nexport HOME='{}' XDG_CONFIG_HOME='{}' XDG_DATA_HOME='{}' \
          XDG_CACHE_HOME='{}' XDG_STATE_HOME='{}' XDG_RUNTIME_DIR='{}' \
-         CHATTY_SECRET_STORE=file\nexec '{}' \"$@\"\n",
+         CHATTY_SECRET_STORE=file{scale}\nexec '{}' \"$@\"\n",
         dir("home"),
         dir("config"),
         dir("data"),
@@ -684,6 +715,9 @@ pub(crate) fn parent_trace(kit: &SwarmKit, run: &LeaderRun) -> Vec<String> {
             InvokeAgentProgress::Conversation(_) => continue,
             // The call a run's events belong to: a counter, not behaviour.
             InvokeAgentProgress::Call(_) => continue,
+            // Liveness, timing-dependent and newer than the goldens
+            // (AGE-932).
+            InvokeAgentProgress::Heartbeat => continue,
             InvokeAgentProgress::Started {
                 agent_name, prompt, ..
             } => format!("started {agent_name}: {prompt}"),

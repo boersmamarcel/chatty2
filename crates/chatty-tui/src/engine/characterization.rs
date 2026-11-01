@@ -32,6 +32,7 @@ fn policy() -> TurnPolicy {
         loop_guard: false,
         already_asked_to_retry: false,
         think_disabled: false,
+        report_liveness: false,
     }
 }
 

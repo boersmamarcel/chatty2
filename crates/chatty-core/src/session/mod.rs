@@ -222,6 +222,9 @@ pub struct AgentSession {
     /// status and captured conversations — persisted on the turn's trace
     /// by `finish_turn` for the full-run export (AGE-859).
     swarm: SwarmTrace,
+    /// Whether this session runs a delegated worker's turns, whose caller
+    /// listens for their liveness (AGE-932). Off by default.
+    report_liveness: bool,
     /// The `invoke_agent` call the delegation progress arriving now belongs
     /// to, as the last [`InvokeAgentProgress::Call`] named it: calls run
     /// side by side share one stream, and each keeps a card of its own.
@@ -246,8 +249,19 @@ impl AgentSession {
             price_book: PriceBook::default(),
             recovery_attempts: HashMap::new(),
             swarm: SwarmTrace::new(),
+            report_liveness: false,
             delegation_call: UNTAGGED_CALL,
         }
+    }
+
+    /// Mark this session as a delegated worker's (AGE-932): its turns'
+    /// unrendered model output — reasoning, tool-call deltas — is reported
+    /// as a rate-limited [`InvokeAgentProgress::Heartbeat`], which the
+    /// worker's mapper sends its caller so the caller's stall watchdog
+    /// hears a busy model. A root's session leaves it off: nobody listens,
+    /// and a frontend would read the event as a delegation.
+    pub fn set_report_liveness(&mut self, report: bool) {
+        self.report_liveness = report;
     }
 
     /// Price the usage lines this session records with `book` (AGE-682):
@@ -600,6 +614,7 @@ impl AgentSession {
                 loop_guard: self.config.loop_guard,
                 already_asked_to_retry,
                 think_disabled: conversation.think_disabled(),
+                report_liveness: self.report_liveness,
             },
         })
     }
@@ -881,6 +896,8 @@ impl AgentSession {
             InvokeAgentProgress::Conversation(_) => {}
             // Named above, for the events that follow.
             InvokeAgentProgress::Call(_) => {}
+            // Liveness for the stall watchdog only, never a row (AGE-932).
+            InvokeAgentProgress::Heartbeat => {}
         }
     }
 
