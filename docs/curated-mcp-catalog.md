@@ -43,7 +43,7 @@ Every entry has `default_enabled: false` — users opt in explicitly from
 | Hugging Face | Optional. Paste a Hugging Face access token into the API key field for private repos / higher rate limits. |
 | Notion | OAuth — sign in with your Notion workspace when prompted by the MCP server. |
 | Atlassian | OAuth — Atlassian Cloud sign-in is performed in the browser on first connect. |
-| GitHub | Personal access token pasted into the API key field (sent as a bearer token). |
+| GitHub | Required: paste a personal access token into the API key field (sent as a bearer token). GitHub does not support OAuth dynamic client registration, so browser sign-in fails without one. |
 | Linear | OAuth — sign in with your Linear workspace; or paste a Linear API key into the API key field. |
 | Google Calendar / Gmail / Drive | OAuth — sign in with your Google account when prompted; grant the matching API scope. |
 

@@ -348,6 +348,13 @@ impl McpConnection {
                          Try using the server's local/desktop MCP option instead."
                     ));
                 }
+                if err_str.contains("Dynamic client registration not supported") {
+                    return Err(anyhow::anyhow!(
+                        "{name} does not support browser sign-in (OAuth dynamic client \
+                         registration). Add an access token as this server's API key in \
+                         Settings → Extensions, then enable it again."
+                    ));
+                }
                 return Err(anyhow::anyhow!(e))
                     .with_context(|| format!("Failed to register OAuth client for {name}"));
             }
@@ -378,13 +385,13 @@ impl McpConnection {
         }
 
         // Wait for the OAuth callback
-        let (code, state) = Self::wait_for_oauth_callback(listener).await?;
+        let (code, state, issuer) = Self::wait_for_oauth_callback(listener).await?;
 
         // Exchange the authorization code for an access token
         // (FileCredentialStore automatically persists the token via CredentialStore::save)
         info!(server = %name, "Exchanging OAuth code for token");
         auth_manager
-            .exchange_code_for_token(&code, &state)
+            .exchange_code_for_token_with_issuer(&code, &state, issuer.as_deref())
             .await
             .with_context(|| format!("Failed to exchange OAuth code for {name}"))?;
 
@@ -484,14 +491,14 @@ impl McpConnection {
     }
 
     /// Run a minimal HTTP server that accepts exactly one callback request,
-    /// extracts `code` and `state` parameters, sends a success page, and returns.
+    /// extracts `code`, `state` and the optional RFC 9207 `iss` parameters, sends a success page, and returns.
     ///
     /// Supports both `GET /callback?code=X&state=Y` (standard query mode)
     /// and `POST /callback` with URL-encoded form body (`response_mode=form_post`,
     /// used by servers like Homey).
     async fn wait_for_oauth_callback(
         listener: tokio::net::TcpListener,
-    ) -> Result<(String, String)> {
+    ) -> Result<(String, String, Option<String>)> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         info!("Waiting for OAuth callback…");
@@ -533,6 +540,10 @@ impl McpConnection {
             .cloned()
             .context("OAuth callback missing 'state' parameter")?;
 
+        // RFC 9207 `iss`: servers such as Linear advertise it as required, and
+        // the token exchange rejects the response if we drop it.
+        let issuer = params.get("iss").cloned();
+
         // Send a success response
         let body = "<!DOCTYPE html><html><body>\
             <h2>✓ Authorization successful</h2>\
@@ -552,7 +563,7 @@ impl McpConnection {
         stream.shutdown().await.ok();
 
         info!(method = %method, "OAuth callback received successfully");
-        Ok((code, state))
+        Ok((code, state, issuer))
     }
 
     /// Parse a URL-encoded query string into key-value pairs.
