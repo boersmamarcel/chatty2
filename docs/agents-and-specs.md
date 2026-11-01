@@ -250,7 +250,7 @@ loopback HTTP:
 | Direction | Message | Fields |
 |---|---|---|
 | worker → broker | `agent.invoke`, `agent.list`, `mailbox.post` requests | `id` (the worker's, never reused on the connection), `params` (none for `agent.list`) |
-| broker → worker | `req.progress` notification | `id`, `event` — `{"Admitted": "…"}` once the callee's node is admitted, `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams |
+| broker → worker | `req.progress` notification | `id`, `event` — `{"Admitted": "…"}` once the callee's node is admitted, `{"Step": "read_file"}` for a line about the callee's work, `{"Text": "…"}` for its answer as it streams; an empty `{"Text": ""}` is a heartbeat (AGE-932): the callee's model is still busy, at most once per 30 s. A non-fabric A2A caller ignores the message-less `working` status a heartbeat is on the worker's side, so it only keeps fabric callers (local roles, hosted) alive |
 | broker → worker | result | `id`, `result` — for `agent.invoke` `{success, response, error?, metadata?}`, the callee's terminal status as an A2A caller reads it (usage, trace, conversation and evidence ride in `metadata`); for `agent.list` the aggregated card's `agents` array; for `mailbox.post` `{"status":"pending","id":"msg-1"}` or `{"status":"refused","reason":"not_on_tree"}` (see [`send_message`](#send_message)) |
 | broker → worker | error | `id`, `error: {kind, …, message}` — the call could not run (`unknown_agent`, `refused`, `spawn_context_refused`, `delegation`, …); the kind's fields ride beside it and `message` is display text only |
 | worker → broker | `req.cancel` notification | `id` — the worker withdraws its call, its approval or its question |
@@ -565,7 +565,12 @@ The child maps its `SessionEvent`s to frames with
 `chatty_protocol_gateway::worker::TaskMapper` (the `worker` feature) — tool starts and
 finishes become `working` status messages (and so do the steps of anything the child
 itself delegated, `InvokeAgentProgress::Step`, so a grandchild's tool calls reach the
-leader one line each), assistant text becomes artifact chunks, and
+leader one line each), assistant text becomes artifact chunks, a model busy with
+output nothing renders (reasoning, a tool call's arguments) — its own or a grandchild's —
+becomes a `working` status with no message at most once per 30 s, which the broker passes
+up as a heartbeat the caller's stall watchdog counts (AGE-932; only a worker's session sends
+them, `AgentSession::set_report_liveness(true)` — chatty-tui's participant loop sets it, and
+a hosted worker's embedder must too — never a root's), and
 the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
 no usage concept; usage belongs to the ledger). It goes as `lines`, one per model, each
 naming its model and carrying tokens and time but no price (AGE-682). The lines already

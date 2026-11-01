@@ -1739,10 +1739,14 @@ impl BrokerCalls {
                             ));
                             break;
                         }
-                        if state == TaskState::Working
-                            && let Some(step) = message
-                        {
-                            yield Ok(CallEvent::Progress(WireProgress::Step(step)));
+                        if state == TaskState::Working {
+                            // A working status with no line is the worker's
+                            // heartbeat (AGE-932): its model is busy, which
+                            // the caller's stall watchdog must hear.
+                            yield Ok(CallEvent::Progress(match message {
+                                Some(step) => WireProgress::Step(step),
+                                None => WireProgress::heartbeat(),
+                            }));
                         }
                     }
                 }

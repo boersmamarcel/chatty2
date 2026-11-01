@@ -21,6 +21,7 @@
 //! | `ClarificationRequested` | a `human.ask` request, up the caller chain (see below) |
 //! | `ApprovalResolved` | `status: working`, and a `req.cancel` of a request still open |
 //! | `Delegation` | `status: working` (a grandchild's progress) |
+//! | `Delegation(Heartbeat)`, a grandchild's `Delegation(Text)` | `status: working` with no line, at most once per heartbeat interval (AGE-932) |
 //! | `ApiCallUsage` | — (folded into `TokenUsage`) |
 //! | `TokenUsage` | — (held, and attached to the terminal status) |
 //! | `TurnMessages` | — (held when capture is on, and attached to the terminal status; RC-0, AGE-649) |
@@ -40,6 +41,18 @@
 //! [`progress_text_for_event`].** The parent renders a worker's tool calls
 //! from the worker's own events; rewriting the strings here would put a
 //! second, drifting copy of them in the transcript.
+//!
+//! **A busy model is heard, rate-limited.** A worker inside one long model
+//! call — thinking, or writing a large tool argument — has nothing to show,
+//! and its caller's stall watchdog would end the caller's turn under it
+//! (AGE-932). Its session — marked a worker's by its embedder with
+//! `AgentSession::set_report_liveness(true)`, which a root's never is —
+//! reports that output as `Delegation(Heartbeat)`,
+//! and a grandchild's heartbeats and answer text arrive the same way; each
+//! becomes a `status: working` with no line, which the broker passes up as
+//! a heartbeat. At most one per
+//! [`HEARTBEAT_INTERVAL`](chatty_core::services::HEARTBEAT_INTERVAL) per
+//! task, however many children and deltas feed it.
 //!
 //! **`TurnEnded` produces nothing.** A terminal status ends the A2A task, and
 //! one delegated task can span several turns — headless recovery and
@@ -129,6 +142,7 @@ use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteAppr
 use chatty_core::services::a2a_client::wire_usage;
 use chatty_core::services::budget_stop;
 use chatty_core::services::handoff::{self, HandoffContract, HandoffOutcome};
+use chatty_core::services::{HeartbeatThrottle, heartbeat_interval};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
@@ -138,6 +152,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -419,6 +434,8 @@ pub struct TaskMapper {
     /// Every question this worker asks is numbered from this counter,
     /// shared with the worker's transport (EN-2b).
     question_numbers: Arc<AtomicU64>,
+    /// The rate limit on heartbeats sent up (AGE-932).
+    heartbeat: HeartbeatThrottle,
 }
 
 impl TaskMapper {
@@ -445,6 +462,7 @@ impl TaskMapper {
             last_approval: 0,
             questions: HashMap::new(),
             question_numbers: Arc::default(),
+            heartbeat: HeartbeatThrottle::every(heartbeat_interval()),
         }
     }
 
@@ -684,6 +702,16 @@ impl TaskMapper {
                 None
             }
 
+            // Liveness, rate-limited (AGE-932): this task's own unrendered
+            // model output, a grandchild's heartbeat, or a grandchild's
+            // answer text, which is not passed up as text (BI-4).
+            SessionEvent::Delegation(
+                InvokeAgentProgress::Heartbeat | InvokeAgentProgress::Text(_),
+            ) => self
+                .heartbeat
+                .due(Instant::now())
+                .then(|| self.status(TaskState::Working, None)),
+
             // Held rather than sent, like usage, and only when capture is on
             // (RC-0, AGE-649): see the module docs.
             SessionEvent::TurnMessages(messages) => {
@@ -916,6 +944,55 @@ mod tests {
             outcome(&mapper),
             TaskState::Completed,
             "a tool may fail and the turn still succeed; only a stream error ends the task"
+        );
+    }
+
+    /// AGE-932: this task's own heartbeats, a grandchild's, and a
+    /// grandchild's answer text each go up as a line-less working status,
+    /// and together at most once per interval.
+    #[test]
+    fn heartbeats_go_up_as_line_less_working_statuses_rate_limited() {
+        let heartbeat = SessionEvent::Delegation(InvokeAgentProgress::Heartbeat);
+        let grandchild_text = SessionEvent::Delegation(InvokeAgentProgress::Text("x".into()));
+
+        // Within the first interval nothing goes up: an ordinary, short
+        // delegation's frames are what they were.
+        let mut mapper = TaskMapper::new("task-1");
+        for _ in 0..20 {
+            assert!(mapper.map(&heartbeat).is_none(), "rate-limited");
+            assert!(mapper.map(&grandchild_text).is_none(), "rate-limited");
+        }
+        assert_eq!(outcome(&mapper), TaskState::Completed);
+
+        let interval = std::time::Duration::from_millis(20);
+        let mut mapper = TaskMapper::new("task-1");
+        mapper.heartbeat = HeartbeatThrottle::every(interval);
+        std::thread::sleep(interval);
+        let first = mapper.map(&heartbeat).expect("an interval in, one goes up");
+        assert_eq!(status_of(&first), (TaskState::Working, None));
+        assert!(mapper.map(&heartbeat).is_none());
+        assert!(mapper.map(&grandchild_text).is_none());
+        std::thread::sleep(interval);
+        let from_text = mapper
+            .map(&grandchild_text)
+            .expect("a grandchild's text is liveness");
+        assert_eq!(status_of(&from_text), (TaskState::Working, None));
+    }
+
+    /// AGE-932: a heartbeat is never usage, trace or a captured message.
+    #[test]
+    fn heartbeats_leave_the_terminal_status_untouched() {
+        let mut mapper = TaskMapper::new("task-1").with_capture_conversation(true);
+        mapper.map(&SessionEvent::Delegation(InvokeAgentProgress::Heartbeat));
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("the terminal frame is a status");
+        };
+        let metadata = metadata.unwrap_or_default();
+        assert!(metadata.usage.is_none());
+        assert!(metadata.trace.is_none());
+        assert_eq!(
+            metadata.conversation.map(|c| c.to_value().unwrap()),
+            Some(serde_json::json!([]))
         );
     }
 

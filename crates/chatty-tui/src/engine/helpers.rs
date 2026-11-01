@@ -114,6 +114,8 @@ pub(crate) fn delegation_line(
         InvokeAgentProgress::Conversation(_) => String::new(),
         // Names the call the lines after it belong to; not a line itself.
         InvokeAgentProgress::Call(_) => String::new(),
+        // Liveness for the stall watchdog only (AGE-932).
+        InvokeAgentProgress::Heartbeat => String::new(),
     }
 }
 

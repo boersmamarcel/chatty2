@@ -25,7 +25,7 @@ const LEAD: &str = "kit-lead";
 const LEAD_MODEL: &str = "kit/lead";
 const ANALYST: &str = "kit-analyst";
 const ANALYST_MODEL: &str = "kit/analyst";
-const ROOT_MODEL: &str = "kit/root";
+pub(crate) const ROOT_MODEL: &str = "kit/root";
 
 /// The root conversation, on the kit's SSE endpoint, delegating through the
 /// kit's broker.
@@ -34,7 +34,7 @@ async fn root_session(kit: &SwarmKit) -> AgentSession {
 }
 
 /// [`root_session`] whose roster is `local_agents`.
-async fn root_session_with(kit: &SwarmKit, local_agents: &[&str]) -> AgentSession {
+pub(crate) async fn root_session_with(kit: &SwarmKit, local_agents: &[&str]) -> AgentSession {
     let _ = chatty_core::init_repositories();
     let settings = ExecutionSettingsModel {
         workspace_dir: Some(kit.workspace().to_string_lossy().into_owned()),

@@ -82,8 +82,18 @@ pub enum WireProgress {
     Admitted(String),
     /// A line about the callee's work.
     Step(String),
-    /// The callee's answer, as it streams.
+    /// The callee's answer, as it streams. Empty, it is a heartbeat
+    /// ([`WireProgress::heartbeat`], AGE-932): the callee's model is still
+    /// producing output nothing renders. An older caller appends nothing.
     Text(String),
+}
+
+impl WireProgress {
+    /// Liveness only (AGE-932): an empty [`Text`](Self::Text), so a caller
+    /// that predates it appends nothing and the schema is unchanged.
+    pub fn heartbeat() -> Self {
+        Self::Text(String::new())
+    }
 }
 
 /// Everything a task's terminal status carries beside its state: the

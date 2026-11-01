@@ -45,7 +45,8 @@ use parking_lot::Mutex;
 /// One step of a scripted route.
 ///
 /// `Text`, `ToolCalls`, `Error` and `ErrorBody` answer a request; `Usage`,
-/// `Delay` and `Say` shape the answer that follows them in the same queue.
+/// `Delay`, `Say` and `Reason` shape the answer that follows them in the
+/// same queue.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     /// End the provider turn with this assistant text.
@@ -68,6 +69,13 @@ pub enum Reply {
     /// Stream this text ahead of the next answer: the assistant says it in
     /// the same call that makes the tool calls that follow.
     Say(String),
+    /// Stream `deltas` reasoning deltas, one every `every_ms` milliseconds,
+    /// ahead of the next answer, which must be `Text` or `ToolCalls`: a
+    /// thinking model busy in one long call (AGE-932). The response goes
+    /// out without a `Content-Length`, as the deltas are written, and ends
+    /// when the connection closes. SSE carries each as `delta.reasoning`,
+    /// NDJSON as a `done: false` line's `message.thinking`.
+    Reason { deltas: u32, every_ms: u64 },
 }
 
 impl Reply {
@@ -78,6 +86,11 @@ impl Reply {
     /// One tool call.
     pub fn tool_call(name: impl Into<String>, arguments: serde_json::Value) -> Self {
         Self::ToolCalls(vec![(name.into(), arguments)])
+    }
+
+    /// [`Reason`](Self::Reason): `deltas` reasoning deltas, `every_ms` apart.
+    pub fn reason(deltas: u32, every_ms: u64) -> Self {
+        Self::Reason { deltas, every_ms }
     }
 }
 
@@ -281,7 +294,7 @@ fn serve(mut connection: TcpStream, state: &State) {
         log.requests.len() - 1
     };
 
-    let response = respond(&request, state, index);
+    let response = respond(&request, state, index, &mut connection);
     let _ = connection.write_all(&response);
     let _ = connection.flush();
 
@@ -290,8 +303,10 @@ fn serve(mut connection: TcpStream, state: &State) {
     log.requests[index].finished = Some(Instant::now());
 }
 
-/// The whole HTTP response for `request`, the `index`th one received.
-fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
+/// The HTTP response for `request`, the `index`th one received: the whole
+/// of it, or — once a [`Reply::Reason`] has streamed the head and its
+/// deltas to `out` — the rest of its body.
+fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write) -> Vec<u8> {
     let (content_type, replies, key) = {
         let mut mode = state.mode.lock();
         match &mut *mode {
@@ -365,10 +380,50 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
 
     let mut usage = DEFAULT_USAGE;
     let mut said = String::new();
+    // Whether a `Reason` already wrote the head: what follows is body only.
+    let mut streaming = false;
+    // The head and body of an answer, or only the body once streaming.
+    let answer = |streaming: bool, body: &str| {
+        if streaming {
+            body.as_bytes().to_vec()
+        } else {
+            http(200, content_type, body)
+        }
+    };
     for reply in replies {
         match reply {
             Reply::Delay(ms) => std::thread::sleep(Duration::from_millis(ms)),
             Reply::Say(text) => said = text,
+            Reply::Reason { deltas, every_ms } => {
+                if !streaming {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\n\
+                         Connection: close\r\n\r\n"
+                    );
+                    if out.write_all(head.as_bytes()).is_err() {
+                        return Vec::new();
+                    }
+                    streaming = true;
+                }
+                for _ in 0..deltas {
+                    let delta = if content_type == "text/event-stream" {
+                        sse_reasoning("thinking ")
+                    } else {
+                        ndjson_thinking("thinking ")
+                    };
+                    if out
+                        .write_all(delta.as_bytes())
+                        .and_then(|()| out.flush())
+                        .is_err()
+                    {
+                        // The client hung up (its stall watchdog, a cancel).
+                        return Vec::new();
+                    }
+                    std::thread::sleep(Duration::from_millis(every_ms));
+                }
+            }
+            // A status cannot follow a streamed head: the body just ends.
+            Reply::ErrorBody(..) | Reply::Error(_) if streaming => return Vec::new(),
             Reply::ErrorBody(status, body) => {
                 return http(status, "application/json", &body.to_string());
             }
@@ -395,7 +450,7 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
                         usage,
                     )
                 };
-                return http(200, content_type, &body);
+                return answer(streaming, &body);
             }
             Reply::ToolCalls(calls) => {
                 let first = {
@@ -418,9 +473,13 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
                         usage,
                     )
                 };
-                return http(200, content_type, &body);
+                return answer(streaming, &body);
             }
         }
+    }
+    if streaming {
+        // A `Reason` with no answer after it: the body just ends.
+        return Vec::new();
     }
     http(
         500,
@@ -476,6 +535,28 @@ fn sse_usage((input, output, cache_read): (u64, u64, u64)) -> serde_json::Value 
         "total_tokens": input + cache_read + output,
         "prompt_tokens_details": { "cached_tokens": cache_read }
     })
+}
+
+/// One SSE reasoning delta, as OpenRouter streams a thinking model's.
+fn sse_reasoning(text: &str) -> String {
+    let frame = serde_json::json!({
+        "id": "gen-fake", "model": "fake",
+        "choices": [{ "index": 0, "delta": { "role": "assistant", "content": "", "reasoning": text },
+            "finish_reason": null }]
+    });
+    format!("data: {frame}\n\n")
+}
+
+/// One NDJSON line of thinking, as Ollama streams a thinking model's.
+fn ndjson_thinking(text: &str) -> String {
+    serde_json::json!({
+        "model": "fake",
+        "created_at": "2026-01-01T00:00:00Z",
+        "message": { "role": "assistant", "content": "", "thinking": text },
+        "done": false
+    })
+    .to_string()
+        + "\n"
 }
 
 fn sse_text(text: &str, usage: (u64, u64, u64)) -> String {
@@ -723,6 +804,48 @@ mod tests {
         assert_eq!(record["prompt_eval_count"], DEFAULT_USAGE.0);
 
         assert_eq!(post(&daemon, "/v1/chat/completions", chat("m", "")).0, 429);
+    }
+
+    /// AGE-932: `Reason` streams its deltas over time, ahead of the answer,
+    /// as SSE `delta.reasoning` frames and NDJSON `thinking` lines.
+    #[test]
+    fn reason_streams_deltas_over_time_before_the_answer() {
+        let daemon = FakeDaemon::scripted(Script::new().route(
+            "m",
+            [
+                Reply::reason(3, 30),
+                Reply::text("done"),
+                Reply::reason(2, 0),
+                Reply::tool_call("read_file", serde_json::json!({ "path": "a" })),
+            ],
+        ));
+
+        let started = Instant::now();
+        let (status, sse) = post(&daemon, "/v1/chat/completions", chat("m", ""));
+        assert_eq!(status, 200);
+        assert!(started.elapsed() >= Duration::from_millis(90), "{sse}");
+        assert_eq!(
+            sse.matches(r#""reasoning":"thinking ""#).count(),
+            3,
+            "{sse}"
+        );
+        let answer = sse.find(r#""content":"done""#).expect("the answer follows");
+        assert!(sse.rfind(r#""reasoning""#).unwrap() < answer, "{sse}");
+        assert!(sse.ends_with("data: [DONE]\n\n"));
+
+        let (_, ndjson) = post(&daemon, "/api/chat", chat("m", ""));
+        let lines: Vec<serde_json::Value> = ndjson
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3, "{ndjson}");
+        assert_eq!(lines[0]["message"]["thinking"], "thinking ");
+        assert_eq!(lines[0]["done"], false);
+        assert_eq!(
+            lines[2]["message"]["tool_calls"][0]["function"]["name"],
+            "read_file"
+        );
+        assert_eq!(lines[2]["done"], true);
     }
 
     #[test]
