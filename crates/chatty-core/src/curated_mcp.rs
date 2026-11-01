@@ -181,6 +181,33 @@ const CURATED_CATALOG: &[CuratedMcpEntry] = &[
              OAuth 2.0; ensure the Drive API scope is granted.",
         default_enabled: false,
     },
+    CuratedMcpEntry {
+        id: "mcp-github",
+        slug: "github",
+        display_name: "GitHub",
+        url: "https://api.githubcopilot.com/mcp/",
+        transport: CuratedMcpTransport::StreamableHttp,
+        description: "Browse repositories, issues, and pull requests through GitHub's official \
+             hosted MCP server.",
+        docs_url: "https://github.com/github/github-mcp-server",
+        auth_notes: "Provide a GitHub personal access token as the API key; it is sent as a \
+             bearer token. Scope the token to the repositories and permissions you want the \
+             agent to use.",
+        default_enabled: false,
+    },
+    CuratedMcpEntry {
+        id: "mcp-linear",
+        slug: "linear",
+        display_name: "Linear",
+        url: "https://mcp.linear.app/mcp",
+        transport: CuratedMcpTransport::StreamableHttp,
+        description: "Search, create, and update Linear issues, projects, and comments through \
+             Linear's official hosted MCP server.",
+        docs_url: "https://linear.app/docs/mcp",
+        auth_notes: "OAuth — sign in with your Linear workspace when prompted by the MCP server. \
+             Alternatively provide a Linear API key as the API key (sent as a bearer token).",
+        default_enabled: false,
+    },
 ];
 
 /// Ensure every entry in [`curated_catalog`] is present in the extensions
@@ -239,6 +266,8 @@ mod tests {
         assert!(ids.contains(&"mcp-google-calendar"));
         assert!(ids.contains(&"mcp-gmail"));
         assert!(ids.contains(&"mcp-google-drive"));
+        assert!(ids.contains(&"mcp-github"));
+        assert!(ids.contains(&"mcp-linear"));
     }
 
     #[test]

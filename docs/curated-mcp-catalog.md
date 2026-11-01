@@ -18,6 +18,8 @@ and seeded into the Extensions store at launch.
 | Google Calendar | `https://calendarmcp.googleapis.com/mcp/v1` | Streamable HTTP | <https://developers.google.com/calendar> |
 | Gmail | `https://gmailmcp.googleapis.com/mcp/v1` | Streamable HTTP | <https://developers.google.com/gmail> |
 | Google Drive | `https://drivemcp.googleapis.com/mcp/v1` | Streamable HTTP | <https://developers.google.com/drive> |
+| GitHub | `https://api.githubcopilot.com/mcp/` | Streamable HTTP | <https://github.com/github/github-mcp-server> |
+| Linear | `https://mcp.linear.app/mcp` | Streamable HTTP | <https://linear.app/docs/mcp> |
 
 Every entry has `default_enabled: false` — users opt in explicitly from
 **Settings → Extensions → Installed**.
@@ -41,6 +43,8 @@ Every entry has `default_enabled: false` — users opt in explicitly from
 | Hugging Face | Optional. Paste a Hugging Face access token into the API key field for private repos / higher rate limits. |
 | Notion | OAuth — sign in with your Notion workspace when prompted by the MCP server. |
 | Atlassian | OAuth — Atlassian Cloud sign-in is performed in the browser on first connect. |
+| GitHub | Personal access token pasted into the API key field (sent as a bearer token). |
+| Linear | OAuth — sign in with your Linear workspace; or paste a Linear API key into the API key field. |
 | Google Calendar / Gmail / Drive | OAuth — sign in with your Google account when prompted; grant the matching API scope. |
 
 ## Transport caveat
@@ -65,7 +69,6 @@ bridged process, not in Chatty.
 
 | Server | Command | Env |
 |:-------|:--------|:----|
-| GitHub | `npx -y @modelcontextprotocol/server-github` | `GITHUB_TOKEN` |
 | Filesystem | `npx -y @modelcontextprotocol/server-filesystem /path/to/dir` | — |
 | PostgreSQL | `npx -y @modelcontextprotocol/server-postgres` | `POSTGRES_CONNECTION_STRING` |
 | Brave Search | `npx -y @modelcontextprotocol/server-brave-search` | `BRAVE_API_KEY` |
