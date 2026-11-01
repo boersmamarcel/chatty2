@@ -126,7 +126,7 @@ Memory, skills and planning never ask. Sub-agents run their own tool calls witho
 
 ## Extensions
 
-MCP servers, agents and modules from the Hive marketplace, the built-in catalog (Hugging Face, Notion, Atlassian, Google) and your own servers plug in under **Settings → Extensions**: [Extensions](./extensions.md).
+MCP servers, agents and modules from the Hive marketplace, the built-in catalog (Hugging Face, Notion, Atlassian, Google, GitHub, Linear) and your own servers plug in under **Settings → Extensions**: [Extensions](./extensions.md).
 
 ## Next
 
