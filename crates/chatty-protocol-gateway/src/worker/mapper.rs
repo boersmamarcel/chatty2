@@ -127,6 +127,7 @@ use chatty_core::models::execution_approval_store::{
 use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
 use chatty_core::services::a2a_client::wire_usage;
+use chatty_core::services::budget_stop;
 use chatty_core::services::handoff::{self, HandoffContract, HandoffOutcome};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
@@ -379,6 +380,10 @@ pub struct TaskMapper {
     /// The typed failure of a worker under this one that never started
     /// (AGE-822): when set, the terminal status fails with it.
     start_failure: Option<String>,
+    /// The typed `budget_exhausted` failure of this task's own refused
+    /// model call, or of a delegation under it (AGE-903): when set, the
+    /// terminal status fails with it, so this task's caller stops too.
+    budget_failure: Option<String>,
     /// What this task spent, its own turns and everything its delegations
     /// reported (AGE-415), one line per model (AGE-682).
     usage: Vec<TokenUsage>,
@@ -426,6 +431,7 @@ impl TaskMapper {
             state: TaskState::Completed,
             failure: None,
             start_failure: None,
+            budget_failure: None,
             usage: Vec::new(),
             trace: Vec::new(),
             open_calls: HashMap::new(),
@@ -579,6 +585,15 @@ impl TaskMapper {
             }
             SessionEvent::ToolCallError { id, error } => {
                 if let Some(index) = self.open_calls.remove(id) {
+                    // A delegation that stopped on a spent budget: this
+                    // task fails with it, whatever the run then says
+                    // (AGE-903).
+                    if self.budget_failure.is_none()
+                        && self.trace[index].name == "invoke_agent"
+                        && let Some(headline) = budget_stop::find_budget_exhausted(error)
+                    {
+                        self.budget_failure = Some(budget_stop::budget_exhausted(&headline));
+                    }
                     self.trace[index].outcome = StepOutcome::Failed(error.clone());
                 }
                 // A worker under this one never started: this task fails
@@ -687,6 +702,14 @@ impl TaskMapper {
             SessionEvent::Error(error) => {
                 self.state = TaskState::Failed;
                 self.failure = Some(error.message.clone());
+                // The model endpoint refused on a spent budget (AGE-903):
+                // its typed text is the task's failure, whatever the run
+                // reports after it (the runner's own wrapped error).
+                if error.kind == chatty_core::services::StreamErrorKind::BudgetExhausted
+                    && self.budget_failure.is_none()
+                {
+                    self.budget_failure = Some(error.message.clone());
+                }
                 // Still reported as progress: a failed turn is something
                 // the parent's transcript should show, not just something
                 // the terminal status records.
@@ -713,7 +736,7 @@ impl TaskMapper {
                     errors.join("; ")
                 )),
             ),
-            _ => match &self.start_failure {
+            _ => match self.start_failure.as_ref().or(self.budget_failure.as_ref()) {
                 Some(failure) => (TaskState::Failed, Some(failure.clone())),
                 None => (self.state, self.failure.clone()),
             },

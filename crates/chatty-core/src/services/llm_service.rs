@@ -16,6 +16,7 @@ use crate::factories::agent_factory::RequestRecorder;
 use crate::models::clarification_store::{ClarificationNotification, ClarifyingQuestion};
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
+use crate::services::budget_stop::{BUDGET_STOP, StopOnBudgetExhausted, endpoint_refusal};
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
 use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
 use crate::services::worker_start::{StopOnWorkerStartFailure, WORKER_START_STOP};
@@ -363,6 +364,9 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
 /// (AGE-244 / D5), using the HTTP status the provider returned when there is
 /// one.
 fn classify_completion_error(err: &CompletionError) -> StreamErrorKind {
+    if budget_refusal(err).is_some() {
+        return StreamErrorKind::BudgetExhausted;
+    }
     if let Some(status) = err.provider_response_status() {
         return match status.as_u16() {
             401 | 403 => StreamErrorKind::Auth,
@@ -375,6 +379,26 @@ fn classify_completion_error(err: &CompletionError) -> StreamErrorKind {
         // the provider's response, not an HTTP status.
         CompletionError::JsonError(_) => StreamErrorKind::MalformedToolCall,
         _ => StreamErrorKind::Transport,
+    }
+}
+
+/// The typed `budget_exhausted` text for a provider's `402` refusal on a
+/// spent budget (AGE-903), read from its status and body.
+fn budget_refusal(err: &CompletionError) -> Option<String> {
+    endpoint_refusal(
+        err.provider_response_status()?.as_u16(),
+        err.provider_response_body()?,
+    )
+}
+
+/// The provider's completion error inside rig's `StreamingError`, if any.
+fn completion_error(err: &StreamingError) -> Option<&CompletionError> {
+    match err {
+        StreamingError::Completion(e) => Some(e),
+        StreamingError::Prompt(e) => match e.as_ref() {
+            PromptError::CompletionError(e) => Some(e),
+            _ => None,
+        },
     }
 }
 
@@ -427,6 +451,9 @@ const TRUNCATED_STREAM_MARKER: &str = "provider stream ended without a terminal 
 /// The error text shown to the user: rig's own, except for a stream cut
 /// short, whose wording names rig internals rather than what happened.
 fn describe_streaming_error(err: &StreamingError) -> String {
+    if let Some(refusal) = completion_error(err).and_then(budget_refusal) {
+        return refusal;
+    }
     let raw = err.to_string();
     if raw.contains(TRUNCATED_STREAM_MARKER) {
         format!(
@@ -510,6 +537,35 @@ fn worker_start_end(
     }
     let separator = if text_in_last_call { "\n\n" } else { "" };
     chunks.push(StreamChunk::Text(format!("{separator}{card}")));
+    chunks.push(StreamChunk::Done);
+    Some(chunks)
+}
+
+/// The end of a run whose `invoke_agent` call came back with a spent budget
+/// (see [`crate::services::budget_stop`]): as [`worker_start_end`], with the
+/// final message the hook wrote — no model call — as the run's text.
+fn budget_stop_end(
+    err: &StreamingError,
+    history_len: usize,
+    text_in_last_call: bool,
+) -> Option<Vec<StreamChunk>> {
+    let StreamingError::Prompt(e) = err else {
+        return None;
+    };
+    let PromptError::PromptCancelled {
+        chat_history,
+        reason,
+    } = e.as_ref()
+    else {
+        return None;
+    };
+    let message = reason.strip_prefix(BUDGET_STOP)?;
+    let mut chunks = Vec::new();
+    if let Some(messages) = chat_history.get(history_len..).filter(|m| !m.is_empty()) {
+        chunks.push(StreamChunk::TurnMessages(messages.to_vec()));
+    }
+    let separator = if text_in_last_call { "\n\n" } else { "" };
+    chunks.push(StreamChunk::Text(format!("{separator}{message}")));
     chunks.push(StreamChunk::Done);
     Some(chunks)
 }
@@ -657,13 +713,20 @@ pub async fn stream_prompt(
 
     // The turn budget sets rig's call cap (the tool turns plus one tool-free
     // wrap-up call) and tells the model how many tool turns it has left.
-    // A delegation whose worker never started ends the run (AGE-822).
+    // A delegation whose worker never started ends the run (AGE-822), and
+    // so does one that came back with a spent budget (AGE-903).
     // A leader that asks for several delegations in one response gets them
     // run side by side; every other agent keeps its tools in call order.
+    // A budget stop belongs to the run it happened in: a new run may
+    // delegate again, and is refused again if the budget is still spent.
+    if let Some(delegator) = agent.delegator() {
+        delegator.clear_budget_stop();
+    }
     let mut agent_stream = turn_budget
         .apply(agent.agent.stream_prompt(user_message).history(history))
         .tool_concurrency(tool_concurrency(agent))
         .add_hook(StopOnWorkerStartFailure)
+        .add_hook(StopOnBudgetExhausted)
         .await;
 
     // A caller that does not wire a channel is treated the same as one whose
@@ -700,6 +763,7 @@ pub async fn stream_prompt(
                             if let Err(e) = &result
                                 && let Some(chunks) = budget_spent_end(e, history_len, text_in_last_call)
                                     .or_else(|| worker_start_end(e, history_len, text_in_last_call))
+                                    .or_else(|| budget_stop_end(e, history_len, text_in_last_call))
                             {
                                 for chunk in chunks {
                                     yield Ok(chunk);

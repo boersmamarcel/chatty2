@@ -44,8 +44,8 @@ use parking_lot::Mutex;
 
 /// One step of a scripted route.
 ///
-/// `Text`, `ToolCalls` and `Error` answer a request; `Usage` and `Delay`
-/// shape the answer that follows them in the same queue.
+/// `Text`, `ToolCalls`, `Error` and `ErrorBody` answer a request; `Usage`,
+/// `Delay` and `Say` shape the answer that follows them in the same queue.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     /// End the provider turn with this assistant text.
@@ -62,6 +62,12 @@ pub enum Reply {
     Delay(u64),
     /// Answer with this HTTP status and an error body.
     Error(u16),
+    /// Answer with this HTTP status and this JSON body, e.g. the egress's
+    /// `402 {"error": "cap_exceeded", …}` (AGE-903).
+    ErrorBody(u16, serde_json::Value),
+    /// Stream this text ahead of the next answer: the assistant says it in
+    /// the same call that makes the tool calls that follow.
+    Say(String),
 }
 
 impl Reply {
@@ -335,7 +341,10 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
                 while let Some(reply) = queue.pop_front() {
                     let answers = matches!(
                         reply,
-                        Reply::Text(_) | Reply::ToolCalls(_) | Reply::Error(_)
+                        Reply::Text(_)
+                            | Reply::ToolCalls(_)
+                            | Reply::Error(_)
+                            | Reply::ErrorBody(..)
                     );
                     taken.push(reply);
                     if answers {
@@ -355,9 +364,14 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
     state.log.lock().requests[index].key = Some(key.clone());
 
     let mut usage = DEFAULT_USAGE;
+    let mut said = String::new();
     for reply in replies {
         match reply {
             Reply::Delay(ms) => std::thread::sleep(Duration::from_millis(ms)),
+            Reply::Say(text) => said = text,
+            Reply::ErrorBody(status, body) => {
+                return http(status, "application/json", &body.to_string());
+            }
             Reply::Usage {
                 input,
                 output,
@@ -372,6 +386,7 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
                 );
             }
             Reply::Text(text) => {
+                let text = format!("{said}{text}");
                 let body = if content_type == "text/event-stream" {
                     sse_text(&text, usage)
                 } else {
@@ -390,7 +405,7 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
                     first
                 };
                 let body = if content_type == "text/event-stream" {
-                    sse_tool_calls(&calls, first, usage)
+                    sse_tool_calls(&said, &calls, first, usage)
                 } else {
                     let calls: Vec<_> = calls
                         .iter()
@@ -399,7 +414,7 @@ fn respond(request: &Request, state: &State, index: usize) -> Vec<u8> {
                         })
                         .collect();
                     ndjson(
-                        serde_json::json!({ "role": "assistant", "content": "", "tool_calls": calls }),
+                        serde_json::json!({ "role": "assistant", "content": said, "tool_calls": calls }),
                         usage,
                     )
                 };
@@ -479,6 +494,7 @@ fn sse_text(text: &str, usage: (u64, u64, u64)) -> String {
 }
 
 fn sse_tool_calls(
+    said: &str,
     calls: &[(String, serde_json::Value)],
     first_id: usize,
     usage: (u64, u64, u64),
@@ -497,7 +513,7 @@ fn sse_tool_calls(
         serde_json::json!({
             "id": "gen-fake", "model": "fake",
             "choices": [{ "index": 0, "delta": {
-                "role": "assistant", "content": "", "tool_calls": tool_calls
+                "role": "assistant", "content": said, "tool_calls": tool_calls
             }, "finish_reason": null }]
         }),
         serde_json::json!({

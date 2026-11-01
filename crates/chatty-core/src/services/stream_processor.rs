@@ -42,6 +42,11 @@ pub enum StreamErrorKind {
     /// The model called a tool name that isn't registered or isn't allowed
     /// this turn — usually a one-token alias mistake (AGE-497).
     UnknownToolCall,
+    /// The model endpoint refused the call because the budget is spent
+    /// (`402` naming `budget_exceeded` or `cap_exceeded`, AGE-903). Never
+    /// retried or nudged on any surface: another call is only refused
+    /// again, or spends past the budget.
+    BudgetExhausted,
     /// Anything else (max turns, memory error, ...).
     Other,
 }
@@ -170,9 +175,11 @@ pub fn decide_recovery(
         // EmptyCompletion: the nudge already happened inside the turn
         // (AGE-401); a second empty answer is the error. Other: surface as
         // today.
-        StreamErrorKind::Cancelled | StreamErrorKind::EmptyCompletion | StreamErrorKind::Other => {
-            RecoveryAction::Stop
-        }
+        // BudgetExhausted: the whole tree stops (AGE-903).
+        StreamErrorKind::Cancelled
+        | StreamErrorKind::EmptyCompletion
+        | StreamErrorKind::BudgetExhausted
+        | StreamErrorKind::Other => RecoveryAction::Stop,
     }
 }
 
@@ -1047,7 +1054,7 @@ mod tests {
     // Recovery policy (AGE-244 / D5): every kind x surface combination.
     // -------------------------------------------------------------------
 
-    const ALL_KINDS: [StreamErrorKind; 10] = [
+    const ALL_KINDS: [StreamErrorKind; 11] = [
         StreamErrorKind::Auth,
         StreamErrorKind::RateLimited,
         StreamErrorKind::ProviderStatus(503),
@@ -1057,6 +1064,7 @@ mod tests {
         StreamErrorKind::Cancelled,
         StreamErrorKind::UnknownToolCall,
         StreamErrorKind::EmptyCompletion,
+        StreamErrorKind::BudgetExhausted,
         StreamErrorKind::Other,
     ];
     const ALL_SURFACES: [StreamSurface; 3] = [

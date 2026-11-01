@@ -275,6 +275,12 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
         let detail = response.text().await.unwrap_or_default();
         // The server's status stands in for the provider's here: the client
         // cannot see past it, and 401/429 mean the same thing either way.
+        // A spent budget is terminal (AGE-903): `402 cap_exceeded`.
+        if let Some(refusal) =
+            crate::services::budget_stop::endpoint_refusal(status.as_u16(), &detail)
+        {
+            return Err(StreamError::new(StreamErrorKind::BudgetExhausted, refusal));
+        }
         let kind = match status.as_u16() {
             401 | 403 => StreamErrorKind::Auth,
             429 => StreamErrorKind::RateLimited,

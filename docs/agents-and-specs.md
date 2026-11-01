@@ -636,6 +636,24 @@ before it spawns anything (`agent_command::preflight`): no workspace, or code ex
 off, is a card instead of a delegation, and a turn that goes ahead shows its workspace
 under the command.
 
+A spent budget ends the whole tree the same way (AGE-903). A model call the endpoint
+refuses with `402` and a JSON body naming `budget_exceeded` or `cap_exceeded` (as
+`error`, `code` or `error.code`; hive's egress sends `{"error": "cap_exceeded",
+"month_to_date": …, "cap_usd": …}`) is `StreamErrorKind::BudgetExhausted`, which no
+surface retries or nudges; its message is the typed `budget_exhausted: Budget of $X
+spent; …` (`services::budget_stop`). A worker's task fails with it, carrying its
+streamed text, usage and captured conversation. `invoke_agent` turns it into the
+terminal `InvokeAgentError::BudgetExhausted` with the callee's partial output, refuses
+every later delegation of the run, and hangs up on the siblings still running, so the
+broker reaps their subtrees (TB-7); its own spend gate refusing a delegation
+(`cap_exceeded`, or `budget_spent: usd` from the run's `LocalSpendGate`, DP-3) is the
+same stop. The `StopOnBudgetExhausted` hook ends the
+caller's run at its next model call, without making it, with a templated final message —
+the budget line and what each delegation finished — and a sub-leader's `TaskMapper`
+fails its own task with the same typed text, so every caller up the tree stops. No
+follow-up prompt (a todo reminder, headless's finalization or announced-step nudges)
+goes out after a budget stop.
+
 **Per-endpoint concurrency budget (ADR-0011 C6).** Workers all talk to the same model
 server, so the broker holds a semaphore per *endpoint* — the server's base URL, not a
 model and not a worker — and a task waits for a slot before a child is spawned. On a

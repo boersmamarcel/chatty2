@@ -25,11 +25,14 @@
 
 use anyhow::Result;
 use chatty_core::services::agent_loop_guard::{PROGRESS_WINDOW_TOOL_CALLS, ProgressCheck};
+use chatty_core::services::budget_stop::find_budget_exhausted;
 use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
     is_agent_todo_tool,
 };
+use chatty_core::tools::invoke_agent_tool::InvokeAgentTool;
 use chatty_fabric::deadline_grace;
+use rig_agent::tool::Tool;
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -264,6 +267,10 @@ pub async fn run_headless(
     let mut announced_step_nudges = 0usize;
     // A worker's handoff is sent back once when it fails its schema (TD-2).
     let mut handoff_sent_back = false;
+    // A delegation came back with a spent budget (AGE-903): the turn ends
+    // on its own with the final message, and nothing follows it — no
+    // finalization pass, nudge or follow-up is sent, each being a paid call.
+    let mut budget_stopped = false;
 
     loop {
         let event = match backstop {
@@ -492,9 +499,10 @@ pub async fn run_headless(
                     engine.stop_stream();
                 }
             }
-            AppEvent::ToolCallError { ref id, .. } => {
+            AppEvent::ToolCallError { ref id, ref error } => {
                 last_call_text.clear();
                 let id_str = id.clone();
+                let budget_stop = find_budget_exhausted(error);
                 engine.handle_event(event);
                 let mut refused = false;
                 let mut progress = ProgressCheck::Fine;
@@ -502,6 +510,12 @@ pub async fn run_headless(
                     eprintln!();
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
+                    }
+                    if budget_stop.is_some() && tc.name == InvokeAgentTool::NAME {
+                        // The run's own hook ends the turn with its final
+                        // message; nothing here may stop it for another pass.
+                        budget_stopped = true;
+                        continue;
                     }
                     refused = tool_result_is_policy_refusal(tc);
                     progress = loop_guard.on_tool_progress(&tc.name, &tc.input);
@@ -558,6 +572,10 @@ pub async fn run_headless(
             }
             AppEvent::StreamCompleted => {
                 engine.handle_event(AppEvent::StreamCompleted);
+                if budget_stopped {
+                    eprintln!("The budget is spent; ending the run with what was finished.");
+                    break;
+                }
                 let final_call_text = std::mem::take(&mut last_call_text);
                 // Update loop guard: resets per-turn counters and checks for late-game deadline.
                 let turns_used = engine.transcript.assistant_turns();
@@ -796,6 +814,14 @@ pub async fn run_headless(
                 last_call_text.clear();
                 engine.handle_event(AppEvent::StreamError(error.clone()));
                 eprintln!("Error: {}", error);
+
+                // The model endpoint refused on a spent budget (AGE-903):
+                // the run ends here, with no retry, last pass or
+                // finalization prompt.
+                if error.kind == StreamErrorKind::BudgetExhausted {
+                    unrecovered_error = Some(error);
+                    break;
+                }
 
                 // Out of time: the run's last pass (or its end) follows once
                 // the turn has ended, not a retry.
