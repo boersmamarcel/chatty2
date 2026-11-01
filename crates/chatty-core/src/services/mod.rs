@@ -27,6 +27,9 @@ pub mod agent_loop_guard;
 pub mod agent_task_controller;
 #[cfg(feature = "browser")]
 pub mod browser;
+/// A spent budget ends the whole tree: the refusal is terminal, the caller
+/// stops and says what was finished (AGE-903).
+pub mod budget_stop;
 pub mod captured_chat;
 pub mod chart_svg_renderer;
 /// The summary a context compaction replaces older messages with.

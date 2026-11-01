@@ -28,6 +28,8 @@ mod broker_delegation;
 #[cfg(test)]
 mod budget_propagation;
 #[cfg(test)]
+mod budget_stop;
+#[cfg(test)]
 mod call_chain;
 #[cfg(test)]
 mod delegation;

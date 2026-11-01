@@ -28,6 +28,8 @@ matching route wins.
 | `Usage { input, output, cache_read }` | The usage the next answer reports (default 10/5/0) |
 | `Delay(ms)` | Sleep, then serve the next reply |
 | `Error(status)` | Answer with that HTTP status |
+| `ErrorBody(status, json)` | Answer with that HTTP status and JSON body (e.g. a `402` budget refusal) |
+| `Say(s)` | Stream `s` as text ahead of the next answer (before its tool calls) |
 
 Replies are OpenAI-compatible SSE on `…/chat/completions` and Ollama NDJSON on
 `/api/chat`. A request no route matches, or whose queue ran dry, gets HTTP 500
@@ -39,7 +41,8 @@ One server is one endpoint.
 
 Mind the headless recovery policy when scripting errors: a worker retries any
 provider status other than 401/403/429 after 10 s, 20 s, …, and a 401 once
-immediately. Two `Error(401)`s end a worker's turn fast.
+immediately. Two `Error(401)`s end a worker's turn fast. A `402` whose body
+names `budget_exceeded` or `cap_exceeded` is never retried (AGE-903).
 
 ## Writing a swarm test
 

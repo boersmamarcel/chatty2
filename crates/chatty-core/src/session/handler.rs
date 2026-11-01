@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
+use rig_agent::tool::Tool;
 use rig_core::completion::Message;
 use rig_core::message::{
     AssistantContent, Text, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
@@ -22,12 +23,13 @@ use rig_core::message::{
 };
 
 use crate::models::token_usage::{ApiCallUsage, TokenUsage};
+use crate::services::budget_stop::find_budget_exhausted;
 use crate::services::llm_service::StreamChunk;
 use crate::services::{
     AgentLoopGuard, AgentTaskController, ChunkAction, RecoveryAction, StreamChunkHandler,
     StreamError, StreamErrorKind, StreamSurface, decide_recovery,
 };
-use crate::tools::invoke_agent_tool::InvokeAgentProgress;
+use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentTool};
 
 use super::SessionEvent;
 
@@ -162,6 +164,10 @@ pub struct SessionStreamHandler<F: FnMut(SessionEvent)> {
     /// The turn's round-trips as they streamed by, for a turn cancelled
     /// before rig's record arrives (AGE-864).
     seen: SeenRoundTrips,
+    /// The turn stopped on a spent budget (AGE-903): its own model call was
+    /// refused, or a delegation came back budget-stopped. No follow-up
+    /// prompt goes out after it — each would be another paid call.
+    budget_stopped: bool,
 }
 
 /// The tool round-trips of a turn, rebuilt from its stream events.
@@ -283,6 +289,7 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             last_call_empty: true,
             turn_messages_seen: false,
             seen: SeenRoundTrips::default(),
+            budget_stopped: false,
         }
     }
 
@@ -372,11 +379,27 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
         usage
     }
 
+    /// The turn's calls so far as one `TokenUsage`, for a turn that ends
+    /// without the provider's aggregate (cancelled, or stopped on a spent
+    /// budget). Nothing when it made none.
+    fn emit_calls_usage(&mut self) {
+        let calls: Vec<ApiCallUsage> = std::mem::take(&mut self.compaction_calls)
+            .into_iter()
+            .chain(std::mem::take(&mut self.calls))
+            .collect();
+        if !calls.is_empty() {
+            (self.emit)(SessionEvent::TokenUsage(TokenUsage::from_calls(calls)));
+        }
+    }
+
     /// What to do about a stream-ending error, per the shared policy table
     /// (AGE-244 / D5). The only recovery a turn can carry out itself is the
     /// malformed-tool-call nudge; the rest is logged or left to the frontend.
     fn on_stream_error(&mut self, error: &StreamError) {
         tracing::error!(error = %error.message, kind = ?error.kind, "Stream error");
+        if error.kind == StreamErrorKind::BudgetExhausted {
+            self.budget_stopped = true;
+        }
         match decide_recovery(error.kind, self.surface, 0) {
             RecoveryAction::Retry { .. } if error.kind == StreamErrorKind::Auth => {
                 // The Entra token is attached fresh to every request
@@ -479,6 +502,12 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 self.on_tool_completed(&id);
             }
             StreamChunk::ToolCallError { id, error } => {
+                if self.pending_tool_names.get(&id).map(String::as_str)
+                    == Some(InvokeAgentTool::NAME)
+                    && find_budget_exhausted(&error).is_some()
+                {
+                    self.budget_stopped = true;
+                }
                 self.seen.result(id.clone(), error.clone());
                 (self.emit)(SessionEvent::ToolCallError {
                     id: id.clone(),
@@ -550,6 +579,12 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             }
             StreamChunk::Error(error) => {
                 self.on_stream_error(&error);
+                // A budget stop never gets the provider's aggregate either;
+                // what the turn spent before the refusal still counts, and
+                // rides the worker's result to its leader (AGE-903).
+                if error.kind == StreamErrorKind::BudgetExhausted {
+                    self.emit_calls_usage();
+                }
                 (self.emit)(SessionEvent::Error(error));
                 return Ok(ChunkAction::Break);
             }
@@ -575,13 +610,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
         {
             (self.emit)(SessionEvent::TurnMessages(messages));
         }
-        let calls: Vec<ApiCallUsage> = std::mem::take(&mut self.compaction_calls)
-            .into_iter()
-            .chain(std::mem::take(&mut self.calls))
-            .collect();
-        if !calls.is_empty() {
-            (self.emit)(SessionEvent::TokenUsage(TokenUsage::from_calls(calls)));
-        }
+        self.emit_calls_usage();
         (self.emit)(SessionEvent::Cancelled);
     }
 
@@ -594,6 +623,9 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             }));
         }
         (self.emit)(SessionEvent::TurnEnded);
+        if self.budget_stopped {
+            self.pending_follow_up = None;
+        }
         if let Some(prompt) = self.pending_follow_up.take() {
             (self.emit)(SessionEvent::FollowUp(prompt));
         }

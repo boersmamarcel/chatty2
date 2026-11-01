@@ -19,6 +19,9 @@ use crate::services::a2a_client::{
     A2aClarificationRequest, A2aClient, A2aStreamEvent, captured_from_status_metadata,
     trace_from_status_metadata, usage_from_status_metadata, usage_from_wire,
 };
+use crate::services::budget_stop::{
+    BUDGET_EXHAUSTED, BUDGET_STOP_NOTE, budget_exhausted, find_budget_exhausted, partial_output,
+};
 use crate::services::handoff::{HandoffLedger, HandoffReport};
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::run_budget::RunBudget;
@@ -255,6 +258,26 @@ pub enum InvokeAgentError {
         chatty_fabric::worker_start_failed(&.0.agent, &.0.reason)
     )]
     WorkerStartFailed(WorkerStartFailure),
+    /// The budget is spent (AGE-903): the callee's model endpoint refused a
+    /// call (`402 budget_exceeded`/`cap_exceeded`), something under it
+    /// did, or this run already stopped on one. Terminal: the model sees
+    /// `budget_exhausted: <headline>`, [`BUDGET_STOP_NOTE`] and what the
+    /// callee had streamed before it stopped, and
+    /// [`StopOnBudgetExhausted`](crate::services::budget_stop::StopOnBudgetExhausted)
+    /// ends its run without another model call.
+    #[error(
+        "{}\n\n{BUDGET_STOP_NOTE}{}{}",
+        budget_exhausted(headline),
+        partial_output(agent, partial),
+        delivered_after_error(messages)
+    )]
+    BudgetExhausted {
+        agent: String,
+        headline: String,
+        /// What the callee streamed as its answer before it stopped.
+        partial: String,
+        messages: Vec<String>,
+    },
 }
 
 /// The line a delegation the user stopped finishes with, in its
@@ -333,6 +356,11 @@ pub struct InvokeAgentTool {
     /// invalid count per role and read-rule misreads. Only a `--team`
     /// leader whose team names `handoffs` has one.
     handoff_ledger: Option<HandoffLedger>,
+    /// The headline of the budget stop this run hit, once a delegation
+    /// came back with one (AGE-903): every later call is refused, and the
+    /// calls still running hang up. Shared by the clones of this tool —
+    /// the calls rig runs side by side — and cleared when a run starts.
+    budget_stop: Arc<tokio::sync::watch::Sender<Option<String>>>,
 }
 
 impl InvokeAgentTool {
@@ -351,6 +379,39 @@ impl InvokeAgentTool {
             lazy_broker: None,
             transport: None,
             handoff_ledger: None,
+            budget_stop: Arc::new(tokio::sync::watch::Sender::new(None)),
+        }
+    }
+
+    /// Forget a budget stop: a new run starts (AGE-903).
+    pub fn clear_budget_stop(&self) {
+        self.budget_stop.send_replace(None);
+    }
+
+    /// Stop this run's delegations on a spent budget: the ones still
+    /// running hang up, later ones are refused (AGE-903). The first
+    /// headline stands.
+    fn stop_on_budget(&self, headline: &str) {
+        self.budget_stop.send_if_modified(|stop| {
+            if stop.is_some() {
+                return false;
+            }
+            *stop = Some(headline.to_string());
+            true
+        });
+    }
+
+    /// Resolves with the headline once this run stops on a spent budget.
+    async fn budget_stopped(&self) -> String {
+        let mut stop = self.budget_stop.subscribe();
+        let stopped = stop
+            .wait_for(Option::is_some)
+            .await
+            .map(|headline| headline.clone().unwrap_or_default());
+        match stopped {
+            Ok(headline) => headline,
+            // The sender lives as long as this tool: never reached.
+            Err(_) => std::future::pending().await,
         }
     }
 
@@ -466,6 +527,13 @@ impl InvokeAgentTool {
     fn check_budget(&self, agent: &str) -> Result<(), InvokeAgentError> {
         self.remaining().check().map_err(|refusal| {
             warn!(agent = %agent, %refusal, "Refusing to delegate: the run's budget is spent");
+            // A spent dollar budget stops the run (AGE-903, DP-3 parity).
+            if let Refusal::BudgetSpent { what } = &refusal
+                && what == "usd"
+                && let Some(headline) = find_budget_exhausted(&refusal.to_string())
+            {
+                self.stop_on_budget(&headline);
+            }
             self.send_progress(InvokeAgentProgress::Finished {
                 success: false,
                 result: Some(format!("\u{26a0}\u{fe0f} {refusal}")),
@@ -573,14 +641,16 @@ impl Tool for InvokeAgentTool {
     /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
     fn map_error(&self, error: Self::Error) -> ToolExecutionError {
         // A worker that never started is not the model's to retry (AGE-822).
-        let terminal = matches!(error, InvokeAgentError::WorkerStartFailed(_));
+        // Nor is a spent budget (AGE-903).
+        let code = match &error {
+            InvokeAgentError::WorkerStartFailed(_) => Some(chatty_fabric::WORKER_START_FAILED),
+            InvokeAgentError::BudgetExhausted { .. } => Some(BUDGET_EXHAUSTED),
+            _ => None,
+        };
         let mapped = crate::tools::map_tool_error(Self::NAME, error);
-        if terminal {
-            mapped
-                .with_retryable(false)
-                .with_code(chatty_fabric::WORKER_START_FAILED)
-        } else {
-            mapped
+        match code {
+            Some(code) => mapped.with_retryable(false).with_code(code),
+            None => mapped,
         }
     }
 
@@ -612,6 +682,19 @@ impl InvokeAgentTool {
             ));
         }
 
+        // The run already stopped on a spent budget (AGE-903): nothing new
+        // starts.
+        let stopped = self.budget_stop.borrow().clone();
+        if let Some(headline) = stopped {
+            info!(agent = %agent_name, "Refusing to delegate: this run's budget is spent");
+            return Err(InvokeAgentError::BudgetExhausted {
+                agent: agent_name,
+                headline,
+                partial: String::new(),
+                messages: Vec::new(),
+            });
+        }
+
         // 0. The tenant's cap (AGE-416), ahead of resolving the agent: a
         //    leader over its cap starts nothing, so nothing below — the
         //    `Started` progress event, the `message/stream` call that makes
@@ -626,6 +709,10 @@ impl InvokeAgentTool {
                 cap_usd = refused.cap_usd,
                 "Refusing to delegate: the spend cap is exceeded"
             );
+            // A spent cap stops the run like a refused model call (AGE-903).
+            if let Some(headline) = find_budget_exhausted(&refused.to_string()) {
+                self.stop_on_budget(&headline);
+            }
             return Err(InvokeAgentError::CapExceeded(refused));
         }
 
@@ -877,6 +964,13 @@ impl InvokeAgentTool {
                     Some(event) => event,
                     None => break,
                 },
+                // A sibling ran out of budget (AGE-903): hang up, which
+                // makes the broker reap this callee's subtree (TB-7).
+                headline = self.budget_stopped() => {
+                    info!(agent = %agent, "Stopping a running delegation: the budget is spent");
+                    failure = Some(budget_exhausted(&headline));
+                    break;
+                }
             };
             match event {
                 Ok(CallEvent::Progress(progress)) => {
@@ -921,6 +1015,13 @@ impl InvokeAgentTool {
                     // A refusal is the tool's error, not a failed task: the
                     // model reads the typed reason, as it does `CapExceeded`.
                     warn!(agent = %agent, %refusal, "The broker refused the delegation");
+                    // A spent dollar budget stops the run (AGE-903, DP-3).
+                    if let Refusal::BudgetSpent { what } = &refusal
+                        && what == "usd"
+                        && let Some(headline) = find_budget_exhausted(&refusal.to_string())
+                    {
+                        self.stop_on_budget(&headline);
+                    }
                     self.send_progress(InvokeAgentProgress::Finished {
                         success: false,
                         result: Some(format!("\u{26a0}\u{fe0f} {refusal}")),
@@ -1043,6 +1144,23 @@ impl InvokeAgentTool {
         }
 
         if !success {
+            // The budget is spent, at the callee or under it (AGE-903):
+            // terminal for this run, and its siblings stop too. What the
+            // callee streamed before it stopped goes with it.
+            if let Some(headline) = error_msg.as_deref().and_then(find_budget_exhausted) {
+                self.stop_on_budget(&headline);
+                self.send_progress(InvokeAgentProgress::Finished {
+                    success: false,
+                    result: Some(format!("\u{26d4} {}", budget_exhausted(&headline))),
+                    usage,
+                });
+                return Err(InvokeAgentError::BudgetExhausted {
+                    agent: agent.to_string(),
+                    headline,
+                    partial: response,
+                    messages,
+                });
+            }
             // A worker that never started, here or anywhere below the
             // callee: terminal for this caller and shown to the user
             // (AGE-822).
