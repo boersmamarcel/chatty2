@@ -190,8 +190,9 @@ const CURATED_CATALOG: &[CuratedMcpEntry] = &[
         description: "Browse repositories, issues, and pull requests through GitHub's official \
              hosted MCP server.",
         docs_url: "https://github.com/github/github-mcp-server",
-        auth_notes: "Provide a GitHub personal access token as the API key; it is sent as a \
-             bearer token. Scope the token to the repositories and permissions you want the \
+        auth_notes: "Required. GitHub's hosted server does not support browser sign-in for \
+             third-party clients, so provide a personal access token as the API key; it is \
+             sent as a bearer token. Scope the token to the repositories and permissions you want the \
              agent to use.",
         default_enabled: false,
     },
