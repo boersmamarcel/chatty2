@@ -326,6 +326,8 @@ Start it with `./run-loop.sh` and leave it. `run-1.log`, `run-2.log` and so on h
 
 The first prompt asks for the whole backlog and the first story's full cycle. Every later prompt is the same sentence, with the gate's result in front. If an iteration ends before any test exists, `pytest` exits non-zero and the gate reports the suite as failing; the next prompt then asks for the repair, which is harmless.
 
+From the second iteration on, the leader does not start cold. Each headless team run leaves a small record in `.chatty/team-state/devteam.json` (git ignores it): how the run ended, the end of the leader's answer and its unfinished todos. The next run reads it and opens with a resume brief, before your prompt: the checked-out branch, uncommitted files, the branches not merged into `main` with their latest commit, how the last run ended, and the instruction to merge open work before starting anything new. `--resume-brief off` turns the brief off; delete the record to start the next run fresh.
+
 ### 5. Read what it built
 
 While it runs, the leader's hand-offs stream to stderr as in the previous tutorial: `invoke_agent`, `[agent: product-owner] ✓ completed`, `git_merge`, and so on. Between iterations, look at the work itself:

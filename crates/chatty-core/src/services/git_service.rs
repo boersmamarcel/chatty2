@@ -382,6 +382,45 @@ impl GitService {
         Ok(counted.trim().parse().unwrap_or(0))
     }
 
+    /// The local branches whose tips `base` does not contain, most recently
+    /// committed first (AGE-922: the open work a resumed session finds).
+    pub async fn branches_not_merged(&self, base: &str) -> Result<Vec<String>> {
+        Self::validate_branch_name(base)?;
+
+        let listed = self
+            .run_git(&[
+                "for-each-ref",
+                "--sort=-committerdate",
+                &format!("--no-merged={base}"),
+                "--format=%(refname:short)",
+                "refs/heads/",
+            ])
+            .await?;
+        Ok(listed
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// The subject line of `branch`'s tip commit.
+    pub async fn last_subject(&self, branch: &str) -> Result<String> {
+        Self::validate_branch_name(branch)?;
+
+        let subject = self
+            .run_git(&["log", "-1", "--format=%s", branch, "--"])
+            .await?;
+        Ok(subject.trim().to_string())
+    }
+
+    /// How many paths `git status --porcelain` lists: staged, modified or
+    /// untracked, each path once.
+    pub async fn changed_path_count(&self) -> Result<usize> {
+        let raw = self.run_git(&["status", "--porcelain=v1"]).await?;
+        Ok(raw.lines().filter(|line| !line.trim().is_empty()).count())
+    }
+
     /// `git diff --stat <base>..<branch>`: the summary of what a branch
     /// changed, as a reviewer reads it.
     pub async fn diff_stat(&self, base: &str, branch: &str) -> Result<String> {
@@ -596,7 +635,22 @@ impl GitService {
     /// list, so the fix never touches the `.gitignore` the user tracks and
     /// owns. Written to the *common* git dir, which linked worktrees share.
     async fn exclude_worktree_dir_locally(&self) -> Result<()> {
-        let entry = format!("/{}/", WORKTREE_DIR.trim_end_matches('/'));
+        self.exclude_dir_locally(
+            WORKTREE_DIR,
+            "chatty sub-agent worktrees (ADR-0017); local-only, not your .gitignore",
+        )
+        .await
+    }
+
+    /// Add `<dir>` (relative to the workspace root) to `.git/info/exclude`
+    /// with `comment` above it, once: harness state that lives in the
+    /// workspace but must never show in `git status` or be staged by
+    /// `git add -A`. The entry is anchored at the repository root, so a
+    /// workspace below it gets its own path in front (`/sub/<dir>/`); at the
+    /// root it is `/<dir>/`. See [`Self::exclude_worktree_dir_locally`].
+    pub async fn exclude_dir_locally(&self, dir: &str, comment: &str) -> Result<()> {
+        let prefix = self.run_git(&["rev-parse", "--show-prefix"]).await?;
+        let entry = format!("/{}{}/", prefix.trim(), dir.trim_end_matches('/'));
 
         let common = self.run_git(&["rev-parse", "--git-common-dir"]).await?;
         let common = common.trim();
@@ -624,7 +678,7 @@ impl GitService {
         if !next.is_empty() && !next.ends_with('\n') {
             next.push('\n');
         }
-        next.push_str("# chatty sub-agent worktrees (ADR-0017); local-only, not your .gitignore\n");
+        next.push_str(&format!("# {comment}\n"));
         next.push_str(&entry);
         next.push('\n');
 
@@ -891,6 +945,42 @@ mod tests {
         assert_eq!(got[1].path, "/repo/.chatty/worktrees/w1");
         assert_eq!(got[1].branch.as_deref(), Some("sub-agent/w1"));
         assert_eq!(got[2].branch, None, "a detached worktree has no branch");
+    }
+
+    /// AGE-922: an exclude entry is anchored at the repository root. At the
+    /// root it is `/<dir>/` (the worktree entry, as before); for a workspace
+    /// in a subdirectory it carries that path, so the directory really is
+    /// ignored there.
+    #[tokio::test]
+    async fn exclude_dir_locally_is_anchored_at_the_workspace() {
+        let (tmp, git) = create_test_repo().await;
+        git.exclude_worktree_dir_locally().await.unwrap();
+        git.exclude_worktree_dir_locally().await.unwrap();
+        let exclude = tmp.path().join(".git/info/exclude");
+        let text = fs::read_to_string(&exclude).unwrap();
+        assert!(
+            text.ends_with(
+                "# chatty sub-agent worktrees (ADR-0017); local-only, not your .gitignore\n\
+                 /.chatty/worktrees/\n"
+            ),
+            "{text}"
+        );
+        assert_eq!(text.matches("/.chatty/worktrees/").count(), 1, "once");
+
+        let sub = tmp.path().join("sub");
+        fs::create_dir_all(sub.join(".chatty/team-state")).unwrap();
+        fs::write(sub.join(".chatty/team-state/t.json"), "{}").unwrap();
+        let nested = GitService::new(&sub.to_string_lossy()).await.unwrap();
+        nested
+            .exclude_dir_locally(".chatty/team-state", "records")
+            .await
+            .unwrap();
+        let text = fs::read_to_string(&exclude).unwrap();
+        assert!(
+            text.ends_with("# records\n/sub/.chatty/team-state/\n"),
+            "{text}"
+        );
+        assert_eq!(nested.changed_path_count().await.unwrap(), 0, "ignored");
     }
 
     #[tokio::test]

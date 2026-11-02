@@ -971,6 +971,23 @@ as any spec, so a workspace spec shadows the preset one. The loader is
 `chatty_core::services::team::load_team`; the presets are
 `crates/chatty-core/teams/` and `crates/chatty-core/agents/`.
 
+**Resuming a team task (AGE-922).** A `--headless --team` leader keeps a session record
+in `<workspace>/.chatty/team-state/<team-id>.json` (added to the clone's
+`.git/info/exclude`): `{"schema":1,"outcome":"running"}` when it starts, then
+`outcome` (`completed`, `deadline`, `budget`, `error`), the tail of its answer
+(`final_answer`, at most 2000 characters) and its unfinished todos (`open_todos`) when
+it ends. A record still saying `running` means the session never reached its end. When
+the next leader of that team finds a record, `--resume-brief auto` (the default) opens
+its first turn, after the skill instruction and before the task, with a resume brief of
+at most 1.5 KB: the checked-out branch, uncommitted paths, the branches not merged into
+`main`/`master` (newest six, commits ahead, tip subject), the last outcome, open todos,
+the quoted end of the previous answer, and the instruction to finish or merge open work
+first and end on the base branch or list the open branches. A workspace without a record
+(a first run) gets nothing; `--resume-brief off` skips the brief but still writes the
+record. A host that tracks a lease's outcome itself can write the record before
+starting the leader, or build the text with
+`chatty_core::services::resume_brief::{snapshot_workspace, render_resume_brief}`.
+
 Two presets ship, both **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
 specs name no models. Besides them, three standalone specs ship: `researcher`,

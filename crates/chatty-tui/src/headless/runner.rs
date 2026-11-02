@@ -106,6 +106,9 @@ pub struct HeadlessRunner {
     save_conversation: Option<PathBuf>,
     /// `--export-atif` (AGE-860).
     export: Option<PathBuf>,
+    /// A `--team` leader's session record (AGE-922): the workspace and the
+    /// team id it is kept under, written when the run ends.
+    session_record: Option<(PathBuf, String)>,
     /// The connection a delegated worker's calls travel over (ADR-0020,
     /// BI-4), set before the agent is built.
     fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
@@ -187,6 +190,7 @@ impl HeadlessRunner {
             usage: UsageRecorder::default(),
             save_conversation: None,
             export: None,
+            session_record: None,
             fabric_transport: None,
             handoff: None,
             handoff_ledger,
@@ -438,6 +442,44 @@ impl HeadlessRunner {
     /// (`--save-conversation`, AGE-650).
     pub fn set_save_conversation(&mut self, path: Option<PathBuf>) {
         self.save_conversation = path;
+    }
+
+    /// Open the first human turn with `brief` (AGE-922), after the team's
+    /// skill instruction and before the task.
+    pub fn set_resume_brief(&mut self, brief: String) {
+        self.pending_first_turn = Some(match self.pending_first_turn.take() {
+            Some(instruction) => format!("{instruction}\n\n{brief}"),
+            None => brief,
+        });
+    }
+
+    /// Keep this `--team` leader's session record under `workspace` for
+    /// `team` (AGE-922): written by [`Self::write_session_record`].
+    pub fn set_session_record(&mut self, workspace: PathBuf, team: String) {
+        self.session_record = Some((workspace, team));
+    }
+
+    /// Write the session record, if the run keeps one: how it ended,
+    /// `answer`'s tail and the leader's unfinished todos, for the next
+    /// session's resume brief.
+    pub(super) async fn write_session_record(
+        &self,
+        outcome: chatty_core::services::resume_brief::SessionOutcome,
+        answer: &str,
+    ) {
+        use chatty_core::services::resume_brief::{SessionRecord, store_record};
+        let Some((workspace, team)) = &self.session_record else {
+            return;
+        };
+        let todos = self
+            .session
+            .conversation()
+            .map(|conversation| conversation.agent().task_controller().snapshot().todos)
+            .unwrap_or_default();
+        let record = SessionRecord::ended(outcome, answer, &todos);
+        if let Err(error) = store_record(workspace, team, &record).await {
+            eprintln!("session record: {error:#}");
+        }
     }
 
     /// `--export-atif` (AGE-860).

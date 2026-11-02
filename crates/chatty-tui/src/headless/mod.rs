@@ -26,6 +26,7 @@
 use anyhow::Result;
 use chatty_core::services::agent_loop_guard::{PROGRESS_WINDOW_TOOL_CALLS, ProgressCheck};
 use chatty_core::services::budget_stop::find_budget_exhausted;
+use chatty_core::services::resume_brief::SessionOutcome;
 use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
     is_agent_todo_tool,
@@ -819,6 +820,7 @@ pub async fn run_headless(
                 // the run ends here, with no retry, last pass or
                 // finalization prompt.
                 if error.kind == StreamErrorKind::BudgetExhausted {
+                    budget_stopped = true;
                     unrecovered_error = Some(error);
                     break;
                 }
@@ -953,13 +955,28 @@ pub async fn run_headless(
 
     engine.write_export();
 
-    engine.finish_usage(if unrecovered_error.is_some() {
+    let exit = if unrecovered_error.is_some() {
         RunExit::Error
     } else if deadline.is_some_and(|d| d.is_past(std::time::Instant::now())) {
         RunExit::Deadline
     } else {
         RunExit::Completed
-    });
+    };
+    engine.finish_usage(exit);
+    // AGE-922: what the next session of this team's task starts from.
+    engine
+        .write_session_record(
+            // A spent budget fails the run (a 402 on the leader's own
+            // call) or ends it (a delegation's); either way it is `budget`.
+            match exit {
+                _ if budget_stopped => SessionOutcome::Budget,
+                RunExit::Error => SessionOutcome::Error,
+                RunExit::Deadline => SessionOutcome::Deadline,
+                _ => SessionOutcome::Completed,
+            },
+            &response,
+        )
+        .await;
 
     if let Some(error) = unrecovered_error {
         // Whatever was streamed before the failure is still worth having;
