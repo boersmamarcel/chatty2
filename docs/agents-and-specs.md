@@ -818,8 +818,8 @@ come with a non-empty `swarm.delegates_to`, on any profile or none, and no profi
 | Profile | What it can call |
 |---------|------------------|
 | `coordinator` | The read set below, plus the todo plan (`write_todos`, `update_todo`, `verify_completion`) and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It does not edit; the `coder-reviewer-leader` preset delegates because its spec lists `local-coder` and `local-reviewer`. |
-| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). |
-| `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value. No writes, no commits. |
+| `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`), `calculate` (AGE-942) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). |
+| `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value, and `calculate` to recompute a figure exactly. No writes, no commits. |
 
 The read set every profile starts from is `read_file`, `list_directory`, `glob_search`,
 `search_code`, `git_status`, `git_log`, `git_diff` (which takes a `base..head` `range`, so

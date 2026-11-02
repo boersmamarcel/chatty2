@@ -85,6 +85,11 @@ const DATA_QUERY: &[&str] = &[
     "file_structure_detector",
 ];
 
+/// Exact decimal arithmetic and statistics (AGE-942). Not part of
+/// `DATA_QUERY`: it is in every build, so a hosted worker built without
+/// DuckDB still has a calculator.
+const CALCULATE: &[&str] = &["calculate"];
+
 /// Writing to the embedding-backed memory/skill store. Writes, so `CODER`
 /// only — `REVIEWER`'s whole design invariant is no writes (AGE-456).
 const MEMORY: &[&str] = &["remember", "save_skill", "search_memory"];
@@ -221,17 +226,18 @@ pub static COORDINATOR: ToolProfile = ToolProfile {
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
     groups: &[
-        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, MEMORY, MESSAGES,
+        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, CALCULATE, MEMORY, MESSAGES,
     ],
 };
 
 /// A worker that judges someone else's work: the read set plus a shell to run
 /// the tests with, plus the same data-query tool a coder used, so it can
 /// independently re-derive a claimed data-derived value instead of only
-/// judging plausibility. No writes, no commits.
+/// judging plausibility, and `calculate` to recompute a figure exactly.
+/// No writes, no commits.
 pub static REVIEWER: ToolProfile = ToolProfile {
     name: "reviewer",
-    groups: &[READ_SET, SHELL, DATA_QUERY, MESSAGES],
+    groups: &[READ_SET, SHELL, DATA_QUERY, CALCULATE, MESSAGES],
 };
 
 /// Every profile, in the order `--tools` documents them.
@@ -379,6 +385,19 @@ mod tests {
                 "a leader delegates data analysis, it does not do it itself"
             );
         }
+
+        assert!(
+            CODER.allows("calculate"),
+            "an analyst on the coder profile computes every number"
+        );
+        assert!(
+            REVIEWER.allows("calculate"),
+            "a reviewer recomputes figures without DuckDB (AGE-942)"
+        );
+        assert!(
+            !COORDINATOR.allows("calculate"),
+            "a leader delegates the arithmetic with the analysis"
+        );
 
         for tool in ["remember", "save_skill", "search_memory"] {
             assert!(

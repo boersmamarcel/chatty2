@@ -474,6 +474,15 @@ impl ListToolsTool {
             source: "native".to_string(),
         });
 
+        // So is calculate, in every build (AGE-942).
+        native_tools.push(ToolInfo {
+            name: "calculate".to_string(),
+            description: "Evaluate an arithmetic expression exactly, in decimal, with \
+                          percent, change, round and statistics (mean, median, stdev, …)."
+                .to_string(),
+            source: "native".to_string(),
+        });
+
         let mcp_tools = mcp_tool_info
             .into_iter()
             .map(|(server_name, tool_name, tool_description)| ToolInfo {
@@ -675,9 +684,10 @@ mod tests {
             .await
             .unwrap();
         let names = tool_names(&output);
-        assert_eq!(names.len(), 5);
+        assert_eq!(names.len(), 6);
         assert!(names.contains(&"list_tools".to_string()));
         assert!(names.contains(&"read_skill".to_string()));
+        assert!(names.contains(&"calculate".to_string()));
         assert_eq!(output.note, "These are the native tools available.");
     }
 
@@ -695,8 +705,8 @@ mod tests {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
         assert!(!names.contains(&"doc_retriever".to_string()));
-        // 5 always-present + 4 fs_read
-        assert_eq!(names.len(), 9);
+        // 6 always-present + 4 fs_read
+        assert_eq!(names.len(), 10);
     }
 
     #[tokio::test]
@@ -726,8 +736,8 @@ mod tests {
         for expected in &["shell_execute", "shell_set_env", "shell_cd", "shell_status"] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
-        // 5 always-present + 4 shell
-        assert_eq!(names.len(), 9);
+        // 6 always-present + 4 shell
+        assert_eq!(names.len(), 10);
     }
 
     #[tokio::test]
@@ -744,6 +754,7 @@ mod tests {
             "update_todo",
             "verify_completion",
             "read_skill",
+            "calculate",
             "list_mcp_services",
             "fetch",
             "doc_retriever",

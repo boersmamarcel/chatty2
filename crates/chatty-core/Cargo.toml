@@ -116,6 +116,8 @@ chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 # install.rs writes the install record the registry checks at load (PL-H5a).
 chatty-module-registry = { path = "../chatty-module-registry" }
 semver.workspace = true
+# `calculate`: exact decimal arithmetic, in every build (AGE-942).
+rust_decimal.workspace = true
 # The agent's persistent shell runs on its PTY (services::shell_service).
 chatty-terminal = { path = "../chatty-terminal" }
 
