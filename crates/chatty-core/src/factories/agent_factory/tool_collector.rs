@@ -322,6 +322,9 @@ impl NativeTools {
             b = add(b, profile, t);
         }
         b = add(b, profile, self.read_skill_tool);
+        // In every build, whatever the settings (AGE-942); a profile that
+        // does not name it drops it like any other tool.
+        b = add(b, profile, crate::tools::CalculateTool);
         if let Some(t) = self.search_web_tool {
             b = add(b, profile, t);
         }

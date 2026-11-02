@@ -1874,6 +1874,7 @@ dependencies = [
  "rig-core",
  "rmcp",
  "rpptx",
+ "rust_decimal",
  "rust_xlsxwriter",
  "semver",
  "serde",

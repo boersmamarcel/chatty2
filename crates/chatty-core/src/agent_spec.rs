@@ -1470,7 +1470,7 @@ cap_usd = 2.0
         let preamble = spec.agent.preamble.as_deref().unwrap();
         for needle in [
             "Recompute every number",
-            "query_data runs a plain SELECT as a calculator",
+            "calculate evaluates an expression exactly",
             "between 0 and 100%",
             "a count of things is a whole number",
             "parts add up to their stated total",
@@ -1480,6 +1480,9 @@ cap_usd = 2.0
             assert!(preamble.contains(needle), "{needle:?} in {preamble:?}");
         }
         let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        // `calculate` is in every build, a hosted one without DuckDB
+        // included (AGE-942); query_data only where DuckDB is.
+        assert!(profile.allows("calculate"));
         assert!(profile.allows("query_data"));
         // query_data comes with the read tools (fs-read).
         assert!(

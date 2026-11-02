@@ -50,6 +50,8 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
         String::from("update_todo"),
         String::from("verify_completion"),
         String::from("read_skill"),
+        // Pure arithmetic, in every build and every availability (AGE-942).
+        String::from("calculate"),
     ]);
 
     if tools.agents {
@@ -223,11 +225,11 @@ mod tests {
     #[test]
     fn always_includes_baseline_tools() {
         let names = active_native_tool_names(&ToolAvailability::default());
-        for tool in ["read_skill", "list_tools"] {
+        for tool in ["read_skill", "list_tools", "calculate"] {
             assert!(names.contains(tool), "{tool} must always be present");
         }
-        // Baseline count: 5 always-on tools
-        assert_eq!(names.len(), 5);
+        // Baseline count: 6 always-on tools
+        assert_eq!(names.len(), 6);
     }
 
     #[test]

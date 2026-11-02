@@ -137,8 +137,10 @@ const GROUPS: &[GroupSpec] = &[
     },
     GroupSpec {
         name: "data",
-        when: "to analyse spreadsheets or CSV/JSON/Parquet data with SQL, or draw a chart",
+        when: "to compute numbers exactly (calculate), analyse spreadsheets or \
+               CSV/JSON/Parquet data with SQL, or draw a chart",
         tools: &[
+            "calculate",
             "read_excel",
             "write_excel",
             "edit_excel",

@@ -161,6 +161,7 @@ pub mod best_of_tool;
 #[cfg(feature = "browser")]
 pub mod browser_tools;
 pub mod browser_use_tool;
+pub mod calculate_tool;
 pub mod chart_tool;
 #[cfg(feature = "duckdb")]
 pub mod data_query_tool;
@@ -214,6 +215,7 @@ pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
 pub use ask_user_tool::AskUserTool;
 pub use browser_use_tool::BrowserUseTool;
+pub use calculate_tool::CalculateTool;
 pub use chart_tool::CreateChartTool;
 #[cfg(feature = "duckdb")]
 pub use data_query_tool::{DescribeDataTool, ProfileDataTool, QueryDataTool};
