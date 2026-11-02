@@ -185,6 +185,9 @@ pub struct AgentRole {
     /// The spec's `swarm.best_of` (AGE-853): offered the `best_of` tool
     /// over its own `invoke_agent`. Only an agent that delegates gets it.
     pub best_of: Option<crate::agent_spec::BestOfSection>,
+    /// The spec's `[agent] max_tokens` (AGE-936): the output cap over the
+    /// model's own. `None` leaves the model's (or no cap).
+    pub max_tokens: Option<u32>,
 }
 
 impl Default for AgentRole {
@@ -194,6 +197,7 @@ impl Default for AgentRole {
             profile: None,
             delegates: true,
             best_of: None,
+            max_tokens: None,
         }
     }
 }
@@ -374,6 +378,7 @@ impl AgentBuildContext {
                 profile: spec.tools.profile.as_deref().and_then(tool_profile),
                 delegates: !spec.swarm.delegates_to.is_empty(),
                 best_of: spec.swarm.best_of.clone(),
+                max_tokens: spec.agent.max_tokens,
             },
             run_budget: Some(run_budget),
             ask_user_enabled: settings.as_ref().is_none_or(|s| s.ask_user_enabled),

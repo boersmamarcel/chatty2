@@ -154,6 +154,13 @@ pub struct AgentSection {
     /// the model's own setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub think: Option<bool>,
+    /// The output-token cap every model call of this agent carries
+    /// (`max_tokens` on the wire), over the model's own `max_tokens`
+    /// (AGE-936). Reasoning tokens count against it on servers that think
+    /// (vLLM's reasoning parser, OpenAI's reasoning models). `None` leaves
+    /// the model's setting; with neither set, no cap is sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
 }
 
 /// `[tools]`: what it may call.
@@ -468,6 +475,8 @@ pub enum SpecError {
     UnrequestedGrant(String),
     BadDuration(String),
     BadCap(f64),
+    /// `agent.max_tokens` is zero: no call could answer.
+    BadMaxTokens,
     /// `swarm.best_of` is malformed: too few solvers, or a name not in
     /// `delegates_to`.
     BadBestOf(String),
@@ -502,6 +511,7 @@ impl std::fmt::Display for SpecError {
             Self::UnrequestedGrant(why) => write!(f, "plugins: {why}"),
             Self::BadDuration(why) => write!(f, "budget.max_duration: {why}"),
             Self::BadCap(cap) => write!(f, "budget.cap_usd {cap} is not a positive amount"),
+            Self::BadMaxTokens => write!(f, "agent.max_tokens must be at least 1"),
             Self::BadBestOf(why) => write!(f, "swarm.best_of: {why}"),
         }
     }
@@ -625,6 +635,9 @@ impl AgentSpec {
             && !(cap.is_finite() && cap > 0.0)
         {
             errors.push(SpecError::BadCap(cap));
+        }
+        if self.agent.max_tokens == Some(0) {
+            errors.push(SpecError::BadMaxTokens);
         }
         if let Some(best_of) = &self.swarm.best_of {
             if best_of.solvers.len() < 2 {
@@ -1264,6 +1277,7 @@ cap_usd = 2.0
             agent: AgentSection {
                 name: "Bad Name".to_string(),
                 model: Some("no-such-model".to_string()),
+                max_tokens: Some(0),
                 ..AgentSection::default()
             },
             tools: ToolsSection {
@@ -1306,7 +1320,8 @@ cap_usd = 2.0
                 .any(|e| matches!(e, SpecError::BadDuration(_)))
         );
         assert!(errors.contains(&SpecError::BadCap(-1.0)));
-        assert_eq!(errors.len(), 7, "{errors:?}");
+        assert!(errors.contains(&SpecError::BadMaxTokens));
+        assert_eq!(errors.len(), 8, "{errors:?}");
 
         let text = SpecErrors(errors).to_string();
         for field in [
@@ -1317,6 +1332,7 @@ cap_usd = 2.0
             "plugins",
             "budget.max_duration",
             "budget.cap_usd",
+            "agent.max_tokens",
         ] {
             assert!(text.contains(field), "{field} missing from: {text}");
         }

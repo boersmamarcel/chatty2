@@ -743,6 +743,7 @@ name = "local-reviewer"            # the A2A address, /a2a/{name}
 description = "Verifies a worker's branch"
 model = "gemma4:26b"               # resolved like --model; absent = the roster's default
 preamble = "Verify, do not trust, verdict first. …"
+max_tokens = 8192                  # optional output cap per model call; absent = the model's, else none
 
 [tools]
 profile = "reviewer"               # coordinator | coder | reviewer
@@ -784,6 +785,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `agent.name` | The name `invoke_agent` addresses, served at `/a2a/{name}`; lowercase letters, digits, `-`, `_`, and the file's own name. |
 | `agent.model` | Optional. Resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the roster's default. |
 | `agent.preamble` | Optional. The role's standing instructions, appended to the system prompt after the base preamble, before the tool summary. |
+| `agent.max_tokens` | Optional, opt-in, at least 1. The output cap every model call of this agent carries (`max_tokens` on the wire), over the model's own `max_tokens` (AGE-936). Absent with no model `max_tokens` either: no cap is sent, as before; chatty has no default cap (a fixed cap counts a thinking model's reasoning too and cuts ordinary calls short). Fitting a call to a hosted task's budget is the egress's job, which may lower a call's `max_tokens` itself. A call that reaches its cap (`finish_reason: length`) is handled: the first tool-free cut-off turn of a run is retried once with feedback; a second is accepted as the answer with `[Note: this answer was cut off at the output limit and may be incomplete.]` appended, and one with no answer at all ends the run as an empty completion, which no surface retries. |
 | `tools.profile` | Optional. A named tool profile: `coordinator`, `coder` or `reviewer` — see below. |
 | `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
