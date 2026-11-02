@@ -79,6 +79,19 @@
 //! sees as much of it as the window allows. Everything under that cap is
 //! recorded whole.
 //!
+//! # The results ledger (AGE-941)
+//!
+//! For a leader, the old tool results the stages one-line and snip are its
+//! workers' answers. Whenever a request goes out shaped or compacted and no
+//! longer carries some `invoke_agent` result verbatim, the guard adds one
+//! message right after the head: a capped ledger of those delegations
+//! ([`super::results_ledger`]) — agent, task, status and a digest of the
+//! answer — telling the model to take figures only from it or from results
+//! still shown, and to write "not recorded" otherwise. Room for it is made
+//! by shaping again with its size counted against the budget. A request
+//! that goes out as recorded, or that drops no delegation result, is
+//! unchanged.
+//!
 //! # Mid-run messages (TM-5)
 //!
 //! A worker's guard is also where the human, or the worker's owner, reaches
@@ -115,6 +128,7 @@ use crate::models::token_usage::ApiCallUsage;
 use crate::services::context_compaction::{
     Summarizer, SummaryInputs, build_summary, task_max_chars,
 };
+use crate::services::results_ledger;
 use crate::services::terminal::context::stub_older_contexts;
 use crate::services::{call_ids, enforce_tool_round_trips, result_ids, tool_round_trips_intact};
 use crate::settings::models::models_store::ModelConfig;
@@ -509,7 +523,19 @@ impl ContextShaper {
         prompt: &Message,
         turn: usize,
     ) -> Option<Vec<Message>> {
-        let prompt_tokens = self.inner.counter.count_message(prompt);
+        self.request_history_reserving(history, prompt, turn, 0)
+    }
+
+    /// [`Self::request_history`] with `reserve` more tokens kept free, for
+    /// what the guard adds to the request itself (the results ledger).
+    fn request_history_reserving(
+        &self,
+        history: &[Message],
+        prompt: &Message,
+        turn: usize,
+        reserve: usize,
+    ) -> Option<Vec<Message>> {
+        let prompt_tokens = self.inner.counter.count_message(prompt) + reserve;
         // rig hands the hook the prompt separately from the history, and
         // mid-tool-loop that prompt is the result answering the history's
         // last call — a call it answers is not a dangling one (AGE-513).
@@ -540,7 +566,9 @@ impl ContextShaper {
 
     /// What the completion-call hook sends: [`Self::request_history`] over
     /// the compacted history when there is a compaction in force (or one is
-    /// due now), over the recorded one otherwise.
+    /// due now), over the recorded one otherwise — plus the results ledger
+    /// when that request no longer shows every delegation's result verbatim
+    /// (AGE-941). `None` when the recorded history goes out as is.
     pub async fn prepare_request(
         &self,
         history: &[Message],
@@ -548,13 +576,69 @@ impl ContextShaper {
         turn: usize,
     ) -> Option<Vec<Message>> {
         let prompt_tokens = self.inner.counter.count_message(prompt);
-        match self.compacted(history, prompt_tokens, turn).await {
-            None => self.request_history(history, prompt, turn),
-            Some(compacted) => Some(
-                self.request_history(&compacted, prompt, turn)
-                    .unwrap_or(compacted),
-            ),
+        let compacted = self.compacted(history, prompt_tokens, turn).await;
+        let base = compacted.as_deref().unwrap_or(history);
+        let sent = match self.request_history(base, prompt, turn) {
+            Some(sent) => sent,
+            None => compacted.clone()?,
+        };
+        Some(self.with_results_ledger(history, base, prompt, turn, sent))
+    }
+
+    /// `sent` with the results ledger ([`results_ledger`]) right after its
+    /// head when it no longer carries every delegation result of `history`
+    /// verbatim; `sent` unchanged otherwise. Room for the ledger is made by
+    /// shaping `base` again with the ledger counted against the budget.
+    fn with_results_ledger(
+        &self,
+        history: &[Message],
+        base: &[Message],
+        prompt: &Message,
+        turn: usize,
+        sent: Vec<Message>,
+    ) -> Vec<Message> {
+        let total = results_ledger::delegations(history).len();
+        if total == 0 {
+            return sent;
         }
+        let prompt_tokens = self.inner.counter.count_message(prompt);
+        let max_chars = results_ledger::max_chars(self.history_budget(prompt_tokens));
+        let ledger_for = |sent: &[Message]| {
+            results_ledger::ledger_message(
+                &results_ledger::not_shown(history, sent),
+                total,
+                max_chars,
+            )
+        };
+        let Some(mut ledger) = ledger_for(&sent) else {
+            return sent;
+        };
+        // A tighter budget can take one more result out, and the ledger
+        // grows with it: shape again until the room kept covers the ledger
+        // (it is capped, so this settles at once in practice).
+        let mut sent = sent;
+        for _ in 0..3 {
+            let reserve = self.inner.counter.count_message(&ledger);
+            sent = self
+                .request_history_reserving(base, prompt, turn, reserve)
+                .unwrap_or_else(|| base.to_vec());
+            let Some(next) = ledger_for(&sent) else {
+                return sent;
+            };
+            let settled = self.inner.counter.count_message(&next) <= reserve;
+            ledger = next;
+            if settled {
+                break;
+            }
+        }
+        debug!(
+            turn,
+            delegations = total,
+            "context shaper: results ledger added to the request"
+        );
+        let at = round_trip_safe_head(&sent, self.inner.settings.keep_head);
+        sent.insert(at, ledger);
+        sent
     }
 
     /// The history with the compaction in force applied, compacting (again)
@@ -1739,5 +1823,361 @@ mod compaction_tests {
         assert_eq!(text_of(sent.last().unwrap()), prompt_text);
         assert_round_trips_intact(sent, &[]);
         assert_eq!(utility.request_count(), 1);
+    }
+}
+
+/// AGE-941: a leader whose workers' results the guard shapes away gets the
+/// results ledger, and nothing else changes.
+#[cfg(test)]
+mod results_ledger_tests {
+    use super::*;
+    use crate::services::results_ledger::{LEDGER_HEADER, figures_not_in};
+    use futures::StreamExt;
+    use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem};
+    use rig_agent::streaming::StreamingPrompt;
+    use rig_agent::test_utils::MockToolError;
+    use rig_agent::tool::{Tool, ToolContext};
+    use rig_core::completion::message::AssistantContent;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+    const TASK: &str = "Coordinate a 10-chapter guide: for each chapter delegate a draft \
+                        to data-analyst and a review to reviewer, then reply with a table.";
+    const CHAPTERS: usize = 10;
+
+    fn counter() -> TokenCounter {
+        TokenCounter::for_model("test")
+    }
+
+    fn settings() -> ContextShaperSettings {
+        ContextShaperSettings {
+            response_reserve: 0,
+            headroom_fraction: 0.0,
+            ..ContextShaperSettings::default()
+        }
+    }
+
+    /// Chapter `i`'s worked-example result: distinct for every chapter.
+    fn figure(i: usize) -> String {
+        format!("{}.{:02}", 300 + i * 11, (i * 7) % 100)
+    }
+
+    fn prose(words: usize) -> String {
+        vec!["prose"; words].join(" ")
+    }
+
+    fn draft(i: usize) -> String {
+        format!(
+            "# Chapter {i}\n\n{}\nWorked example: total = {} over the sample\n{}",
+            prose(600),
+            figure(i),
+            prose(100)
+        )
+    }
+
+    /// What the data-analyst returns for `task` ("Draft chapter i") and the
+    /// reviewer for "Review chapter i", whose task carries the draft, as the
+    /// soak's leader sent it.
+    fn worker_answer(task: &str) -> (String, String) {
+        let first = task.lines().next().unwrap_or_default();
+        let i: usize = first
+            .rsplit(' ')
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("a chapter number");
+        if first.starts_with("Draft") {
+            ("data-analyst".to_string(), draft(i))
+        } else {
+            (
+                "reviewer".to_string(),
+                format!(
+                    "APPROVE\n1. Recomputed total = {} ✓\n{}",
+                    figure(i),
+                    prose(30)
+                ),
+            )
+        }
+    }
+
+    fn tasks() -> Vec<String> {
+        (1..=CHAPTERS)
+            .flat_map(|i| {
+                [
+                    format!("Draft chapter {i}"),
+                    format!("Review chapter {i}\n\n{}", draft(i)),
+                ]
+            })
+            .collect()
+    }
+
+    fn call(id: &str, task: &str) -> Message {
+        let agent = if task.starts_with("Draft") {
+            "data-analyst"
+        } else {
+            "reviewer"
+        };
+        Message::Assistant {
+            id: None,
+            content: vec![AssistantContent::tool_call(
+                id,
+                "invoke_agent",
+                serde_json::json!({ "agent": agent, "prompt": task }),
+            )],
+        }
+    }
+
+    fn result(id: &str, name: &str, value: serde_json::Value) -> Message {
+        Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: ToolCallId::new(id).unwrap(),
+                provider: None,
+                name: name.to_string(),
+                content: vec![ToolResultContent::Json { value }],
+            })],
+        }
+    }
+
+    /// The soak's shape: the task, then a draft and a review per chapter.
+    fn leader_run() -> Vec<Message> {
+        let mut history = vec![Message::user(TASK)];
+        for (n, task) in tasks().iter().enumerate() {
+            let id = format!("d{n}");
+            let (agent, response) = worker_answer(task);
+            history.push(call(&id, task));
+            history.push(result(
+                &id,
+                "invoke_agent",
+                serde_json::json!({ "agent": agent, "response": response, "success": true }),
+            ));
+        }
+        history
+    }
+
+    fn all_text(messages: &[Message]) -> String {
+        serde_json::to_string(messages).unwrap()
+    }
+
+    fn ledger_index(messages: &[Message]) -> Option<usize> {
+        messages.iter().position(|m| match m {
+            Message::User { content } => content
+                .iter()
+                .any(|c| matches!(c, UserContent::Text(t) if t.text.starts_with(LEDGER_HEADER))),
+            _ => false,
+        })
+    }
+
+    fn tokens(messages: &[Message]) -> usize {
+        let counter = counter();
+        messages.iter().map(|m| counter.count_message(m)).sum()
+    }
+
+    #[tokio::test]
+    async fn a_leader_history_that_fits_goes_out_as_recorded() {
+        let history = leader_run();
+        let prompt = Message::user("continue");
+        let shaper = ContextShaper::new(settings(), counter(), Some(tokens(&history) * 2));
+        assert!(shaper.prepare_request(&history, &prompt, 1).await.is_none());
+    }
+
+    /// An ordinary single-agent run the guard shapes is shaped exactly as
+    /// before: no delegation, no ledger.
+    #[tokio::test]
+    async fn a_shaped_run_without_delegations_is_unchanged() {
+        let mut history = vec![Message::user(TASK)];
+        for n in 0..20 {
+            let id = format!("r{n}");
+            history.push(Message::Assistant {
+                id: None,
+                content: vec![AssistantContent::tool_call(
+                    &id,
+                    "read_file",
+                    serde_json::json!({ "path": format!("f{n}.rs") }),
+                )],
+            });
+            history.push(result(
+                &id,
+                "read_file",
+                serde_json::json!({ "content": prose(200) }),
+            ));
+        }
+        let prompt = Message::user("continue");
+        let shaper = ContextShaper::new(settings(), counter(), Some(tokens(&history) / 3));
+        let expected = shaper
+            .request_history(&history, &prompt, 1)
+            .expect("shaped");
+        let sent = shaper
+            .prepare_request(&history, &prompt, 1)
+            .await
+            .expect("shaped");
+        assert_eq!(sent, expected);
+        assert!(ledger_index(&sent).is_none());
+    }
+
+    /// The soak's final call, replayed: the guard snips the middle of a
+    /// 20-delegation history, and the request still carries every chapter's
+    /// figure — in the ledger right after the task, or verbatim in the tail.
+    #[tokio::test]
+    async fn a_snipped_leader_request_carries_every_workers_figures() {
+        let history = leader_run();
+        let prompt = Message::user("All chapters are done. Reply with the table.");
+        // A third of what the run needs, like the soak's 32k window under
+        // ~75k tokens of history.
+        let window = tokens(&history) / 3;
+        let shaper = ContextShaper::new(settings(), counter(), Some(window));
+        let plain = shaper
+            .request_history(&history, &prompt, 1)
+            .expect("shaped");
+        let plain_text = all_text(&plain);
+        assert!(plain_text.contains("messages snipped"), "the guard snips");
+        let lost: Vec<usize> = (1..=CHAPTERS)
+            .filter(|i| !plain_text.contains(&figure(*i)))
+            .collect();
+        assert!(
+            lost.len() >= 5,
+            "without the ledger most figures are gone: {lost:?}"
+        );
+
+        let sent = shaper
+            .prepare_request(&history, &prompt, 1)
+            .await
+            .expect("shaped");
+        let text = all_text(&sent);
+        for i in 1..=CHAPTERS {
+            assert!(
+                text.contains(&figure(i)),
+                "chapter {i}'s figure is in the request"
+            );
+        }
+        let ledger = all_text(&sent[ledger_index(&sent).expect("a ledger")..][..1]);
+        for i in &lost {
+            assert!(
+                ledger.contains(&figure(*i)),
+                "chapter {i}'s figure is in the ledger"
+            );
+        }
+        assert!(all_text(&sent[1..2]).contains("messages snipped"));
+        assert_eq!(
+            ledger_index(&sent),
+            Some(2),
+            "after the head (the task and the snip marker), ahead of every kept round trip"
+        );
+        assert!(tool_round_trips_intact(&sent, &[]));
+        let budget = shaper.history_budget(counter().count_message(&prompt));
+        assert!(tokens(&sent) <= budget, "{} > {budget}", tokens(&sent));
+    }
+
+    /// A stand-in for `invoke_agent`: answers each task with the scripted
+    /// worker answer, in the real tool's JSON shape.
+    struct FakeInvokeAgent;
+
+    #[derive(serde::Deserialize)]
+    struct FakeArgs {
+        prompt: String,
+    }
+
+    impl Tool for FakeInvokeAgent {
+        const NAME: &'static str = "invoke_agent";
+        type Error = MockToolError;
+        type Args = FakeArgs;
+        type Output = serde_json::Value;
+
+        fn description(&self) -> String {
+            "Delegate a task to an agent".to_string()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": { "agent": { "type": "string" }, "prompt": { "type": "string" } },
+                "required": ["agent", "prompt"],
+            })
+        }
+
+        async fn call(
+            &self,
+            _context: &mut ToolContext,
+            args: Self::Args,
+        ) -> Result<Self::Output, Self::Error> {
+            let (agent, response) = worker_answer(&args.prompt);
+            Ok(serde_json::json!({ "agent": agent, "response": response, "success": true }))
+        }
+    }
+
+    /// On rig's own loop: a scripted leader delegates every draft and review,
+    /// then answers. The request its final answer is written from carries the
+    /// ledger and every chapter's figure; a final answer built from it has no
+    /// figure absent from the workers' results, and the check flags one that
+    /// does (the soak's "313.1% of sales").
+    #[tokio::test]
+    async fn a_scripted_leaders_final_request_is_grounded_in_its_workers_results() {
+        let mut turns: Vec<Vec<MockStreamEvent>> = tasks()
+            .iter()
+            .enumerate()
+            .map(|(n, task)| {
+                let agent = if task.starts_with("Draft") {
+                    "data-analyst"
+                } else {
+                    "reviewer"
+                };
+                vec![
+                    MockStreamEvent::tool_call(
+                        format!("tool_call_{n}"),
+                        "invoke_agent",
+                        serde_json::json!({ "agent": agent, "prompt": task }),
+                    )
+                    .with_call_id(format!("call_{n}")),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ]
+            })
+            .collect();
+        let table: String = (1..=CHAPTERS)
+            .map(|i| format!("| {i} | 1 | APPROVE | total = {} |\n", figure(i)))
+            .collect();
+        turns.push(vec![
+            MockStreamEvent::text(table.clone()),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]);
+        let model = MockCompletionModel::from_stream_turns(turns);
+        let window = tokens(&leader_run()) / 3;
+        let shaper = ContextShaper::new(settings(), counter(), Some(window));
+        let agent = AgentBuilder::new(model.clone())
+            .tool(FakeInvokeAgent)
+            .add_hook(shaper.clone())
+            .build();
+        let mut stream = agent.stream_prompt(TASK).max_turns(2 * CHAPTERS + 2).await;
+        let mut answer = None;
+        while let Some(item) = stream.next().await {
+            if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the run succeeds") {
+                answer = Some(response.output);
+            }
+        }
+        assert_eq!(answer.as_deref(), Some(table.as_str()));
+
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2 * CHAPTERS + 1);
+        let last: Vec<Message> = requests.last().unwrap().chat_history.to_vec();
+        let text = all_text(&last);
+        assert!(
+            text.contains("messages snipped"),
+            "the final call was shaped"
+        );
+        assert!(
+            ledger_index(&last).is_some(),
+            "the final call carries the ledger"
+        );
+        for i in 1..=CHAPTERS {
+            assert!(
+                text.contains(&figure(i)),
+                "chapter {i}'s figure reached the final call"
+            );
+        }
+
+        let results: Vec<String> = tasks().iter().map(|t| worker_answer(t).1).collect();
+        let sources: Vec<&str> = results.iter().map(String::as_str).collect();
+        assert!(
+            figures_not_in(&table, &sources).is_empty(),
+            "nothing invented"
+        );
+        let invented = format!("{table}| 1 | top 3 customers = 313.1% of sales |");
+        assert_eq!(figures_not_in(&invented, &sources), ["313.1"]);
     }
 }

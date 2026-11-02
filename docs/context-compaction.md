@@ -100,6 +100,27 @@ bites in practice. Once a run is over budget the tail boundary
 moves by one message per call, so requests stop sharing a prefix until it fits again —
 the price of not crashing, and what the planned engine below removes.
 
+**A leader keeps its workers' results: the results ledger (AGE-941).** For a leader, the
+old tool results the stages one-line and snip — and the messages a compaction replaces —
+are its workers' answers. In the AGE-937 soak a 32k-window leader with 28 delegations sent
+its final call with 88 of 98 messages snipped and every older `invoke_agent` result
+one-lined, and wrote its 10-chapter summary table from "reconstructed notes", with figures
+no worker produced. So whenever a request goes out shaped or compacted and no longer
+carries some delegation's result verbatim, the guard inserts one user message right after
+the request's head: the ledger (`services::results_ledger`). It lists those delegations
+in order — agent, the task's first line, returned or failed, and a digest of the answer
+(its first line, then the lines that carry figures, those stating a result with `=`/`≈`/`→`
+first) — and tells the model to take every figure, count and verdict from it or from a
+result still shown verbatim, and to write "not recorded" otherwise. Worker text is quoted
+on one line with `"`, `\` and control/bidi characters escaped, as data. The ledger is at
+most 12 000 characters and a quarter of the history budget; every digest gets the same
+allowance, as large as fits, so each delegation keeps its title and leading figures before
+any gets more (only past hundreds of delegations are the oldest dropped, with a count).
+Room for it is made by shaping again with its size counted against the budget. It is
+derived from the recorded history on every request, never persisted, and absent from a
+request that goes out as recorded or that drops no delegation result — an ordinary
+single-agent run is shaped exactly as before.
+
 ## Summarisation
 
 `summarize_oldest_half` (`crates/chatty-core/src/token_budget/summarizer.rs`) takes
