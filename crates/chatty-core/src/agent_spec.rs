@@ -1460,6 +1460,35 @@ cap_usd = 2.0
         }
     }
 
+    /// AGE-937: the shared reviewer re-derives every figure instead of
+    /// reading along, checks that each number is possible, and rejects a
+    /// figure that fails. The calculator it is pointed at must be one its
+    /// own spec lets through, or the instruction is dead text.
+    #[test]
+    fn the_reviewer_recomputes_figures_with_a_tool_it_has() {
+        let spec = load_agent_spec_from("reviewer", None, None).unwrap().spec;
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for needle in [
+            "Recompute every number",
+            "query_data runs a plain SELECT as a calculator",
+            "between 0 and 100%",
+            "a count of things is a whole number",
+            "parts add up to their stated total",
+            "units and scales stay consistent",
+            "answer REQUEST_CHANGES and name the figure",
+        ] {
+            assert!(preamble.contains(needle), "{needle:?} in {preamble:?}");
+        }
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        assert!(profile.allows("query_data"));
+        // query_data comes with the read tools (fs-read).
+        assert!(
+            !spec.tools.disable.iter().any(|group| group == "fs-read"),
+            "{:?}",
+            spec.tools.disable
+        );
+    }
+
     fn names(specs: &[AgentSpec]) -> Vec<&str> {
         specs.iter().map(|spec| spec.agent.name.as_str()).collect()
     }
