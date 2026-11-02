@@ -58,10 +58,13 @@ pub struct AgentTaskResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentTaskError {
+    /// `plan` is the plan in force (`plan_listing`): a model whose first
+    /// plan has been shaped out of its context learns its ids here instead
+    /// of guessing them (AGE-941).
     #[error(
-        "write_todos has already been called for this agent invocation; use update_todo to revise individual todos"
+        "write_todos has already been called for this agent invocation, so this call changed nothing: the plan below is still in force. Continue with update_todo on these ids (a step the plan lacks goes under the closest todo): {plan}"
     )]
-    WriteTodosAlreadyCalled,
+    WriteTodosAlreadyCalled { plan: String },
     #[error("goal must not be empty")]
     EmptyGoal,
     #[error("todos must contain between 1 and {MAX_TODOS} items")]
@@ -72,8 +75,10 @@ pub enum AgentTaskError {
     DuplicateTodoId(String),
     #[error("write_todos must be called before update_todo or verify_completion")]
     MissingTodos,
-    #[error("unknown todo id: {0}")]
-    UnknownTodo(String),
+    #[error(
+        "unknown todo id: {id}. The plan's todos are: {plan}. Call update_todo with one of these ids."
+    )]
+    UnknownTodo { id: String, plan: String },
     #[error("todo {0} is already in progress; finish or block it before starting another todo")]
     TodoAlreadyInProgress(String),
     #[error("blocked todos require blocked_reason and reflection")]
@@ -154,7 +159,9 @@ impl AgentTaskController {
 
         let mut state = self.state.lock();
         if state.write_todos_called {
-            return Err(AgentTaskError::WriteTodosAlreadyCalled);
+            return Err(AgentTaskError::WriteTodosAlreadyCalled {
+                plan: plan_listing(&state.todos),
+            });
         }
 
         state.goal = Some(goal);
@@ -194,11 +201,12 @@ impl AgentTaskController {
             return Err(AgentTaskError::TodoAlreadyInProgress(active.id.clone()));
         }
 
-        let todo = state
-            .todos
-            .iter_mut()
-            .find(|todo| todo.id == id)
-            .ok_or_else(|| AgentTaskError::UnknownTodo(id.clone()))?;
+        let Some(todo) = state.todos.iter_mut().find(|todo| todo.id == id) else {
+            return Err(AgentTaskError::UnknownTodo {
+                plan: plan_listing(&state.todos),
+                id,
+            });
+        };
 
         if matches!(status, AgentTodoStatus::Blocked)
             && (blocked_reason
@@ -359,6 +367,38 @@ pub fn is_protocol_follow_up_text(text: &str) -> bool {
         || t.starts_with("Agent protocol follow-up:")
 }
 
+/// A todo title is cut at this many characters in [`plan_listing`].
+const LISTED_TITLE_CHARS: usize = 60;
+
+/// The plan as one line an error can carry: `id "title" [status]` per todo,
+/// `; `-separated. Ids and titles are the model's own text: each stays on
+/// the line, the title quoted with `"` and `\` escaped.
+fn plan_listing(todos: &[AgentTodo]) -> String {
+    let one_line = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    todos
+        .iter()
+        .map(|todo| {
+            let title = one_line(&todo.title);
+            let mut shown: String = title.chars().take(LISTED_TITLE_CHARS).collect();
+            if title.chars().count() > LISTED_TITLE_CHARS {
+                shown.push('…');
+            }
+            let status = match todo.status {
+                AgentTodoStatus::Pending => "pending",
+                AgentTodoStatus::InProgress => "in_progress",
+                AgentTodoStatus::Done => "done",
+                AgentTodoStatus::Blocked => "blocked",
+            };
+            format!(
+                "{} \"{}\" [{status}]",
+                one_line(&todo.id),
+                shown.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 fn response(message: &str, state: &AgentTaskState, should_ask_user: bool) -> AgentTaskResponse {
     AgentTaskResponse {
         message: message.to_string(),
@@ -433,7 +473,68 @@ mod tests {
             .write_todos("Ship again".into(), todos())
             .unwrap_err();
 
-        assert!(matches!(error, AgentTaskError::WriteTodosAlreadyCalled));
+        assert!(matches!(
+            error,
+            AgentTaskError::WriteTodosAlreadyCalled { .. }
+        ));
+    }
+
+    /// AGE-941: in the soak, a leader whose first plan had been shaped out
+    /// of its context called write_todos again, then guessed an id, and gave
+    /// up on its notes. Both errors now hand back the plan in force, so the
+    /// model can carry on with update_todo.
+    #[test]
+    fn a_second_write_todos_says_which_plan_is_in_force() {
+        let controller = controller();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        controller
+            .update_todo("t1".into(), AgentTodoStatus::Done, None, None)
+            .unwrap();
+        let error = controller
+            .write_todos("Ship again".into(), todos())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "write_todos has already been called for this agent invocation, so this call changed \
+             nothing: the plan below is still in force. Continue with update_todo on these ids \
+             (a step the plan lacks goes under the closest todo): t1 \"Plan\" [done]; \
+             t2 \"Implement\" [pending]"
+        );
+    }
+
+    #[test]
+    fn an_unknown_todo_id_lists_the_ids_there_are() {
+        let controller = controller();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        let error = controller
+            .update_todo("draft-ch9".into(), AgentTodoStatus::Done, None, None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "unknown todo id: draft-ch9. The plan's todos are: t1 \"Plan\" [pending]; \
+             t2 \"Implement\" [pending]. Call update_todo with one of these ids."
+        );
+    }
+
+    #[test]
+    fn a_listed_title_stays_on_one_quoted_line() {
+        let controller = controller();
+        let long = format!("Line one\nline \"two\" {}", "x".repeat(200));
+        controller
+            .write_todos("Ship".into(), vec![("t1".into(), long, "d".into())])
+            .unwrap();
+        let error = controller
+            .update_todo("nope".into(), AgentTodoStatus::Done, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains('\n'), "{error}");
+        assert!(
+            error.contains("t1 \"Line one line \\\"two\\\" xxx"),
+            "{error}"
+        );
+        assert!(error.contains("…\" [pending]"), "{error}");
     }
 
     #[test]

@@ -68,6 +68,9 @@ pub mod plugin_llm;
 #[cfg(feature = "pptx")]
 pub mod pptx_render;
 pub mod project_instructions;
+/// What a leader's workers returned, kept in front of it once the context
+/// guard has taken their results out of the request (AGE-941).
+pub mod results_ledger;
 /// The resume brief a resumed team leader starts from (AGE-922).
 pub mod resume_brief;
 /// What a run has left to hand its callees: turns, time and dollars

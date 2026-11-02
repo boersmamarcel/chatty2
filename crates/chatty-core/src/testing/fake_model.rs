@@ -107,7 +107,26 @@ pub const DEFAULT_USAGE: (u64, u64, u64) = (10, 5, 0);
 /// Routing keys, each with its queue of replies.
 #[derive(Debug, Clone, Default)]
 pub struct Script {
-    routes: Vec<(String, VecDeque<Reply>)>,
+    routes: Vec<(Key, VecDeque<Reply>)>,
+}
+
+/// What a route's key is matched against.
+#[derive(Debug, Clone)]
+enum Key {
+    /// The request's `model`, or a substring of its system prompt.
+    ModelOrSystem(String),
+    /// A substring of the raw request body: a request no model or system
+    /// prompt tells apart, e.g. a compaction's summary call, which runs on
+    /// the agent's own model with no system prompt.
+    Body(String),
+}
+
+impl Key {
+    fn name(&self) -> &str {
+        match self {
+            Key::ModelOrSystem(key) | Key::Body(key) => key,
+        }
+    }
 }
 
 impl Script {
@@ -121,17 +140,36 @@ impl Script {
         key: impl Into<String>,
         replies: impl IntoIterator<Item = Reply>,
     ) -> Self {
-        self.routes
-            .push((key.into(), replies.into_iter().collect::<VecDeque<_>>()));
+        self.routes.push((
+            Key::ModelOrSystem(key.into()),
+            replies.into_iter().collect::<VecDeque<_>>(),
+        ));
         self
     }
 
-    /// The first route whose key matches, by `model` equality or as a
-    /// substring of the system prompt.
-    fn matching(&self, model: &str, system: &str) -> Option<usize> {
-        self.routes
-            .iter()
-            .position(|(key, _)| model == key || system.contains(key.as_str()))
+    /// Answer requests whose raw body contains `key` with `replies`, in
+    /// order. Like every route it is tried in the order routes were added,
+    /// so add it ahead of the model route it must win over.
+    pub fn route_body(
+        mut self,
+        key: impl Into<String>,
+        replies: impl IntoIterator<Item = Reply>,
+    ) -> Self {
+        self.routes.push((
+            Key::Body(key.into()),
+            replies.into_iter().collect::<VecDeque<_>>(),
+        ));
+        self
+    }
+
+    /// The first route whose key matches: by `model` equality or as a
+    /// substring of the system prompt, or for a body route as a substring
+    /// of the raw body.
+    fn matching(&self, model: &str, system: &str, body: &[u8]) -> Option<usize> {
+        self.routes.iter().position(|(key, _)| match key {
+            Key::ModelOrSystem(key) => model == key || system.contains(key.as_str()),
+            Key::Body(key) => find(body, key.as_bytes()).is_some(),
+        })
     }
 }
 
@@ -343,7 +381,7 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
                     serde_json::from_slice(&request.body).unwrap_or(serde_json::Value::Null);
                 let model = body["model"].as_str().unwrap_or_default().to_string();
                 let system = system_prompt(&body);
-                let Some(at) = script.matching(&model, &system) else {
+                let Some(at) = script.matching(&model, &system, &request.body) else {
                     return http(
                         500,
                         "text/plain",
@@ -356,6 +394,7 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
                     );
                 };
                 let (key, queue) = &mut script.routes[at];
+                let key = key.name().to_string();
                 // Take everything up to and including the next answer now,
                 // so concurrent requests on one route never share a reply.
                 let mut taken = Vec::new();
@@ -379,7 +418,7 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
                 } else {
                     "text/event-stream"
                 };
-                (content_type, taken, key.clone())
+                (content_type, taken, key)
             }
         }
     };
@@ -799,6 +838,30 @@ mod tests {
         assert!(by_system.contains("from system"), "{by_system}");
         assert_eq!(daemon.requests_for("coder-model").len(), 1);
         assert_eq!(daemon.requests_for("You are the reviewer").len(), 1);
+    }
+
+    #[test]
+    fn a_body_route_added_first_wins_over_the_model_route() {
+        let daemon = FakeDaemon::scripted(
+            Script::new()
+                .route_body("compacting the working history", [Reply::text("summary")])
+                .route("m", [Reply::text("answer")]),
+        );
+
+        let (_, summary) = post(
+            &daemon,
+            "/chat/completions",
+            chat("m", "You are compacting the working history of an agent."),
+        );
+        let (_, answer) = post(&daemon, "/chat/completions", chat("m", "You code."));
+
+        assert!(summary.contains("summary"), "{summary}");
+        assert!(answer.contains("answer"), "{answer}");
+        assert_eq!(
+            daemon.requests_for("compacting the working history").len(),
+            1
+        );
+        assert_eq!(daemon.requests_for("m").len(), 1);
     }
 
     #[test]
