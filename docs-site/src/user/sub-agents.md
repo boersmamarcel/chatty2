@@ -134,6 +134,7 @@ A `module_settings.json` that still describes workers inline (the format before 
 | `agent.model` | This worker's model, matched the way `chatty-tui --model` matches (id, name, or part of the id). Leave it out to use the default model. A worker on a different model server is queued on that server's budget, not the parent's. |
 | `tools.profile` | A **role**: `coordinator`, `coder` or `reviewer`. A role is the worker's whole tool set; anything not in it — including every MCP tool — is gone, so a small model isn't handed fifty tool schemas before it can read a file. |
 | `agent.preamble` | Standing instructions, added to the worker's system prompt. Its first sentence is what the parent reads on the card, so lead with the role. |
+| `agent.max_tokens` | Optional. The most this worker may write in one model call, thinking included. Leave it out to use the model's own `max_tokens`, or no limit when that is unset too: there is no default. If a call is cut off at the limit, the worker is asked once to finish more briefly; if it is cut off again, its answer ends with a note that it may be incomplete. |
 | `budget.max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
 | `tools.disable` | Tool groups to remove on top of the role (`shell`, `fs-write`, `git`, …). |
 

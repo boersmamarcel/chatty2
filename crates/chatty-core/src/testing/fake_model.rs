@@ -44,13 +44,19 @@ use parking_lot::Mutex;
 
 /// One step of a scripted route.
 ///
-/// `Text`, `ToolCalls`, `Error` and `ErrorBody` answer a request; `Usage`,
+/// `Text`, `Truncated`, `ToolCalls`, `Error` and `ErrorBody` answer a request; `Usage`,
 /// `Delay`, `Say` and `Reason` shape the answer that follows them in the
 /// same queue.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     /// End the provider turn with this assistant text.
     Text(String),
+    /// End the provider turn with this text, cut off at the request's
+    /// output cap: SSE `finish_reason: "length"`, Ollama `done_reason:
+    /// "length"` (AGE-936). Empty text is a turn the cap ended before it
+    /// answered anything — with a [`Reason`](Self::Reason) ahead of it, one
+    /// that spent the cap thinking.
+    Truncated(String),
     /// Answer with these tool calls, `(name, arguments)`, in order.
     ToolCalls(Vec<(String, serde_json::Value)>),
     /// The usage the next answer reports, instead of [`DEFAULT_USAGE`].
@@ -357,6 +363,7 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
                     let answers = matches!(
                         reply,
                         Reply::Text(_)
+                            | Reply::Truncated(_)
                             | Reply::ToolCalls(_)
                             | Reply::Error(_)
                             | Reply::ErrorBody(..)
@@ -443,11 +450,25 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
             Reply::Text(text) => {
                 let text = format!("{said}{text}");
                 let body = if content_type == "text/event-stream" {
-                    sse_text(&text, usage)
+                    sse_text(&text, usage, "stop")
                 } else {
                     ndjson(
                         serde_json::json!({ "role": "assistant", "content": text }),
                         usage,
+                        "stop",
+                    )
+                };
+                return answer(streaming, &body);
+            }
+            Reply::Truncated(text) => {
+                let text = format!("{said}{text}");
+                let body = if content_type == "text/event-stream" {
+                    sse_text(&text, usage, "length")
+                } else {
+                    ndjson(
+                        serde_json::json!({ "role": "assistant", "content": text }),
+                        usage,
+                        "length",
                     )
                 };
                 return answer(streaming, &body);
@@ -471,6 +492,7 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
                     ndjson(
                         serde_json::json!({ "role": "assistant", "content": said, "tool_calls": calls }),
                         usage,
+                        "stop",
                     )
                 };
                 return answer(streaming, &body);
@@ -559,7 +581,9 @@ fn ndjson_thinking(text: &str) -> String {
         + "\n"
 }
 
-fn sse_text(text: &str, usage: (u64, u64, u64)) -> String {
+/// A text answer ending with `finish_reason` (`stop`, or `length` for one
+/// cut off at the output cap).
+fn sse_text(text: &str, usage: (u64, u64, u64), finish_reason: &str) -> String {
     sse_stream(&[
         serde_json::json!({
             "id": "gen-fake", "model": "fake",
@@ -568,7 +592,7 @@ fn sse_text(text: &str, usage: (u64, u64, u64)) -> String {
         }),
         serde_json::json!({
             "id": "gen-fake", "model": "fake",
-            "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }],
             "usage": sse_usage(usage)
         }),
     ])
@@ -605,13 +629,17 @@ fn sse_tool_calls(
     ])
 }
 
-fn ndjson(message: serde_json::Value, (input, output, _): (u64, u64, u64)) -> String {
+fn ndjson(
+    message: serde_json::Value,
+    (input, output, _): (u64, u64, u64),
+    done_reason: &str,
+) -> String {
     serde_json::json!({
         "model": "fake",
         "created_at": "2026-01-01T00:00:00Z",
         "message": message,
         "done": true,
-        "done_reason": "stop",
+        "done_reason": done_reason,
         "prompt_eval_count": input,
         "eval_count": output
     })

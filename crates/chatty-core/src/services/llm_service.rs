@@ -378,9 +378,35 @@ fn classify_completion_error(err: &CompletionError) -> StreamErrorKind {
         // A malformed tool call surfaces from rig as a JSON parse failure on
         // the provider's response, not an HTTP status.
         CompletionError::JsonError(_) => StreamErrorKind::MalformedToolCall,
+        // rig ends a run whose last turn answered nothing *and* was cut off
+        // (at the output cap, or by a content filter) with this error. It is
+        // an empty completion, not a transport failure: re-running the turn
+        // hits the same cap, so headless must stop rather than retry it five
+        // times (AGE-936). The in-turn retry (`EmptyTurnRetry`) had its go.
+        CompletionError::ResponseError(message) if message.contains(NO_ANSWER_CUT_OFF) => {
+            StreamErrorKind::EmptyCompletion
+        }
         _ => StreamErrorKind::Transport,
     }
 }
+
+/// What rig's error says when a run's last turn produced no answer and its
+/// provider cut it off. This matches rig-agent 0.42's error text
+/// (`AgentRun::next_step`) verbatim and must be revisited on every rig bump:
+/// rig has no typed variant for it. The session test
+/// `a_capped_turn_with_no_answer_stops_without_a_loop` drives the real error
+/// through this, so a rig that rewords it fails there.
+const NO_ANSWER_CUT_OFF: &str = "produced no answer and stopped with finish_reason=";
+
+/// Appended to a turn's answer when the run ended on a model call the
+/// provider cut off at its output cap (`finish_reason: length`) and the text
+/// was accepted as the answer — the retry in `EmptyTurnRetry` was already
+/// spent (AGE-936). Without it a worker's partial answer reaches its leader,
+/// and a human, as a complete success. The cap is not named: the hosted
+/// egress may lower a call's `max_tokens` on its way out, so chatty does not
+/// know the number that applied.
+pub const TRUNCATION_NOTE: &str =
+    "\n\n[Note: this answer was cut off at the output limit and may be incomplete.]";
 
 /// The typed `budget_exhausted` text for a provider's `402` refusal on a
 /// spent budget (AGE-903), read from its status and body.
@@ -739,6 +765,8 @@ pub async fn stream_prompt(
     let stream: ResponseStream = Box::pin(async_stream::stream! {
         // Whether the model call in flight has said anything yet.
         let mut text_in_last_call = false;
+        // Whether the latest model call ended at the output cap (AGE-936).
+        let mut last_call_cut_off = false;
         let mut clock = UsageClock::new(model);
         loop {
             tokio::select! {
@@ -774,6 +802,20 @@ pub async fn stream_prompt(
                                 && let Some(chunk) = failed_run_messages(e, &request_recorder, history_len)
                             {
                                 yield Ok(chunk);
+                            }
+                            // Whether the run's latest model call was cut
+                            // off at the output cap; read when the run ends.
+                            match &result {
+                                Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                                    last_call_cut_off = call.finish_reason
+                                        == Some(rig_core::completion::FinishReason::Length);
+                                }
+                                Ok(MultiTurnStreamItem::FinalResponse(_))
+                                    if last_call_cut_off && text_in_last_call =>
+                                {
+                                    yield Ok(StreamChunk::Text(TRUNCATION_NOTE.to_string()));
+                                }
+                                _ => {}
                             }
                             let (chunks, stop) = map_stream_result(result, semantics);
                             for mut chunk in chunks {
@@ -1401,6 +1443,30 @@ mod tests {
         assert_eq!(
             classify_completion_error(&CompletionError::ResponseError("boom".into())),
             StreamErrorKind::Transport
+        );
+    }
+
+    /// AGE-936: a run rig ended because its last turn was cut off with no
+    /// answer is an empty completion, which every surface stops on, not a
+    /// transport failure headless would re-run five times into the same cap.
+    #[test]
+    fn classifies_a_cut_off_turn_with_no_answer_as_empty() {
+        let err = CompletionError::ResponseError(
+            "the model produced no answer and stopped with finish_reason=Length; the turn ran \
+             out of output budget before producing one — raise max_tokens for this request"
+                .into(),
+        );
+        assert_eq!(
+            classify_completion_error(&err),
+            StreamErrorKind::EmptyCompletion
+        );
+        assert_eq!(
+            crate::services::decide_recovery(
+                StreamErrorKind::EmptyCompletion,
+                crate::services::StreamSurface::Headless,
+                0
+            ),
+            crate::services::RecoveryAction::Stop
         );
     }
 

@@ -6,6 +6,7 @@ mod connect_retry_http;
 mod empty_turn_retry;
 mod mcp_helpers;
 mod openai_responses;
+mod output_cap;
 mod preamble_builder;
 mod prompt_cache_http;
 mod provider_builder;
@@ -65,7 +66,9 @@ use tool_registry::active_native_tool_names;
 pub use build_context::{
     AgentBuildContext, AgentRole, AgentServices, SpecBuild, gated_exec_settings,
 };
-pub use empty_turn_retry::{EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry};
+pub use empty_turn_retry::{
+    EMPTY_COMPLETION_FOLLOW_UP, EmptyTurnRetry, OUTPUT_CAP_FOLLOW_UP, output_cap_follow_up,
+};
 pub(crate) use openai_responses::ensure_tools_reachable;
 #[cfg(test)]
 pub(crate) use provider_builder::openrouter_base_url;
@@ -325,6 +328,11 @@ impl AgentClient {
             plugins,
             plugin_host,
         } = ctx;
+        // The output cap this agent's requests carry, when one is configured
+        // (AGE-936): the spec's, else the model's, else none. Built in, so
+        // the context guard and the spec's plugins (`llm::complete`) use the
+        // same cap as the chat requests.
+        let model_config = &output_cap::with_output_cap(model_config, role.max_tokens);
         let run_inbox = lazy_broker.clone();
         // A worker's mid-run messages (TM-5) come over its connection.
         let mid_run_inbox = fabric_transport.clone();
