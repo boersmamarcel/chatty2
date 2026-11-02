@@ -24,7 +24,7 @@ pub(crate) use chatty_core::settings::models::execution_settings::{
 };
 use chatty_core::settings::models::models_store::{ModelConfig, resolve_model_query};
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -420,6 +420,23 @@ struct Cli {
     #[arg(long, value_name = "ID")]
     team: Option<String>,
 
+    /// Whether a --headless --team leader that resumes an earlier session's
+    /// task starts from a resume brief (AGE-922): `auto` (default) or `off`.
+    ///
+    /// Every headless leader keeps a session record in
+    /// `<workspace>/.chatty/team-state/<team>.json` (excluded from git):
+    /// how it ended, the end of its answer and its unfinished todos. With
+    /// `auto`, a leader that finds one opens its first turn, before the
+    /// task, with a few lines of facts: the checked-out branch, uncommitted
+    /// paths, branches not merged into main/master, that record, and the
+    /// instruction to finish open work before starting anything new. A
+    /// first run has no record and gets nothing. `off` skips the brief; the
+    /// record is still written.
+    ///
+    /// Example: --team devteam --headless --resume-brief off -m "…"
+    #[arg(long, value_name = "MODE", default_value = "auto", requires = "team")]
+    resume_brief: ResumeBriefMode,
+
     /// Run as an agent spec (AGE-614): `<NAME>.toml` in
     /// `<workspace>/.chatty/agents/`, then the platform data directory's
     /// `chatty/agents/`, then the presets compiled in.
@@ -452,6 +469,15 @@ struct Cli {
 
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+/// `--resume-brief` (AGE-922).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ResumeBriefMode {
+    /// Brief a leader whose workspace holds an earlier session's record.
+    Auto,
+    /// Never brief.
+    Off,
 }
 
 #[derive(Subcommand, Debug, PartialEq, Eq)]
@@ -971,6 +997,24 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         }
         engine.set_save_conversation(cli.save_conversation.clone());
         engine.set_export(cli.export_atif.clone());
+        // AGE-922: a headless team leader resumes from the record an
+        // earlier session left, and leaves one for the next.
+        if cli.headless
+            && !cli.pipe
+            && !participant_mode
+            && let (Some(team), Some(workspace)) = (
+                team.as_ref(),
+                engine.execution_settings.workspace_dir.clone(),
+            )
+        {
+            start_session_record(
+                &mut engine,
+                &team.id,
+                Path::new(&workspace),
+                cli.resume_brief,
+            )
+            .await;
+        }
         if let Some(fd) = cli.participant_fd {
             #[cfg(unix)]
             {
@@ -1071,6 +1115,32 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     }
 
     result
+}
+
+/// Read the session record an earlier leader of `team` left in `workspace`
+/// and, under `--resume-brief auto`, open the first turn with the brief built
+/// from it and the workspace's git facts; then mark this session as running
+/// and have the runner record its end (AGE-922).
+async fn start_session_record(
+    engine: &mut headless::HeadlessRunner,
+    team: &str,
+    workspace: &Path,
+    mode: ResumeBriefMode,
+) {
+    use chatty_core::services::resume_brief::{
+        SessionRecord, load_record, render_resume_brief, snapshot_workspace, store_record,
+    };
+    if mode == ResumeBriefMode::Auto
+        && let Some(previous) = load_record(workspace, team)
+    {
+        let snapshot = snapshot_workspace(workspace).await;
+        engine.set_resume_brief(render_resume_brief(snapshot.as_ref(), &previous));
+        eprintln!("Resuming team {team}: the first turn opens with a resume brief.");
+    }
+    if let Err(error) = store_record(workspace, team, &SessionRecord::started()).await {
+        eprintln!("session record: {error:#}");
+    }
+    engine.set_session_record(workspace.to_path_buf(), team.to_string());
 }
 
 /// Whether this process starts a broker: a root run with `--broker` or
@@ -2075,6 +2145,21 @@ mod cli_smoke_tests {
         assert!(team(&["--headless", "-m", "hi"]).headless);
         assert!(team(&["--pipe"]).pipe);
         assert!(Cli::try_parse_from(["chatty-tui", "--team"]).is_err());
+    }
+
+    /// AGE-922: `--resume-brief` defaults to `auto` and needs `--team`.
+    #[test]
+    fn resume_brief_defaults_to_auto_and_needs_a_team() {
+        let parsed = Cli::try_parse_from(["chatty-tui", "--headless", "-m", "hi"]).unwrap();
+        assert_eq!(parsed.resume_brief, crate::ResumeBriefMode::Auto);
+        let parsed =
+            Cli::try_parse_from(["chatty-tui", "--team", "devteam", "--resume-brief", "off"])
+                .unwrap();
+        assert_eq!(parsed.resume_brief, crate::ResumeBriefMode::Off);
+        assert!(Cli::try_parse_from(["chatty-tui", "--resume-brief", "off"]).is_err());
+        assert!(
+            Cli::try_parse_from(["chatty-tui", "--team", "t", "--resume-brief", "maybe"]).is_err()
+        );
     }
 
     /// `--tool-loading all|dynamic`, absent by default so the persisted

@@ -68,6 +68,8 @@ pub mod plugin_llm;
 #[cfg(feature = "pptx")]
 pub mod pptx_render;
 pub mod project_instructions;
+/// The resume brief a resumed team leader starts from (AGE-922).
+pub mod resume_brief;
 /// What a run has left to hand its callees: turns, time and dollars
 /// (PL-S2 DP-3).
 pub mod run_budget;
