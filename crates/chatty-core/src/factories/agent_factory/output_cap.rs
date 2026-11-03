@@ -109,6 +109,7 @@ mod tests {
     use crate::testing::fake_model::{FakeDaemon, Reply, Script};
 
     use super::super::OUTPUT_CAP_FOLLOW_UP;
+    use crate::session::CUT_OFF_FOLLOW_UP;
 
     const CHEAP_MODEL: &str = "age-936-cheap-model";
 
@@ -224,10 +225,21 @@ mod tests {
     /// One turn on a hosted model scripted with `replies`, on the headless
     /// surface: the events, the request bodies, and the session after it.
     async fn capped_turn(replies: Vec<Reply>) -> (Vec<SessionEvent>, Vec<String>, AgentSession) {
-        let _ = crate::init_repositories();
         let daemon = FakeDaemon::scripted(Script::new().route(CHEAP_MODEL, replies));
         // The cap a hosted egress would set near the end of a budget.
         let (model, provider) = hosted(&daemon, Some(8_192));
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+        let events = run_turn(&mut session, TurnInput::text("Write the report.")).await;
+        (events, bodies(&daemon), session)
+    }
+
+    /// A headless session on `model`, with its workspace (kept alive by the
+    /// caller).
+    async fn hosted_session(
+        model: &ModelConfig,
+        provider: &ProviderConfig,
+    ) -> (AgentSession, tempfile::TempDir) {
+        let _ = crate::init_repositories();
         let workspace = tempfile::tempdir().expect("a workspace");
         let settings = ExecutionSettingsModel {
             workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
@@ -251,30 +263,54 @@ mod tests {
             .create_conversation(
                 "age-936".to_string(),
                 "Capped".to_string(),
-                &model,
-                &provider,
+                model,
+                provider,
                 built.context,
             )
             .await
             .expect("the conversation builds");
+        (session, workspace)
+    }
+
+    /// Run `input` as one turn of `session`, applying its events.
+    async fn run_turn(session: &mut AgentSession, input: TurnInput) -> Vec<SessionEvent> {
         let events: Rc<RefCell<Vec<SessionEvent>>> = Rc::default();
         let sink = events.clone();
         session
-            .begin_turn(TurnInput::text("Write the report."), move |event| {
-                sink.borrow_mut().push(event)
-            })
+            .begin_turn(input, move |event| sink.borrow_mut().push(event))
             .expect("the turn starts")
             .await;
         let events = Rc::try_unwrap(events).unwrap().into_inner();
         for event in &events {
             session.apply(event);
         }
-        let bodies = daemon
+        events
+    }
+
+    fn bodies(daemon: &FakeDaemon) -> Vec<String> {
+        daemon
             .requests()
             .iter()
             .map(|request| String::from_utf8_lossy(&request.body).into_owned())
-            .collect();
-        (events, bodies, session)
+            .collect()
+    }
+
+    fn follow_ups(events: &[SessionEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::FollowUp(prompt) => Some(prompt.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn answer(session: &AgentSession) -> String {
+        session
+            .conversation()
+            .and_then(|conversation| conversation.streaming_message())
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn errors(events: &[SessionEvent]) -> Vec<crate::services::StreamError> {
@@ -341,13 +377,31 @@ mod tests {
     }
 
     /// A model that only ever hits the cap without answering costs the run
-    /// two calls, then the turn ends with an empty-completion error, which
-    /// even headless stops on: no loop of truncated answers.
+    /// two calls (the call and the feedback retry: the cap is chatty's, not
+    /// the window's, so a shorter history would not help, and the turn did
+    /// not think), then the turn ends with a follow-up that continues the
+    /// task (AGE-967). A follow-up turn cut off the same way ends with the
+    /// empty-completion error, which even headless stops on: no loop.
     #[tokio::test]
-    async fn a_capped_turn_with_no_answer_stops_without_a_loop() {
-        let (events, bodies, mut session) =
-            capped_turn(vec![Reply::Truncated(String::new()); 6]).await;
-        assert_eq!(bodies.len(), 2, "one call, one retry, no more");
+    async fn a_capped_turn_with_no_answer_continues_once_then_stops() {
+        let daemon = FakeDaemon::scripted(
+            Script::new().route(CHEAP_MODEL, vec![Reply::Truncated(String::new()); 6]),
+        );
+        let (model, provider) = hosted(&daemon, Some(8_192));
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+        let events = run_turn(&mut session, TurnInput::text("Write the report.")).await;
+        assert_eq!(bodies(&daemon).len(), 2, "one call, one retry, no more");
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(follow_ups(&events), vec![CUT_OFF_FOLLOW_UP.to_string()]);
+        session.finish_turn(None, vec![]);
+
+        let events = run_turn(
+            &mut session,
+            TurnInput::protocol_follow_up(CUT_OFF_FOLLOW_UP),
+        )
+        .await;
+        assert_eq!(bodies(&daemon).len(), 4, "the follow-up's call and retry");
+        assert!(follow_ups(&events).is_empty(), "{events:?}");
         let errors = errors(&events);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(
@@ -360,5 +414,213 @@ mod tests {
             "{errors:?}"
         );
         assert_eq!(session.recovery_action(&errors[0]), RecoveryAction::Stop);
+    }
+
+    // ── AGE-967: a turn the window ran out under ─────────────────────────
+
+    /// What a request body carries when thinking is switched off on an
+    /// OpenAI-compatible server (vLLM's Qwen chat template).
+    const THINKING_OFF: &str = r#""chat_template_kwargs":{"enable_thinking":false}"#;
+
+    /// What it carries for OpenRouter behind the same URL.
+    const REASONING_LOW: &str = r#""reasoning":{"effort":"low"}"#;
+
+    /// The soak's leader on local vLLM: no cap in the request, so the
+    /// window is the limit, and a call that reasons until it is full ends
+    /// with `finish_reason: length` and no answer. The fake model does that
+    /// until a request carries thinking off; the turn is repeated with it
+    /// (not answered with feedback: the rejected reasoning stays out of the
+    /// history) and completes.
+    #[tokio::test]
+    async fn a_turn_that_reasoned_until_the_window_ran_out_completes_with_thinking_off() {
+        let daemon = FakeDaemon::scripted(
+            Script::new()
+                .route_body(THINKING_OFF, [Reply::text("The report.")])
+                .route(
+                    CHEAP_MODEL,
+                    [Reply::reason(3, 0), Reply::Truncated(String::new())],
+                ),
+        );
+        let (model, provider) = hosted(&daemon, None);
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+        let events = run_turn(&mut session, TurnInput::text("Write the report.")).await;
+
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert!(follow_ups(&events).is_empty(), "{events:?}");
+        let bodies = bodies(&daemon);
+        assert_eq!(bodies.len(), 2, "the call and its repeat");
+        assert!(!bodies[0].contains(THINKING_OFF), "{}", bodies[0]);
+        assert!(bodies[1].contains(THINKING_OFF), "{}", bodies[1]);
+        // The fake model sits on a loopback URL, like the hive egress a
+        // hosted guest calls, which may forward to OpenRouter: both knobs.
+        assert!(bodies[1].contains(REASONING_LOW), "{}", bodies[1]);
+        assert!(!bodies[1].contains(OUTPUT_CAP_FOLLOW_UP), "{}", bodies[1]);
+        assert_eq!(answer(&session), "The report.");
+    }
+
+    /// A model that runs the window out even with thinking off gets one more
+    /// repeat with room kept for the reply, then the turn ends with a
+    /// follow-up instead of `EmptyCompletion`; thinking stays off for every
+    /// call of the run after the first cut-off.
+    #[tokio::test]
+    async fn a_turn_still_cut_off_with_thinking_off_ends_with_a_follow_up() {
+        let thinking = || [Reply::reason(2, 0), Reply::Truncated(String::new())];
+        let daemon = FakeDaemon::scripted(
+            Script::new().route(CHEAP_MODEL, [thinking(), thinking(), thinking()].concat()),
+        );
+        let (model, provider) = hosted(&daemon, None);
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+        let events = run_turn(&mut session, TurnInput::text("Write the report.")).await;
+
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(follow_ups(&events), vec![CUT_OFF_FOLLOW_UP.to_string()]);
+        let bodies = bodies(&daemon);
+        assert_eq!(
+            bodies.len(),
+            3,
+            "the call, thinking off, room for the reply"
+        );
+        assert!(!bodies[0].contains(THINKING_OFF));
+        assert!(bodies[1].contains(THINKING_OFF), "{}", bodies[1]);
+        assert!(bodies[2].contains(THINKING_OFF), "{}", bodies[2]);
+    }
+
+    /// An output cap of half the window or more already keeps that much
+    /// for the reply, so the reply-room step could only repeat the same
+    /// request: it is skipped, and the feedback retry takes its place. No
+    /// two requests of the turn are identical.
+    #[tokio::test]
+    async fn with_a_cap_of_half_the_window_the_reply_room_step_is_skipped() {
+        let thinking = || [Reply::reason(2, 0), Reply::Truncated(String::new())];
+        let daemon = FakeDaemon::scripted(
+            Script::new().route(CHEAP_MODEL, [thinking(), thinking(), thinking()].concat()),
+        );
+        // Clamped to the window (so the cut-off is the window's), with the
+        // cap above half of it.
+        let (mut model, provider) = hosted(&daemon, Some(30_000));
+        model.max_context_window = Some(32_768);
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+        let events = run_turn(&mut session, TurnInput::text("Write the report.")).await;
+
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(follow_ups(&events), vec![CUT_OFF_FOLLOW_UP.to_string()]);
+        let bodies = bodies(&daemon);
+        assert_eq!(bodies.len(), 3, "the call, thinking off, feedback");
+        assert!(bodies[1].contains(THINKING_OFF), "{}", bodies[1]);
+        assert!(bodies[2].contains(OUTPUT_CAP_FOLLOW_UP), "{}", bodies[2]);
+        for pair in bodies.windows(2) {
+            assert_ne!(pair[0], pair[1], "a repeat of the identical request");
+        }
+    }
+
+    /// A request that leaves the reply less than the clamp's floor in a
+    /// configured window is cut off because the window is full: the error
+    /// the follow-up turn ends with says so, not "raise max_tokens".
+    #[tokio::test]
+    async fn a_cut_off_in_an_exhausted_window_says_the_window_is_full() {
+        use crate::services::context_shaper::MIN_CLAMPED_REPLY_TOKENS;
+        use crate::services::llm_service::WINDOW_EXHAUSTED_ERROR;
+
+        assert!(WINDOW_EXHAUSTED_ERROR.contains(&format!("less than {MIN_CLAMPED_REPLY_TOKENS}")));
+        let daemon = FakeDaemon::scripted(
+            Script::new().route(CHEAP_MODEL, vec![Reply::Truncated(String::new()); 8]),
+        );
+        // A window the base and prompt alone fill.
+        let (mut model, provider) = hosted(&daemon, Some(2_048));
+        model.max_context_window = Some(1_024);
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+        let events = run_turn(&mut session, TurnInput::text("Write the report.")).await;
+        assert_eq!(follow_ups(&events), vec![CUT_OFF_FOLLOW_UP.to_string()]);
+        session.finish_turn(None, vec![]);
+
+        let events = run_turn(
+            &mut session,
+            TurnInput::protocol_follow_up(CUT_OFF_FOLLOW_UP),
+        )
+        .await;
+        let errors = errors(&events);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].kind, StreamErrorKind::EmptyCompletion);
+        assert_eq!(errors[0].message, WINDOW_EXHAUSTED_ERROR, "{errors:?}");
+    }
+
+    /// The thinking switch is the model's own request fields with thinking
+    /// flipped off, per wire, and none where it is unknown or already off.
+    #[test]
+    fn thinking_off_params_per_provider() {
+        use super::super::provider_builder::thinking_off_params;
+        let daemon_url = "http://127.0.0.1:9/v1".to_string();
+        let compat =
+            ProviderConfig::new("vllm".into(), ProviderType::OpenRouter).with_base_url(daemon_url);
+        let both = serde_json::json!({
+            "chat_template_kwargs": { "enable_thinking": false },
+            "reasoning": { "effort": "low" },
+        });
+        let mut qwen = model(ProviderType::OpenRouter);
+        assert_eq!(thinking_off_params(&qwen, &compat), Some(both.clone()));
+        qwen.extra_params.insert("think".into(), "true".into());
+        assert_eq!(thinking_off_params(&qwen, &compat), Some(both));
+        qwen.extra_params.insert("think".into(), "false".into());
+        assert_eq!(thinking_off_params(&qwen, &compat), None, "already off");
+
+        let plain = model(ProviderType::OpenRouter);
+        let openrouter = ProviderConfig::new("or".into(), ProviderType::OpenRouter);
+        assert_eq!(
+            thinking_off_params(&plain, &openrouter),
+            Some(serde_json::json!({ "reasoning": { "effort": "low" } }))
+        );
+        let openai = ProviderConfig::new("openai".into(), ProviderType::OpenRouter)
+            .with_base_url("https://api.openai.com/v1".into());
+        assert_eq!(thinking_off_params(&plain, &openai), None);
+
+        let ollama = ProviderConfig::new("ollama".into(), ProviderType::Ollama);
+        assert_eq!(
+            thinking_off_params(&model(ProviderType::Ollama), &ollama),
+            Some(serde_json::json!({ "think": false }))
+        );
+        let azure = ProviderConfig::new("azure".into(), ProviderType::AzureOpenAI);
+        assert_eq!(
+            thinking_off_params(&model(ProviderType::AzureOpenAI), &azure),
+            None
+        );
+    }
+
+    /// A configured cap the window has no room for is clamped to the room
+    /// left, so vLLM does not refuse the request outright (its prompt plus
+    /// `max_tokens` over the window); a cap that fits goes out unchanged.
+    #[tokio::test]
+    async fn a_cap_larger_than_the_window_has_room_for_is_clamped() {
+        use crate::services::context_shaper::MIN_CLAMPED_REPLY_TOKENS;
+        use rig_agent::completion::Prompt;
+
+        let _ = crate::init_repositories();
+        for (window, cap, clamped) in [(32_768, 30_000, true), (32_768, 2_048, false)] {
+            let daemon =
+                FakeDaemon::scripted(Script::new().route(CHEAP_MODEL, [Reply::text("done")]));
+            let (mut model, provider) = hosted(&daemon, Some(cap));
+            model.max_context_window = Some(window);
+            let built =
+                AgentBuildContext::from_spec(&AgentSpec::named("worker"), AgentServices::default())
+                    .expect("the spec builds");
+            let agent = super::super::AgentClient::from_model_config_with_tools(
+                &model,
+                &provider,
+                built.context,
+            )
+            .await
+            .expect("the agent builds");
+            let _ = agent.client.agent.prompt("go").await;
+            let body = daemon.requests()[0].json();
+            let sent = body["max_tokens"].as_u64().expect("a cap");
+            if clamped {
+                assert!(sent < cap as u64, "{sent}");
+                assert!(sent >= MIN_CLAMPED_REPLY_TOKENS as u64, "{sent}");
+                // Near the window: the base and the prompt are all it lost,
+                // beyond the tenth kept for the tokenizer mismatch.
+                assert!(sent as f64 > window as f64 * 0.5, "{sent}");
+            } else {
+                assert_eq!(sent, cap as u64);
+            }
+        }
     }
 }

@@ -92,6 +92,23 @@
 //! that goes out as recorded, or that drops no delegation result, is
 //! unchanged.
 //!
+//! # Room for the reply (AGE-967)
+//!
+//! Two things keep a request's reply inside the window. When the agent has
+//! an output cap (`max_tokens`), the model has a configured window, and the
+//! request as sent leaves less room than that cap — the history could not
+//! be shaped small enough, or the prompt alone is large — the request's
+//! `max_tokens` is lowered to the room left (never under
+//! [`MIN_CLAMPED_REPLY_TOKENS`]), since vLLM refuses a request whose prompt
+//! plus `max_tokens` exceeds its window; the run's scratchpad then carries
+//! [`WindowClamped`]. And once a turn was cut off with no answer because
+//! the window ran out (the cut-off ladder in `empty_turn_retry`), the run's
+//! scratchpad carries [`ReplyRoom`], and every later request of the run
+//! keeps [`REPLY_ROOM_SHARE`] of the window for the reply: the history is
+//! shaped, or compacted, that much harder. That window is the model's
+//! `max_context_window`, else the assumed 32k; the clamp needs a configured
+//! one.
+//!
 //! # Mid-run messages (TM-5)
 //!
 //! A worker's guard is also where the human, or the worker's owner, reaches
@@ -157,6 +174,27 @@ const RESPONSE_RESERVE: usize = 4_096;
 /// Fraction of the window kept free for what the count cannot see: the chat
 /// template's wrapping and the tokenizer mismatch (see the module docs).
 const HEADROOM_FRACTION: f64 = 0.10;
+
+/// Share of the window a run keeps for the reply once a turn of it ran out
+/// of window before answering ([`ReplyRoom`], AGE-967).
+pub const REPLY_ROOM_SHARE: f64 = 0.5;
+
+/// A clamped `max_tokens` never goes below this: a request with less room
+/// than that is over the window anyway, and the provider's refusal says so
+/// more clearly than a reply cut off after a few words.
+pub const MIN_CLAMPED_REPLY_TOKENS: usize = 1_024;
+
+/// Run-scoped marker (rig scratchpad): a turn of this run ran out of window
+/// before it answered, so every later request keeps [`REPLY_ROOM_SHARE`] of
+/// the window for the reply. Set by `EmptyTurnRetry` (AGE-967).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReplyRoom;
+
+/// Run-scoped marker (rig scratchpad): the guard lowered a request's
+/// `max_tokens` of this run to the room the window had left, so a cut-off
+/// at that cap was the window's. Read by `EmptyTurnRetry` (AGE-967).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowClamped;
 
 /// The compact stages keep this many characters of a tool result.
 const COMPACT_PREVIEW_CHARS: usize = 120;
@@ -225,6 +263,11 @@ pub struct ContextShaperSettings {
 
     /// Share of the budget the newest messages keep verbatim on compaction.
     pub compaction_keep_recent_fraction: f64,
+
+    /// The agent's configured output cap (`max_tokens`), which a request is
+    /// clamped below when the window has less room left (AGE-967). `None`:
+    /// requests carry no cap and are never given one.
+    pub output_cap: Option<usize>,
 }
 
 impl Default for ContextShaperSettings {
@@ -238,6 +281,7 @@ impl Default for ContextShaperSettings {
             headroom_fraction: HEADROOM_FRACTION,
             compaction_trigger_fraction: COMPACTION_TRIGGER_FRACTION,
             compaction_keep_recent_fraction: COMPACTION_KEEP_RECENT_FRACTION,
+            output_cap: None,
         }
     }
 }
@@ -287,6 +331,9 @@ struct Inner {
     compaction_usage: Mutex<Vec<ApiCallUsage>>,
     /// A worker's broker connection, its mid-run messages' source (TM-5).
     mid_run: OnceLock<Arc<dyn Transport>>,
+    /// Set per request: the request left the reply less than
+    /// [`MIN_CLAMPED_REPLY_TOKENS`] of a configured window.
+    window_exhausted: AtomicBool,
 }
 
 /// A compaction in force: `history[..covered]` goes out as `summary`.
@@ -319,6 +366,7 @@ impl ContextShaper {
         let mut settings = ContextShaperSettings::default();
         if let Some(max_tokens) = model_config.max_tokens.filter(|n| *n > 0) {
             settings.response_reserve = max_tokens as usize;
+            settings.output_cap = Some(max_tokens as usize);
         }
         let context_window = model_config
             .max_context_window
@@ -350,6 +398,7 @@ impl ContextShaper {
                 compaction_enabled: AtomicBool::new(false),
                 compaction_usage: Mutex::new(Vec::new()),
                 mid_run: OnceLock::new(),
+                window_exhausted: AtomicBool::new(false),
             }),
         }
     }
@@ -575,14 +624,76 @@ impl ContextShaper {
         prompt: &Message,
         turn: usize,
     ) -> Option<Vec<Message>> {
-        let prompt_tokens = self.inner.counter.count_message(prompt);
+        self.prepare_request_reserving(history, prompt, turn, 0)
+            .await
+    }
+
+    /// [`Self::prepare_request`] with `extra_reserve` more tokens kept free
+    /// for the reply ([`ReplyRoom`]).
+    pub async fn prepare_request_reserving(
+        &self,
+        history: &[Message],
+        prompt: &Message,
+        turn: usize,
+        extra_reserve: usize,
+    ) -> Option<Vec<Message>> {
+        let prompt_tokens = self.inner.counter.count_message(prompt) + extra_reserve;
         let compacted = self.compacted(history, prompt_tokens, turn).await;
         let base = compacted.as_deref().unwrap_or(history);
-        let sent = match self.request_history(base, prompt, turn) {
+        let sent = match self.request_history_reserving(base, prompt, turn, extra_reserve) {
             Some(sent) => sent,
             None => compacted.clone()?,
         };
-        Some(self.with_results_ledger(history, base, prompt, turn, sent))
+        Some(self.with_results_ledger(history, base, prompt, turn, sent, extra_reserve))
+    }
+
+    /// The tokens a run that ran out of window keeps free for the reply on
+    /// top of the usual reserve ([`ReplyRoom`]): enough for the reply to
+    /// have [`REPLY_ROOM_SHARE`] of the window.
+    pub fn reply_room_reserve(&self) -> usize {
+        let room = (self.context_window() as f64 * REPLY_ROOM_SHARE) as usize;
+        room.saturating_sub(self.inner.settings.response_reserve)
+    }
+
+    /// The `max_tokens` a request carrying `history` and `prompt` should go
+    /// out with instead of the agent's cap, or `None` when the cap fits (or
+    /// there is none): the window less the headroom, the base and the
+    /// request, never under [`MIN_CLAMPED_REPLY_TOKENS`]. Only against a
+    /// window the model is configured with: the assumed 32k may be far
+    /// below a hosted model's real one, and a cap clamped to it would cut
+    /// replies short that always fit.
+    pub fn clamped_output_cap(&self, history: &[Message], prompt: &Message) -> Option<u64> {
+        let cap = self.inner.settings.output_cap?;
+        let room = self.reply_room_left(history, prompt)?;
+        (cap > room).then(|| room.max(MIN_CLAMPED_REPLY_TOKENS) as u64)
+    }
+
+    /// The tokens a request carrying `history` and `prompt` leaves for the
+    /// reply in the model's configured window, less the headroom and the
+    /// base; `None` without a configured window.
+    fn reply_room_left(&self, history: &[Message], prompt: &Message) -> Option<usize> {
+        let window = self.inner.context_window?;
+        let headroom = (window as f64 * self.inner.settings.headroom_fraction) as usize;
+        let counter = &self.inner.counter;
+        let request: usize = history
+            .iter()
+            .chain(std::iter::once(prompt))
+            .map(|m| counter.count_message(m))
+            .sum();
+        Some(
+            window
+                .saturating_sub(headroom)
+                .saturating_sub(self.inner.base_tokens.load(Ordering::Relaxed))
+                .saturating_sub(request),
+        )
+    }
+
+    /// Whether this agent's latest request left less room for the reply
+    /// than [`MIN_CLAMPED_REPLY_TOKENS`] in its configured window: the
+    /// clamp could not make it fit, and a cut-off there is the window being
+    /// full, not `max_tokens` being too low (AGE-967).
+    pub fn window_exhausted(&self) -> bool {
+        self.inner.window_exhausted.load(Ordering::Relaxed)
     }
 
     /// `sent` with the results ledger ([`results_ledger`]) right after its
@@ -596,12 +707,13 @@ impl ContextShaper {
         prompt: &Message,
         turn: usize,
         sent: Vec<Message>,
+        extra_reserve: usize,
     ) -> Vec<Message> {
         let total = results_ledger::delegations(history).len();
         if total == 0 {
             return sent;
         }
-        let prompt_tokens = self.inner.counter.count_message(prompt);
+        let prompt_tokens = self.inner.counter.count_message(prompt) + extra_reserve;
         let max_chars = results_ledger::max_chars(self.history_budget(prompt_tokens));
         let ledger_for = |sent: &[Message]| {
             results_ledger::ledger_message(
@@ -618,7 +730,7 @@ impl ContextShaper {
         // (it is capped, so this settles at once in practice).
         let mut sent = sent;
         for _ in 0..3 {
-            let reserve = self.inner.counter.count_message(&ledger);
+            let reserve = self.inner.counter.count_message(&ledger) + extra_reserve;
             sent = self
                 .request_history_reserving(base, prompt, turn, reserve)
                 .unwrap_or_else(|| base.to_vec());
@@ -850,15 +962,42 @@ impl ContextShaper {
 impl AgentHook for ContextShaper {
     async fn on_completion_call(
         &self,
-        _ctx: &HookContext,
+        ctx: &HookContext,
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
-        match self
-            .prepare_request(event.history, event.prompt, event.turn)
-            .await
-        {
-            Some(history) => CompletionCallAction::patch(RequestPatch::new().history(history)),
-            None => CompletionCallAction::Continue,
+        let extra_reserve = if ctx.scratchpad().contains::<ReplyRoom>() {
+            self.reply_room_reserve()
+        } else {
+            0
+        };
+        let shaped = self
+            .prepare_request_reserving(event.history, event.prompt, event.turn, extra_reserve)
+            .await;
+        let sent = shaped.as_deref().unwrap_or(event.history);
+        let cap = self.clamped_output_cap(sent, event.prompt);
+        let exhausted = self
+            .reply_room_left(sent, event.prompt)
+            .is_some_and(|room| room < MIN_CLAMPED_REPLY_TOKENS);
+        self.inner
+            .window_exhausted
+            .store(exhausted, Ordering::Relaxed);
+        let mut patch = RequestPatch::new();
+        if let Some(cap) = cap {
+            debug!(
+                turn = event.turn,
+                max_tokens = cap,
+                "context shaper: output cap clamped to the room the window has left"
+            );
+            ctx.scratchpad().insert(WindowClamped);
+            patch = patch.max_tokens(cap);
+        }
+        if let Some(history) = shaped {
+            patch = patch.history(history);
+        }
+        if patch == RequestPatch::new() {
+            CompletionCallAction::Continue
+        } else {
+            CompletionCallAction::patch(patch)
         }
     }
 
@@ -1088,6 +1227,71 @@ mod tests {
         let counter = counter();
         let total: usize = history.iter().map(|m| counter.count_message(m)).sum();
         ContextShaper::new(settings, counter, Some(total - 1))
+    }
+
+    /// AGE-967: a configured cap the request leaves no room for is clamped
+    /// to the window less the headroom, the base and the request, never
+    /// under the floor; a cap that fits, or no cap, is left alone.
+    #[test]
+    fn the_output_cap_is_clamped_to_the_room_the_window_has_left() {
+        let history = vec![user_text(&"word ".repeat(400))];
+        let prompt = user_text("and now?");
+        let c = counter();
+        let request = c.count_message(&history[0]) + c.count_message(&prompt);
+        let shaper = |cap: Option<usize>| {
+            let shaper = ContextShaper::new(
+                ContextShaperSettings {
+                    headroom_fraction: 0.1,
+                    output_cap: cap,
+                    ..ContextShaperSettings::default()
+                },
+                counter(),
+                Some(10_000),
+            );
+            shaper.set_base_tokens(1_000);
+            shaper
+        };
+        let room = 10_000 - 1_000 - 1_000 - request;
+        assert_eq!(
+            shaper(Some(9_000)).clamped_output_cap(&history, &prompt),
+            Some(room as u64)
+        );
+        assert_eq!(
+            shaper(Some(room)).clamped_output_cap(&history, &prompt),
+            None,
+            "a cap that fits"
+        );
+        assert_eq!(shaper(None).clamped_output_cap(&history, &prompt), None);
+        let long = vec![user_text(&"word ".repeat(9_000))];
+        assert_eq!(
+            shaper(Some(9_000)).clamped_output_cap(&long, &prompt),
+            Some(MIN_CLAMPED_REPLY_TOKENS as u64),
+            "never under the floor"
+        );
+    }
+
+    /// AGE-967: a run that ran out of window keeps half of it for the
+    /// reply, so a history that fits as usual is shaped once the run
+    /// carries `ReplyRoom`.
+    #[tokio::test]
+    async fn room_for_the_reply_shapes_a_history_that_otherwise_fits() {
+        let history = tool_loop(6);
+        let prompt = user_text("and now?");
+        let c = counter();
+        let total: usize =
+            history.iter().map(|m| c.count_message(m)).sum::<usize>() + c.count_message(&prompt);
+        // Fits with room to spare under the usual reserve, not with half
+        // the window kept free.
+        let shaper = ContextShaper::new(settings(1_000), counter(), Some(total * 3 / 2));
+        assert!(shaper.prepare_request(&history, &prompt, 1).await.is_none());
+        let extra = shaper.reply_room_reserve();
+        assert_eq!(extra, total * 3 / 4, "half the window, the reserve being 0");
+        let shaped = shaper
+            .prepare_request_reserving(&history, &prompt, 1, extra)
+            .await
+            .expect("shaped for the reply's room");
+        let sent: usize = shaped.iter().map(|m| c.count_message(m)).sum();
+        assert!(sent < total, "{sent} < {total}");
     }
 
     #[test]

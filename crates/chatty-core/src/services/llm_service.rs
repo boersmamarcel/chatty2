@@ -398,6 +398,25 @@ fn classify_completion_error(err: &CompletionError) -> StreamErrorKind {
 /// through this, so a rig that rewords it fails there.
 const NO_ANSWER_CUT_OFF: &str = "produced no answer and stopped with finish_reason=";
 
+/// The cut-off error's text when the request filled the model's configured
+/// window: rig's "raise max_tokens" would send the reader the wrong way.
+/// It keeps rig's own phrase, so [`is_cut_off_without_answer`] (and the
+/// follow-up it leads to) still holds (AGE-967).
+pub const WINDOW_EXHAUSTED_ERROR: &str = "the model produced no answer and stopped with \
+     finish_reason=Length: the context window is exhausted — the request left the reply less \
+     than 1024 tokens, so raising max_tokens cannot help; the history has to shrink";
+
+/// Whether `error` is a run rig ended because its last turn ran out of
+/// output (`finish_reason=Length`) before it answered anything, after the
+/// in-turn cut-off ladder (`EmptyTurnRetry`, AGE-967) was spent. A content
+/// filter's cut-off is not one: continuing would only meet the filter again.
+pub fn is_cut_off_without_answer(error: &StreamError) -> bool {
+    error.kind == StreamErrorKind::EmptyCompletion
+        && error
+            .message
+            .contains(&format!("{NO_ANSWER_CUT_OFF}Length"))
+}
+
 /// Appended to a turn's answer when the run ended on a model call the
 /// provider cut off at its output cap (`finish_reason: length`) and the text
 /// was accepted as the answer — the retry in `EmptyTurnRetry` was already
@@ -820,6 +839,12 @@ pub async fn stream_prompt(
                             let (chunks, stop) = map_stream_result(result, semantics);
                             for mut chunk in chunks {
                                 clock.stamp(&mut chunk);
+                                if let StreamChunk::Error(error) = &mut chunk
+                                    && is_cut_off_without_answer(error)
+                                    && context_shaper.window_exhausted()
+                                {
+                                    error.message = WINDOW_EXHAUSTED_ERROR.to_string();
+                                }
                                 match &chunk {
                                     StreamChunk::Text(text) if !text.trim().is_empty() => {
                                         text_in_last_call = true;
