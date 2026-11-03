@@ -27,6 +27,7 @@ tools = [
     ("update_todo", "agent", "agent_todo_tool.rs", "Always available"),
     ("verify_completion", "agent", "agent_todo_tool.rs", "Always available"),
     ("read_skill", "memory", "read_skill_tool.rs", "Always available"),
+    ("calculate", "math", "calculate_tool.rs", "Always available"),
     ("list_agents", "agents", "list_agents_tool.rs", "Always available"),
     ("invoke_agent", "agents", "invoke_agent_tool.rs", "Always available"),
     ("best_of", "agents", "best_of_tool.rs", "A spec with `swarm.best_of` (the Crosscheck leaders)"),
