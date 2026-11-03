@@ -746,7 +746,7 @@ preamble = "Verify, do not trust, verdict first. …"
 max_tokens = 8192                  # optional output cap per model call; absent = the model's, else none
 
 [tools]
-profile = "reviewer"               # coordinator | coder | reviewer
+profile = "reviewer"               # coordinator | coder | reviewer | typesetter
 disable = ["fetch"]                # tool groups, narrows only
 skills = ["coder-reviewer"]        # read_skill names, named in the preamble
 
@@ -786,7 +786,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `agent.model` | Optional. Resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the roster's default. |
 | `agent.preamble` | Optional. The role's standing instructions, appended to the system prompt after the base preamble, before the tool summary. |
 | `agent.max_tokens` | Optional, opt-in, at least 1. The output cap every model call of this agent carries (`max_tokens` on the wire), over the model's own `max_tokens` (AGE-936). Absent with no model `max_tokens` either: no cap is sent, as before; chatty has no default cap (a fixed cap counts a thinking model's reasoning too and cuts ordinary calls short). Fitting a call to a hosted task's budget is the egress's job, which may lower a call's `max_tokens` itself. A call that reaches its cap (`finish_reason: length`) is handled: the first tool-free cut-off turn of a run is retried once with feedback; a second is accepted as the answer with `[Note: this answer was cut off at the output limit and may be incomplete.]` appended, and one with no answer at all ends the run as an empty completion, which no surface retries. |
-| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder` or `reviewer` — see below. |
+| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder`, `reviewer` or `typesetter` — see below. |
 | `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
 | `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
@@ -820,6 +820,7 @@ come with a non-empty `swarm.delegates_to`, on any profile or none, and no profi
 | `coordinator` | The read set below, plus the todo plan (`write_todos`, `update_todo`, `verify_completion`) and `git_merge` (AGE-404: how a leader without a shell takes a worker's branch; on a conflict the tool lists the conflicting files and leaves the tree for the leader to report). It does not edit; the `coder-reviewer-leader` preset delegates because its spec lists `local-coder` and `local-reviewer`. |
 | `coder` | The read set, plus the filesystem-write tools, the shell, the writing half of git (`git_add`, `git_create_branch`, `git_switch_branch`, `git_commit`, `git_merge`), `execute_code`, the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`), `calculate` (AGE-942) and the memory tools (`remember`, `save_skill`, `search_memory`; AGE-456). |
 | `reviewer` | The read set, plus the shell so it can run the tests and the data-query tools (`query_data`, `describe_data`, `profile_data`, `file_structure_detector`) so it can independently re-derive a claimed data-derived value, and `calculate` to recompute a figure exactly. No writes, no commits. |
+| `typesetter` | The read set, plus the filesystem-write tools (for its own workspace: a long text may arrive as a file it fixes in place), `compile_typst` and `calculate` (AGE-946). The only profile with `compile_typst`: a hosted worker's guest image has the Typst compiler in it for every role, so the profile is what decides who may call it. No shell, no git, no code execution. |
 
 The read set every profile starts from is `read_file`, `list_directory`, `glob_search`,
 `search_code`, `git_status`, `git_log`, `git_diff` (which takes a `base..head` `range`, so
@@ -992,8 +993,11 @@ starting the leader, or build the text with
 
 Two presets ship, both **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
-specs name no models. Besides them, three standalone specs ship: `researcher`,
-`reviewer` and `writer`.
+specs name no models. Besides them, four standalone specs ship: `researcher`,
+`reviewer`, `typesetter` and `writer`. `typesetter` (AGE-946) assembles the approved texts
+it is handed into one Typst document and compiles it with `compile_typst`, fixing compile
+errors until it compiles; it is the only preset whose profile has that tool, and it needs a
+build with the `math-render` feature.
 
 | Team (display name) | Leader | Attempts | Judge |
 |------|--------|---------|-------|

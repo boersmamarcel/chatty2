@@ -94,6 +94,11 @@ const CALCULATE: &[&str] = &["calculate"];
 /// only — `REVIEWER`'s whole design invariant is no writes (AGE-456).
 const MEMORY: &[&str] = &["remember", "save_skill", "search_memory"];
 
+/// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
+/// shares one guest image with `math-render` compiled in, so the profile is
+/// what keeps the compiler away from the roles that have no use for it.
+const TYPESET: &[&str] = &["compile_typst"];
+
 /// One named tool set, as a list of groups so the three profiles share their
 /// common parts rather than repeating them.
 #[derive(Debug, PartialEq, Eq)]
@@ -240,8 +245,17 @@ pub static REVIEWER: ToolProfile = ToolProfile {
     groups: &[READ_SET, SHELL, DATA_QUERY, CALCULATE, MESSAGES],
 };
 
+/// A worker that turns approved texts into one PDF (AGE-946): the read set,
+/// the filesystem-write tools for its own workspace (a long text arrives as
+/// a file it may have to fix in place), `compile_typst`, and `calculate`.
+/// No shell, no git, no code execution.
+pub static TYPESETTER: ToolProfile = ToolProfile {
+    name: "typesetter",
+    groups: &[READ_SET, FS_WRITE, TYPESET, CALCULATE, MESSAGES],
+};
+
 /// Every profile, in the order `--tools` documents them.
-pub static TOOL_PROFILES: &[&ToolProfile] = &[&COORDINATOR, &CODER, &REVIEWER];
+pub static TOOL_PROFILES: &[&ToolProfile] = &[&COORDINATOR, &CODER, &REVIEWER, &TYPESETTER];
 
 /// The profile of that name, or `None` — the caller decides whether an unknown
 /// name is a warning or a hard error.
@@ -305,6 +319,7 @@ mod tests {
         assert_eq!(tool_profile("reviewer"), Some(&REVIEWER));
         assert_eq!(tool_profile("coder"), Some(&CODER));
         assert_eq!(tool_profile("coordinator"), Some(&COORDINATOR));
+        assert_eq!(tool_profile("typesetter"), Some(&TYPESETTER));
         assert_eq!(tool_profile("Reviewer"), None, "names are exact");
         assert_eq!(tool_profile("nope"), None);
     }
@@ -412,6 +427,43 @@ mod tests {
                 !COORDINATOR.allows(tool),
                 "no evidence yet a leader needs to write memory itself"
             );
+        }
+    }
+
+    /// AGE-946: every hosted role runs in one guest image with the Typst
+    /// compiler in it, so the profile is the only thing that decides who
+    /// may call it — the typesetter, and nobody else.
+    #[test]
+    fn only_the_typesetter_compiles_typst() {
+        for profile in TOOL_PROFILES {
+            assert_eq!(
+                profile.allows("compile_typst"),
+                profile.name() == "typesetter",
+                "{} and compile_typst",
+                profile.name()
+            );
+        }
+        for tool in ["read_file", "write_file", "apply_diff", "calculate"] {
+            assert!(TYPESETTER.allows(tool), "a typesetter needs {tool}");
+        }
+        for tool in [
+            "shell_execute",
+            "git_commit",
+            "execute_code",
+            "query_data",
+            "fetch",
+            "remember",
+            "write_todos",
+        ] {
+            assert!(!TYPESETTER.allows(tool), "a typesetter has no {tool}");
+        }
+        let narrowed = TYPESETTER.narrow(&everything());
+        assert!(narrowed.compile_typst);
+        assert!(narrowed.fs_write);
+        assert!(!narrowed.shell);
+        assert!(!narrowed.data_query);
+        for profile in [&COORDINATOR, &CODER, &REVIEWER] {
+            assert!(!profile.narrow(&everything()).compile_typst);
         }
     }
 

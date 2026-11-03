@@ -879,6 +879,12 @@
     "TaskMetadata": {
       "additionalProperties": false,
       "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/WireArtifact"
+          },
+          "type": "array"
+        },
         "conversation": {},
         "conversationTooLarge": {
           "format": "uint64",
@@ -1051,6 +1057,34 @@
       "required": [
         "name",
         "scope"
+      ],
+      "type": "object"
+    },
+    "WireArtifact": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "mediaType",
+        "size"
       ],
       "type": "object"
     },

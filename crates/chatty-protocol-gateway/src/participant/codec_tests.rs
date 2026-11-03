@@ -11,8 +11,8 @@ use chatty_core::services::handoff::{
     HANDOFF_INVALID_COUNT_METADATA_KEY, HANDOFF_INVALID_METADATA_KEY, HANDOFF_METADATA_KEY,
 };
 use chatty_fabric::wire::{
-    HandoffInvalid, Opaque, TaskIdentity, TaskMetadata, WireModelRef, WireProgress, WireUsage,
-    WireUsageLine, WorkerSwarmItem,
+    HandoffInvalid, Opaque, TaskIdentity, TaskMetadata, WireArtifact, WireModelRef, WireProgress,
+    WireUsage, WireUsageLine, WorkerSwarmItem,
 };
 use chatty_fabric::{
     Answer, AskReply, AskRequest, Asker, ConversationScope, InvokeAgentParams, NodeName, Question,
@@ -1082,6 +1082,12 @@ fn task_metadata_roundtrips_every_worker_key() {
         evidence: Some(
             Opaque::from_value(&json!({"branch": "kit-coder-0", "commits": 1})).unwrap(),
         ),
+        artifacts: vec![WireArtifact {
+            name: "book.pdf".into(),
+            media_type: "application/pdf".into(),
+            size: 4,
+            data: Some("JVBERg==".into()),
+        }],
     };
     let line = worker
         .encode(&ParticipantFrame::Status {
@@ -1109,6 +1115,8 @@ fn task_metadata_roundtrips_every_worker_key() {
         HANDOFF_INVALID_COUNT_METADATA_KEY,
         // The runner's, added by the broker (`with_evidence`).
         "evidence",
+        // The PDFs `compile_typst` wrote (AGE-946).
+        "artifacts",
     ]
     .into_iter()
     .map(String::from)
