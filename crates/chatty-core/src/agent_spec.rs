@@ -108,6 +108,7 @@ pub const PRESETS: &[(&str, &str)] = &[
     ),
     ("researcher", include_str!("../agents/researcher.toml")),
     ("reviewer", include_str!("../agents/reviewer.toml")),
+    ("typesetter", include_str!("../agents/typesetter.toml")),
     ("writer", include_str!("../agents/writer.toml")),
 ];
 
@@ -167,7 +168,7 @@ pub struct AgentSection {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsSection {
-    /// A named tool profile (`coordinator`, `coder`, `reviewer`).
+    /// A named tool profile (`coordinator`, `coder`, `reviewer`, `typesetter`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// Tool groups switched off on top of the profile; narrows only.
@@ -1511,6 +1512,7 @@ cap_usd = 2.0
                 "crosscheck-lead",
                 "researcher",
                 "reviewer",
+                "typesetter",
                 "writer",
             ]
         );
@@ -1583,6 +1585,7 @@ cap_usd = 2.0
                 "crosscheck-writer",
                 "researcher",
                 "reviewer",
+                "typesetter",
             ]
         );
         let listings = inspect_agent_specs_from(Some(workspace.path()), None);
@@ -1597,6 +1600,7 @@ cap_usd = 2.0
                 "crosscheck-lead",
                 "researcher",
                 "reviewer",
+                "typesetter",
             ]
         );
     }
@@ -1753,6 +1757,7 @@ cap_usd = 2.0
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
                 "reviewer",
+                "typesetter",
                 "writer"
             ]
         );

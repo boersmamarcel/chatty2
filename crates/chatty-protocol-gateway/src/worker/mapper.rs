@@ -25,6 +25,7 @@
 //! | `ApiCallUsage` | — (folded into `TokenUsage`) |
 //! | `TokenUsage` | — (held, and attached to the terminal status) |
 //! | `TurnMessages` | — (held when capture is on, and attached to the terminal status; RC-0, AGE-649) |
+//! | `ToolCallResult` of `compile_typst` | its progress line, and the PDF's path held for the terminal status (AGE-946) |
 //! | `Error` / `Cancelled` | `status: working`, and the task's recorded outcome |
 //! | `TurnEnded` | — (see below) |
 //! | `FollowUp` | — |
@@ -119,6 +120,17 @@
 //! rides under [`CONVERSATION_TOO_LARGE_METADATA_KEY`] instead — never a
 //! silently truncated conversation.
 //!
+//! # Artifacts (AGE-946)
+//!
+//! A hosted worker's workspace dies with its lease, so a file it made for
+//! its caller has to travel back on the terminal status. The channel is
+//! narrow on purpose: the PDFs `compile_typst` wrote, read back at the
+//! terminal status, newest first under [`ARTIFACT_CAP_BYTES`] for all of
+//! them together. One over the cap rides as its name and size alone, never
+//! truncated. A path compiled to again is sent once, as it is at the end.
+//! A desktop worker shares its caller's disk, and nothing on the desktop
+//! reads them.
+//!
 //! # Typed handoffs (TD-2, AGE-693)
 //!
 //! A task whose role has a handoff schema carries it
@@ -133,6 +145,7 @@
 //! keeps none of this, so its frames are the bytes they always were.
 
 use crate::participant::{ParticipantFrame, TaskState};
+use base64::Engine as _;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
 use chatty_core::models::execution_approval_store::{
     self as approvals, ApprovalDecision, ApprovalDetail, ExecutionApprovalStore,
@@ -146,7 +159,9 @@ use chatty_core::services::{HeartbeatThrottle, heartbeat_interval};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
-use chatty_fabric::wire::{HandoffInvalid, Opaque, TaskMetadata, WorkerSwarmItem};
+use chatty_fabric::wire::{
+    ARTIFACT_CAP_BYTES, HandoffInvalid, Opaque, TaskMetadata, WireArtifact, WorkerSwarmItem,
+};
 use chatty_fabric::{Answer, ApprovalKind, ApprovalRequest, ApprovalVerdict, AskRequest, Question};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -407,6 +422,8 @@ pub struct TaskMapper {
     /// Tool call id → index into `trace`, for a call still waiting on its
     /// result or error.
     open_calls: HashMap<String, usize>,
+    /// The files `compile_typst` wrote, oldest first, each once (AGE-946).
+    artifacts: Vec<String>,
     /// Whether this task's conversation is captured at its terminal status
     /// (RC-0, AGE-649). Off by default.
     capture_conversation: bool,
@@ -452,6 +469,7 @@ impl TaskMapper {
             usage: Vec::new(),
             trace: Vec::new(),
             open_calls: HashMap::new(),
+            artifacts: Vec::new(),
             capture_conversation: false,
             captured_messages: Vec::new(),
             handoff: None,
@@ -598,6 +616,12 @@ impl TaskMapper {
             }
             SessionEvent::ToolCallResult { id, result } => {
                 if let Some(index) = self.open_calls.remove(id) {
+                    if self.trace[index].name == ARTIFACT_TOOL
+                        && let Some(path) = saved_path(result)
+                    {
+                        self.artifacts.retain(|known| *known != path);
+                        self.artifacts.push(path);
+                    }
                     self.trace[index].outcome = StepOutcome::Ok(result.clone());
                 }
             }
@@ -816,6 +840,7 @@ impl TaskMapper {
         };
         self.conversation_metadata(&mut metadata);
         self.handoff_metadata(handoff, &mut metadata);
+        metadata.artifacts = read_artifacts(&self.artifacts);
         (!metadata.is_empty()).then_some(metadata)
     }
 
@@ -847,6 +872,57 @@ impl TaskMapper {
             metadata: None,
         }
     }
+}
+
+/// The tool whose output files ride back as artifacts (AGE-946).
+const ARTIFACT_TOOL: &str = "compile_typst";
+
+/// The `saved_path` of a `compile_typst` result.
+fn saved_path(result: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(result).ok()?;
+    value["saved_path"].as_str().map(str::to_string)
+}
+
+/// The files at `paths` as artifacts, in the same order: the newest first
+/// gets its bytes while the cap allows; a file over what is left goes as
+/// its name and size alone, and a file that is gone is left out.
+fn read_artifacts(paths: &[String]) -> Vec<WireArtifact> {
+    let mut left = ARTIFACT_CAP_BYTES;
+    let mut artifacts: Vec<WireArtifact> = paths
+        .iter()
+        .rev()
+        .filter_map(|path| {
+            let path = std::path::Path::new(path);
+            let size = std::fs::metadata(path).ok()?.len();
+            let data = if size <= left {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        left -= size;
+                        Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, path = %path.display(), "An artifact could not be read");
+                        return None;
+                    }
+                }
+            } else {
+                None
+            };
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let media_type = match path.extension().and_then(|e| e.to_str()) {
+                Some(ext) if ext.eq_ignore_ascii_case("pdf") => "application/pdf",
+                _ => "application/octet-stream",
+            };
+            Some(WireArtifact {
+                name,
+                media_type: media_type.to_string(),
+                size,
+                data,
+            })
+        })
+        .collect();
+    artifacts.reverse();
+    artifacts
 }
 
 /// Fold `line` into `lines`: onto the line with the same model when there
@@ -945,6 +1021,89 @@ mod tests {
             TaskState::Completed,
             "a tool may fail and the turn still succeed; only a stream error ends the task"
         );
+    }
+
+    /// One `compile_typst` call that wrote `path`.
+    fn compiled(mapper: &mut TaskMapper, id: &str, path: &std::path::Path) {
+        mapper.map(&tool_started(id, "compile_typst"));
+        mapper.map(&SessionEvent::ToolCallResult {
+            id: id.into(),
+            result: serde_json::json!({"saved_path": path, "page_count": 1}).to_string(),
+        });
+    }
+
+    fn artifacts(mapper: &TaskMapper) -> Vec<WireArtifact> {
+        match mapper.terminal() {
+            ParticipantFrame::Status { metadata, .. } => metadata
+                .map(|metadata| metadata.artifacts)
+                .unwrap_or_default(),
+            other => panic!("expected a status frame, got {other:?}"),
+        }
+    }
+
+    /// AGE-946: the PDF `compile_typst` wrote rides back on the terminal
+    /// status, its bytes base64; a path compiled to again goes once, as it
+    /// is at the end; a failed compile and a file since removed add nothing.
+    #[test]
+    fn the_pdfs_compile_typst_wrote_ride_the_terminal_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let book = dir.path().join("book.pdf");
+        let gone = dir.path().join("gone.pdf");
+        let mut mapper = TaskMapper::new("task-1");
+        assert!(artifacts(&mapper).is_empty(), "no compile, no artifacts");
+
+        std::fs::write(&book, b"%PDF-1.7 draft").unwrap();
+        compiled(&mut mapper, "c1", &book);
+        std::fs::write(&gone, b"%PDF-1.7 gone").unwrap();
+        compiled(&mut mapper, "c2", &gone);
+        std::fs::remove_file(&gone).unwrap();
+        mapper.map(&tool_started("c3", "compile_typst"));
+        mapper.map(&SessionEvent::ToolCallError {
+            id: "c3".into(),
+            error: "Error: compile_typst: Typst compilation failed".into(),
+        });
+        // Another tool's `saved_path` is not an artifact.
+        mapper.map(&tool_started("c4", "write_file"));
+        mapper.map(&SessionEvent::ToolCallResult {
+            id: "c4".into(),
+            result: serde_json::json!({"saved_path": book}).to_string(),
+        });
+        std::fs::write(&book, b"%PDF-1.7 final").unwrap();
+        compiled(&mut mapper, "c5", &book);
+
+        let sent = artifacts(&mapper);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].name, "book.pdf");
+        assert_eq!(sent[0].media_type, "application/pdf");
+        assert_eq!(sent[0].size, 14);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(sent[0].data.as_deref().unwrap())
+            .unwrap();
+        assert_eq!(bytes, b"%PDF-1.7 final");
+    }
+
+    /// Over the cap an artifact is its name and size, never cut short;
+    /// the newest gets the bytes first.
+    #[test]
+    fn an_artifact_over_the_cap_goes_without_its_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.pdf");
+        let small = dir.path().join("small.pdf");
+        let file = std::fs::File::create(&big).unwrap();
+        file.set_len(ARTIFACT_CAP_BYTES).unwrap();
+        std::fs::write(&small, b"%PDF").unwrap();
+        let mut mapper = TaskMapper::new("task-1");
+        compiled(&mut mapper, "c1", &big);
+        compiled(&mut mapper, "c2", &small);
+
+        let sent = artifacts(&mapper);
+        assert_eq!(
+            sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            ["big.pdf", "small.pdf"]
+        );
+        assert_eq!(sent[0].size, ARTIFACT_CAP_BYTES);
+        assert_eq!(sent[0].data, None, "the newest took the room first");
+        assert!(sent[1].data.is_some());
     }
 
     /// AGE-932: this task's own heartbeats, a grandchild's, and a

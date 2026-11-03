@@ -197,7 +197,7 @@ struct Cli {
     /// tool set of a role (ADR-0011 C11) — anything it does not name is
     /// dropped, MCP tools included. It only ever removes tools: a profile
     /// cannot turn a group back on that the settings switched off.
-    /// Valid profiles: coordinator, coder, reviewer.
+    /// Valid profiles: coordinator, coder, reviewer, typesetter.
     ///
     /// Applied after --enable/--disable, and it wins over both.
     ///

@@ -86,7 +86,7 @@ chatty-tui --headless --broker -m "Refactor the auth module and write tests"
 
 ## Named workers and roles
 
-Out of the box the parent can reach `local-agent` — your default model with the parent's tools — the built-in agents (`researcher`, `reviewer`, `writer` and the `crosscheck-lead` / `crosscheck-data-lead` team leaders), and every spec of your own that doesn't opt out with `exposed = false` under `[swarm]`. A spec that names its `callers` (a team's internal members, such as `crosscheck-judge`) works only for those agents and is never offered to the parent. You can declare your own **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
+Out of the box the parent can reach `local-agent` — your default model with the parent's tools — the built-in agents (`researcher`, `reviewer`, `typesetter`, `writer` and the `crosscheck-lead` / `crosscheck-data-lead` team leaders), and every spec of your own that doesn't opt out with `exposed = false` under `[swarm]`. A spec that names its `callers` (a team's internal members, such as `crosscheck-judge`) works only for those agents and is never offered to the parent. You can declare your own **named workers**, each with its own model, a role that limits what it may do, and standing instructions. The parent sees each one as a card — its name, model, role and the first sentence of its instructions — and picks by reading, the same way it would choose a colleague. Nothing else about the parent changes: the prompt and the tool stay identical whether the roster is empty or five deep.
 
 Declare each worker as an **agent spec**: a small TOML file named after the worker, in your project's `.chatty/agents/` folder (or in Chatty's data folder under `chatty/agents/` to share it across projects — [where that is](./advanced.md)):
 
@@ -132,7 +132,7 @@ A `module_settings.json` that still describes workers inline (the format before 
 |-------|--------------|
 | `agent.name` | What the parent addresses; also the branch name, `sub-agent/<name>`. Must match the file name. |
 | `agent.model` | This worker's model, matched the way `chatty-tui --model` matches (id, name, or part of the id). Leave it out to use the default model. A worker on a different model server is queued on that server's budget, not the parent's. |
-| `tools.profile` | A **role**: `coordinator`, `coder` or `reviewer`. A role is the worker's whole tool set; anything not in it — including every MCP tool — is gone, so a small model isn't handed fifty tool schemas before it can read a file. |
+| `tools.profile` | A **role**: `coordinator`, `coder`, `reviewer` or `typesetter`. A role is the worker's whole tool set; anything not in it — including every MCP tool — is gone, so a small model isn't handed fifty tool schemas before it can read a file. |
 | `agent.preamble` | Standing instructions, added to the worker's system prompt. Its first sentence is what the parent reads on the card, so lead with the role. |
 | `agent.max_tokens` | Optional. The most this worker may write in one model call, thinking included. Leave it out to use the model's own `max_tokens`, or no limit when that is unset too: there is no default. If a call is cut off at the limit, the worker is asked once to finish more briefly; if it is cut off again, its answer ends with a note that it may be incomplete. |
 | `budget.max_agent_turns` | How many tool rounds this worker may take before it has to answer. Without it the worker has no turn cap and a 30-minute time budget. This is the worker's own budget — the parent's is **Max Agent Turns** under **Settings → Code Execution**. |
@@ -140,13 +140,14 @@ A `module_settings.json` that still describes workers inline (the format before 
 
 A spec in your project folder wins over one of the same name in the data folder, which wins over the built-in ones (the members of the teams below). `chatty-tui --agent <name>` runs the terminal app as any spec.
 
-The three roles:
+The four roles:
 
 | Role | Can | Cannot |
 |------|-----|--------|
 | **`coordinator`** | Read files, search, read git history and diffs, delegate to other workers, merge a worker's branch, ask you a question. | Edit, run commands, commit. It hands work out; it never does it. |
 | **`coder`** | Everything a coordinator can read, plus write files, run commands, commit on its own branch, run code, query data, remember and save skills. | Delegate further: a coder does not fan out. |
 | **`reviewer`** | Read and search, read diffs (including another worker's branch), run commands so it can run the tests, query data. | Write, commit, or delegate. It reports; it never fixes. |
+| **`typesetter`** | Read and write files in its own workspace, compile Typst markup to a PDF (`compile_typst`), calculate. The only role that can make a PDF. | Run commands, use git, run code, or delegate. |
 
 A role only ever removes tools: it cannot turn on a tool group you switched off under **Settings → Code Execution** (or with `--disable`).
 
@@ -167,7 +168,7 @@ Two teams ship built in, both **experimental**: they are free, run on your own m
 | `crosscheck` (Crosscheck) | `chatty-tui --team crosscheck -m "<task>"` | Several independent attempts at your task, and a judge picks the strongest; the reply says what it cost. |
 | `crosscheck-data` (Crosscheck: Data) | `chatty-tui --team crosscheck-data -m "<question about your data>"` | The same, with data analysts as the attempts. |
 
-See [Crosscheck](./crosscheck.md) for when it pays and what it costs. `chatty-tui --team <id>` runs a team from the terminal. The desktop has no team switch: the team's leader is on the default roster, so `/agent <leader> …` runs it, since the leader is an agent like any other. Three standalone agents ship too: `researcher`, `reviewer` and `writer`.
+See [Crosscheck](./crosscheck.md) for when it pays and what it costs. `chatty-tui --team <id>` runs a team from the terminal. The desktop has no team switch: the team's leader is on the default roster, so `/agent <leader> …` runs it, since the leader is an agent like any other. Four standalone agents ship too: `researcher`, `reviewer`, `typesetter` (turns approved texts into one PDF; needs a build with PDF output) and `writer`.
 
 `--model` runs every agent of the team on that model for the run, including agents whose spec names a model of its own; `--tools` and `--preamble` override the leader's settings. Bring your own team by adding `<workspace>/.chatty/teams/<id>/team.json`, which overrides both the built-in preset and any team of the same id under your data directory. File format and search order: [Teams](../dev/architecture/agents-and-specs.md#teams).
 

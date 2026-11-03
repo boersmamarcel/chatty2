@@ -131,6 +131,32 @@ pub struct TaskMetadata {
     /// broker for a virtual agent's worker. Opaque: the runner's facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Opaque>,
+    /// The files the task produced for its caller to keep (AGE-946): a
+    /// hosted worker's workspace is gone with its lease, so a deliverable
+    /// rides back on the terminal status. Empty for every task that made
+    /// none, and then absent from the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<WireArtifact>,
+}
+
+/// The most bytes one task's artifacts carry, all of them together
+/// (AGE-946). An artifact past it rides as its name and size alone, never
+/// truncated: well under the frame cap, beside a captured conversation.
+pub const ARTIFACT_CAP_BYTES: u64 = 10 * 1024 * 1024;
+
+/// One file a task produced: its name, media type and size, and its bytes
+/// as standard base64 unless they did not fit [`ARTIFACT_CAP_BYTES`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WireArtifact {
+    /// The file's name, without its directory.
+    pub name: String,
+    pub media_type: String,
+    /// The file's size in bytes.
+    pub size: u64,
+    /// The bytes, base64; absent when they did not fit the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 impl TaskMetadata {
