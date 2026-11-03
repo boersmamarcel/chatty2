@@ -93,9 +93,13 @@ pub(super) async fn build_provider_agent(
             sanitize_mcp_tools_for_openai(mcp_tools)
         }
     };
+    let empty_turn_retry =
+        EmptyTurnRetry::with_thinking_off(thinking_off_params(model_config, provider_config))
+            .with_reply_room(context_shaper.reply_room_reserve() > 0);
     let builder = chat_agent_builder(
         native_tools,
         builder,
+        empty_turn_retry,
         context_shaper.clone(),
         request_recorder.clone(),
         tool_loader.clone(),
@@ -485,13 +489,14 @@ fn normalize_azure_endpoint(raw_endpoint: &str) -> String {
 fn chat_agent_builder(
     native_tools: NativeTools,
     builder: AgentBuilder,
+    empty_turn_retry: EmptyTurnRetry,
     context_shaper: ContextShaper,
     request_recorder: RequestRecorder,
     tool_loader: Option<ToolLoader>,
 ) -> AgentBuilder<rig_agent::agent::WithBuilderTools> {
     let builder = native_tools
         .apply_to_builder(builder)
-        .add_hook(EmptyTurnRetry);
+        .add_hook(empty_turn_retry);
     let builder = match tool_loader {
         Some(loader) => builder.add_hook(loader),
         None => builder,
@@ -500,6 +505,63 @@ fn chat_agent_builder(
         .add_hook(ToolNameRepair)
         .add_hook(context_shaper)
         .add_hook(request_recorder)
+}
+
+/// The request fields that switch thinking off for one model call, for the
+/// cut-off retry (`EmptyTurnRetry`, AGE-967): the chat request's own
+/// provider fields with the switch flipped, in the shape each wire expects.
+///
+/// - Ollama: `think: false`.
+/// - OpenRouter itself: `reasoning.effort: "low"` — its normalized knob;
+///   some models cannot switch reasoning off, all take an effort. Low
+///   effort is a reduction, not a switch-off: the repeat can still reason,
+///   only less.
+/// - Any other OpenAI-compatible endpoint: both knobs,
+///   `chat_template_kwargs.enable_thinking: false` (vLLM / SGLang with a
+///   Qwen3-style chat template) and `reasoning.effort: "low"`. The host does
+///   not tell which upstream answers: a hosted guest calls the hive egress
+///   on a loopback URL, which forwards the body untouched to vLLM locally
+///   and to OpenRouter on the platform. vLLM ignores the unknown top-level
+///   `reasoning`, OpenRouter ignores `chat_template_kwargs`. A server that
+///   rejects unknown fields answers the repeat with a 400 — no worse than
+///   the cut-off error the turn would otherwise have ended with.
+/// - OpenAI's own API and Azure: none. They reject unknown fields, and
+///   chat completions there shows no reasoning to cut a turn off with.
+///
+/// `None` as well for a model whose thinking is already off
+/// (`extra_params.think = "false"`): there is nothing left to switch.
+pub(crate) fn thinking_off_params(
+    model_config: &ModelConfig,
+    provider_config: &ProviderConfig,
+) -> Option<serde_json::Value> {
+    if openai_compat_think(model_config) == Some(false) {
+        return None;
+    }
+    let base = request_params(model_config, &provider_config.provider_type)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let switch = match provider_config.provider_type {
+        ProviderType::Ollama => serde_json::json!({ "think": false }),
+        ProviderType::AzureOpenAI => return None,
+        ProviderType::OpenRouter => {
+            let base_url = openrouter_base_url(provider_config);
+            if openai_platform_responses_base(base_url).is_some() {
+                return None;
+            }
+            let host = reqwest::Url::parse(base_url)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_ascii_lowercase));
+            if host.is_some_and(|host| host == "openrouter.ai" || host.ends_with(".openrouter.ai"))
+            {
+                serde_json::json!({ "reasoning": { "effort": "low" } })
+            } else {
+                serde_json::json!({
+                    "chat_template_kwargs": { "enable_thinking": false },
+                    "reasoning": { "effort": "low" },
+                })
+            }
+        }
+    };
+    Some(rig_core::json_utils::merge(base, switch))
 }
 
 /// Ollama's per-request `think` switch, from the model's `extra_params.think`

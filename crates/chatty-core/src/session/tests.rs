@@ -673,6 +673,90 @@ mod empty_completion {
         );
     }
 
+    /// rig's error for a run whose last turn ran out of output before it
+    /// answered, verbatim (rig-agent 0.42).
+    fn cut_off_error() -> StreamChunk {
+        StreamChunk::Error(crate::services::StreamError::new(
+            StreamErrorKind::EmptyCompletion,
+            "PromptError: CompletionError: ResponseError: the model produced no answer and \
+             stopped with finish_reason=Length; the turn ran out of output budget before \
+             producing one — raise max_tokens for this request",
+        ))
+    }
+
+    /// AGE-967: once the in-turn cut-off retries are spent, the turn ends
+    /// with a follow-up that continues the task, not with an
+    /// `EmptyCompletion` error that ends it — and the follow-up comes after
+    /// `TurnEnded`, where every owner takes it as the next turn.
+    #[tokio::test]
+    async fn a_spent_cut_off_ends_the_turn_with_a_follow_up() {
+        let events =
+            replay_scenario(scenario(vec![call(1, 14_504), cut_off_error()]), policy()).await;
+        assert!(empty_error(&events).is_none(), "{events:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, SessionEvent::Error(_))),
+            "{events:?}"
+        );
+        let n = events.len();
+        assert!(
+            matches!(events[n - 2], SessionEvent::TurnEnded),
+            "{events:?}"
+        );
+        assert!(
+            matches!(&events[n - 1], SessionEvent::FollowUp(p) if p == CUT_OFF_FOLLOW_UP),
+            "{events:?}"
+        );
+        assert!(crate::services::is_protocol_follow_up_text(
+            CUT_OFF_FOLLOW_UP
+        ));
+    }
+
+    /// The follow-up is one attempt: a follow-up turn that is cut off the
+    /// same way ends with the error, so a model that can never answer in
+    /// its window does not loop.
+    #[tokio::test]
+    async fn a_cut_off_in_the_follow_up_turn_ends_with_the_error() {
+        let events = replay_scenario(
+            scenario(vec![call(1, 14_504), cut_off_error()]),
+            TurnPolicy {
+                already_asked_to_retry: true,
+                ..policy()
+            },
+        )
+        .await;
+        assert!(empty_error(&events).is_some(), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::FollowUp(_))),
+            "{events:?}"
+        );
+    }
+
+    /// A content filter's cut-off is not continued: the filter would only
+    /// stop the follow-up the same way.
+    #[tokio::test]
+    async fn a_content_filter_cut_off_still_ends_with_the_error() {
+        let events = replay_scenario(
+            scenario(vec![
+                call(1, 10),
+                StreamChunk::Error(crate::services::StreamError::new(
+                    StreamErrorKind::EmptyCompletion,
+                    "the model produced no answer and stopped with finish_reason=ContentFilter",
+                )),
+            ]),
+            policy(),
+        )
+        .await;
+        assert!(empty_error(&events).is_some(), "{events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::FollowUp(_))),
+            "{events:?}"
+        );
+    }
+
     /// The sub-leader shape: a tool call, then a final request that says
     /// nothing. The turn did work; its answer is still missing.
     #[tokio::test]

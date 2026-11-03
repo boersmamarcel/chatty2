@@ -24,7 +24,7 @@ use rig_core::message::{
 
 use crate::models::token_usage::{ApiCallUsage, TokenUsage};
 use crate::services::budget_stop::find_budget_exhausted;
-use crate::services::llm_service::StreamChunk;
+use crate::services::llm_service::{StreamChunk, is_cut_off_without_answer};
 use crate::services::{
     AgentLoopGuard, AgentTaskController, ChunkAction, HeartbeatThrottle, RecoveryAction,
     StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
@@ -85,6 +85,20 @@ pub fn empty_completion_error(think_disabled: bool) -> &'static str {
     }
 }
 
+/// What ends a turn whose run ran out of output before it answered anything
+/// once the in-turn cut-off ladder (`EmptyTurnRetry`: thinking off, room
+/// for the reply) is spent (AGE-967): a `FollowUp` that continues the task
+/// in a fresh run, instead of an `EmptyCompletion` error that ends it. The
+/// turn's tool round-trips are persisted first (the failed run's record),
+/// so the follow-up sees the work done so far. Bounded like the
+/// malformed-tool-call retry: a follow-up turn that starts with this text
+/// and is cut off again ends with the error. The `Agent protocol
+/// follow-up:` prefix keeps it out of the transcript.
+pub const CUT_OFF_FOLLOW_UP: &str = "Agent protocol follow-up: your last response ran out of room \
+     in the model's context window while reasoning, before it gave an answer or a tool call. \
+     Continue the task from your notes, the plan and the results so far. Think briefly: make \
+     the next tool call, or give your answer, right away.";
+
 /// Injected after a text-only response that ran past the loop guard's
 /// verbosity limit.
 pub const BREVITY_FOLLOW_UP: &str = "You produced a long response without any tool call. \
@@ -112,8 +126,15 @@ pub struct TurnPolicy {
     /// The desktop does; the interactive TUI does not, and headless runs its
     /// own (AGE-196 decides whether that one folds in here).
     pub loop_guard: bool,
-    /// Whether the last user message in history is already the
-    /// malformed-tool-call retry, which bounds that retry to one attempt.
+    /// Whether the message this turn sends is already a one-shot recovery
+    /// follow-up — the malformed-tool-call retry, or the cut-off follow-up
+    /// ([`CUT_OFF_FOLLOW_UP`]) — which bounds each to one attempt.
+    ///
+    /// One flag serves both retries, so each one's turn also spends the
+    /// other's: a turn started by the cut-off follow-up gets no
+    /// malformed-tool-call nudge (a malformed call there ends the turn with
+    /// its error), and a turn started by the malformed-tool-call retry that
+    /// is cut off ends with the `EmptyCompletion` error, not a follow-up.
     pub already_asked_to_retry: bool,
     /// Whether the bound model's `extra_params.think` is `"false"`, which
     /// picks the empty-completion error text (AGE-404).
@@ -596,6 +617,27 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 }
                 if self.pending_follow_up.is_none() {
                     self.pending_follow_up = self.task_controller.stream_end_follow_up();
+                }
+                return Ok(ChunkAction::Break);
+            }
+            StreamChunk::Error(error)
+                if is_cut_off_without_answer(&error)
+                    && !self.already_asked_to_retry
+                    && !self.budget_stopped =>
+            {
+                // A recoverable cut-off: the turn ends cleanly and the task
+                // goes on in a follow-up (AGE-967). The run's round-trips
+                // arrived as `TurnMessages` ahead of this chunk.
+                tracing::warn!(
+                    error = %error.message,
+                    "Model ran out of output before answering, after the in-turn retries; \
+                     continuing the task in a follow-up"
+                );
+                self.emit_calls_usage();
+                // As in the `Done` arm: a follow-up already queued (a
+                // loop-guard pivot, which always wins) is not overwritten.
+                if self.pending_follow_up.is_none() {
+                    self.pending_follow_up = Some(CUT_OFF_FOLLOW_UP.to_string());
                 }
                 return Ok(ChunkAction::Break);
             }
