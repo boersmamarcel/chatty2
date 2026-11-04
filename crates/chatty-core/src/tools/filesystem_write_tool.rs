@@ -461,12 +461,17 @@ fn is_plain_number(value: &str) -> bool {
 pub struct WriteFileArgs {
     pub path: String,
     pub content: String,
+    /// Add `content` to the end of the file instead of replacing it
+    /// (AGE-983): how a file too large for one call is written in parts.
+    #[serde(default)]
+    pub append: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct WriteFileOutput {
     pub path: String,
     pub overwritten: bool,
+    pub appended: bool,
     pub bytes_written: usize,
 }
 
@@ -498,13 +503,18 @@ impl Tool for WriteFileTool {
     type Output = WriteFileOutput;
 
     fn description(&self) -> String {
-        "Create or overwrite a file within the workspace. \
+        "Create or overwrite a file within the workspace, or append to it. \
                          Requires user confirmation before writing. \
                          The file path must be within the workspace directory.\n\
                          \n\
+                         Write a large file (over about 8 KB) in parts: the first part as usual, \
+                         then each further part with \"append\": true. One very long call can be \
+                         cut off before its arguments are complete, and then nothing is written.\n\
+                         \n\
                          Examples:\n\
                          - Create new file: {\"path\": \"src/utils.rs\", \"content\": \"pub fn hello() {}\"}\n\
-                         - Write config: {\"path\": \"config.json\", \"content\": \"{\\\"key\\\": \\\"value\\\"}\"}"
+                         - Write config: {\"path\": \"config.json\", \"content\": \"{\\\"key\\\": \\\"value\\\"}\"}\n\
+                         - Add the next part: {\"path\": \"report.typ\", \"content\": \"= Section 2\\n...\", \"append\": true}"
                 .to_string()
     }
 
@@ -519,6 +529,10 @@ impl Tool for WriteFileTool {
                 "content": {
                     "type": "string",
                     "description": "Content to write to the file"
+                },
+                "append": {
+                    "type": "boolean",
+                    "description": "Add content to the end of the file (creating it if missing) instead of overwriting it. Default false."
                 }
             },
             "required": ["path", "content"]
@@ -536,8 +550,9 @@ impl Tool for WriteFileTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        // Check if file exists to determine if this is an overwrite
-        let is_overwrite = self.service.read_file(&args.path).await.is_ok();
+        // Check if file exists to determine if this is an overwrite; an
+        // append to an existing file replaces nothing.
+        let is_overwrite = !args.append && self.service.read_file(&args.path).await.is_ok();
 
         let operation = WriteOperation::WriteFile {
             path: args.path.clone(),
@@ -554,11 +569,17 @@ impl Tool for WriteFileTool {
         }
 
         let bytes = args.content.len();
-        let overwritten = self.service.write_file(&args.path, &args.content).await?;
+        let overwritten = if args.append {
+            self.service.append_file(&args.path, &args.content).await?;
+            false
+        } else {
+            self.service.write_file(&args.path, &args.content).await?
+        };
 
         Ok(WriteFileOutput {
             path: args.path,
             overwritten,
+            appended: args.append,
             bytes_written: bytes,
         })
     }
@@ -940,6 +961,86 @@ mod tests {
             tool(Some(true)).is_offered(),
             "a headless task that does ask for an answer file must offer it"
         );
+    }
+
+    /// AGE-983: `append` adds to the end of the file instead of replacing
+    /// it, is still asked about like any write (and refused when denied),
+    /// and is optional in the schema, so a call without it overwrites.
+    #[tokio::test]
+    async fn write_file_appends_a_part_when_asked() {
+        use super::{WriteFileArgs, WriteFileTool};
+        use crate::services::filesystem_service::FileSystemService;
+        use rig_agent::tool::{Tool, ToolContext};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = WriteFileTool::new(
+            service.clone(),
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        );
+        let write = |content: &str, append: bool| WriteFileArgs {
+            path: "report.typ".into(),
+            content: content.into(),
+            append,
+        };
+        let report = dir.path().join("report.typ");
+
+        let first = tool
+            .call(&mut ToolContext::new(), write("= Q1\n", false))
+            .await
+            .unwrap();
+        assert!(!first.overwritten && !first.appended);
+        let second = tool
+            .call(&mut ToolContext::new(), write("= Q2\n", true))
+            .await
+            .unwrap();
+        assert!(!second.overwritten, "an append replaces nothing");
+        assert!(second.appended);
+        assert_eq!(second.bytes_written, 5);
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "= Q1\n= Q2\n");
+
+        let args: WriteFileArgs =
+            serde_json::from_value(serde_json::json!({"path": "report.typ", "content": "x"}))
+                .unwrap();
+        assert!(!args.append, "append defaults to false");
+        tool.call(&mut ToolContext::new(), args).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "x");
+
+        let schema = tool.parameters();
+        assert_eq!(schema["properties"]["append"]["type"], "boolean");
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["path", "content"]),
+            "append is optional"
+        );
+        assert!(tool.description().contains("\"append\": true"));
+
+        // An append is a write: under always-ask, a denial writes nothing.
+        let mut store = WriteApprovalStore::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resolution_tx, _resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+        store.set_notifiers(tx, resolution_tx);
+        let asking = WriteFileTool::new(
+            service,
+            ApprovalMode::AlwaysAsk,
+            store.get_pending_approvals(),
+        );
+        let call = tokio::spawn(async move {
+            asking
+                .call(&mut ToolContext::new(), write("= Q3\n", true))
+                .await
+                .map(|_| ())
+        });
+        let asked = rx.recv().await.expect("the append is asked about");
+        assert!(store.resolve(&asked.id, WriteApprovalDecision::Denied));
+        assert!(call.await.unwrap().is_err(), "a denied append fails");
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "x");
     }
 
     /// AGE-246 / D7: two agents, each with its own `WriteApprovalStore`, must

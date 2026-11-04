@@ -1433,6 +1433,30 @@ cap_usd = 2.0
         }
     }
 
+    /// AGE-983: the typesetter writes a big document in parts — a few
+    /// files of grouped sections (few enough for its turn budget), a long
+    /// one appended in parts, a main file that includes them — and compiles
+    /// the main file once they are all written, so no one call carries the
+    /// whole document.
+    #[test]
+    fn the_typesetter_writes_in_parts_and_compiles_at_the_end() {
+        let preamble = load_agent_spec_from("typesetter", None, None)
+            .unwrap()
+            .spec
+            .agent
+            .preamble
+            .unwrap_or_default();
+        for phrase in [
+            "never as one long write_file call",
+            "at most about 10 files, well under your turn budget",
+            "\"append\": true",
+            "#include",
+            "compile only that main file, once every part is written",
+        ] {
+            assert!(preamble.contains(phrase), "{phrase:?} in {preamble}");
+        }
+    }
+
     /// AGE-752: what ships reads well in Settings → Agents and `list_agents`:
     /// every preset has a one-line description and a preamble, names no
     /// model (the roster's default runs it), and has a budget: a turn cap or

@@ -49,9 +49,9 @@ use parking_lot::Mutex;
 
 /// One step of a scripted route.
 ///
-/// `Text`, `Truncated`, `ToolCalls`, `Error` and `ErrorBody` answer a request; `Usage`,
-/// `Delay`, `Say` and `Reason` shape the answer that follows them in the
-/// same queue.
+/// `Text`, `Truncated`, `ToolCalls`, `CutOffToolCall`, `Error` and
+/// `ErrorBody` answer a request; `Usage`, `Delay`, `Say` and `Reason` shape
+/// the answer that follows them in the same queue.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     /// End the provider turn with this assistant text.
@@ -64,6 +64,12 @@ pub enum Reply {
     Truncated(String),
     /// Answer with these tool calls, `(name, arguments)`, in order.
     ToolCalls(Vec<(String, serde_json::Value)>),
+    /// Answer with one call to tool `name` whose `arguments` are raw text
+    /// that stops partway (not valid JSON), under `finish_reason:
+    /// "tool_calls"`: a call cut off mid-string that the server still
+    /// declared complete, as vLLM served Qwen's (AGE-983). SSE only; on
+    /// Ollama's wire, where arguments are objects, it is a 500.
+    CutOffToolCall { name: String, arguments: String },
     /// The usage the next answer reports, instead of [`DEFAULT_USAGE`].
     Usage {
         input: u64,
@@ -97,6 +103,15 @@ impl Reply {
     /// One tool call.
     pub fn tool_call(name: impl Into<String>, arguments: serde_json::Value) -> Self {
         Self::ToolCalls(vec![(name.into(), arguments)])
+    }
+
+    /// [`CutOffToolCall`](Self::CutOffToolCall): a call to `name` whose
+    /// arguments end after `arguments`.
+    pub fn cut_off_tool_call(name: impl Into<String>, arguments: impl Into<String>) -> Self {
+        Self::CutOffToolCall {
+            name: name.into(),
+            arguments: arguments.into(),
+        }
     }
 
     /// [`Reason`](Self::Reason): `deltas` reasoning deltas, `every_ms` apart.
@@ -447,6 +462,7 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
                         Reply::Text(_)
                             | Reply::Truncated(_)
                             | Reply::ToolCalls(_)
+                            | Reply::CutOffToolCall { .. }
                             | Reply::Error(_)
                             | Reply::ErrorBody(..)
                     );
@@ -553,6 +569,22 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
                         "length",
                     )
                 };
+                return answer(streaming, &body);
+            }
+            Reply::CutOffToolCall { .. } if content_type != "text/event-stream" => {
+                return http(
+                    500,
+                    "text/plain",
+                    "fake model: a cut-off tool call is SSE only",
+                );
+            }
+            Reply::CutOffToolCall { name, arguments } => {
+                let id = {
+                    let mut log = state.log.lock();
+                    log.calls += 1;
+                    log.calls - 1
+                };
+                let body = sse_raw_tool_call(&said, &name, &arguments, id, usage);
                 return answer(streaming, &body);
             }
             Reply::ToolCalls(calls) => {
@@ -701,6 +733,44 @@ fn sse_tool_calls(
             "id": "gen-fake", "model": "fake",
             "choices": [{ "index": 0, "delta": {
                 "role": "assistant", "content": said, "tool_calls": tool_calls
+            }, "finish_reason": null }]
+        }),
+        serde_json::json!({
+            "id": "gen-fake", "model": "fake",
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }],
+            "usage": sse_usage(usage)
+        }),
+    ])
+}
+
+/// One tool call whose `arguments` go out as they are, in two deltas, then
+/// `finish_reason: "tool_calls"`.
+fn sse_raw_tool_call(
+    said: &str,
+    name: &str,
+    arguments: &str,
+    id: usize,
+    usage: (u64, u64, u64),
+) -> String {
+    let half = arguments
+        .char_indices()
+        .nth(arguments.chars().count() / 2)
+        .map_or(arguments.len(), |(at, _)| at);
+    let (head, tail) = arguments.split_at(half);
+    sse_stream(&[
+        serde_json::json!({
+            "id": "gen-fake", "model": "fake",
+            "choices": [{ "index": 0, "delta": {
+                "role": "assistant", "content": said, "tool_calls": [{
+                    "index": 0, "id": format!("call_{id}"), "type": "function",
+                    "function": { "name": name, "arguments": head }
+                }]
+            }, "finish_reason": null }]
+        }),
+        serde_json::json!({
+            "id": "gen-fake", "model": "fake",
+            "choices": [{ "index": 0, "delta": {
+                "tool_calls": [{ "index": 0, "function": { "arguments": tail } }]
             }, "finish_reason": null }]
         }),
         serde_json::json!({

@@ -379,6 +379,35 @@ impl FileSystemService {
         Ok(existed)
     }
 
+    /// Append content to the end of a file, creating it if it doesn't
+    /// exist. Returns whether the file already existed. A large file is
+    /// written in parts this way, so no one tool call has to carry all of
+    /// it (AGE-983).
+    pub async fn append_file(&self, path: &str, content: &str) -> Result<bool> {
+        use tokio::io::AsyncWriteExt;
+
+        let canonical = self.validator.validate_new_path(path).await?;
+        let existed = canonical.exists();
+
+        debug!(path = %canonical.display(), existed, "Appending to file");
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&canonical)
+            .await
+            .map_err(|e| anyhow!("Failed to open file '{}' for appending: {}", path, e))?;
+        file.write_all(content.as_bytes())
+            .await
+            .map_err(|e| anyhow!("Failed to append to file '{}': {}", path, e))?;
+        file.flush()
+            .await
+            .map_err(|e| anyhow!("Failed to append to file '{}': {}", path, e))?;
+
+        info!(path = %canonical.display(), "File appended successfully");
+        Ok(existed)
+    }
+
     /// Create a directory and all parent directories.
     /// Returns whether the directory already existed.
     pub async fn create_directory(&self, path: &str) -> Result<bool> {
@@ -875,6 +904,28 @@ mod tests {
 
         let content = service.read_file("existing.txt").await.unwrap();
         assert_eq!(content, "new content");
+    }
+
+    /// AGE-983: appending adds to the end of an existing file, creates a
+    /// missing one, and is held to the workspace like a write.
+    #[tokio::test]
+    async fn test_append_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        assert!(!service.append_file("report.typ", "= One\n").await.unwrap());
+        assert!(service.append_file("report.typ", "= Two\n").await.unwrap());
+        let content = service.read_file("report.typ").await.unwrap();
+        assert_eq!(content, "= One\n= Two\n");
+
+        assert!(
+            service
+                .append_file("../../etc/evil.txt", "hack")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

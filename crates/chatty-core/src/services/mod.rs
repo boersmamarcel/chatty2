@@ -35,6 +35,9 @@ pub mod chart_svg_renderer;
 /// The summary a context compaction replaces older messages with.
 pub mod context_compaction;
 pub mod context_shaper;
+/// A tool call cut off mid-arguments, answered with an error tool result
+/// instead of ending the run (AGE-983).
+pub mod cut_off_tool_call;
 /// Who may call whom: delegation rights from the specs (PL-S2 DP-1).
 pub mod delegation_policy;
 pub mod embedding_service;

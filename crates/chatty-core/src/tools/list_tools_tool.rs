@@ -121,7 +121,7 @@ impl ListToolsTool {
                 },
                 ToolInfo {
                     name: "write_file".to_string(),
-                    description: "Create or overwrite a file within the workspace. Best for new files or small rewrites; for large existing files, prefer apply_diff or an in-place shell edit to avoid very large tool payloads.".to_string(),
+                    description: "Create or overwrite a file within the workspace, or append to it (\"append\": true). Best for new files or small rewrites; write a large new file in parts with append, and for large existing files prefer apply_diff or an in-place shell edit to avoid very large tool payloads.".to_string(),
                     source: "native".to_string(),
                 },
                 ToolInfo {
