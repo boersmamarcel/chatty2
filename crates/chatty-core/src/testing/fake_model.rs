@@ -20,6 +20,11 @@
 //!   requests apart by content — e.g. a compaction summary call — rather than
 //!   by route.
 //!
+//! A daemon given a context window ([`FakeDaemon::with_window`]) refuses
+//! any request whose body counts more tokens than that, before any route
+//! sees it, with vLLM's own 400 (AGE-978): a model server that is strict
+//! about its window, as vLLM is.
+//!
 //! Replies go out as OpenAI-compatible SSE on `…/chat/completions` and as
 //! Ollama NDJSON on `/api/chat`: rig only reads the body, so the content type
 //! and the record shape are the whole difference.
@@ -219,11 +224,15 @@ struct Log {
     peak: usize,
     /// Numbers tool-call ids, so they are stable run to run.
     calls: usize,
+    /// Requests refused as over the window.
+    refused: usize,
 }
 
 struct State {
     mode: Mutex<Mode>,
     log: Mutex<Log>,
+    /// The context window, in tokens of the raw body, when one is set.
+    window: Mutex<Option<usize>>,
 }
 
 /// The fake model server. It serves until the process exits.
@@ -274,6 +283,7 @@ impl FakeDaemon {
         let state = Arc::new(State {
             mode: Mutex::new(mode),
             log: Mutex::default(),
+            window: Mutex::new(None),
         });
 
         let serving = state.clone();
@@ -311,6 +321,18 @@ impl FakeDaemon {
             .into_iter()
             .filter(|r| r.key.as_deref() == Some(key))
             .collect()
+    }
+
+    /// Refuse every request whose raw body counts more than `tokens`
+    /// tokens (cl100k) with vLLM's 400 for a prompt over its window.
+    pub fn with_window(self, tokens: usize) -> Self {
+        *self.state.window.lock() = Some(tokens);
+        self
+    }
+
+    /// How many requests were refused as over the window.
+    pub fn refused(&self) -> usize {
+        self.state.log.lock().refused
     }
 
     /// The most requests that were ever in flight at once.
@@ -351,6 +373,27 @@ fn serve(mut connection: TcpStream, state: &State) {
 /// of it, or — once a [`Reply::Reason`] has streamed the head and its
 /// deltas to `out` — the rest of its body.
 fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write) -> Vec<u8> {
+    if let Some(window) = *state.window.lock() {
+        let tokens = crate::token_budget::counter::TokenCounter::for_model("fake")
+            .count(&String::from_utf8_lossy(&request.body));
+        if tokens > window {
+            state.log.lock().refused += 1;
+            let message = format!(
+                "This model's maximum context length is {window} tokens. However, you \
+                 requested 0 output tokens and your prompt contains at least {} input \
+                 tokens, for a total of at least {} tokens. Please reduce the length of \
+                 the input prompt or the number of requested output tokens. \
+                 (parameter=input_tokens, value={})",
+                window + 1,
+                window + 1,
+                window + 1
+            );
+            let body = serde_json::json!({ "error": {
+                "message": message, "type": "BadRequestError", "param": "input_tokens", "code": 400
+            }});
+            return http(400, "application/json", &body.to_string());
+        }
+    }
     let (content_type, replies, key) = {
         let mut mode = state.mode.lock();
         match &mut *mode {

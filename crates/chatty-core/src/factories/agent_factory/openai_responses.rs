@@ -431,7 +431,15 @@ mod tests {
             .await;
 
         let base = format!("{}/v1", server.uri());
-        let model = openai_responses_model(&base, "sk-openai", "gpt-6.1-sol").unwrap();
+        let model = openai_responses_model(
+            &base,
+            "sk-openai",
+            "gpt-6.1-sol",
+            super::super::connect_retry_http::ConnectRetryHttpClient::new(
+                crate::services::http_client::llm_client().clone(),
+            ),
+        )
+        .unwrap();
         let usage = send_with_tools(model).await;
         assert_eq!(usage.cached_input_tokens, 4);
         assert_eq!(usage.reasoning_tokens, 2);

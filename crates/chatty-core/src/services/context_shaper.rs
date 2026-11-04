@@ -79,6 +79,24 @@
 //! sees as much of it as the window allows. Everything under that cap is
 //! recorded whole.
 //!
+//! A cut result keeps its head and its tail, with a marker in the middle
+//! saying how much was left out and how to read it (AGE-978): a data file's
+//! last rows, a log's final error, are often what the model needs. And the
+//! results of one tool round all go out in that one unshaped message, so
+//! each is capped at two fifths of the room the round's earlier results
+//! left, not of the whole budget: four parallel reads no longer add up to
+//! more than the window ([`ContextShaper::record_round_output`]).
+//!
+//! # A refused request (AGE-978)
+//!
+//! The count is an estimate, and on some text (digits, for one) a model's
+//! own tokenizer counts far more than it. When a provider still refuses a
+//! request as over its window, the HTTP layer under rig compacts that one
+//! request and sends it again (`connect_retry_http`), and records the
+//! refusal on [`WindowOverflows`]: every later request of the agent keeps
+//! another tenth of the window as headroom, up to three tenths, so the
+//! guard shapes it before the provider has to refuse it.
+//!
 //! # The results ledger (AGE-941)
 //!
 //! For a leader, the old tool results the stages one-line and snip are its
@@ -195,6 +213,32 @@ pub struct ReplyRoom;
 /// at that cap was the window's. Read by `EmptyTurnRetry` (AGE-967).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WindowClamped;
+
+/// Extra headroom, as a share of the window, per request the provider
+/// refused as over its window ([`WindowOverflows`], AGE-978).
+const OVERFLOW_HEADROOM_STEP: f64 = 0.10;
+
+/// Refusals counted towards the extra headroom: three tenths of the window
+/// more is already far past any tokenizer gap measured.
+const MAX_OVERFLOW_STEPS: usize = 3;
+
+/// How many of an agent's requests its provider refused as over the context
+/// window (AGE-978). Shared by the agent's context guard, which keeps more
+/// headroom per refusal, and the HTTP layer that sees the refusal.
+#[derive(Clone, Debug, Default)]
+pub struct WindowOverflows(Arc<AtomicUsize>);
+
+impl WindowOverflows {
+    /// Count one refused request.
+    pub fn record(&self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Refusals counted so far.
+    pub fn count(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+}
 
 /// The compact stages keep this many characters of a tool result.
 const COMPACT_PREVIEW_CHARS: usize = 120;
@@ -334,6 +378,10 @@ struct Inner {
     /// Set per request: the request left the reply less than
     /// [`MIN_CLAMPED_REPLY_TOKENS`] of a configured window.
     window_exhausted: AtomicBool,
+    /// Tokens recorded by the tool results of the current round (AGE-978).
+    round_recorded: Mutex<usize>,
+    /// Requests the provider refused as over the window (AGE-978).
+    overflows: WindowOverflows,
 }
 
 /// A compaction in force: `history[..covered]` goes out as `summary`.
@@ -399,6 +447,8 @@ impl ContextShaper {
                 compaction_usage: Mutex::new(Vec::new()),
                 mid_run: OnceLock::new(),
                 window_exhausted: AtomicBool::new(false),
+                round_recorded: Mutex::new(0),
+                overflows: WindowOverflows::default(),
             }),
         }
     }
@@ -479,11 +529,26 @@ impl ContextShaper {
             .unwrap_or(self.inner.settings.assumed_context_window)
     }
 
+    /// The refusal count this guard keeps more headroom for; the HTTP layer
+    /// under the agent's model records on it (AGE-978).
+    pub fn window_overflows(&self) -> WindowOverflows {
+        self.inner.overflows.clone()
+    }
+
+    /// The share of `window` kept free for what the count cannot see: the
+    /// configured fraction, plus a step per refused request.
+    fn headroom(&self, window: usize) -> usize {
+        let steps = self.inner.overflows.count().min(MAX_OVERFLOW_STEPS);
+        let fraction =
+            self.inner.settings.headroom_fraction + OVERFLOW_HEADROOM_STEP * steps as f64;
+        (window as f64 * fraction) as usize
+    }
+
     /// Tokens available to the history once the headroom, the reply reserve,
     /// the base and `prompt_tokens` are taken off the window.
     pub fn history_budget(&self, prompt_tokens: usize) -> usize {
         let window = self.context_window();
-        let headroom = (window as f64 * self.inner.settings.headroom_fraction) as usize;
+        let headroom = self.headroom(window);
         window
             .saturating_sub(headroom)
             .saturating_sub(self.inner.settings.response_reserve)
@@ -505,9 +570,48 @@ impl ContextShaper {
     }
 
     /// The presentation a tool result is recorded with: `output` itself when
-    /// it fits the recording cap, else its text cut down to the cap with a
-    /// header saying how much was kept. Image blocks are never touched.
+    /// it fits the recording cap, else its text cut down to the cap — its
+    /// head and its tail, with a header saying how much was kept and a
+    /// marker where the middle was. Image blocks are never touched.
     pub fn record_tool_output(&self, output: &ToolOutput) -> Option<ToolOutput> {
+        self.record_within(output, self.recording_cap())
+    }
+
+    /// Start a new tool round: the results recorded from here on share the
+    /// room again (called before every model call).
+    pub fn start_round(&self) {
+        if let Ok(mut used) = self.inner.round_recorded.lock() {
+            *used = 0;
+        }
+    }
+
+    /// [`Self::record_tool_output`] for one result of the current round:
+    /// capped at two fifths of the room the round's earlier results left in
+    /// the history budget (never under [`RECORDING_CAP_FLOOR_TOKENS`]), so
+    /// the round's results together fit it (AGE-978).
+    pub fn record_round_output(&self, output: &ToolOutput) -> Option<ToolOutput> {
+        let Ok(mut used) = self.inner.round_recorded.lock() else {
+            return self.record_tool_output(output);
+        };
+        let room = self.history_budget(0).saturating_sub(*used);
+        let cap = (room * 2 / 5).max(RECORDING_CAP_FLOOR_TOKENS);
+        let recorded = self.record_within(output, cap);
+        let sent = recorded.as_ref().unwrap_or(output);
+        *used += sent
+            .as_content()
+            .iter()
+            .map(|block| match block {
+                ToolResultContent::Text(text) => self.inner.counter.count(&text.text),
+                ToolResultContent::Json { value } => self.inner.counter.count(&value.to_string()),
+                ToolResultContent::Image(_) => 0,
+            })
+            .sum::<usize>();
+        recorded
+    }
+
+    /// `output` cut down to `cap` tokens, or `None` when it fits (or holds
+    /// an image).
+    fn record_within(&self, output: &ToolOutput, cap: usize) -> Option<ToolOutput> {
         let content = output.as_content();
         if content
             .iter()
@@ -525,37 +629,35 @@ impl ContextShaper {
             .collect::<Vec<_>>()
             .join("\n");
         let tokens = self.inner.counter.count(&text);
-        let cap = self.recording_cap();
         if tokens <= cap {
             return None;
         }
         // Keep the share of the text the cap allows, at this result's own
-        // chars-per-token ratio, on a char boundary; the ratio of a prefix
-        // is only close to the whole's, so recount and cut again while the
-        // kept part plus its header is still over the cap.
-        let header = |kept: usize| {
+        // chars-per-token ratio, half from each end; the ratio of a part is
+        // only close to the whole's, so recount and cut again while the kept
+        // parts plus the header and marker are still over the cap.
+        let cut_to = |keep: usize| {
+            let (head, tail) = head_and_tail(&text, keep);
+            let kept = head.len() + tail.len();
             format!(
-                "[tool result truncated — kept {kept} of {} chars; the rest did not fit the model's context window]\n",
-                text.len()
+                "[tool result truncated — kept {kept} of {} chars, from its start and its end; \
+                 the rest did not fit the model's context window]\n{head}{}{tail}",
+                text.len(),
+                omitted_marker(text.len() - kept),
             )
         };
-        let budget = cap.saturating_sub(self.inner.counter.count(&header(text.len())));
+        let overhead = self.inner.counter.count(&cut_to(0));
+        let budget = cap.saturating_sub(overhead);
         let mut keep = text.len() * budget / tokens;
         for _ in 0..4 {
-            let cut = text
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|i| *i <= keep)
-                .last()
-                .unwrap_or(0);
-            let kept = &text[..cut];
-            let kept_tokens = self.inner.counter.count(kept);
-            if kept_tokens <= budget || cut == 0 {
-                return Some(ToolOutput::text(format!("{}{kept}", header(cut))));
+            let cut = cut_to(keep);
+            let kept_tokens = self.inner.counter.count(&cut).saturating_sub(overhead);
+            if kept_tokens <= budget || keep == 0 {
+                return Some(ToolOutput::text(cut));
             }
-            keep = cut * budget / kept_tokens;
+            keep = keep * budget / kept_tokens;
         }
-        Some(ToolOutput::text(header(0)))
+        Some(ToolOutput::text(cut_to(0)))
     }
 
     /// The history one request should carry, or `None` when the recorded
@@ -673,7 +775,7 @@ impl ContextShaper {
     /// base; `None` without a configured window.
     fn reply_room_left(&self, history: &[Message], prompt: &Message) -> Option<usize> {
         let window = self.inner.context_window?;
-        let headroom = (window as f64 * self.inner.settings.headroom_fraction) as usize;
+        let headroom = self.headroom(window);
         let counter = &self.inner.counter;
         let request: usize = history
             .iter()
@@ -965,6 +1067,8 @@ impl AgentHook for ContextShaper {
         ctx: &HookContext,
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
+        // The results recorded after this call are the next round's.
+        self.start_round();
         let extra_reserve = if ctx.scratchpad().contains::<ReplyRoom>() {
             self.reply_room_reserve()
         } else {
@@ -1006,7 +1110,7 @@ impl AgentHook for ContextShaper {
         _ctx: &HookContext,
         event: ToolResultEvent<'_>,
     ) -> ToolResultAction {
-        let recorded = self.record_tool_output(event.presentation);
+        let recorded = self.record_round_output(event.presentation);
         if recorded.is_some() {
             warn!(
                 tool = event.tool_name,
@@ -1036,6 +1140,29 @@ fn with_messages(output: ToolOutput, messages: &[String]) -> ToolOutput {
     let mut content = output.into_content();
     content.push(ToolResultContent::text(messages.join("\n")));
     ToolOutput::content(content).expect("a tool result with a text block is valid")
+}
+
+/// The first and the last of `text`, `keep` bytes in all (half from each
+/// end), each cut on a char boundary; the whole text as the head when it is
+/// no longer than `keep`.
+pub(crate) fn head_and_tail(text: &str, keep: usize) -> (&str, &str) {
+    if keep >= text.len() {
+        return (text, "");
+    }
+    let head_end = text.floor_char_boundary(keep / 2);
+    let tail_start = text.ceil_char_boundary(text.len() - (keep - keep / 2));
+    (&text[..head_end], &text[tail_start.max(head_end)..])
+}
+
+/// What stands where a cut tool result's middle was (AGE-978): how much is
+/// missing, and how a model reads it — the omitted part is still there to
+/// be read in smaller pieces.
+pub(crate) fn omitted_marker(omitted: usize) -> String {
+    format!(
+        "\n[… {omitted} chars omitted here. To read them, call the tool again for a \
+         smaller part: read_file with start_line/end_line, or grep, head, tail or \
+         sed -n in the shell …]\n"
+    )
 }
 
 // ── Round trips ───────────────────────────────────────────────────────────────
@@ -1746,6 +1873,90 @@ mod tests {
         ])
         .unwrap();
         assert!(shaper.record_tool_output(&output).is_none());
+    }
+
+    /// AGE-978: a result larger than the whole window is recorded as its
+    /// head and its tail, with a marker in the middle saying how to read
+    /// the rest, and what is recorded fits the window.
+    #[test]
+    fn a_result_larger_than_the_window_keeps_its_head_and_tail() {
+        let window = 2_000;
+        let shaper = ContextShaper::new(settings(100), counter(), Some(window));
+        let text = format!("FIRST-LINE {} LAST-LINE", vec!["word"; 10_000].join(" "));
+        let recorded = shaper
+            .record_tool_output(&ToolOutput::text(text))
+            .expect("over the cap");
+        let kept = recorded.as_text().expect("recorded as text");
+        assert!(kept.starts_with("[tool result truncated — kept "), "{kept}");
+        assert!(kept.contains("FIRST-LINE"), "the head is kept");
+        assert!(kept.ends_with("LAST-LINE"), "the tail is kept");
+        assert!(
+            kept.contains("omitted here") && kept.contains("start_line"),
+            "the marker says how to read the rest: {kept}"
+        );
+        let tokens = shaper.counter().count(kept);
+        assert!(
+            tokens <= shaper.recording_cap() + 40 && tokens < window,
+            "{tokens} tokens fit the window"
+        );
+        // Recording again is a no-op: the truncated form fits.
+        assert!(shaper.record_tool_output(&recorded).is_none());
+    }
+
+    /// AGE-978: the results of one tool round go out together in the one
+    /// message the guard cannot shape, so each is capped at a share of the
+    /// room the earlier ones left, and together they fit the budget. A new
+    /// round starts over.
+    #[test]
+    fn the_results_of_one_round_share_the_room_left() {
+        let window = 10_000;
+        let shaper = ContextShaper::new(settings(100), counter(), Some(window));
+        let output = ToolOutput::text(vec!["word"; 3_000].join(" "));
+        assert!(
+            shaper.counter().count(output.as_text().unwrap()) < shaper.recording_cap(),
+            "fixture: one result alone fits the cap"
+        );
+        shaper.start_round();
+        let mut total = 0;
+        for _ in 0..4 {
+            let recorded = shaper.record_round_output(&output);
+            let sent = recorded.as_ref().unwrap_or(&output);
+            total += shaper.counter().count(sent.as_text().unwrap());
+        }
+        assert!(
+            total <= shaper.history_budget(0),
+            "four results of one round take {total} of {} tokens",
+            shaper.history_budget(0)
+        );
+        shaper.start_round();
+        assert!(
+            shaper.record_round_output(&output).is_none(),
+            "a new round has the whole room again"
+        );
+    }
+
+    /// AGE-978: a request the provider refused as over its window means the
+    /// count ran short, so every later request keeps more headroom — a tenth
+    /// of the window per refusal, up to three.
+    #[test]
+    fn a_refused_request_tightens_the_budget() {
+        let shaper = ContextShaper::new(
+            ContextShaperSettings {
+                response_reserve: 0,
+                headroom_fraction: 0.1,
+                ..ContextShaperSettings::default()
+            },
+            counter(),
+            Some(10_000),
+        );
+        assert_eq!(shaper.history_budget(0), 9_000);
+        let overflows = shaper.window_overflows();
+        overflows.record();
+        assert_eq!(shaper.history_budget(0), 8_000);
+        for _ in 0..10 {
+            overflows.record();
+        }
+        assert_eq!(shaper.history_budget(0), 6_000, "at most three tenths more");
     }
 }
 

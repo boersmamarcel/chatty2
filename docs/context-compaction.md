@@ -92,13 +92,31 @@ would be its own 400.
 shaped, and a single result can be larger than the whole budget (a 237 KB shell dump
 was, in the AGE-500 rerun). That is caught where the result is recorded: the same hook's
 `on_tool_result` cuts a result over **two fifths of the history budget** (floor 512
-tokens) down to the cap, once, with a header saying how much was kept. The cut form is
+tokens) down to the cap, once, with a header saying how much was kept — its head and its
+tail, with a marker in the middle saying how many characters are left out and how to read
+them (`read_file` with `start_line`/`end_line`, or `grep`/`head`/`tail` in the shell,
+AGE-978). The results of one tool round all travel in that one unshaped prompt, so each
+is capped at two fifths of the room the round's earlier results left, not of the whole
+budget: four parallel 20 KB reads of a data file no longer add up to more than a 32k
+window. The cut form is
 what the transcript shows, what the conversation persists and what every later request
 carries, so the append-only property holds for it too. On a 32k model with the full
 tool set that cap is ~4k tokens (~16 KB); on a 200k model it is ~70k tokens and never
 bites in practice. Once a run is over budget the tail boundary
 moves by one message per call, so requests stop sharing a prefix until it fits again —
 the price of not crashing, and what the planned engine below removes.
+
+**A request the provider still refuses (AGE-978).** The count is a tiktoken estimate, and
+on some text — rows of digits, which Qwen's tokenizer splits per digit — the model counts far
+more. A request refused as over the window (vLLM's `maximum context length is … tokens`,
+OpenAI's `context_length_exceeded`, Anthropic's `prompt is too long`, llama.cpp's `exceeds
+the available context size`) would end the run, and a hosted worker's whole invocation with
+it. The HTTP layer under every provider (`ConnectRetryHttpClient`) instead sends that request
+once more with its tool results compacted — oldest first, each replaced by a one-line stub,
+until their text is half what it was; the newest keeps its head and tail if it alone is more —
+and counts the refusal on the agent's guard, which then keeps another tenth of the window as
+headroom on every later request (up to three tenths). A second refusal of the same request
+fails the turn as before.
 
 **A leader keeps its workers' results: the results ledger (AGE-941).** For a leader, the
 old tool results the stages one-line and snip — and the messages a compaction replaces —
