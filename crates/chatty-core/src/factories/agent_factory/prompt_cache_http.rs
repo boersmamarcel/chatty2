@@ -40,10 +40,8 @@ pub struct PromptCachingHttpClient {
 }
 
 impl PromptCachingHttpClient {
-    pub fn new(inner: reqwest::Client) -> Self {
-        Self {
-            inner: ConnectRetryHttpClient::new(inner),
-        }
+    pub fn new(inner: ConnectRetryHttpClient) -> Self {
+        Self { inner }
     }
 }
 

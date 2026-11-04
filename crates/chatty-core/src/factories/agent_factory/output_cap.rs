@@ -623,4 +623,138 @@ mod tests {
             }
         }
     }
+
+    // ── AGE-978: a worker whose tool results outgrow the window ──────────
+
+    /// vLLM's 32k window, as the AGE-900 acceptance run served Qwen.
+    const VLLM_WINDOW: usize = 32_768;
+
+    /// A data file of `chars` characters: rows of numbers, the text a
+    /// DABstep worker reads.
+    fn data_file(chars: usize) -> String {
+        let mut text = String::from("id,amount,fee,merchant\n");
+        let mut i = 0u64;
+        while text.len() < chars {
+            text.push_str(&format!(
+                "{i},{}.{:02},{}.{:03},{}\n",
+                (i * 7919) % 100_000,
+                i % 100,
+                (i * 104_729) % 1_000,
+                i % 1_000,
+                (i * 31) % 9_973
+            ));
+            i += 1;
+        }
+        text.truncate(chars);
+        text
+    }
+
+    /// A hosted worker on a model with vLLM's window, whose workspace holds
+    /// `files` data files of `chars` characters each.
+    async fn worker_with_files(
+        daemon: &FakeDaemon,
+        files: &[&str],
+        chars: usize,
+    ) -> (AgentSession, tempfile::TempDir) {
+        let (mut model, provider) = hosted(daemon, None);
+        model.max_context_window = Some(VLLM_WINDOW as i32);
+        let (session, workspace) = hosted_session(&model, &provider).await;
+        for name in files {
+            std::fs::write(workspace.path().join(name), data_file(chars)).unwrap();
+        }
+        (session, workspace)
+    }
+
+    fn read(path: &str) -> (String, serde_json::Value) {
+        ("read_file".to_string(), serde_json::json!({ "path": path }))
+    }
+
+    /// AGE-978, criterion 1: a worker reads four data files in one round —
+    /// each read under `read_file`'s own cap, together more than the whole
+    /// window. A model server strict about its window refuses nothing: the
+    /// next request fits, and the worker finishes.
+    #[tokio::test]
+    async fn tool_results_larger_than_the_window_do_not_end_the_worker() {
+        let files = ["a.csv", "b.csv", "c.csv", "d.csv"];
+        let daemon = FakeDaemon::scripted(Script::new().route(
+            CHEAP_MODEL,
+            [
+                Reply::ToolCalls(files.iter().map(|f| read(f)).collect()),
+                Reply::text("done"),
+            ],
+        ))
+        .with_window(VLLM_WINDOW);
+        let (mut session, _workspace) = worker_with_files(&daemon, &files, 20_000).await;
+        let counter = crate::token_budget::counter::TokenCounter::for_model("fake");
+        assert!(
+            counter.count(&data_file(20_000)) * files.len() > VLLM_WINDOW,
+            "fixture: the four reads together are larger than the window"
+        );
+
+        let events = run_turn(&mut session, TurnInput::text("Total the fees.")).await;
+
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(answer(&session), "done");
+        assert_eq!(daemon.refused(), 0, "no request was over the window");
+        let bodies = bodies(&daemon);
+        assert_eq!(bodies.len(), 2, "the reads, then the answer");
+        for name in files {
+            assert!(bodies[1].contains(name), "every read is answered: {name}");
+        }
+        assert!(
+            bodies[1].contains("omitted here"),
+            "the reads the window had no room for are cut, with the marker"
+        );
+    }
+
+    /// AGE-978, criterion 2: a context-length 400 leads to one
+    /// compaction-and-retry, not a failure: the same request goes out again
+    /// with its oldest tool result stubbed, the worker finishes, and its
+    /// guard keeps more headroom from then on.
+    #[tokio::test]
+    async fn a_context_length_400_is_compacted_and_retried_once() {
+        let overflow = serde_json::json!({ "error": {
+            "message": "This model's maximum context length is 32768 tokens. However, you \
+                        requested 0 output tokens and your prompt contains at least 32769 \
+                        input tokens, for a total of at least 32769 tokens. Please reduce the \
+                        length of the input prompt or the number of requested output tokens. \
+                        (parameter=input_tokens, value=32769)",
+            "type": "BadRequestError", "param": "input_tokens", "code": 400
+        }});
+        let daemon = FakeDaemon::scripted(Script::new().route(
+            CHEAP_MODEL,
+            [
+                Reply::ToolCalls(vec![read("a.csv")]),
+                Reply::ToolCalls(vec![read("b.csv")]),
+                Reply::ErrorBody(400, overflow),
+                Reply::text("done"),
+            ],
+        ));
+        let (mut session, _workspace) =
+            worker_with_files(&daemon, &["a.csv", "b.csv"], 2_000).await;
+        let guard = session
+            .conversation()
+            .expect("the conversation")
+            .agent()
+            .context_shaper()
+            .clone();
+        let budget = guard.history_budget(0);
+
+        let events = run_turn(&mut session, TurnInput::text("Total the fees.")).await;
+
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(answer(&session), "done");
+        let bodies = bodies(&daemon);
+        assert_eq!(bodies.len(), 4, "two reads, the refused request, its retry");
+        assert!(!bodies[2].contains("[tool result dropped"));
+        assert!(
+            bodies[3].contains("[tool result dropped"),
+            "the retry carries the oldest result compacted"
+        );
+        assert_eq!(guard.window_overflows().count(), 1, "one refusal counted");
+        assert!(
+            guard.history_budget(0) < budget,
+            "later requests keep more headroom"
+        );
+    }
 }

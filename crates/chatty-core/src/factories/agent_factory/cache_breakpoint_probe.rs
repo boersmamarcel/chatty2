@@ -99,7 +99,9 @@ fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
         Arm::MovingBreakpoint => {
             let client = rig_core::providers::openrouter::Client::builder()
                 .api_key(key)
-                .http_client(PromptCachingHttpClient::new(llm_client().clone()))
+                .http_client(PromptCachingHttpClient::new(
+                    super::connect_retry_http::ConnectRetryHttpClient::new(llm_client().clone()),
+                ))
                 .build()
                 .expect("the OpenRouter client builds");
             let model = client.completion_model(model).with_prompt_caching();

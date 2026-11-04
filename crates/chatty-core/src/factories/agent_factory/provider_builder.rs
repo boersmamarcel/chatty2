@@ -15,7 +15,7 @@ use rig_core::providers::azure::AzureOpenAIAuth;
 
 use crate::auth::AzureTokenCache;
 use crate::services::AgentTaskController;
-use crate::services::context_shaper::ContextShaper;
+use crate::services::context_shaper::{ContextShaper, WindowOverflows};
 use crate::services::http_client::llm_client;
 use crate::settings::models::models_store::{AZURE_DEFAULT_API_VERSION, ModelConfig};
 use crate::settings::models::providers_store::{
@@ -73,7 +73,13 @@ pub(super) async fn build_provider_agent(
 
     // Chat agents always carry tools.
     ensure_tools_reachable(model_config, provider_config)?;
-    let model = completion_model(model_config, provider_config)?;
+    // A request the provider still refuses as over the window is counted
+    // on the guard, so it keeps more headroom after one (AGE-978).
+    let model = completion_model_reporting(
+        model_config,
+        provider_config,
+        context_shaper.window_overflows(),
+    )?;
     let mut builder = AgentBuilder::from_model_handle(model.clone()).preamble(preamble);
     if model_config.supports_temperature {
         builder = builder.temperature(model_config.temperature as f64);
@@ -142,6 +148,18 @@ pub(crate) fn completion_model(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
 ) -> Result<ModelHandle> {
+    completion_model_reporting(model_config, provider_config, WindowOverflows::default())
+}
+
+/// [`completion_model`] whose HTTP layer counts a request refused as over
+/// the context window on `overflows` — an agent's context guard's (AGE-978).
+pub(crate) fn completion_model_reporting(
+    model_config: &ModelConfig,
+    provider_config: &ProviderConfig,
+    overflows: WindowOverflows,
+) -> Result<ModelHandle> {
+    let retrying =
+        || ConnectRetryHttpClient::new(llm_client().clone()).reporting_overflows(overflows.clone());
     let identifier = model_config.model_identifier.as_str();
     // SEC-16 / AGE-756: an OpenAI-compatible base URL carries the API key
     // in a header, so a configured http:// endpoint outside loopback/the
@@ -172,7 +190,7 @@ pub(crate) fn completion_model(
             // shared prefix.
             let client = rig_core::providers::openrouter::Client::builder()
                 .api_key(&key)
-                .http_client(PromptCachingHttpClient::new(llm_client().clone()))
+                .http_client(PromptCachingHttpClient::new(retrying()))
                 .base_url(openrouter_base_url(provider_config))
                 .build()?;
             let chat = ModelHandle::new(client.completion_model(identifier).with_prompt_caching());
@@ -184,7 +202,7 @@ pub(crate) fn completion_model(
             match openai_platform_responses_base(openrouter_base_url(provider_config)) {
                 Some(base_url) => Ok(ModelHandle::new(ToolsOnResponses {
                     chat,
-                    responses: openai_responses_model(&base_url, &key, identifier)?,
+                    responses: openai_responses_model(&base_url, &key, identifier, retrying())?,
                 })),
                 None => Ok(chat),
             }
@@ -198,11 +216,13 @@ pub(crate) fn completion_model(
                         .as_deref()
                         .unwrap_or(DEFAULT_OLLAMA_URL),
                 )
-                .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
+                .http_client(retrying())
                 .build()?;
             Ok(ModelHandle::new(client.completion_model(identifier)))
         }
-        ProviderType::AzureOpenAI => azure_completion_model(model_config, provider_config),
+        ProviderType::AzureOpenAI => {
+            azure_completion_model(model_config, provider_config, &retrying)
+        }
     }
 }
 
@@ -227,19 +247,26 @@ pub(crate) fn openrouter_base_url(provider_config: &ProviderConfig) -> &str {
 fn azure_completion_model(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
+    retrying: &dyn Fn() -> ConnectRetryHttpClient,
 ) -> Result<ModelHandle> {
     let raw_endpoint = provider_config
         .base_url
         .as_deref()
         .ok_or_else(|| anyhow!("Endpoint URL not configured for Azure OpenAI provider"))?;
-    let chat = azure_chat_model(model_config, provider_config, raw_endpoint)?;
+    let chat = azure_chat_model(model_config, provider_config, raw_endpoint, retrying)?;
     match azure_wire(raw_endpoint) {
         AzureWire::Responses {
             base_url,
             api_version,
         } => Ok(ModelHandle::new(ToolsOnResponses {
             chat,
-            responses: azure_responses_model(model_config, provider_config, base_url, api_version)?,
+            responses: azure_responses_model(
+                model_config,
+                provider_config,
+                base_url,
+                api_version,
+                retrying,
+            )?,
         })),
         AzureWire::ChatCompletionsOnly => Ok(chat),
     }
@@ -251,6 +278,7 @@ fn azure_chat_model(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
     raw_endpoint: &str,
+    retrying: &dyn Fn() -> ConnectRetryHttpClient,
 ) -> Result<ModelHandle> {
     let endpoint = normalize_azure_endpoint(raw_endpoint);
 
@@ -298,10 +326,7 @@ fn azure_chat_model(
                 .api_key(AzureOpenAIAuth::Token(
                     AZURE_ENTRA_PLACEHOLDER_TOKEN.to_string(),
                 ))
-                .http_client(AzureAuthHttpClient::new(
-                    ConnectRetryHttpClient::new(llm_client().clone()),
-                    Arc::new(cache),
-                ))
+                .http_client(AzureAuthHttpClient::new(retrying(), Arc::new(cache)))
                 .azure_endpoint(endpoint.clone())
                 .api_version(api_version)
                 .build()
@@ -321,7 +346,7 @@ fn azure_chat_model(
                 .api_key(AzureOpenAIAuth::ApiKey(key))
                 .azure_endpoint(endpoint.clone())
                 .api_version(api_version)
-                .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
+                .http_client(retrying())
                 .build()
                 .map_err(client_error)?;
             Ok(ModelHandle::new(
@@ -337,10 +362,11 @@ pub(super) fn openai_responses_model(
     base_url: &str,
     key: &str,
     identifier: &str,
+    http: ConnectRetryHttpClient,
 ) -> Result<ModelHandle> {
     let client = rig_core::providers::openai::Client::builder()
         .api_key(key)
-        .http_client(ConnectRetryHttpClient::new(llm_client().clone()))
+        .http_client(http)
         .base_url(base_url)
         .build()?;
     Ok(ModelHandle::new(client.completion_model(identifier)))
@@ -355,6 +381,7 @@ fn azure_responses_model(
     provider_config: &ProviderConfig,
     base_url: String,
     api_version: Option<String>,
+    retrying: &dyn Fn() -> ConnectRetryHttpClient,
 ) -> Result<ModelHandle> {
     tracing::info!(
         base_url = %base_url,
@@ -370,11 +397,7 @@ fn azure_responses_model(
             let client = rig_core::providers::openai::Client::builder()
                 .api_key(AZURE_ENTRA_PLACEHOLDER_TOKEN)
                 .http_client(AzureAuthHttpClient::new(
-                    AzureResponsesHttpClient::new(
-                        ConnectRetryHttpClient::new(llm_client().clone()),
-                        None,
-                        api_version,
-                    ),
+                    AzureResponsesHttpClient::new(retrying(), None, api_version),
                     Arc::new(cache),
                 ))
                 .base_url(base_url)
@@ -389,7 +412,7 @@ fn azure_responses_model(
             let client = rig_core::providers::openai::Client::builder()
                 .api_key(&key)
                 .http_client(AzureResponsesHttpClient::new(
-                    ConnectRetryHttpClient::new(llm_client().clone()),
+                    retrying(),
                     Some(key.clone()),
                     api_version,
                 ))
