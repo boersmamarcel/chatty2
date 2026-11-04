@@ -6,7 +6,7 @@ use rig_agent::completion::PromptError;
 use rig_agent::streaming::StreamingPrompt;
 use rig_core::completion::{CompletionError, Message};
 use rig_core::message::{Text, ToolResultContent, UserContent};
-use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
+use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent, ToolCallDeltaContent};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -17,6 +17,7 @@ use crate::models::clarification_store::{ClarificationNotification, ClarifyingQu
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::budget_stop::{BUDGET_STOP, StopOnBudgetExhausted, endpoint_refusal};
+use crate::services::cut_off_tool_call::{ArgumentTail, CutOffToolCall, MAX_CUT_OFF_RECOVERIES};
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
 use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
 use crate::services::worker_start::{StopOnWorkerStartFailure, WORKER_START_STOP};
@@ -378,6 +379,13 @@ fn classify_completion_error(err: &CompletionError) -> StreamErrorKind {
         // A malformed tool call surfaces from rig as a JSON parse failure on
         // the provider's response, not an HTTP status.
         CompletionError::JsonError(_) => StreamErrorKind::MalformedToolCall,
+        // A streamed tool call whose arguments never parsed, past the
+        // turn's in-run recoveries (AGE-983): a malformed call, worth the
+        // protocol nudge. Re-sending the same request, as a transport
+        // retry does, only cuts the same call off again.
+        CompletionError::ResponseError(message) if CutOffToolCall::parse(message).is_some() => {
+            StreamErrorKind::MalformedToolCall
+        }
         // rig ends a run whose last turn answered nothing *and* was cut off
         // (at the output cap, or by a content filter) with this error. It is
         // an empty completion, not a transport failure: re-running the turn
@@ -465,6 +473,34 @@ fn classify_streaming_error(err: &StreamingError) -> StreamErrorKind {
             | PromptError::MemoryError(_) => StreamErrorKind::Other,
         },
     }
+}
+
+/// The tool call rig rejected because its streamed arguments never parsed
+/// (AGE-983), when `err` is that error.
+fn cut_off_tool_call(err: &StreamingError) -> Option<CutOffToolCall> {
+    match completion_error(err)? {
+        CompletionError::ResponseError(message) => CutOffToolCall::parse(message),
+        _ => None,
+    }
+}
+
+/// Start one rig run of `agent` on `history` and `prompt` under `budget`,
+/// with the hooks every run of `stream_prompt` carries.
+async fn start_run(
+    agent: &rig_agent::agent::Agent,
+    concurrency: usize,
+    history: Vec<Message>,
+    prompt: Message,
+    budget: TurnBudget,
+) -> rig_agent::agent::StreamingResult {
+    // A delegation whose worker never started ends the run (AGE-822), and
+    // so does one that came back with a spent budget (AGE-903).
+    budget
+        .apply(agent.stream_prompt(prompt).history(history))
+        .tool_concurrency(concurrency)
+        .add_hook(StopOnWorkerStartFailure)
+        .add_hook(StopOnBudgetExhausted)
+        .await
 }
 
 /// Map one line of the agent's stream — an item, or the transport `Err` that
@@ -758,8 +794,6 @@ pub async fn stream_prompt(
 
     // The turn budget sets rig's call cap (the tool turns plus one tool-free
     // wrap-up call) and tells the model how many tool turns it has left.
-    // A delegation whose worker never started ends the run (AGE-822), and
-    // so does one that came back with a spent budget (AGE-903).
     // A leader that asks for several delegations in one response gets them
     // run side by side; every other agent keeps its tools in call order.
     // A budget stop belongs to the run it happened in: a new run may
@@ -767,12 +801,10 @@ pub async fn stream_prompt(
     if let Some(delegator) = agent.delegator() {
         delegator.clear_budget_stop();
     }
-    let mut agent_stream = turn_budget
-        .apply(agent.agent.stream_prompt(user_message).history(history))
-        .tool_concurrency(tool_concurrency(agent))
-        .add_hook(StopOnWorkerStartFailure)
-        .add_hook(StopOnBudgetExhausted)
-        .await;
+    let rig_agent = agent.agent.clone();
+    let concurrency = tool_concurrency(agent);
+    let mut agent_stream =
+        start_run(&rig_agent, concurrency, history, user_message, turn_budget).await;
 
     // A caller that does not wire a channel is treated the same as one whose
     // sender already dropped: `recv()` resolves to `None` immediately, which
@@ -787,6 +819,15 @@ pub async fn stream_prompt(
         // Whether the latest model call ended at the output cap (AGE-936).
         let mut last_call_cut_off = false;
         let mut clock = UsageClock::new(model);
+        // A cut-off tool call answered in-run (AGE-983): how many this turn,
+        // the model calls spent so far (for the continued run's budget), the
+        // text and the arguments of the call in flight, and the messages of
+        // the runs before the current one, which its final record lacks.
+        let mut recoveries = 0;
+        let mut calls = 0;
+        let mut said = String::new();
+        let mut arguments = ArgumentTail::default();
+        let mut earlier_runs: Vec<Message> = Vec::new();
         loop {
             tokio::select! {
                 item = agent_stream.next() => {
@@ -808,6 +849,54 @@ pub async fn stream_prompt(
                     match item {
                         Some(result) => {
                             if let Err(e) = &result
+                                && let Some(cut) = cut_off_tool_call(e)
+                            {
+                                // What rig leaves of the call: no arguments,
+                                // no finish_reason. rig raises this only for a
+                                // call the provider declared complete, never
+                                // for one cut at `length`, which it drops.
+                                warn!(
+                                    tool = %cut.tool,
+                                    reason = %cut.reason,
+                                    finish_reason = "not length: tool_calls, stop, unknown or none",
+                                    argument_chars = arguments.chars(),
+                                    argument_tail = %arguments.tail(),
+                                    recovery = recoveries + 1,
+                                    max = MAX_CUT_OFF_RECOVERIES,
+                                    "Tool call cut off before its arguments were complete"
+                                );
+                                let sent = if recoveries < MAX_CUT_OFF_RECOVERIES {
+                                    request_recorder.take()
+                                } else {
+                                    None
+                                };
+                                if let Some(sent) = sent {
+                                    recoveries += 1;
+                                    calls += 1;
+                                    let id = format!("call_cut_off_{}", uuid::Uuid::new_v4().simple());
+                                    let (call, result) = cut.messages(&id, &said);
+                                    for chunk in [
+                                        StreamChunk::ToolCallStarted { id: id.clone(), name: cut.tool.clone() },
+                                        StreamChunk::ToolCallInput { id: id.clone(), arguments: "{}".to_string() },
+                                        StreamChunk::ToolCallError { id, error: cut.tool_result() },
+                                    ] {
+                                        yield Ok(chunk);
+                                    }
+                                    text_in_last_call = false;
+                                    last_call_cut_off = false;
+                                    said.clear();
+                                    arguments.clear();
+                                    earlier_runs = sent.get(history_len..).unwrap_or_default().to_vec();
+                                    earlier_runs.push(call.clone());
+                                    let mut history = sent;
+                                    history.push(call);
+                                    let budget = turn_budget.continued(calls);
+                                    agent_stream =
+                                        start_run(&rig_agent, concurrency, history, result, budget).await;
+                                    continue;
+                                }
+                            }
+                            if let Err(e) = &result
                                 && let Some(chunks) = budget_spent_end(e, history_len, text_in_last_call)
                                     .or_else(|| worker_start_end(e, history_len, text_in_last_call))
                                     .or_else(|| budget_stop_end(e, history_len, text_in_last_call))
@@ -826,9 +915,18 @@ pub async fn stream_prompt(
                             // off at the output cap; read when the run ends.
                             match &result {
                                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
+                                    calls += 1;
                                     last_call_cut_off = call.finish_reason
                                         == Some(rig_core::completion::FinishReason::Length);
                                 }
+                                // The arguments of the call in flight, for
+                                // the log line should it be cut off.
+                                Ok(MultiTurnStreamItem::StreamAssistantItem(
+                                    StreamedAssistantContent::ToolCallDelta { content, .. },
+                                )) => match content {
+                                    ToolCallDeltaContent::Name(_) => arguments.clear(),
+                                    ToolCallDeltaContent::Delta(delta) => arguments.push(delta),
+                                },
                                 Ok(MultiTurnStreamItem::FinalResponse(_))
                                     if last_call_cut_off && text_in_last_call =>
                                 {
@@ -839,6 +937,14 @@ pub async fn stream_prompt(
                             let (chunks, stop) = map_stream_result(result, semantics);
                             for mut chunk in chunks {
                                 clock.stamp(&mut chunk);
+                                // A continued run's record starts at the
+                                // cut-off call's result: the runs before it
+                                // go first, so the turn is persisted whole.
+                                if let StreamChunk::TurnMessages(messages) = &mut chunk
+                                    && !earlier_runs.is_empty()
+                                {
+                                    messages.splice(0..0, earlier_runs.iter().cloned());
+                                }
                                 if let StreamChunk::Error(error) = &mut chunk
                                     && is_cut_off_without_answer(error)
                                     && context_shaper.window_exhausted()
@@ -846,13 +952,17 @@ pub async fn stream_prompt(
                                     error.message = WINDOW_EXHAUSTED_ERROR.to_string();
                                 }
                                 match &chunk {
-                                    StreamChunk::Text(text) if !text.trim().is_empty() => {
-                                        text_in_last_call = true;
+                                    StreamChunk::Text(text) => {
+                                        said.push_str(text);
+                                        if !text.trim().is_empty() {
+                                            text_in_last_call = true;
+                                        }
                                     }
                                     // The next call starts after the results.
                                     StreamChunk::ToolCallResult { .. }
                                     | StreamChunk::ToolCallError { .. } => {
                                         text_in_last_call = false;
+                                        said.clear();
                                     }
                                     _ => {}
                                 }
@@ -988,9 +1098,9 @@ mod tests {
         BUDGET_SPENT_NOTE, IMAGE_UNSUPPORTED_NOTE, Message, MultiTurnStreamItem, PromptError,
         RequestRecorder, StreamChunk, StreamErrorKind, StreamedAssistantContent,
         StreamedUserContent, StreamingError, UsageClock, UsageSemantics, WRAP_UP_TOOL_CALL_STOP,
-        budget_spent_end, classify_completion_error, classify_streaming_error, failed_run_messages,
-        map_item, map_stream_result, normalize_usage, streamed_tool_result_to_text,
-        strip_unsupported_images, tool_result_looks_like_error,
+        budget_spent_end, classify_completion_error, classify_streaming_error, cut_off_tool_call,
+        failed_run_messages, map_item, map_stream_result, normalize_usage,
+        streamed_tool_result_to_text, strip_unsupported_images, tool_result_looks_like_error,
     };
     use rig_core::message::{Image, UserContent};
 
@@ -1469,6 +1579,29 @@ mod tests {
             classify_completion_error(&CompletionError::ResponseError("boom".into())),
             StreamErrorKind::Transport
         );
+    }
+
+    /// AGE-983: rig's error for a streamed tool call whose arguments never
+    /// parsed is a malformed tool call (nudged), not a transport failure
+    /// (re-sent, and cut off again).
+    #[test]
+    fn classifies_a_cut_off_tool_call_as_malformed() {
+        let cut_off = CompletionError::ResponseError(
+            "tool call `write_file` arrived with malformed JSON input: EOF while parsing a \
+             string at line 1 column 13114"
+                .into(),
+        );
+        assert_eq!(
+            classify_completion_error(&cut_off),
+            StreamErrorKind::MalformedToolCall
+        );
+        let err = StreamingError::Completion(cut_off);
+        assert_eq!(
+            cut_off_tool_call(&err).map(|cut| cut.tool),
+            Some("write_file".to_string())
+        );
+        let transport = StreamingError::Completion(CompletionError::ResponseError("boom".into()));
+        assert!(cut_off_tool_call(&transport).is_none());
     }
 
     /// AGE-936: a run rig ended because its last turn was cut off with no

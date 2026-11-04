@@ -233,6 +233,29 @@ impl TurnBudget {
         }
     }
 
+    /// What is left of this budget once `calls` of its model calls are
+    /// spent: the budget of a run continued in a new `stream_prompt` pass
+    /// within the same turn (a cut-off tool call answered by
+    /// `llm_service`, AGE-983). Its notes keep counting down the whole run.
+    /// An uncapped budget stays uncapped; the deadline stays.
+    pub fn continued(self, calls: usize) -> Self {
+        if !self.is_capped() {
+            return self;
+        }
+        let run = self.run.unwrap_or(RunShare {
+            total: self.tool_turns,
+            spent: 0,
+        });
+        Self {
+            tool_turns: self.tool_turns.saturating_sub(calls),
+            run: Some(RunShare {
+                total: run.total,
+                spent: run.spent + calls,
+            }),
+            deadline: self.deadline,
+        }
+    }
+
     /// Tool turns this pass may use.
     pub fn tool_turns(&self) -> usize {
         self.tool_turns
@@ -520,6 +543,36 @@ mod tests {
         );
         // Early in the run a follow-up pass stays quiet.
         assert_eq!(run_budget_note(1, 40, 50, 10), None);
+    }
+
+    /// AGE-983: a run continued within its turn keeps what is left of the
+    /// budget, counted down the whole run, and its deadline.
+    #[test]
+    fn a_continued_budget_keeps_what_is_left() {
+        let deadline = Deadline::starting_now(Duration::from_secs(60));
+        let budget = TurnBudget::new(20).with_deadline(Some(deadline));
+        let continued = budget.continued(6);
+        assert_eq!(
+            continued,
+            TurnBudget::run_share(14, 20, 6).with_deadline(Some(deadline))
+        );
+        assert_eq!(
+            continued.continued(4),
+            TurnBudget::run_share(10, 20, 10).with_deadline(Some(deadline))
+        );
+        assert_eq!(
+            TurnBudget::run_share(5, 50, 45).continued(2),
+            TurnBudget::run_share(3, 50, 47)
+        );
+        assert_eq!(
+            TurnBudget::new(3).continued(5),
+            TurnBudget::run_share(0, 3, 5)
+        );
+        assert_eq!(
+            TurnBudget::new(0).continued(5),
+            TurnBudget::new(0),
+            "uncapped stays"
+        );
     }
 
     #[test]
