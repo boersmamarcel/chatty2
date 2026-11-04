@@ -11,6 +11,8 @@ ignore = [
     "RUSTSEC-2025-0052",
     # bincode: unmaintained, no patched release; replace or wait for upstream
     "RUSTSEC-2025-0141",
+    # calamine: calamine 0.22.1 pinned by memvid-core (chatty's own calamine is 0.38.0, unaffected)
+    "RUSTSEC-2026-0436",
     # fxhash: unmaintained, no patched release; replace or wait for upstream
     "RUSTSEC-2025-0057",
     # instant: unmaintained, no patched release; replace or wait for upstream
