@@ -792,7 +792,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
 | `swarm.exposed` | Optional, default `true`. `false`: no other agent may call it. |
 | `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. The broker asks it on every worker's `invoke_agent` before anything is spawned, and on the root's when the root runs as a spec (a `--team` leader, an `--agent <spec>` root; a plain root may call anyone), then refuses a call that closes a cycle or goes deeper than 4 levels below the root; the calling model reads `Error: invoke_agent: not_listed: …`, `cycle: root → a → b → a` or `too_deep: depth 5 > max 4` (PL-S2 DP-2). |
-| `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. |
+| `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. An `AgentSession` whose agent was built from the spec holds a turn to it even when the host's settings cap less tightly or not at all (hive's hosted worker runs on its user's uncapped settings; AGE-992). A run that spends it is not killed: it gets one tool-free call to answer with what it has, and a delegated worker's answer goes to its caller prefixed with `[limit_reached: turns. …]` (`[limit_reached: time. …]` for the deadline), so the caller's `invoke_agent` result says why the answer may be incomplete. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
 | `budget.cap_usd` | Optional. Dollars one task may spend before `invoke_agent` refuses to start another delegation (`budget_spent: usd`). |
 
@@ -993,8 +993,11 @@ starting the leader, or build the text with
 
 Two presets ship, both **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
-specs name no models. Besides them, four standalone specs ship: `researcher`,
-`reviewer`, `typesetter` and `writer`. `typesetter` (AGE-946) assembles the approved texts
+specs name no models. Besides them, five standalone specs ship: `data-analyst`,
+`researcher`, `reviewer`, `typesetter` and `writer`. `data-analyst` (AGE-992) answers
+questions from the data files in its workspace with the `coder` profile (DuckDB's
+`query_data` and friends, `calculate`, code execution), capped at 60 tool turns and 15
+minutes per delegation. `typesetter` (AGE-946) assembles the approved texts
 it is handed into one Typst document and compiles it with `compile_typst`, fixing compile
 errors until it compiles; it is the only preset whose profile has that tool, and it needs a
 build with the `math-render` feature.

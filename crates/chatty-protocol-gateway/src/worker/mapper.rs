@@ -14,7 +14,7 @@
 //! | `SessionEvent` | frame |
 //! |---|---|
 //! | `TurnStarted` | `status: working` |
-//! | `Text` | `artifact` (a chunk, `lastChunk: false`) |
+//! | `Text` | `artifact` (a chunk, `lastChunk: false`); the first after a tool result carrying the turn budget's wrap-up note starts with the limit note (see below) |
 //! | `ToolCallStarted` / `ToolCallResult` / `ToolCallError` | `status: working` with the progress line |
 //! | `ToolCallInput` | — |
 //! | `ApprovalRequested` | a `human.approve` request, to the root (see below) |
@@ -131,6 +131,18 @@
 //! A desktop worker shares its caller's disk, and nothing on the desktop
 //! reads them.
 //!
+//! # A run that hit its limit (AGE-992)
+//!
+//! A worker that spends its tool turns or its time is not killed: the
+//! turn budget (`chatty_core::services::turn_budget`) gives it one
+//! tool-free call to answer with what it has. The tool results that call
+//! answers carry the budget's wrap-up note; the first text after them, the
+//! best-effort answer, goes up prefixed once with
+//! [`TURN_LIMIT_REACHED`](turn_budget::TURN_LIMIT_REACHED) or
+//! [`TIME_LIMIT_REACHED`](turn_budget::TIME_LIMIT_REACHED), so the caller's
+//! `invoke_agent` result says the limit was hit and carries the partial
+//! answer. A run inside its limits sends its text as it was.
+//!
 //! # Typed handoffs (TD-2, AGE-693)
 //!
 //! A task whose role has a handoff schema carries it
@@ -155,6 +167,7 @@ use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteAppr
 use chatty_core::services::a2a_client::wire_usage;
 use chatty_core::services::budget_stop;
 use chatty_core::services::handoff::{self, HandoffContract, HandoffOutcome};
+use chatty_core::services::turn_budget;
 use chatty_core::services::{HeartbeatThrottle, heartbeat_interval};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
@@ -169,7 +182,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Answers for the running task, as the broker delivers them.
 pub type InputReceiver = mpsc::UnboundedReceiver<WorkerInput>;
@@ -453,6 +466,12 @@ pub struct TaskMapper {
     question_numbers: Arc<AtomicU64>,
     /// The rate limit on heartbeats sent up (AGE-932).
     heartbeat: HeartbeatThrottle,
+    /// The run hit its turn or time limit (AGE-992): the caller's note,
+    /// sent ahead of the next text, which is the tool-free wrap-up
+    /// call's best-effort answer.
+    limit_reached: Option<&'static str>,
+    /// Whether that note went out; it goes once per task.
+    limit_told: bool,
 }
 
 impl TaskMapper {
@@ -481,6 +500,8 @@ impl TaskMapper {
             questions: HashMap::new(),
             question_numbers: Arc::default(),
             heartbeat: HeartbeatThrottle::every(heartbeat_interval()),
+            limit_reached: None,
+            limit_told: false,
         }
     }
 
@@ -651,18 +672,52 @@ impl TaskMapper {
         }
     }
 
+    /// Note a tool result the tool-free wrap-up call answers: the run hit
+    /// its turn or time limit (AGE-992).
+    fn record_limit_event(&mut self, event: &SessionEvent) {
+        let result = match event {
+            SessionEvent::ToolCallResult { result, .. } => result,
+            SessionEvent::ToolCallError { error, .. } => error,
+            _ => return,
+        };
+        if self.limit_told || self.limit_reached.is_some() {
+            return;
+        }
+        if let Some(note) = turn_budget::limit_reached(result) {
+            info!(
+                task = %self.task_id,
+                note,
+                "The worker hit its limit; its caller is told ahead of its answer"
+            );
+            self.limit_reached = Some(note);
+        }
+    }
+
     /// The frame for `event`, or `None` for the events that stay in the child.
     pub fn map(&mut self, event: &SessionEvent) -> Option<ParticipantFrame> {
         self.record_trace_event(event);
         self.record_handoff_event(event);
+        self.record_limit_event(event);
         match event {
             SessionEvent::TurnStarted => Some(self.status(TaskState::Working, None)),
 
-            SessionEvent::Text(text) => Some(ParticipantFrame::Artifact {
-                task_id: self.task_id.clone(),
-                text: text.clone(),
-                last_chunk: false,
-            }),
+            // A run that hit its limit says so ahead of its best-effort
+            // answer, so its caller reads why the answer may be
+            // incomplete (AGE-992).
+            SessionEvent::Text(text) => {
+                let text = match self.limit_reached.take() {
+                    Some(note) => {
+                        self.limit_told = true;
+                        format!("{note}\n\n{text}")
+                    }
+                    None => text.clone(),
+                };
+                Some(ParticipantFrame::Artifact {
+                    task_id: self.task_id.clone(),
+                    text,
+                    last_chunk: false,
+                })
+            }
 
             // To the root, and only the root (EN-2a).
             SessionEvent::ApprovalRequested { id, detail, .. } => {
@@ -1170,6 +1225,71 @@ mod tests {
         assert_eq!(task_id, "task-1");
         assert_eq!(text, "Hello");
         assert!(!last_chunk, "more text may follow");
+    }
+
+    /// The texts of `events`' artifact frames, in order.
+    fn artifact_texts(mapper: &mut TaskMapper, events: &[SessionEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match mapper.map(event) {
+                Some(ParticipantFrame::Artifact { text, .. }) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A run that answered from its tool turns.
+    fn tool_turn_then_answer(result: &str, answer: &str) -> Vec<SessionEvent> {
+        vec![
+            SessionEvent::Text("Checking. ".into()),
+            tool_started("c1", "calculate"),
+            SessionEvent::ToolCallResult {
+                id: "c1".into(),
+                result: result.into(),
+            },
+            SessionEvent::Text(answer.into()),
+            SessionEvent::Text(" More.".into()),
+        ]
+    }
+
+    /// AGE-992: a run that spent its tool turns or its time answers with
+    /// tools disabled, and its caller reads why ahead of that answer, once.
+    #[test]
+    fn a_run_that_hit_its_limit_tells_its_caller_ahead_of_its_answer() {
+        use chatty_core::services::turn_budget::{
+            FINAL_TURN_NOTE, TIME_LIMIT_REACHED, TIME_UP_NOTE, TURN_LIMIT_REACHED,
+        };
+        for (note, told) in [
+            (FINAL_TURN_NOTE, TURN_LIMIT_REACHED),
+            (TIME_UP_NOTE, TIME_LIMIT_REACHED),
+        ] {
+            let mut mapper = TaskMapper::new("task-1");
+            let texts = artifact_texts(
+                &mut mapper,
+                &tool_turn_then_answer(&format!("2\n\n{note}"), "Best so far: 42."),
+            );
+            assert_eq!(
+                texts,
+                [
+                    "Checking. ".to_string(),
+                    format!("{told}\n\nBest so far: 42."),
+                    " More.".to_string(),
+                ]
+            );
+            assert_eq!(outcome(&mapper), TaskState::Completed, "not a failure");
+        }
+    }
+
+    /// A run inside its limits, the countdown notes included, sends its
+    /// text as it was.
+    #[test]
+    fn a_run_within_its_limits_sends_its_text_unchanged() {
+        let countdown = chatty_core::services::turn_budget::budget_note(9, 10).unwrap();
+        for result in ["2".to_string(), format!("2\n\n{countdown}")] {
+            let mut mapper = TaskMapper::new("task-1");
+            let texts = artifact_texts(&mut mapper, &tool_turn_then_answer(&result, "42."));
+            assert_eq!(texts, ["Checking. ", "42.", " More."]);
+        }
     }
 
     #[test]

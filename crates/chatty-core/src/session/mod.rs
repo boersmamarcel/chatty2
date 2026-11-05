@@ -69,6 +69,7 @@ use crate::models::message_types::{
 use crate::models::token_usage::{PriceBook, TokenUsage};
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
 use crate::repositories::ConversationData;
+use crate::services::run_budget::RunBudget;
 use crate::services::swarm_trace::{AGENTS_TRACE_KEY, SwarmTrace};
 use crate::services::turn_budget::TurnBudget;
 use crate::services::{
@@ -229,6 +230,11 @@ pub struct AgentSession {
     /// to, as the last [`InvokeAgentProgress::Call`] named it: calls run
     /// side by side share one stream, and each keeps a card of its own.
     delegation_call: u64,
+    /// The run budget of the spec the conversation's agent was built from
+    /// (`AgentBuildContext::run_budget`), whose turn cap a turn with no
+    /// budget of its own runs under when it is tighter than the settings'
+    /// (AGE-992). `None` for an agent built from settings alone.
+    spec_budget: Option<RunBudget>,
 }
 
 impl AgentSession {
@@ -251,6 +257,7 @@ impl AgentSession {
             swarm: SwarmTrace::new(),
             report_liveness: false,
             delegation_call: UNTAGGED_CALL,
+            spec_budget: None,
         }
     }
 
@@ -346,8 +353,10 @@ impl AgentSession {
         ctx: AgentBuildContext,
     ) -> Result<()> {
         let ctx = self.build_context(ctx);
+        let spec_budget = ctx.run_budget.clone();
         let conversation = Conversation::new(id, title, model, provider, ctx).await?;
         self.conversation = Some(conversation);
+        self.spec_budget = spec_budget;
         Ok(())
     }
 
@@ -361,8 +370,10 @@ impl AgentSession {
         ctx: AgentBuildContext,
     ) -> Result<()> {
         let ctx = self.build_context(ctx);
+        let spec_budget = ctx.run_budget.clone();
         let conversation = Conversation::from_data(data, model, provider, ctx).await?;
         self.conversation = Some(conversation);
+        self.spec_budget = spec_budget;
         Ok(())
     }
 
@@ -506,6 +517,26 @@ impl AgentSession {
         Ok(())
     }
 
+    /// The tool-turn cap of a turn that brings no budget of its own: the
+    /// settings' `max_agent_turns`, lowered to the cap of the spec the agent
+    /// was built from where that is tighter (AGE-992). A host that runs a
+    /// spec's agent on settings it did not narrow by the spec — hive's
+    /// hosted worker, on its user's uncapped settings — still stops at the
+    /// spec's cap. `0` is no cap, on either side.
+    fn max_agent_turns(&self) -> usize {
+        let configured = self.config.execution_settings.max_agent_turns as usize;
+        let spec = self
+            .spec_budget
+            .as_ref()
+            .and_then(RunBudget::turns)
+            .map_or(0, |turns| turns as usize);
+        match (configured, spec) {
+            (0, spec) => spec,
+            (configured, 0) => configured,
+            (configured, spec) => configured.min(spec),
+        }
+    }
+
     /// Everything `begin_turn` does before the stream is opened, kept apart
     /// so a test can run the same preparation against a scripted stream.
     fn prepare_turn(
@@ -516,6 +547,7 @@ impl AgentSession {
         if self.is_turn_active() {
             bail!("a turn is already running");
         }
+        let max_agent_turns = self.max_agent_turns();
         let Some(conversation) = self.conversation.as_mut() else {
             bail!("no conversation");
         };
@@ -606,12 +638,10 @@ impl AgentSession {
             cancel_flag,
             progress_slot: conversation.invoke_agent_progress_slot(),
             delegation,
-            turn_budget: turn_budget.unwrap_or_else(|| {
-                TurnBudget::new(self.config.execution_settings.max_agent_turns as usize)
-            }),
+            turn_budget: turn_budget.unwrap_or_else(|| TurnBudget::new(max_agent_turns)),
             policy: TurnPolicy {
                 surface: self.config.surface,
-                max_agent_turns: self.config.execution_settings.max_agent_turns as usize,
+                max_agent_turns,
                 loop_guard: self.config.loop_guard,
                 already_asked_to_retry,
                 think_disabled: conversation.think_disabled(),
@@ -1247,5 +1277,7 @@ pub async fn replay_scenario(
 
 #[cfg(test)]
 mod append_only_prefix;
+#[cfg(test)]
+mod spec_budget;
 #[cfg(test)]
 mod tests;

@@ -10,5 +10,10 @@ disable = ["shell"]
 [swarm]
 exposed = true
 
+# 40 tool turns and 15 minutes (AGE-992): still bounded, far below the ~300
+# calls one hosted delegation made in DABstep run #4, yet enough for a batch
+# review (recomputing five answers with its own SQL) plus building the final
+# answer table from every results/R<n>.md file (~20 reads and the README).
 [budget]
-max_agent_turns = 12
+max_agent_turns = 40
+max_duration = "15m"
