@@ -38,6 +38,16 @@
 //! for the tokenizer gap ([`OutputMargin`]), and the request is sent once
 //! more. OpenAI's `max_tokens is too large … supports at most N` is handled
 //! too: the cap goes down to N.
+//!
+//! vLLM's input figure is only a lower bound (AGE-988): it stops counting the
+//! prompt once it is past the room the requested output left, and says `at
+//! least 583 input tokens` of a 19k-token prompt, or gives its length in
+//! characters. So the lowered cap is also bounded by the request's own count:
+//! the window less the counted body and the margin on it. And the cap a
+//! refusal names may not be chatty's: hive's egress adds one, sized to the
+//! budget left, to a request that carries none (run #4). The retry then
+//! carries the lowered cap itself, which an egress that only ever lowers a
+//! cap keeps.
 
 use std::future::Future;
 use std::time::Duration;
@@ -52,6 +62,7 @@ use serde_json::Value;
 use crate::services::context_shaper::{
     MIN_CLAMPED_REPLY_TOKENS, OutputMargin, WindowOverflows, head_and_tail, omitted_marker,
 };
+use crate::token_budget::counter::TokenCounter;
 
 /// Re-sends after the first failed send. With the default backoff the
 /// retries wait 1 + 2 + 4 + 8 = 15 s in all: long enough for a pooled
@@ -321,8 +332,8 @@ enum OutputCapRefusal {
     Lower(usize),
 }
 
-/// Read a refusal message (any case) for what it asks of the output cap.
-/// Wordings handled:
+/// Read a refusal message (any case) for what it asks of the output cap of
+/// a request counted at `input_tokens` on our side. Wordings handled:
 ///
 /// - vLLM: `maximum context length is W tokens. However, you requested N
 ///   output tokens and your prompt contains at least M input tokens`, the
@@ -331,12 +342,19 @@ enum OutputCapRefusal {
 ///   large: N. … your request has M input tokens`: N less the overshoot
 ///   `N + M - W`, less the margin on M, but never under
 ///   [`MIN_CLAMPED_REPLY_TOKENS`] (a reply that short is the input's
-///   problem: compact it);
+///   problem: compact it); and never over the window less `input_tokens`
+///   and the margin on it, since vLLM's M is a lower bound (AGE-988). Any
+///   input wording does, or none: `your prompt contains C characters (more
+///   than …, which is the upper bound for M input tokens)` is one;
 /// - OpenRouter: `you requested about T tokens (M of text input, N in the
 ///   output)`: the same;
 /// - OpenAI: `max_tokens is too large: N. This model supports at most L
 ///   completion tokens`: L.
-fn output_cap_refusal(message: &str, margin: OutputMargin) -> OutputCapRefusal {
+fn output_cap_refusal(
+    message: &str,
+    input_tokens: usize,
+    margin: OutputMargin,
+) -> OutputCapRefusal {
     let text = message.to_ascii_lowercase();
     let too_large = OUTPUT_CAP_PHRASES.iter().any(|p| text.contains(p));
     if let Some(limit) = number_after(&text, "supports at most ")
@@ -356,16 +374,19 @@ fn output_cap_refusal(message: &str, margin: OutputMargin) -> OutputCapRefusal {
         .or_else(|| number_before(&text, " of text input", 0))
         .or_else(|| number_before(&text, " in the messages", 0));
     let window = number_after(&text, "maximum context length is ");
-    let (Some(output), Some(input), Some(window)) = (output, input, window) else {
+    let (Some(output), Some(window)) = (output, window) else {
         return if too_large {
             OutputCapRefusal::Unfixable
         } else {
             OutputCapRefusal::NotOutput
         };
     };
-    let overshoot = (output + input).saturating_sub(window);
-    match output.checked_sub(overshoot + margin.for_input(input)) {
-        Some(lowered) if overshoot > 0 && lowered >= MIN_CLAMPED_REPLY_TOKENS => {
+    // The room the window leaves past an input of `n` tokens and its margin:
+    // the provider's figure and our count are both at most the real input.
+    let room = |n: usize| window.checked_sub(n + margin.for_input(n));
+    let lowered = room(input.unwrap_or(0)).zip(room(input_tokens));
+    match lowered.map(|(reported, counted)| reported.min(counted)) {
+        Some(lowered) if lowered < output && lowered >= MIN_CLAMPED_REPLY_TOKENS => {
             OutputCapRefusal::Lower(lowered)
         }
         _ => OutputCapRefusal::NotOutput,
@@ -374,17 +395,31 @@ fn output_cap_refusal(message: &str, margin: OutputMargin) -> OutputCapRefusal {
 
 /// `body` with its output cap (`max_tokens`, `max_completion_tokens`,
 /// `max_output_tokens`) lowered to what the provider's refusal `message`
-/// asks for, or `None` when the refusal is not about the output, the body
-/// carries no cap, or the cap is already no larger.
+/// asks for — or `max_tokens` added, when the body carries none and the cap
+/// refused was added on the way (AGE-988) — or `None` when the refusal is
+/// not about the output or the cap is already no larger.
 pub(crate) fn lower_output_cap(body: &Bytes, message: &str) -> Option<Bytes> {
-    let OutputCapRefusal::Lower(lowered) = output_cap_refusal(message, OutputMargin::default())
+    let mut json: Value = serde_json::from_slice(body).ok()?;
+    let model = json
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // The whole body, JSON and all: more than the prompt the model sees, so
+    // the room it leaves errs on the small side.
+    let counted = TokenCounter::for_model(model).count(&String::from_utf8_lossy(body));
+    let OutputCapRefusal::Lower(lowered) =
+        output_cap_refusal(message, counted, OutputMargin::default())
     else {
         return None;
     };
-    let mut json: Value = serde_json::from_slice(body).ok()?;
     let object = json.as_object_mut()?;
+    let fields = ["max_tokens", "max_completion_tokens", "max_output_tokens"];
+    if !fields.iter().any(|field| object.contains_key(*field)) {
+        object.insert("max_tokens".into(), Value::from(lowered as u64));
+        return serde_json::to_vec(&json).ok().map(Bytes::from);
+    }
     let mut changed = false;
-    for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+    for field in fields {
         if let Some(slot) = object.get_mut(field)
             && slot.as_u64().is_some_and(|n| n as usize > lowered)
         {
@@ -426,7 +461,7 @@ where
             let message = overflow_message(&error);
             let (smaller, path) = if let Some(lowered) = lower_output_cap(&body, message) {
                 (lowered, "with a lower max_tokens")
-            } else if output_cap_refusal(message, OutputMargin::default())
+            } else if output_cap_refusal(message, 0, OutputMargin::default())
                 == OutputCapRefusal::Unfixable
             {
                 // The refusal is about the output cap and names no number to
@@ -932,12 +967,18 @@ mod tests {
         let prompt_only = "maximum context length is 32768 tokens. However, you requested 0 \
             output tokens and your prompt contains at least 40000 input tokens";
         assert!(lower_output_cap(&body_with_cap("max_tokens", 0), prompt_only).is_none());
-        // A body without a cap, or with a cap already low enough.
+        // A cap already low enough.
         let message = "maximum context length is 32768 tokens. However, you requested 30135 \
             output tokens and your prompt contains at least 2634 input tokens";
-        let none = Bytes::from(r#"{"messages":[]}"#);
-        assert!(lower_output_cap(&none, message).is_none());
         assert!(lower_output_cap(&body_with_cap("max_tokens", 100), message).is_none());
+        // A body without a cap: the one refused was added on the way, and
+        // the retry carries its own (AGE-988).
+        let none = Bytes::from(r#"{"messages":[]}"#);
+        let added = lower_output_cap(&none, message).expect("a cap added");
+        assert_eq!(
+            cap_of(&added, "max_tokens"),
+            30_135 - 1 - OutputMargin::default().for_input(2_634) as u64
+        );
         // No room left at all.
         let hopeless = "maximum context length is 32768 tokens. However, you requested 100 \
             output tokens and your prompt contains at least 32700 input tokens";
@@ -967,7 +1008,7 @@ mod tests {
             output tokens and your prompt contains at least 29400 input tokens";
         assert!(lower_output_cap(&body_with_cap("max_tokens", 3_500), crowded).is_none());
         assert_eq!(
-            output_cap_refusal(crowded, OutputMargin::default()),
+            output_cap_refusal(crowded, 0, OutputMargin::default()),
             OutputCapRefusal::NotOutput
         );
     }
@@ -1046,5 +1087,78 @@ mod tests {
         assert!(ok);
         assert_eq!((sent.len(), count), (2, 1));
         assert!(sent[1].len() < sent[0].len());
+    }
+
+    // ── AGE-988: run #4's refusals, a cap added downstream ──────────────
+
+    /// A request like run #4's leader's: about 76k characters of history
+    /// (about 23k tokens by cl100k) and no `max_tokens` of its own.
+    fn run4_body() -> Bytes {
+        let rows: String = (0..2_000)
+            .map(|i| {
+                format!(
+                    "Merchant Crossfit_Hanna paid a fee of {}.{:02} EUR. ",
+                    i % 97,
+                    i % 100
+                )
+            })
+            .collect();
+        let rows = &rows[..rows.len().min(76_000)];
+        Bytes::from(
+            serde_json::json!({ "model": "RedHatAI/Qwen3.8-27B-INT4", "messages": [
+                { "role": "system", "content": "You analyse payments data." },
+                { "role": "user", "content": "Total the fees." },
+                { "role": "tool", "content": rows }
+            ] })
+            .to_string(),
+        )
+    }
+
+    fn tokens_of(body: &Bytes) -> u64 {
+        crate::token_budget::counter::TokenCounter::for_model("m")
+            .count(&String::from_utf8_lossy(body)) as u64
+    }
+
+    /// Both run #4 wordings: vLLM names only a lower bound on the input
+    /// (`at least 583`, `upper bound for 143`), so the retry's cap is
+    /// counted from the request itself, with the margin, and added to the
+    /// body that had none. That request fits the window.
+    #[test]
+    fn the_run_4_refusals_are_answered_by_a_cap_that_fits() {
+        let worker = "This model's maximum context length is 32768 tokens. However, you \
+            requested 32186 output tokens and your prompt contains at least 583 input tokens, \
+            for a total of at least 32769 tokens. Please reduce the length of the input \
+            prompt or the number of requested output tokens. (parameter=input_tokens, \
+            value=583)";
+        let leader = "This model's maximum context length is 32768 tokens. However, you \
+            requested 32625 output tokens and your prompt contains 76061 characters (more \
+            than 18304 characters, which is the upper bound for 143 input tokens). Please \
+            reduce the length of the input prompt or the number of requested output tokens. \
+            (parameter=input_text, value=76061)";
+        let body = run4_body();
+        let input = tokens_of(&body);
+        assert!(input > 15_000 && input < 25_000, "fixture: {input} tokens");
+        for message in [worker, leader] {
+            assert!(says_context_overflow(message));
+            let lowered = lower_output_cap(&body, message).expect("a cap to retry with");
+            let cap = cap_of(&lowered, "max_tokens");
+            let margin = OutputMargin::default().for_input(input as usize) as u64;
+            assert!(cap >= MIN_CLAMPED_REPLY_TOKENS as u64, "{cap}");
+            assert!(input + margin + cap <= 32_768, "{input} + {margin} + {cap}");
+        }
+    }
+
+    /// The retry goes out once, with that cap; no overflow is counted (the
+    /// input was not the problem).
+    #[tokio::test]
+    async fn a_refusal_of_a_cap_added_downstream_is_retried_with_a_counted_cap() {
+        let leader = "maximum context length is 32768 tokens. However, you requested 32625 \
+            output tokens and your prompt contains 76061 characters (more than 18304 \
+            characters, which is the upper bound for 143 input tokens).";
+        let (sent, count, ok) = refused_once(run4_body(), leader).await;
+        assert!(ok);
+        assert_eq!((sent.len(), count), (2, 0));
+        assert!(serde_json::from_slice::<Value>(&sent[0]).unwrap()["max_tokens"].is_null());
+        assert!(cap_of(&sent[1], "max_tokens") + tokens_of(&sent[0]) < 32_768);
     }
 }

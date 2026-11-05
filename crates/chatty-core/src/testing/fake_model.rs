@@ -23,7 +23,11 @@
 //! A daemon given a context window ([`FakeDaemon::with_window`]) refuses
 //! any request whose body counts, with its requested `max_tokens`, more tokens than that, before any route
 //! sees it, with vLLM's own 400 (AGE-978): a model server that is strict
-//! about its window, as vLLM is.
+//! about its window, as vLLM is. Like vLLM, the refusal names only a lower
+//! bound on the input (`at least N input tokens`, or the characters wording
+//! for a long prompt): vLLM stops counting once the prompt is over the room
+//! the requested output left (AGE-988). [`FakeDaemon::with_egress_cap`]
+//! puts hive's egress budget clamp in front of it.
 //!
 //! Replies go out as OpenAI-compatible SSE on `…/chat/completions` and as
 //! Ollama NDJSON on `/api/chat`: rig only reads the body, so the content type
@@ -251,6 +255,9 @@ struct State {
     /// How many times the daemon's own token count exceeds the client's
     /// (cl100k), as Qwen's tokenizer does; 1.0 when none is set.
     tokenizer_gap: Mutex<f64>,
+    /// The output limit an egress in front of the daemon clamps every
+    /// request to, inserting it when the body has none (AGE-988).
+    egress_cap: Mutex<Option<usize>>,
 }
 
 /// The fake model server. It serves until the process exits.
@@ -303,6 +310,7 @@ impl FakeDaemon {
             log: Mutex::default(),
             window: Mutex::new(None),
             tokenizer_gap: Mutex::new(1.0),
+            egress_cap: Mutex::new(None),
         });
 
         let serving = state.clone();
@@ -356,6 +364,17 @@ impl FakeDaemon {
         self
     }
 
+    /// Answer every request as if an egress had clamped its output limit
+    /// to `tokens`: a body with no `max_tokens` gets `tokens`, a larger one
+    /// is lowered to it. This is hive's egress when the budget left cannot
+    /// pay for a request's worst case (AGE-940): it sizes the limit from
+    /// the money left, not from the window (AGE-988, run #4). The recorded
+    /// body is the one the client sent.
+    pub fn with_egress_cap(self, tokens: usize) -> Self {
+        *self.state.egress_cap.lock() = Some(tokens);
+        self
+    }
+
     /// How many requests were refused as over the window.
     pub fn refused(&self) -> usize {
         self.state.log.lock().refused
@@ -404,27 +423,58 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
             .count(&String::from_utf8_lossy(&request.body));
         let tokens = (tokens as f64 * *state.tokenizer_gap.lock()).ceil() as usize;
         // The requested output counts against the window too (AGE-985), as
-        // vLLM counts it.
-        let output = serde_json::from_slice::<serde_json::Value>(&request.body)
+        // vLLM counts it; an egress in front may have clamped or added it.
+        let requested = serde_json::from_slice::<serde_json::Value>(&request.body)
             .ok()
             .and_then(|body| {
                 ["max_completion_tokens", "max_tokens"]
                     .iter()
                     .find_map(|field| body.get(*field).and_then(serde_json::Value::as_u64))
             })
-            .unwrap_or(0) as usize;
+            .map(|n| n as usize);
+        let output = match (requested, *state.egress_cap.lock()) {
+            (Some(n), Some(cap)) => n.min(cap),
+            (None, Some(cap)) => cap,
+            (requested, None) => requested.unwrap_or(0),
+        };
         if tokens + output > window {
             state.log.lock().refused += 1;
+            // vLLM tokenizes no further than the room the output leaves, so
+            // it reports a lower bound on the input; a prompt of more than
+            // 128 characters per token of that room it does not tokenize
+            // at all and reports in characters (AGE-988).
+            let room = window.saturating_sub(output);
+            let chars = request.body.len();
+            let (input, param, value) = if output > 0 && chars > 128 * room {
+                (
+                    format!(
+                        "your prompt contains {chars} characters (more than {} characters, \
+                         which is the upper bound for {room} input tokens)",
+                        128 * room
+                    ),
+                    "input_text",
+                    chars,
+                )
+            } else {
+                let at_least = tokens.min(room + 1);
+                (
+                    format!(
+                        "your prompt contains at least {at_least} input tokens, for a total \
+                         of at least {} tokens",
+                        at_least + output
+                    ),
+                    "input_tokens",
+                    at_least,
+                )
+            };
             let message = format!(
                 "This model's maximum context length is {window} tokens. However, you \
-                 requested {output} output tokens and your prompt contains at least {tokens} \
-                 input tokens, for a total of at least {} tokens. Please reduce the length \
+                 requested {output} output tokens and {input}. Please reduce the length \
                  of the input prompt or the number of requested output tokens. \
-                 (parameter=input_tokens, value={tokens})",
-                tokens + output
+                 (parameter={param}, value={value})"
             );
             let body = serde_json::json!({ "error": {
-                "message": message, "type": "BadRequestError", "param": "input_tokens", "code": 400
+                "message": message, "type": "BadRequestError", "param": param, "code": 400
             }});
             return http(400, "application/json", &body.to_string());
         }

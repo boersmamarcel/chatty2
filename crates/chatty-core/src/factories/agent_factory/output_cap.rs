@@ -809,4 +809,91 @@ mod tests {
         let lowered = requests[1].json()["max_tokens"].as_u64().unwrap();
         assert!(lowered < 30_500 - 1_000, "{lowered}");
     }
+
+    // ── AGE-988: a long run on a known window, its output cap added downstream
+
+    /// A DABstep analyst's run (#4): `ROUNDS` tool rounds, each reading a
+    /// data file, then the answer, on vLLM's 32k window with Qwen's
+    /// tokenizer counting 5% more than ours. The model has hive's
+    /// configured window, and `max_tokens` as given; its last request
+    /// carries more than `min_tokens` (the fixture's size).
+    const ROUNDS: usize = 10;
+
+    async fn long_analyst_run(daemon: &FakeDaemon, max_tokens: Option<i32>, min_tokens: usize) {
+        let files: Vec<String> = (0..ROUNDS).map(|i| format!("part-{i}.csv")).collect();
+        let (mut model, provider) = hosted(daemon, max_tokens);
+        model.max_context_window = Some(VLLM_WINDOW as i32);
+        let (mut session, workspace) = hosted_session(&model, &provider).await;
+        for name in &files {
+            std::fs::write(workspace.path().join(name), data_file(7_000)).unwrap();
+        }
+        let events = run_turn(&mut session, TurnInput::text("Total the fees.")).await;
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(answer(&session), "done");
+        let counter = crate::token_budget::counter::TokenCounter::for_model("fake");
+        let last = daemon.requests().last().unwrap().body.clone();
+        let tokens = counter.count(&String::from_utf8_lossy(&last));
+        assert!(
+            tokens > min_tokens,
+            "fixture: the last request is {tokens} tokens"
+        );
+    }
+
+    fn analyst_script() -> Script {
+        let mut replies: Vec<Reply> = (0..ROUNDS)
+            .map(|i| Reply::ToolCalls(vec![read(&format!("part-{i}.csv"))]))
+            .collect();
+        replies.push(Reply::text("done"));
+        Script::new().route(CHEAP_MODEL, replies)
+    }
+
+    /// Criterion 1: with the window known and a model whose max output is
+    /// large (32k, the window itself), the cap the guard clamps to counts
+    /// the whole request — base, history, prompt — so no request of a long
+    /// run is over the window: every `max_tokens` plus the real input fits.
+    /// (A cap that large is also the history's reply reserve, so the
+    /// history is shaped to some 12k tokens, not 20k.)
+    #[tokio::test]
+    async fn a_long_run_with_a_large_output_cap_fits_every_request() {
+        let daemon = FakeDaemon::scripted(analyst_script())
+            .with_window(VLLM_WINDOW)
+            .with_tokenizer_gap(1.05);
+        long_analyst_run(&daemon, Some(VLLM_WINDOW as i32), 12_000).await;
+        assert_eq!(daemon.refused(), 0, "no request was over the window");
+        for request in daemon.requests() {
+            let sent = request.json()["max_tokens"].as_u64().unwrap();
+            assert!(sent < VLLM_WINDOW as u64, "clamped: {sent}");
+        }
+    }
+
+    /// Criterion 2, run #4 as it happened: chatty sends no `max_tokens`
+    /// (none configured), and hive's egress, short of budget, adds one of
+    /// 32,186 — the window less nothing. vLLM refuses, naming only a lower
+    /// bound on the input. Each such request is sent once more with a cap
+    /// counted from the request itself, which fits (the egress keeps the
+    /// lower of the two), and the analyst finishes.
+    #[tokio::test]
+    async fn a_near_window_cap_added_downstream_is_answered_with_one_that_fits() {
+        let daemon = FakeDaemon::scripted(analyst_script())
+            .with_window(VLLM_WINDOW)
+            .with_tokenizer_gap(1.05)
+            .with_egress_cap(32_186);
+        // The incident's size: about 20k tokens of history.
+        long_analyst_run(&daemon, None, 18_000).await;
+
+        let requests = daemon.requests();
+        let calls = ROUNDS + 1;
+        assert_eq!(daemon.refused(), calls, "each call refused once");
+        assert_eq!(requests.len(), 2 * calls, "and each retried once");
+        for pair in requests.chunks(2) {
+            assert!(
+                pair[0].json().get("max_tokens").is_none(),
+                "none configured"
+            );
+            let cap = pair[1].json()["max_tokens"]
+                .as_u64()
+                .expect("the retry's cap");
+            assert!(cap >= 1_024, "{cap}");
+        }
+    }
 }
