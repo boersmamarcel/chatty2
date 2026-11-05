@@ -757,4 +757,56 @@ mod tests {
             "later requests keep more headroom"
         );
     }
+
+    // ── AGE-985: a request that asks for more output than the window leaves
+
+    /// A user message of about `words` tokens.
+    fn long_prompt(words: usize) -> TurnInput {
+        TurnInput::text("word ".repeat(words))
+    }
+
+    /// Criterion 1: a model server whose tokenizer counts 5% more than ours
+    /// and that counts the requested `max_tokens` against its window refuses
+    /// nothing: the cap leaves the margin, and the agent finishes.
+    #[tokio::test]
+    async fn an_input_undercounted_by_five_percent_still_fits_with_its_output_cap() {
+        let daemon = FakeDaemon::scripted(Script::new().route(CHEAP_MODEL, [Reply::text("done")]))
+            .with_window(VLLM_WINDOW)
+            .with_tokenizer_gap(1.05);
+        // The cap a typesetter asks for: all but the prompt of the window.
+        let (mut model, provider) = hosted(&daemon, Some(VLLM_WINDOW as i32 - 2_000));
+        model.max_context_window = Some(VLLM_WINDOW as i32);
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+
+        let events = run_turn(&mut session, long_prompt(2_500)).await;
+
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(answer(&session), "done");
+        assert_eq!(daemon.refused(), 0);
+        let sent = daemon.requests()[0].json()["max_tokens"].as_u64().unwrap();
+        assert!(sent < VLLM_WINDOW as u64 - 2_000, "{sent}");
+    }
+
+    /// Criterion 2: a 400 that says `requested N output tokens` is retried
+    /// once with `max_tokens` lowered by the overshoot plus the margin, and
+    /// the agent finishes. The model has no configured window here, so the
+    /// guard cannot have clamped the cap beforehand.
+    #[tokio::test]
+    async fn a_requested_output_400_is_retried_once_with_a_lower_max_tokens() {
+        let daemon = FakeDaemon::scripted(Script::new().route(CHEAP_MODEL, [Reply::text("done")]))
+            .with_window(VLLM_WINDOW);
+        let (model, provider) = hosted(&daemon, Some(30_500));
+        let (mut session, _workspace) = hosted_session(&model, &provider).await;
+
+        let events = run_turn(&mut session, long_prompt(2_500)).await;
+
+        assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+        assert_eq!(answer(&session), "done");
+        assert_eq!(daemon.refused(), 1, "refused once, then accepted");
+        let requests = daemon.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].json()["max_tokens"], 30_500);
+        let lowered = requests[1].json()["max_tokens"].as_u64().unwrap();
+        assert!(lowered < 30_500 - 1_000, "{lowered}");
+    }
 }

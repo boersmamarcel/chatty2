@@ -27,6 +27,17 @@
 //! The refusal is recorded on the agent's [`WindowOverflows`], so its guard
 //! keeps more headroom on every later request. A second refusal is the
 //! caller's, as before.
+//!
+//! # A request that asks for more output than the window leaves (AGE-985)
+//!
+//! One more shape of the same refusal: the prompt fits, but the prompt plus
+//! the requested `max_tokens` does not (vLLM: `you requested 30135 output
+//! tokens and your prompt contains at least 2634 input tokens`, one over a
+//! 32,768 window). Compacting tool results cannot help; the request's output
+//! is lowered instead ([`lower_output_cap`]) by the overshoot plus a margin
+//! for the tokenizer gap ([`OutputMargin`]), and the request is sent once
+//! more. OpenAI's `max_tokens is too large … supports at most N` is handled
+//! too: the cap goes down to N.
 
 use std::future::Future;
 use std::time::Duration;
@@ -38,7 +49,9 @@ use rig_core::http_client::{
 use rig_core::wasm_compat::WasmCompatSend;
 use serde_json::Value;
 
-use crate::services::context_shaper::{WindowOverflows, head_and_tail, omitted_marker};
+use crate::services::context_shaper::{
+    MIN_CLAMPED_REPLY_TOKENS, OutputMargin, WindowOverflows, head_and_tail, omitted_marker,
+};
 
 /// Re-sends after the first failed send. With the default backoff the
 /// retries wait 1 + 2 + 4 + 8 = 15 s in all: long enough for a pooled
@@ -145,6 +158,8 @@ const CONTEXT_OVERFLOW_PHRASES: &[&str] = &[
     "exceeds the available context size",
     "exceed_context_size",
     "exceeds the context window",
+    "max_tokens is too large",
+    "max_completion_tokens is too large",
 ];
 
 /// Whether a provider's error body says the request was over its context
@@ -262,9 +277,140 @@ fn compacted(body: &Bytes) -> Option<Bytes> {
     serde_json::to_vec(&json).ok().map(Bytes::from)
 }
 
+/// The number written right before `marker` in `text` (`"30135 output
+/// tokens"` with `" output tokens"`), searching from byte `from`.
+fn number_before(text: &str, marker: &str, from: usize) -> Option<usize> {
+    let end = from + text.get(from..)?.find(marker)?;
+    let digits: String = text[..end]
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .filter(|c| *c != ',')
+        .collect();
+    digits.chars().rev().collect::<String>().parse().ok()
+}
+
+/// The number written right after `marker` in `text`.
+fn number_after(text: &str, marker: &str) -> Option<usize> {
+    let start = text.find(marker)? + marker.len();
+    let digits: String = text[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == ',')
+        .filter(|c| *c != ',')
+        .collect();
+    digits.parse().ok()
+}
+
+/// Phrasings that say the requested `max_tokens` itself was refused.
+const OUTPUT_CAP_PHRASES: &[&str] = &[
+    "max_tokens is too large",
+    "max_completion_tokens is too large",
+    "'max_tokens' or 'max_completion_tokens' is too large",
+];
+
+/// What a refusal says about the request's output cap.
+#[derive(Debug, PartialEq)]
+enum OutputCapRefusal {
+    /// Not about the output (or the prompt alone is over the window, or
+    /// there is no room worth asking for): compacting is the remedy.
+    NotOutput,
+    /// About the output cap, but too little is said to pick a lower one:
+    /// neither a retry nor compaction would change the outcome.
+    Unfixable,
+    /// Retry with the cap lowered to this.
+    Lower(usize),
+}
+
+/// Read a refusal message (any case) for what it asks of the output cap.
+/// Wordings handled:
+///
+/// - vLLM: `maximum context length is W tokens. However, you requested N
+///   output tokens and your prompt contains at least M input tokens`, the
+///   older `you requested T tokens (M in the messages, N in the
+///   completion)`, and `'max_tokens' or 'max_completion_tokens' is too
+///   large: N. … your request has M input tokens`: N less the overshoot
+///   `N + M - W`, less the margin on M, but never under
+///   [`MIN_CLAMPED_REPLY_TOKENS`] (a reply that short is the input's
+///   problem: compact it);
+/// - OpenRouter: `you requested about T tokens (M of text input, N in the
+///   output)`: the same;
+/// - OpenAI: `max_tokens is too large: N. This model supports at most L
+///   completion tokens`: L.
+fn output_cap_refusal(message: &str, margin: OutputMargin) -> OutputCapRefusal {
+    let text = message.to_ascii_lowercase();
+    let too_large = OUTPUT_CAP_PHRASES.iter().any(|p| text.contains(p));
+    if let Some(limit) = number_after(&text, "supports at most ")
+        && (text.contains("max_tokens") || text.contains("completion tokens"))
+    {
+        return if limit > 0 {
+            OutputCapRefusal::Lower(limit)
+        } else {
+            OutputCapRefusal::Unfixable
+        };
+    }
+    let output = number_before(&text, " output tokens", 0)
+        .or_else(|| number_before(&text, " in the output", 0))
+        .or_else(|| number_before(&text, " in the completion", 0))
+        .or_else(|| number_after(&text, "is too large: "));
+    let input = number_before(&text, " input tokens", 0)
+        .or_else(|| number_before(&text, " of text input", 0))
+        .or_else(|| number_before(&text, " in the messages", 0));
+    let window = number_after(&text, "maximum context length is ");
+    let (Some(output), Some(input), Some(window)) = (output, input, window) else {
+        return if too_large {
+            OutputCapRefusal::Unfixable
+        } else {
+            OutputCapRefusal::NotOutput
+        };
+    };
+    let overshoot = (output + input).saturating_sub(window);
+    match output.checked_sub(overshoot + margin.for_input(input)) {
+        Some(lowered) if overshoot > 0 && lowered >= MIN_CLAMPED_REPLY_TOKENS => {
+            OutputCapRefusal::Lower(lowered)
+        }
+        _ => OutputCapRefusal::NotOutput,
+    }
+}
+
+/// `body` with its output cap (`max_tokens`, `max_completion_tokens`,
+/// `max_output_tokens`) lowered to what the provider's refusal `message`
+/// asks for, or `None` when the refusal is not about the output, the body
+/// carries no cap, or the cap is already no larger.
+pub(crate) fn lower_output_cap(body: &Bytes, message: &str) -> Option<Bytes> {
+    let OutputCapRefusal::Lower(lowered) = output_cap_refusal(message, OutputMargin::default())
+    else {
+        return None;
+    };
+    let mut json: Value = serde_json::from_slice(body).ok()?;
+    let object = json.as_object_mut()?;
+    let mut changed = false;
+    for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        if let Some(slot) = object.get_mut(field)
+            && slot.as_u64().is_some_and(|n| n as usize > lowered)
+        {
+            *slot = Value::from(lowered as u64);
+            changed = true;
+        }
+    }
+    if !changed {
+        return None;
+    }
+    serde_json::to_vec(&json).ok().map(Bytes::from)
+}
+
+/// The refusal message of a context-overflow error.
+fn overflow_message(error: &http_client::Error) -> &str {
+    match error {
+        http_client::Error::InvalidStatusCodeWithMessage(_, body) => body,
+        http_client::Error::InvalidStatusCodeWithDetails { body, .. } => body,
+        _ => "",
+    }
+}
+
 /// Send `body` with connection retries; when the provider refuses it as
-/// over its window, count that on `overflows` and send it once more with
-/// its tool results compacted.
+/// over its window, count that on `overflows` and send it once more: with
+/// its output cap lowered when the refusal says the requested output was
+/// what did not fit (AGE-985), else with its tool results compacted.
 async fn send_fitting<R, F, Fut>(
     backoff: Duration,
     overflows: &WindowOverflows,
@@ -277,15 +423,29 @@ where
 {
     match with_connect_retries(backoff, || send(body.clone())).await {
         Err(error) if is_context_overflow(&error) => {
-            let Some(smaller) = compacted(&body) else {
+            let message = overflow_message(&error);
+            let (smaller, path) = if let Some(lowered) = lower_output_cap(&body, message) {
+                (lowered, "with a lower max_tokens")
+            } else if output_cap_refusal(message, OutputMargin::default())
+                == OutputCapRefusal::Unfixable
+            {
+                // The refusal is about the output cap and names no number to
+                // lower it to: compacting tool results would change nothing
+                // and would raise the headroom of every later request.
+                return Err(error);
+            } else if let Some(compacted) = compacted(&body) {
+                // Only a compaction counts as a window overflow: it is the
+                // input that was too large, so later requests keep more
+                // headroom. A lowered cap says nothing about the input.
+                overflows.record();
+                (compacted, "with its oldest tool results compacted")
+            } else {
                 return Err(error);
             };
-            overflows.record();
             tracing::warn!(
                 bytes_before = body.len(),
                 bytes_after = smaller.len(),
-                "Model request refused as over the context window; sending it once more \
-                 with its oldest tool results compacted"
+                "Model request refused as over the context window; sending it once more {path}"
             );
             with_connect_retries(backoff, || send(smaller.clone())).await
         }
@@ -715,5 +875,176 @@ mod tests {
             "overloaded".into(),
         );
         assert!(!is_connection_failure(&error));
+    }
+
+    // ── AGE-985: a request asking for more output than the window leaves ──
+
+    fn body_with_cap(field: &str, cap: u64) -> Bytes {
+        Bytes::from(serde_json::json!({ "model": "m", "messages": [], field: cap }).to_string())
+    }
+
+    fn cap_of(body: &Bytes, field: &str) -> u64 {
+        serde_json::from_slice::<Value>(body).unwrap()[field]
+            .as_u64()
+            .unwrap()
+    }
+
+    /// The incident's vLLM refusal: 2,634 + 30,135 = 32,769, one over. The
+    /// cap goes down by that one, plus 10% of the input and the slack.
+    #[test]
+    fn the_vllm_wording_lowers_the_cap_by_the_overshoot_and_the_margin() {
+        let message = "This model's maximum context length is 32768 tokens. However, you \
+            requested 30135 output tokens and your prompt contains at least 2634 input \
+            tokens, for a total of at least 32769 tokens. Please reduce the length of \
+            the input prompt or the number of requested output tokens.";
+        assert!(says_context_overflow(message));
+        let lowered = lower_output_cap(&body_with_cap("max_tokens", 30_135), message).unwrap();
+        let margin = OutputMargin::default().for_input(2_634) as u64;
+        assert!(margin >= 263 + 256);
+        assert_eq!(cap_of(&lowered, "max_tokens"), 30_135 - 1 - margin);
+        // The new request fits by a margin the tokenizer gap cannot eat.
+        assert!(2_634 + cap_of(&lowered, "max_tokens") + margin <= 32_768);
+    }
+
+    #[test]
+    fn other_providers_wordings_are_handled() {
+        // OpenRouter: the output share is named in parentheses.
+        let openrouter = "This endpoint's maximum context length is 32768 tokens. However, you \
+            requested about 35000 tokens (2000 of text input, 33000 in the output). Please \
+            reduce the length of either one, or use the \"middle-out\" transform";
+        assert!(says_context_overflow(openrouter));
+        let lowered = lower_output_cap(&body_with_cap("max_tokens", 33_000), openrouter).unwrap();
+        let cap = cap_of(&lowered, "max_tokens");
+        assert!(cap <= 33_000 - 2_232 - 200 && cap > 28_000, "{cap}");
+
+        // OpenAI: the model's real limit on completion tokens.
+        let openai = "max_tokens is too large: 40000. This model supports at most 16384 \
+            completion tokens, whereas you provided 40000.";
+        assert!(says_context_overflow(openai));
+        let lowered =
+            lower_output_cap(&body_with_cap("max_completion_tokens", 40_000), openai).unwrap();
+        assert_eq!(cap_of(&lowered, "max_completion_tokens"), 16_384);
+    }
+
+    #[test]
+    fn a_refusal_that_is_not_about_the_output_lowers_nothing() {
+        // The prompt alone is over: no output cap helps.
+        let prompt_only = "maximum context length is 32768 tokens. However, you requested 0 \
+            output tokens and your prompt contains at least 40000 input tokens";
+        assert!(lower_output_cap(&body_with_cap("max_tokens", 0), prompt_only).is_none());
+        // A body without a cap, or with a cap already low enough.
+        let message = "maximum context length is 32768 tokens. However, you requested 30135 \
+            output tokens and your prompt contains at least 2634 input tokens";
+        let none = Bytes::from(r#"{"messages":[]}"#);
+        assert!(lower_output_cap(&none, message).is_none());
+        assert!(lower_output_cap(&body_with_cap("max_tokens", 100), message).is_none());
+        // No room left at all.
+        let hopeless = "maximum context length is 32768 tokens. However, you requested 100 \
+            output tokens and your prompt contains at least 32700 input tokens";
+        assert!(lower_output_cap(&body_with_cap("max_tokens", 100), hopeless).is_none());
+    }
+
+    /// More vLLM wordings, and a floor on the lowered cap.
+    #[test]
+    fn more_vllm_wordings_and_a_floor_on_the_lowered_cap() {
+        let new = "'max_tokens' or 'max_completion_tokens' is too large: 30135. This model's \
+            maximum context length is 32768 tokens and your request has 2634 input tokens \
+            (30135 > 32768 - 2634).";
+        assert!(says_context_overflow(new));
+        let lowered = lower_output_cap(&body_with_cap("max_tokens", 30_135), new).unwrap();
+        let margin = OutputMargin::default().for_input(2_634) as u64;
+        assert_eq!(cap_of(&lowered, "max_tokens"), 30_135 - 1 - margin);
+
+        let old = "This model's maximum context length is 32768 tokens. However, you requested \
+            32769 tokens (2634 in the messages, 30135 in the completion). Please reduce the \
+            length of the messages or completion.";
+        let lowered = lower_output_cap(&body_with_cap("max_tokens", 30_135), old).unwrap();
+        assert_eq!(cap_of(&lowered, "max_tokens"), 30_135 - 1 - margin);
+
+        // Input near the window: 32768 - 29400 - margin is under the floor,
+        // so no output retry; compaction is the remedy.
+        let crowded = "maximum context length is 32768 tokens. However, you requested 3500 \
+            output tokens and your prompt contains at least 29400 input tokens";
+        assert!(lower_output_cap(&body_with_cap("max_tokens", 3_500), crowded).is_none());
+        assert_eq!(
+            output_cap_refusal(crowded, OutputMargin::default()),
+            OutputCapRefusal::NotOutput
+        );
+    }
+
+    fn refusal(message: &str) -> http_client::Error {
+        http_client::Error::InvalidStatusCodeWithMessage(
+            reqwest::StatusCode::BAD_REQUEST,
+            message.to_string(),
+        )
+    }
+
+    /// Sends `body` through `send_fitting` against a server that refuses the
+    /// first request with `message`; returns the bodies sent and the
+    /// overflows counted.
+    async fn refused_once(body: Bytes, message: &str) -> (Vec<Bytes>, usize, bool) {
+        let overflows = WindowOverflows::default();
+        let sent = std::sync::Mutex::new(Vec::new());
+        let result = send_fitting(Duration::ZERO, &overflows, body, |b| {
+            let mut sent = sent.lock().unwrap();
+            sent.push(b);
+            let first = sent.len() == 1;
+            let message = message.to_string();
+            async move {
+                if first {
+                    Err(refusal(&message))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+        (
+            sent.into_inner().unwrap(),
+            overflows.count(),
+            result.is_ok(),
+        )
+    }
+
+    /// An output-cap refusal that names nothing to lower to is returned as
+    /// it is: no second request, no compaction, no overflow counted.
+    #[tokio::test]
+    async fn an_unlowerable_output_cap_refusal_neither_compacts_nor_counts() {
+        let body = Bytes::from(
+            serde_json::json!({ "max_tokens": 40_000, "messages": [
+                { "role": "tool", "content": "x".repeat(5_000) },
+                { "role": "tool", "content": "y".repeat(5_000) }
+            ] })
+            .to_string(),
+        );
+        let (sent, count, ok) = refused_once(body, "max_tokens is too large: 40000.").await;
+        assert_eq!(sent.len(), 1, "no retry");
+        assert_eq!(count, 0);
+        assert!(!ok);
+    }
+
+    /// A lowered cap is a retry that counts no overflow; a compaction does.
+    #[tokio::test]
+    async fn only_a_compaction_counts_a_window_overflow() {
+        let message = "maximum context length is 32768 tokens. However, you requested 30135 \
+            output tokens and your prompt contains at least 2634 input tokens";
+        let (sent, count, ok) = refused_once(body_with_cap("max_tokens", 30_135), message).await;
+        assert!(ok);
+        assert_eq!((sent.len(), count), (2, 0));
+        assert!(cap_of(&sent[1], "max_tokens") < 30_135);
+
+        let tools = Bytes::from(
+            serde_json::json!({ "messages": [
+                { "role": "tool", "content": "x".repeat(5_000) },
+                { "role": "tool", "content": "y".repeat(5_000) }
+            ] })
+            .to_string(),
+        );
+        let overflow = "maximum context length is 32768 tokens. However, you requested 0 \
+            output tokens and your prompt contains at least 32769 input tokens";
+        let (sent, count, ok) = refused_once(tools, overflow).await;
+        assert!(ok);
+        assert_eq!((sent.len(), count), (2, 1));
+        assert!(sent[1].len() < sent[0].len());
     }
 }
