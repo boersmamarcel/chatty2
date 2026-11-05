@@ -21,7 +21,7 @@
 //!   by route.
 //!
 //! A daemon given a context window ([`FakeDaemon::with_window`]) refuses
-//! any request whose body counts more tokens than that, before any route
+//! any request whose body counts, with its requested `max_tokens`, more tokens than that, before any route
 //! sees it, with vLLM's own 400 (AGE-978): a model server that is strict
 //! about its window, as vLLM is.
 //!
@@ -248,6 +248,9 @@ struct State {
     log: Mutex<Log>,
     /// The context window, in tokens of the raw body, when one is set.
     window: Mutex<Option<usize>>,
+    /// How many times the daemon's own token count exceeds the client's
+    /// (cl100k), as Qwen's tokenizer does; 1.0 when none is set.
+    tokenizer_gap: Mutex<f64>,
 }
 
 /// The fake model server. It serves until the process exits.
@@ -299,6 +302,7 @@ impl FakeDaemon {
             mode: Mutex::new(mode),
             log: Mutex::default(),
             window: Mutex::new(None),
+            tokenizer_gap: Mutex::new(1.0),
         });
 
         let serving = state.clone();
@@ -342,6 +346,13 @@ impl FakeDaemon {
     /// tokens (cl100k) with vLLM's 400 for a prompt over its window.
     pub fn with_window(self, tokens: usize) -> Self {
         *self.state.window.lock() = Some(tokens);
+        self
+    }
+
+    /// Count the body `gap` times as many tokens as the client does (1.05:
+    /// the daemon's tokenizer counts 5% more than cl100k, AGE-985).
+    pub fn with_tokenizer_gap(self, gap: f64) -> Self {
+        *self.state.tokenizer_gap.lock() = gap;
         self
     }
 
@@ -391,17 +402,26 @@ fn respond(request: &Request, state: &State, index: usize, out: &mut impl Write)
     if let Some(window) = *state.window.lock() {
         let tokens = crate::token_budget::counter::TokenCounter::for_model("fake")
             .count(&String::from_utf8_lossy(&request.body));
-        if tokens > window {
+        let tokens = (tokens as f64 * *state.tokenizer_gap.lock()).ceil() as usize;
+        // The requested output counts against the window too (AGE-985), as
+        // vLLM counts it.
+        let output = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|body| {
+                ["max_completion_tokens", "max_tokens"]
+                    .iter()
+                    .find_map(|field| body.get(*field).and_then(serde_json::Value::as_u64))
+            })
+            .unwrap_or(0) as usize;
+        if tokens + output > window {
             state.log.lock().refused += 1;
             let message = format!(
                 "This model's maximum context length is {window} tokens. However, you \
-                 requested 0 output tokens and your prompt contains at least {} input \
-                 tokens, for a total of at least {} tokens. Please reduce the length of \
-                 the input prompt or the number of requested output tokens. \
-                 (parameter=input_tokens, value={})",
-                window + 1,
-                window + 1,
-                window + 1
+                 requested {output} output tokens and your prompt contains at least {tokens} \
+                 input tokens, for a total of at least {} tokens. Please reduce the length \
+                 of the input prompt or the number of requested output tokens. \
+                 (parameter=input_tokens, value={tokens})",
+                tokens + output
             );
             let body = serde_json::json!({ "error": {
                 "message": message, "type": "BadRequestError", "param": "input_tokens", "code": 400

@@ -202,6 +202,35 @@ pub const REPLY_ROOM_SHARE: f64 = 0.5;
 /// more clearly than a reply cut off after a few words.
 pub const MIN_CLAMPED_REPLY_TOKENS: usize = 1_024;
 
+/// What a request's output cap keeps free beyond the counted input, for the
+/// tokenizer gap (AGE-985): our count is cl100k, and a model's own tokenizer
+/// counts more on some text, so `input + max_tokens` that adds up to the
+/// window by our count can be over it by the model's. The margin is
+/// `fraction` of the counted input plus a fixed `slack`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OutputMargin {
+    /// Share of the counted input.
+    pub fraction: f64,
+    /// Tokens on top, for the chat template and rounding.
+    pub slack: usize,
+}
+
+impl Default for OutputMargin {
+    fn default() -> Self {
+        Self {
+            fraction: 0.10,
+            slack: 256,
+        }
+    }
+}
+
+impl OutputMargin {
+    /// The tokens to keep free for a request counted at `input_tokens`.
+    pub fn for_input(&self, input_tokens: usize) -> usize {
+        (input_tokens as f64 * self.fraction.max(0.0)) as usize + self.slack
+    }
+}
+
 /// Run-scoped marker (rig scratchpad): a turn of this run ran out of window
 /// before it answered, so every later request keeps [`REPLY_ROOM_SHARE`] of
 /// the window for the reply. Set by `EmptyTurnRetry` (AGE-967).
@@ -312,6 +341,10 @@ pub struct ContextShaperSettings {
     /// clamped below when the window has less room left (AGE-967). `None`:
     /// requests carry no cap and are never given one.
     pub output_cap: Option<usize>,
+
+    /// What the output cap keeps free beyond the counted input (AGE-985); a
+    /// clamped cap leaves the larger of this and the window headroom.
+    pub output_margin: OutputMargin,
 }
 
 impl Default for ContextShaperSettings {
@@ -326,6 +359,7 @@ impl Default for ContextShaperSettings {
             compaction_trigger_fraction: COMPACTION_TRIGGER_FRACTION,
             compaction_keep_recent_fraction: COMPACTION_KEEP_RECENT_FRACTION,
             output_cap: None,
+            output_margin: OutputMargin::default(),
         }
     }
 }
@@ -775,17 +809,22 @@ impl ContextShaper {
     /// base; `None` without a configured window.
     fn reply_room_left(&self, history: &[Message], prompt: &Message) -> Option<usize> {
         let window = self.inner.context_window?;
-        let headroom = self.headroom(window);
         let counter = &self.inner.counter;
         let request: usize = history
             .iter()
             .chain(std::iter::once(prompt))
             .map(|m| counter.count_message(m))
             .sum();
+        let base = self.inner.base_tokens.load(Ordering::Relaxed);
+        // The window headroom, or the margin on the counted input when that
+        // is more (AGE-985): the input is undercounted by a share of itself.
+        let margin = self
+            .headroom(window)
+            .max(self.inner.settings.output_margin.for_input(base + request));
         Some(
             window
-                .saturating_sub(headroom)
-                .saturating_sub(self.inner.base_tokens.load(Ordering::Relaxed))
+                .saturating_sub(margin)
+                .saturating_sub(base)
                 .saturating_sub(request),
         )
     }
@@ -1395,6 +1434,39 @@ mod tests {
             Some(MIN_CLAMPED_REPLY_TOKENS as u64),
             "never under the floor"
         );
+    }
+
+    /// AGE-985: the cap leaves at least 10% of the counted input plus the
+    /// slack, even with no window headroom, and the margin is configurable.
+    #[test]
+    fn the_output_cap_keeps_a_margin_on_the_counted_input() {
+        let history = vec![user_text(&"word ".repeat(2_000))];
+        let prompt = user_text("and now?");
+        let c = counter();
+        let input = c.count_message(&history[0]) + c.count_message(&prompt);
+        let shaper = |margin: OutputMargin| {
+            ContextShaper::new(
+                ContextShaperSettings {
+                    headroom_fraction: 0.0,
+                    output_cap: Some(32_000),
+                    output_margin: margin,
+                    ..ContextShaperSettings::default()
+                },
+                counter(),
+                Some(32_768),
+            )
+        };
+        let default = shaper(OutputMargin::default())
+            .clamped_output_cap(&history, &prompt)
+            .unwrap() as usize;
+        assert_eq!(default, 32_768 - input - (input / 10 + 256), "{default}");
+        let wide = shaper(OutputMargin {
+            fraction: 0.2,
+            slack: 1_000,
+        })
+        .clamped_output_cap(&history, &prompt)
+        .unwrap() as usize;
+        assert!(wide < default - 200, "{wide} {default}");
     }
 
     /// AGE-967: a run that ran out of window keeps half of it for the
