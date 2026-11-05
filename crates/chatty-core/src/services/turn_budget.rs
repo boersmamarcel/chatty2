@@ -40,6 +40,11 @@
 //! text: `llm_service` turns the resulting `MaxTurnsError` / the stop this
 //! hook asks for ([`WRAP_UP_TOOL_CALL_STOP`]) into a normal end.
 //!
+//! A delegated worker's caller learns that its answer came from the
+//! wrap-up call: the worker's mapper sees the wrap-up note on a tool result
+//! ([`limit_reached`]) and sends [`TURN_LIMIT_REACHED`] or
+//! [`TIME_LIMIT_REACHED`] ahead of the answer (AGE-992).
+//!
 //! Nothing here touches history, so tool-call/result pairing (AGE-513) and
 //! the context shaper's history patch (AGE-504) are unaffected: the note is
 //! appended inside the tool result it rides on.
@@ -62,6 +67,32 @@ pub const FINAL_TURN_NOTE: &str = "[No tool turns left. Tools are now disabled: 
 /// [`Deadline`] has passed.
 pub const TIME_UP_NOTE: &str = "[Time is up. Tools are now disabled: reply with your final \
      answer, or a short summary of what you did and what remains, using what you have.]";
+
+/// What a delegated worker's caller reads ahead of the answer of a run that
+/// spent its tool turns (AGE-992): the answer that follows is the worker's
+/// best so far, given with tools disabled, not a finished one.
+pub const TURN_LIMIT_REACHED: &str = "[limit_reached: turns. This agent used all its tool turns \
+     before it finished; tools were disabled and it was asked for its best answer so far, which \
+     follows. It may be incomplete.]";
+
+/// [`TURN_LIMIT_REACHED`] for a run whose time budget ran out.
+pub const TIME_LIMIT_REACHED: &str = "[limit_reached: time. This agent's time budget ran out \
+     before it finished; tools were disabled and it was asked for its best answer so far, which \
+     follows. It may be incomplete.]";
+
+/// The note for a delegated worker's caller when `tool_result` is one the
+/// tool-free wrap-up call answers: it carries [`FINAL_TURN_NOTE`] or
+/// [`TIME_UP_NOTE`]. `None` for every other result, the countdown notes
+/// included.
+pub fn limit_reached(tool_result: &str) -> Option<&'static str> {
+    if tool_result.contains(FINAL_TURN_NOTE) {
+        Some(TURN_LIMIT_REACHED)
+    } else if tool_result.contains(TIME_UP_NOTE) {
+        Some(TIME_LIMIT_REACHED)
+    } else {
+        None
+    }
+}
 
 /// What the countdown notes ask for. A run that has only explored so far
 /// must hear that it is time to act, not merely to wrap up.
@@ -585,6 +616,33 @@ mod tests {
         // A standalone zero budget is no cap, not a spent one.
         assert_eq!(TurnBudget::new(0).rig_max_turns(), UNCAPPED_RIG_TURNS);
         assert!(!TurnBudget::new(0).is_wrap_up(1, now));
+    }
+
+    /// AGE-992: only the notes before the tool-free wrap-up call mean a
+    /// limit was hit; the countdown does not.
+    #[test]
+    fn only_the_wrap_up_notes_say_a_limit_was_reached() {
+        let noted = |note: &str| {
+            with_note(&ToolOutput::text("42"), note)
+                .as_text()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(
+            limit_reached(&noted(FINAL_TURN_NOTE)),
+            Some(TURN_LIMIT_REACHED)
+        );
+        assert_eq!(
+            limit_reached(&noted(TIME_UP_NOTE)),
+            Some(TIME_LIMIT_REACHED)
+        );
+        assert_eq!(limit_reached(&noted(&budget_note(8, 10).unwrap())), None);
+        let start = Instant::now();
+        let near_the_end = Deadline::new(start, Duration::from_secs(60))
+            .note(start + Duration::from_secs(55))
+            .unwrap();
+        assert_eq!(limit_reached(&noted(&near_the_end)), None);
+        assert_eq!(limit_reached("42"), None);
     }
 
     #[test]

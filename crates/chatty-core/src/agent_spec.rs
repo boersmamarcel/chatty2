@@ -106,6 +106,7 @@ pub const PRESETS: &[(&str, &str)] = &[
         "crosscheck-writer",
         include_str!("../agents/crosscheck-writer.toml"),
     ),
+    ("data-analyst", include_str!("../agents/data-analyst.toml")),
     ("researcher", include_str!("../agents/researcher.toml")),
     ("reviewer", include_str!("../agents/reviewer.toml")),
     ("typesetter", include_str!("../agents/typesetter.toml")),
@@ -1485,6 +1486,48 @@ cap_usd = 2.0
         }
     }
 
+    /// AGE-992: a hosted data analyst ran the default spec, with no turn
+    /// cap, and one delegation made ~300 model calls. Its preset caps a
+    /// delegation at 60 tool turns and 15 minutes, delegates to nobody, and
+    /// keeps the tools it computes with (AGE-979's DuckDB tools, calculate,
+    /// code execution).
+    #[test]
+    fn the_data_analyst_is_capped_and_keeps_its_data_tools() {
+        let spec = load_agent_spec_from("data-analyst", None, None)
+            .unwrap()
+            .spec;
+        assert_eq!(spec.budget.max_agent_turns, Some(60));
+        assert_eq!(spec.max_duration(), Some(Duration::from_secs(15 * 60)));
+        assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
+        assert!(spec.swarm.delegates_to.is_empty(), "a leaf worker");
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        for tool in [
+            "query_data",
+            "describe_data",
+            "profile_data",
+            "file_structure_detector",
+            "calculate",
+            "execute_code",
+            "read_file",
+        ] {
+            assert!(profile.allows(tool), "{tool}");
+        }
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for tool in ["query_data", "execute_code", "calculate"] {
+            assert!(preamble.contains(tool), "the preamble names {tool}");
+        }
+    }
+
+    /// AGE-992: on hosted the reviewer's cap now bites; 40 turns and 15
+    /// minutes fit a batch review plus building the answer table from
+    /// every result file.
+    #[test]
+    fn the_reviewer_fits_a_batch_review_and_the_table_build() {
+        let spec = load_agent_spec_from("reviewer", None, None).unwrap().spec;
+        assert_eq!(spec.budget.max_agent_turns, Some(40));
+        assert_eq!(spec.max_duration(), Some(Duration::from_secs(15 * 60)));
+    }
+
     /// AGE-937: the shared reviewer re-derives every figure instead of
     /// reading along, checks that each number is possible, and rejects a
     /// figure that fails. The calculator it is pointed at must be one its
@@ -1534,6 +1577,7 @@ cap_usd = 2.0
                 "local-agent",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "data-analyst",
                 "researcher",
                 "reviewer",
                 "typesetter",
@@ -1607,6 +1651,7 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "data-analyst",
                 "researcher",
                 "reviewer",
                 "typesetter",
@@ -1622,6 +1667,7 @@ cap_usd = 2.0
                 "writer",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "data-analyst",
                 "researcher",
                 "reviewer",
                 "typesetter",
@@ -1780,6 +1826,7 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "data-analyst",
                 "reviewer",
                 "typesetter",
                 "writer"

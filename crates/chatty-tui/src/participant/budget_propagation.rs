@@ -13,6 +13,7 @@
 use chatty_core::models::token_usage::{ModelRef, TokenPricing, TokenUsage};
 use chatty_core::services::run_budget::RunBudget;
 use chatty_core::services::spend_gate::LocalSpendGate;
+use chatty_core::services::turn_budget::TURN_LIMIT_REACHED;
 use chatty_core::settings::models::providers_store::ProviderType;
 use chatty_core::testing::fake_model::{RecordedRequest, Reply, Script};
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
@@ -128,7 +129,12 @@ async fn turn_budget_propagates() {
         .await;
     let out = run.output.as_ref().expect("the run completes");
     assert!(out.success, "{out:?}");
-    assert_eq!(out.response, "Done within two turns.");
+    // The leader's tool result says the limit was hit, then carries the
+    // worker's best-effort answer (AGE-992).
+    assert_eq!(
+        out.response,
+        format!("{TURN_LIMIT_REACHED}\n\nDone within two turns.")
+    );
 
     let calls = kit.sse.requests_for("kit/w");
     assert_eq!(calls.len(), 3, "two tool turns and the wrap-up");
