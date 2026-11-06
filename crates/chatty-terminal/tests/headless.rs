@@ -20,6 +20,17 @@ fn sh(script: &str) -> TerminalConfig {
     }
 }
 
+/// An interactive bash with a fixed `$ ` prompt. bash's default prompt ends
+/// in `#` for root, so tests waiting for `$` would hang in a root container.
+fn bash() -> TerminalConfig {
+    TerminalConfig {
+        shell: Some("bash".into()),
+        args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
+        env: [("PS1".to_string(), "$ ".to_string())].into(),
+        ..TerminalConfig::default()
+    }
+}
+
 /// Pump events until `done` holds for the current terminal state. Returns
 /// every event seen on the way.
 fn wait_until(
@@ -257,11 +268,7 @@ fn scrollback_setting_caps_the_history() {
 /// than the shell holds the terminal.
 #[test]
 fn foreground_job_is_seen_while_a_program_runs_in_the_shell() {
-    let config = TerminalConfig {
-        shell: Some("bash".into()),
-        args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
-        ..TerminalConfig::default()
-    };
+    let config = bash();
     let (term, events) = TerminalHandle::spawn(config).unwrap();
     // An interactive bash at its prompt owns the foreground itself.
     wait_until(&term, &events, "the prompt", |t, _| {
@@ -305,10 +312,8 @@ fn foreground_job_is_seen_while_a_program_runs_in_the_shell() {
 fn foreground_process_name_and_current_dir_follow_the_shell() {
     let start = std::env::temp_dir();
     let config = TerminalConfig {
-        shell: Some("bash".into()),
-        args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
         cwd: Some(start.clone()),
-        ..TerminalConfig::default()
+        ..bash()
     };
     let (term, events) = TerminalHandle::spawn(config).unwrap();
     wait_until(&term, &events, "the prompt", |t, _| {
@@ -358,11 +363,7 @@ fn poll_input_hidden(term: &TerminalHandle, want: bool, what: &str) {
 /// but in non-canonical mode, and that is not hidden input.
 #[test]
 fn input_hidden_follows_stty_echo_but_not_the_line_editor() {
-    let config = TerminalConfig {
-        shell: Some("bash".into()),
-        args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
-        ..TerminalConfig::default()
-    };
+    let config = bash();
     let (term, events) = TerminalHandle::spawn(config).unwrap();
     wait_until(&term, &events, "the prompt", |t, _| {
         t.snapshot(Region::Screen).text.contains('$')
