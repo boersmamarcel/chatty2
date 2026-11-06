@@ -106,6 +106,10 @@ pub const PRESETS: &[(&str, &str)] = &[
         "crosscheck-writer",
         include_str!("../agents/crosscheck-writer.toml"),
     ),
+    (
+        "code-reviewer",
+        include_str!("../agents/code-reviewer.toml"),
+    ),
     ("coder", include_str!("../agents/coder.toml")),
     ("coding-lead", include_str!("../agents/coding-lead.toml")),
     ("data-analyst", include_str!("../agents/data-analyst.toml")),
@@ -1573,7 +1577,10 @@ cap_usd = 2.0
         let spec = load_agent_spec_from("coding-lead", None, None)
             .unwrap()
             .spec;
-        assert_eq!(spec.swarm.delegates_to, ["coder", "reviewer", "tester"]);
+        assert_eq!(
+            spec.swarm.delegates_to,
+            ["coder", "code-reviewer", "tester"]
+        );
         assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
         assert_eq!(spec.budget.max_agent_turns, Some(30));
         assert_eq!(spec.max_duration(), Some(Duration::from_secs(90 * 60)));
@@ -1603,6 +1610,8 @@ cap_usd = 2.0
             "acceptance criteria",
             "merge it into yours with git_merge",
             "TESTS: PASS",
+            "MUTATION CAUGHT or MUTATION MISSED",
+            "MUTATION MISSED counts as a fix round",
             "APPROVE",
             "numbered list of fixes",
             "At most 2 fix rounds",
@@ -1680,6 +1689,12 @@ cap_usd = 2.0
             "python -m pytest -q",
             "cargo test",
             "shell_execute",
+            "grep -E '^test result|FAILED|panicked'",
+            "git show --stat HEAD",
+            "MUTATION CAUGHT",
+            "MUTATION MISSED",
+            "git checkout -- <file>",
+            "Never commit",
             "TESTS: PASS",
             "TESTS: FAIL",
             "never answer TESTS: PASS without having run the checks",
@@ -1690,7 +1705,8 @@ cap_usd = 2.0
 
     /// AGE-957: the shared reviewer also reviews a code change: against
     /// the task's acceptance criteria, read with the git tools, its fixes
-    /// numbered and located.
+    /// numbered and located. It has no shell (AGE-1032: the coding team's
+    /// `code-reviewer` is the one with it).
     #[test]
     fn the_reviewer_reviews_a_code_change_against_its_criteria() {
         let spec = load_agent_spec_from("reviewer", None, None).unwrap().spec;
@@ -1704,6 +1720,46 @@ cap_usd = 2.0
         }
         let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
         assert!(profile.allows("git_diff") && profile.allows("git_log"));
+        assert_eq!(spec.tools.disable, ["shell"]);
+    }
+
+    /// AGE-1032: the coding team's reviewer runs the tests and `git show`
+    /// through the shell, read-only by instruction: the shell group is on,
+    /// and the profile has no write or commit tool.
+    #[test]
+    fn the_code_reviewer_can_run_the_tests_and_writes_nothing() {
+        let spec = load_agent_spec_from("code-reviewer", None, None)
+            .unwrap()
+            .spec;
+        assert!(spec.swarm.delegates_to.is_empty(), "a leaf worker");
+        assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
+        assert!(spec.budget.max_agent_turns.is_some() && spec.max_duration().is_some());
+        assert!(spec.tools.disable.is_empty(), "{:?}", spec.tools.disable);
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        for tool in ["shell_execute", "git_diff", "git_log", "read_file"] {
+            assert!(profile.allows(tool), "{tool}");
+        }
+        for tool in [
+            "write_file",
+            "apply_diff",
+            "delete_file",
+            "git_add",
+            "git_commit",
+            "git_merge",
+        ] {
+            assert!(!profile.allows(tool), "the code-reviewer may not {tool}");
+        }
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for needle in [
+            "acceptance criterion",
+            "git_diff",
+            "shell_execute",
+            "git show --stat HEAD",
+            "You are read-only",
+            "The first line of your answer is APPROVE or REQUEST_CHANGES, then a numbered list",
+        ] {
+            assert!(preamble.contains(needle), "{needle:?} in {preamble:?}");
+        }
     }
 
     fn names(specs: &[AgentSpec]) -> Vec<&str> {
@@ -1723,6 +1779,7 @@ cap_usd = 2.0
                 "local-agent",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "code-reviewer",
                 "coder",
                 "coding-lead",
                 "data-analyst",
@@ -1806,6 +1863,7 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "code-reviewer",
                 "coder",
                 "coding-lead",
                 "data-analyst",
@@ -1825,6 +1883,7 @@ cap_usd = 2.0
                 "writer",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "code-reviewer",
                 "coder",
                 "coding-lead",
                 "data-analyst",
@@ -1987,6 +2046,7 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "code-reviewer",
                 "coder",
                 "coding-lead",
                 "data-analyst",

@@ -5,9 +5,9 @@
 # it reports NOT DONE rather than going on.
 [agent]
 name = "coding-lead"
-description = "Leads a coding task: a coder changes and commits, a tester runs the checks, a reviewer approves"
+description = "Leads a coding task: a coder changes and commits, a tester runs the checks, a code-reviewer approves"
 preamble = """You lead a small coding team and change no file yourself. coder makes a change \
-and commits it, tester runs the repository's own checks, reviewer reviews the change against \
+and commits it, tester runs the repository's own checks, code-reviewer reviews the change against \
 the task.
 
 1. Read the task, and the files it names if you need them. Write down its acceptance \
@@ -18,15 +18,21 @@ several steps gets one coder call per small step.
 3. If coder's result names a branch of its own (a local run gives every worker one), merge it \
 into yours with git_merge before you go on. On a hosted run its commits are already on the \
 working branch.
-4. Delegate to tester: "Run the repository's checks." Then delegate to reviewer: the task, \
-the acceptance criteria, and that the change is the newest commits on the current branch \
-(git_log, git_diff); ask for APPROVE, or REQUEST_CHANGES with a numbered list of fixes.
-5. The task is done when tester's first line is TESTS: PASS and reviewer's is APPROVE. \
-Otherwise send coder one numbered list of fixes: the failing output tester quoted and \
-reviewer's numbered fixes, word for word. Then merge, test and review again as in 3 and 4. \
-At most 2 fix rounds: after the second, stop.
-6. Reply with DONE or NOT DONE on the first line, then the commits on the branch, tester's \
-and reviewer's last verdicts, and, when NOT DONE, what still fails.
+4. Delegate to tester: "Run the repository's checks." If the change adds or changes tests \
+and tester's first line is TESTS: PASS, delegate to tester again for a mutation check: name \
+one line of the code under test for each new test, and ask it to break that line, run that \
+test, expect it to FAIL, restore the file with git checkout -- <file>, commit nothing, and \
+report MUTATION CAUGHT or MUTATION MISSED per test.
+5. Then delegate to code-reviewer: the task, the acceptance criteria, tester's and the mutation \
+check's results, and that the change is the newest commits on the current branch (git_log, \
+git_diff); ask for APPROVE, or REQUEST_CHANGES with a numbered list of fixes.
+6. The task is done when tester's first line is TESTS: PASS, no test is MUTATION MISSED and \
+code-reviewer's is APPROVE. Otherwise send coder one numbered list of fixes: the failing output \
+tester quoted, code-reviewer's numbered fixes word for word, and for each MUTATION MISSED the \
+test and the line it did not notice. Then merge, test and review again as in 3 to 5. A \
+MUTATION MISSED counts as a fix round. At most 2 fix rounds: after the second, stop.
+7. Reply with DONE or NOT DONE on the first line, then the commits on the branch, tester's \
+and code-reviewer's last verdicts, and, when NOT DONE, what still fails.
 
 Never switch to, merge into or push the base branch: the work stays on the current branch. If the current branch is the base branch (main or master), stop before delegating and reply NOT DONE, saying the work needs its own branch."""
 
@@ -34,9 +40,9 @@ Never switch to, merge into or push the base branch: the work stays on the curre
 profile = "coordinator"
 
 [swarm]
-delegates_to = ["coder", "reviewer", "tester"]
+delegates_to = ["coder", "code-reviewer", "tester"]
 
-# Up to 3 rounds of coder, merge, tester and reviewer (12 turns) plus reading
+# Up to 3 rounds of coder, merge, tester and code-reviewer (12 turns) plus reading
 # the task and the repository. The deadline bounds the callees too: each runs
 # under the tighter of its own and what the lead has left (AGE-644).
 [budget]

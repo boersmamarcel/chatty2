@@ -1,5 +1,5 @@
 //! The coding team (AGE-957) on the swarm kit: the `coding-lead`, `coder`,
-//! `tester` and `reviewer` presets run as real `chatty-tui` workers in a git
+//! `tester` and `code-reviewer` presets run as real `chatty-tui` workers in a git
 //! repository, behind a scripted fake model, and take one small issue from a
 //! task to commits on the conversation's working branch in a bare remote.
 //!
@@ -27,7 +27,7 @@ use super::swarm_kit::{AgentDef, Endpoint, SwarmKit, git};
 const LEAD_MODEL: &str = "kit/coding-lead";
 const CODER_MODEL: &str = "kit/coder";
 const TESTER_MODEL: &str = "kit/tester";
-const REVIEWER_MODEL: &str = "kit/reviewer";
+const REVIEWER_MODEL: &str = "kit/code-reviewer";
 
 /// The conversation's working branch, as hive names it (`chatty/<id>`).
 const WORKING_BRANCH: &str = "chatty/conv-957";
@@ -36,7 +36,7 @@ const WORKING_BRANCH: &str = "chatty/conv-957";
 const TEST_SCRIPT: &str = r#". ./calc.sh
 [ "$(add 2 3)" = 5 ] || { echo "FAIL: add 2 3 gave '$(add 2 3)', want 5"; exit 1; }
 [ "$(sub 5 3)" = 2 ] || { echo "FAIL: sub 5 3 gave '$(sub 5 3)', want 2"; exit 1; }
-echo "2 passed"
+echo "test result: ok. 2 passed; 0 failed"
 "#;
 
 const CALC: &str = "add() { echo $(( $1 + $2 )); }\n";
@@ -120,6 +120,27 @@ fn tester_run(verdict: &str) -> [Reply; 3] {
     ]
 }
 
+/// One mutation check (AGE-1032): break the line under test in the
+/// working tree, run the test and see it fail, restore the file with
+/// `git checkout -- calc.sh`, and show that nothing is left changed.
+fn tester_mutation_run(verdict: &str) -> [Reply; 3] {
+    [
+        Reply::tool_call(
+            "shell_execute",
+            serde_json::json!({
+                "command": "sed -i 's/\\$1 - \\$2/\\$1 + \\$2/' calc.sh; \\\n\\
+                            sh tests/test_calc.sh; echo \"test exit $?\"; \\\n\\
+                            git checkout -- calc.sh"
+            }),
+        ),
+        Reply::tool_call(
+            "shell_execute",
+            serde_json::json!({ "command": "git status --short; echo tree-restored" }),
+        ),
+        Reply::text(verdict),
+    ]
+}
+
 /// The repository the issue is about, committed on the working branch and
 /// pushed to a bare remote, as hive's checkout leaves a conversation's
 /// workspace (AGE-915).
@@ -166,7 +187,7 @@ fn seed_repository(workspace: &Path, remote: &Path) {
 /// tester runs the repository's check, which really fails, and answers
 /// `TESTS: FAIL` with that output. The lead sends the failure back as a
 /// numbered fix; the coder fixes and commits; merged and tested again, the
-/// check really passes, the tester answers `TESTS: PASS`, the reviewer
+/// check really passes, the tester answers `TESTS: PASS`, the code-reviewer
 /// `APPROVE`, and the lead `DONE`. The lead's branch then goes to the bare
 /// repository's working branch, which ends up with both commits and a
 /// passing check, while its base branch is untouched.
@@ -178,7 +199,7 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
             AgentDef::from_spec(lead, LEAD_MODEL, Endpoint::Sse),
             AgentDef::from_spec(preset("coder"), CODER_MODEL, Endpoint::Ndjson),
             AgentDef::from_spec(preset("tester"), TESTER_MODEL, Endpoint::Ndjson),
-            AgentDef::from_spec(preset("reviewer"), REVIEWER_MODEL, Endpoint::Ndjson),
+            AgentDef::from_spec(preset("code-reviewer"), REVIEWER_MODEL, Endpoint::Ndjson),
         ],
         Script::new().route(
             LEAD_MODEL,
@@ -194,11 +215,17 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
                 merge("sub-agent/coder-1"),
                 invoke("tester", "Run the repository's checks."),
                 invoke(
-                    "reviewer",
+                    "tester",
+                    "Mutation check: break the line `sub() { echo $(( $1 - $2 )); }` \
+                     in calc.sh (change - to +) for test tests/test_calc.sh; expect it to \
+                     FAIL, restore with git checkout -- calc.sh, commit nothing.",
+                ),
+                invoke(
+                    "code-reviewer",
                     "Review the newest commits on the current branch against: \
                      sub(a, b) returns a - b; tests/test_calc.sh passes.",
                 ),
-                Reply::text("DONE\nsub() added and fixed; TESTS: PASS; APPROVE."),
+                Reply::text("DONE\nsub() added and fixed; TESTS: PASS; MUTATION CAUGHT; APPROVE."),
             ],
         ),
         Script::new()
@@ -239,13 +266,23 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
                     "TESTS: FAIL\nsh tests/test_calc.sh: exit 1\nFAIL: sub 5 3 gave '8', want 2",
                 )
                 .to_vec();
-                replies.extend(tester_run("TESTS: PASS\nsh tests/test_calc.sh: exit 0"));
+                replies.extend(tester_run(
+                    "TESTS: PASS\nsh tests/test_calc.sh: exit 0\n\
+                     test result: ok. 2 passed; 0 failed\nFiles changed: calc.sh",
+                ));
+                replies.extend(tester_mutation_run(
+                    "MUTATION CAUGHT: tests/test_calc.sh, calc.sh sub(): - to +",
+                ));
                 replies
             })
             .route(
                 REVIEWER_MODEL,
                 [
                     Reply::tool_call("git_log", serde_json::json!({ "max_count": 3 })),
+                    Reply::tool_call(
+                        "shell_execute",
+                        serde_json::json!({ "command": "git show --stat HEAD" }),
+                    ),
                     Reply::text("APPROVE\n1. sub(a, b) returns a - b.\n2. The test passes."),
                 ],
             ),
@@ -277,7 +314,8 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
             edge(lead_node, "tester-0"),
             edge(lead_node, "coder-1"),
             edge(lead_node, "tester-1"),
-            edge(lead_node, "reviewer-0"),
+            edge(lead_node, "tester-2"),
+            edge(lead_node, "code-reviewer-0"),
             edge("root", lead_node),
         ]
     );
@@ -286,7 +324,7 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
     // the coder edits and commits and delegates to nobody; the tester runs
     // a shell and can write nothing.
     let lead_requests = kit.sse.requests_for(LEAD_MODEL);
-    assert_eq!(lead_requests.len(), 8);
+    assert_eq!(lead_requests.len(), 9);
     let lead_tools = tools(&lead_requests[0]);
     for tool in ["invoke_agent", "git_merge"] {
         assert!(
@@ -320,7 +358,7 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
         );
     }
     let tester_requests = kit.ndjson.requests_for(TESTER_MODEL);
-    assert_eq!(tester_requests.len(), 6);
+    assert_eq!(tester_requests.len(), 9);
     let tester_tools = tools(&tester_requests[0]);
     assert!(
         tester_tools.iter().any(|t| t == "shell_execute"),
@@ -346,17 +384,51 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
         body(&tester_requests[2])
     );
     assert!(
-        body(&tester_requests[5]).contains("2 passed"),
+        body(&tester_requests[5]).contains("test result: ok. 2 passed"),
         "the second check really passed: {}",
         body(&tester_requests[5])
     );
+
+    // The mutation check really broke the line and the test really failed
+    // on it, then the file was restored: the tester's second shell call
+    // sees a clean tree.
+    assert!(
+        body(&tester_requests[7]).contains("FAIL: sub 5 3 gave '8', want 2")
+            && body(&tester_requests[7]).contains("test exit 1"),
+        "the broken line made the test fail: {}",
+        body(&tester_requests[7])
+    );
+    assert!(
+        body(&tester_requests[8]).contains("tree-restored")
+            && !body(&tester_requests[8]).contains(" M calc.sh"),
+        "the file was restored: {}",
+        body(&tester_requests[8])
+    );
+
+    // The reviewer has the shell now (AGE-1032): it listed the commit's
+    // files with git show and the output reached it.
+    let reviewer_requests = kit.ndjson.requests_for(REVIEWER_MODEL);
+    assert_eq!(reviewer_requests.len(), 3);
+    let reviewer_tools = tools(&reviewer_requests[0]);
+    assert!(
+        reviewer_tools.iter().any(|t| t == "shell_execute"),
+        "{reviewer_tools:?}"
+    );
+    for tool in ["write_file", "apply_diff", "git_commit"] {
+        assert!(
+            !reviewer_tools.iter().any(|t| t == tool),
+            "{tool}: {reviewer_tools:?}"
+        );
+    }
+    assert!(body(&reviewer_requests[2]).contains("calc.sh"));
 
     // The lead acted on each verdict: the failure reached it before it sent
     // the fix, and the pass and the approval before it said DONE.
     assert!(body(&lead_requests[3]).contains("TESTS: FAIL"));
     assert!(body(&coder_requests[5]).contains("1. FAIL: sub 5 3 gave '8', want 2"));
     assert!(body(&lead_requests[6]).contains("TESTS: PASS"));
-    assert!(body(&lead_requests[7]).contains("APPROVE"));
+    assert!(body(&lead_requests[7]).contains("MUTATION CAUGHT"));
+    assert!(body(&lead_requests[8]).contains("APPROVE"));
 
     // The lead's branch holds both of the coder's commits on top of the
     // base, and the base branch was never moved.
@@ -408,5 +480,8 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
         "{}",
         String::from_utf8_lossy(&check.stdout)
     );
-    assert_eq!(String::from_utf8_lossy(&check.stdout).trim(), "2 passed");
+    assert_eq!(
+        String::from_utf8_lossy(&check.stdout).trim(),
+        "test result: ok. 2 passed; 0 failed"
+    );
 }
