@@ -32,6 +32,8 @@ mod budget_stop;
 #[cfg(test)]
 mod call_chain;
 #[cfg(test)]
+mod coding_team;
+#[cfg(test)]
 mod delegation;
 #[cfg(test)]
 mod equivalence;

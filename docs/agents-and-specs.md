@@ -994,13 +994,37 @@ starting the leader, or build the text with
 Two presets ship, both **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
 specs name no models. Besides them, five standalone specs ship: `data-analyst`,
-`researcher`, `reviewer`, `typesetter` and `writer`. `data-analyst` (AGE-992) answers
+`researcher`, `reviewer`, `typesetter` and `writer`, and the coding team below. `data-analyst` (AGE-992) answers
 questions from the data files in its workspace with the `coder` profile (DuckDB's
 `query_data` and friends, `calculate`, code execution), capped at 60 tool turns and 15
 minutes per delegation. `typesetter` (AGE-946) assembles the approved texts
 it is handed into one Typst document and compiles it with `compile_typst`, fixing compile
 errors until it compiles; it is the only preset whose profile has that tool, and it needs a
 build with the `math-render` feature.
+
+**The coding team (AGE-957)** is three specs and the shared `reviewer`, with no
+`team.json`: `/agent coding-lead` or `--agent coding-lead` runs it. It is the first
+milestone of the hosted coding swarm (AGE-956: issue, branch, commits, PR).
+
+| Spec | Profile | Role | Budget |
+|------|---------|------|--------|
+| `coding-lead` | `coordinator` | Reads the task, writes its acceptance criteria, delegates to `coder`, merges the coder's branch (`git_merge`; on hosted the commits are already on the working branch), then requires `tester` `TESTS: PASS` and `reviewer` `APPROVE`. Otherwise it sends the numbered fixes back to `coder`, at most 2 rounds, and replies `DONE` or `NOT DONE`. Edits nothing. `delegates_to = ["coder", "reviewer", "tester"]` | 30 turns, 90m |
+| `coder` | `coder`, less `code-exec` | Smallest change, committed on the current branch with `git_add`/`git_commit`; never creates, switches or merges a branch, never pushes. Leaf, exposed | 40 turns, 20m |
+| `tester` | `reviewer` (read tools plus the shell, which can write: the tester stays read-only by instruction, not by tool) | Runs the repository's checks: each line of `.chatty/checks`, else the README's test command, else `python -m pytest -q` (a `pytest.ini` or `tests/`) or `cargo test` (a `Cargo.toml`), with `shell_execute`. First line `TESTS: PASS` or `TESTS: FAIL`, then each command's exit code and the failing output, trimmed. No checks or no shell is `TESTS: FAIL`, never a pass. Leaf, exposed | 12 turns, 10m |
+| `reviewer` | `reviewer`, less `shell` | The shared reviewer; for a code change it reads `git_log`/`git_diff` and checks each acceptance criterion: `APPROVE` or `REQUEST_CHANGES` and numbered fixes | 40 turns, 15m |
+
+`coder` and `tester` are exposed rather than `callers = ["coding-lead"]`: an agent run
+without `--team` (`/agent coding-lead`, `--agent coding-lead`, a delegated worker) is
+offered the roster less every spec that names its callers (`root_agent_names_of`), so a
+callers-only member would be unreachable from its own lead.
+
+The tester needs the shell group on (`ExecutionSettingsModel::enabled`). A hosted
+worker runs on the user's stored execution settings, where the shell and `execute_code`
+are off by default, so on hosted the tester can run checks only once the user's
+settings turn the shell on, and the guest image has the tools the checks call (hive's
+rootfs adds only `git`). `chatty-tui/src/participant/coding_team.rs` runs the whole team on
+the swarm kit: a wrong first commit, a real failing check, a fix round, a pass, an
+approval, and the result pushed to a bare repository's working branch.
 
 | Team (display name) | Leader | Attempts | Judge |
 |------|--------|---------|-------|
