@@ -443,4 +443,58 @@ mod tests {
         assert!(text.ends_with("1999\n"));
         assert_eq!(text.lines().count(), 2_000);
     }
+
+    /// The mark `bytes` end with, scanning the whole slice.
+    fn mark_of(bytes: &[u8]) -> Option<Mark> {
+        let mut scanner = MarkScanner::new();
+        let (_, mark) = scanner.next_mark(bytes);
+        mark
+    }
+
+    #[test]
+    fn osc_133_abc_give_prompt_command_and_output_start() {
+        assert_eq!(mark_of(b"\x1b]133;A\x07"), Some(Mark::PromptStart));
+        assert_eq!(mark_of(b"\x1b]133;B\x07"), Some(Mark::CommandStart));
+        assert_eq!(mark_of(b"\x1b]133;C\x07"), Some(Mark::OutputStart));
+    }
+
+    #[test]
+    fn osc_133_d_carries_the_exit_code() {
+        assert_eq!(
+            mark_of(b"\x1b]133;D;0\x07"),
+            Some(Mark::CommandEnd { exit_code: Some(0) })
+        );
+        assert_eq!(
+            mark_of(b"\x1b]133;D;127\x07"),
+            Some(Mark::CommandEnd {
+                exit_code: Some(127)
+            })
+        );
+    }
+
+    #[test]
+    fn osc_133_d_without_a_usable_code_has_none() {
+        let none = Some(Mark::CommandEnd { exit_code: None });
+        assert_eq!(mark_of(b"\x1b]133;D\x07"), none);
+        assert_eq!(mark_of(b"\x1b]133;D;x\x07"), none);
+    }
+
+    #[test]
+    fn unknown_osc_133_letter_and_window_title_give_no_mark() {
+        assert_eq!(mark_of(b"\x1b]133;Z\x07"), None);
+        assert_eq!(mark_of(b"\x1b]0;title\x07"), None);
+    }
+
+    #[test]
+    fn osc_6973_gives_private_with_its_fields() {
+        assert_eq!(
+            mark_of(b"\x1b]6973;a;b\x07"),
+            Some(Mark::Private(vec!["a".to_string(), "b".to_string()]))
+        );
+    }
+
+    #[test]
+    fn st_terminator_works_like_bel() {
+        assert_eq!(mark_of(b"\x1b]133;A\x1b\\"), Some(Mark::PromptStart));
+    }
 }
