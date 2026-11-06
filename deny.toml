@@ -17,10 +17,14 @@ ignore = [
     "RUSTSEC-2024-0384",
     # lopdf: lopdf 0.39 pinned by memvid-core
     "RUSTSEC-2026-0187",
+    # calamine: calamine 0.22 is pinned by memvid-core 2.0.140 (latest release, no newer one uses calamine >= 0.38, the fixed line). Panic/OOM on malformed .xls/.xlsb (CFB parser). Exposure: chatty's own Excel and data-query tools use calamine 0.38 (fixed); which memvid-core ingest path reaches calamine 0.22 is not yet traced. Remove once memvid-core upgrades calamine.
+    "RUSTSEC-2026-0436",
     # paste: unmaintained, no patched release; replace or wait for upstream
     "RUSTSEC-2024-0436",
     # proc-macro-error2: unmaintained, no patched release; replace or wait for upstream
     "RUSTSEC-2026-0173",
+    # pin-utils: unmaintained (repo archived 2026-10-01), no patched release; pulled by futures/aws-smithy-http; replace or wait for upstream
+    "RUSTSEC-2026-0441",
     # quick-xml: old quick-xml pinned by upstream crates (calamine, memvid-core, docx-rs, citationberg, plist, pptx)
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
