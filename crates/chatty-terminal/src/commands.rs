@@ -474,19 +474,25 @@ impl CommandTracker {
         }
         let text = term.bounds_to_string(start, end);
         let text = text.trim_end();
-        if text.len() <= LAST_COMMAND_OUTPUT_BYTES {
-            return (text.to_string(), false);
-        }
-        let mut cut = text.len() - LAST_COMMAND_OUTPUT_BYTES;
-        while !text.is_char_boundary(cut) {
-            cut += 1;
-        }
-        // Start at a line boundary when one is near.
-        if let Some(newline) = text[cut..].find('\n') {
-            cut += newline + 1;
-        }
-        (text[cut..].to_string(), true)
+        cap_tail(text, LAST_COMMAND_OUTPUT_BYTES)
     }
+}
+
+/// `text` limited to its last `max` bytes, cut at a char boundary and then
+/// moved to the next line start when one follows; and whether it was cut.
+fn cap_tail(text: &str, max: usize) -> (String, bool) {
+    if text.len() <= max {
+        return (text.to_string(), false);
+    }
+    let mut cut = text.len() - max;
+    while !text.is_char_boundary(cut) {
+        cut += 1;
+    }
+    // Start at a line boundary when one is near.
+    if let Some(newline) = text[cut..].find('\n') {
+        cut += newline + 1;
+    }
+    (text[cut..].to_string(), true)
 }
 
 /// What [`Region::LastCommand`](crate::Region::LastCommand) found.
@@ -514,6 +520,30 @@ mod tests {
 
     fn tracker() -> CommandTracker {
         CommandTracker::new(&GridSize { cols: 20, rows: 5 })
+    }
+
+    #[test]
+    fn cap_tail_keeps_short_text() {
+        assert_eq!(cap_tail("abc", 10), ("abc".to_string(), false));
+    }
+
+    #[test]
+    fn cap_tail_starts_at_a_line_boundary() {
+        assert_eq!(cap_tail("aaaa\nbbbb\ncccc", 7), ("cccc".to_string(), true));
+    }
+
+    #[test]
+    fn cap_tail_does_not_split_multi_byte_chars() {
+        let text = "é".repeat(10);
+        let (kept, capped) = cap_tail(&text, 9);
+        assert!(kept.len() <= 9);
+        assert!(text.ends_with(&kept));
+        assert!(capped);
+    }
+
+    #[test]
+    fn cap_tail_without_newline_after_the_cut() {
+        assert_eq!(cap_tail("abcdefghij", 4), ("ghij".to_string(), true));
     }
 
     const PROMPT: &[u8] = b"\x1b]133;A\x07$ \x1b]133;B\x07";
