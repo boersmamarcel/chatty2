@@ -110,4 +110,32 @@ mod tests {
         let term = Term::new(Default::default(), &size, VoidListener);
         assert_eq!(snapshot(&term, Region::Scrollback { lines: 10 }).text, "");
     }
+
+    #[test]
+    fn trailing_blanks_are_trimmed_per_line() {
+        let term = mock_term("ab   \r\ncd  ");
+        assert_eq!(snapshot(&term, Region::Screen).text, "ab\ncd");
+    }
+
+    #[test]
+    fn wide_characters_appear_once() {
+        let term = mock_term("漢x");
+        let text = snapshot(&term, Region::Screen).text;
+        assert_eq!(text, "漢x");
+        assert_eq!(text.matches('漢').count(), 1);
+    }
+
+    #[test]
+    fn scrollback_returns_only_the_last_rows_requested() {
+        let term = mock_term("one\r\ntwo\r\nthree\r\nfour\r\n\r\n");
+        let snap = snapshot(&term, Region::Scrollback { lines: 2 });
+        assert_eq!(snap.text, "three\nfour");
+    }
+
+    #[test]
+    fn scrollback_of_zero_lines_counts_as_one() {
+        let term = mock_term("one\r\ntwo\r\nthree\r\nfour\r\n\r\n");
+        let snap = snapshot(&term, Region::Scrollback { lines: 0 });
+        assert_eq!(snap.text, "four");
+    }
 }
