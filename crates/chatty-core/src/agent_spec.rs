@@ -106,9 +106,12 @@ pub const PRESETS: &[(&str, &str)] = &[
         "crosscheck-writer",
         include_str!("../agents/crosscheck-writer.toml"),
     ),
+    ("coder", include_str!("../agents/coder.toml")),
+    ("coding-lead", include_str!("../agents/coding-lead.toml")),
     ("data-analyst", include_str!("../agents/data-analyst.toml")),
     ("researcher", include_str!("../agents/researcher.toml")),
     ("reviewer", include_str!("../agents/reviewer.toml")),
+    ("tester", include_str!("../agents/tester.toml")),
     ("typesetter", include_str!("../agents/typesetter.toml")),
     ("writer", include_str!("../agents/writer.toml")),
 ];
@@ -1560,6 +1563,149 @@ cap_usd = 2.0
         );
     }
 
+    /// AGE-957: the coding team's lead plans and delegates and edits
+    /// nothing: its profile has no write, commit or shell tool. It
+    /// delegates to exactly coder, reviewer and tester, requires both
+    /// verdicts, and bounds its fix loop; a turn cap and a deadline bound
+    /// the run.
+    #[test]
+    fn the_coding_lead_delegates_and_edits_nothing() {
+        let spec = load_agent_spec_from("coding-lead", None, None)
+            .unwrap()
+            .spec;
+        assert_eq!(spec.swarm.delegates_to, ["coder", "reviewer", "tester"]);
+        assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
+        assert_eq!(spec.budget.max_agent_turns, Some(30));
+        assert_eq!(spec.max_duration(), Some(Duration::from_secs(90 * 60)));
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        for tool in [
+            "invoke_agent",
+            "read_file",
+            "git_log",
+            "git_diff",
+            "git_merge",
+        ] {
+            assert!(profile.allows(tool), "{tool}");
+        }
+        for tool in [
+            "write_file",
+            "apply_diff",
+            "delete_file",
+            "git_commit",
+            "shell_execute",
+            "execute_code",
+        ] {
+            assert!(!profile.allows(tool), "the lead may not {tool}");
+        }
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for needle in [
+            "change no file yourself",
+            "acceptance criteria",
+            "merge it into yours with git_merge",
+            "TESTS: PASS",
+            "APPROVE",
+            "numbered list of fixes",
+            "At most 2 fix rounds",
+            "DONE or NOT DONE",
+            "Never switch to, merge into or push the base branch",
+        ] {
+            assert!(preamble.contains(needle), "{needle:?} in {preamble}");
+        }
+    }
+
+    /// AGE-957: the coder edits, commits on the branch it was started on
+    /// and pushes nothing; it delegates to nobody, and anyone may
+    /// call it: it is exposed, as a callers-only spec is not offered to
+    /// a lead run without `--team`.
+    #[test]
+    fn the_coder_commits_on_its_branch_and_is_a_leaf() {
+        let spec = load_agent_spec_from("coder", None, None).unwrap().spec;
+        assert!(spec.swarm.delegates_to.is_empty(), "a leaf worker");
+        assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
+        assert!(spec.budget.max_agent_turns.is_some() && spec.max_duration().is_some());
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        for tool in [
+            "read_file",
+            "apply_diff",
+            "write_file",
+            "git_add",
+            "git_commit",
+            "shell_execute",
+        ] {
+            assert!(profile.allows(tool), "{tool}");
+        }
+        assert_eq!(spec.tools.disable, ["code-exec"]);
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for needle in [
+            "smallest change",
+            "git_commit",
+            "Never create, switch to or merge another branch, and never push",
+            "numbered list of fixes",
+        ] {
+            assert!(preamble.contains(needle), "{needle:?} in {preamble}");
+        }
+    }
+
+    /// AGE-957: the tester runs the repository's own checks — from
+    /// `.chatty/checks`, else the README, else a well-known default — with
+    /// the shell, changes nothing, and answers `TESTS: PASS` or
+    /// `TESTS: FAIL` with the failing output.
+    #[test]
+    fn the_tester_runs_the_repository_s_checks_and_changes_nothing() {
+        let spec = load_agent_spec_from("tester", None, None).unwrap().spec;
+        assert!(spec.swarm.delegates_to.is_empty(), "a leaf worker");
+        assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
+        assert!(spec.budget.max_agent_turns.is_some() && spec.max_duration().is_some());
+        assert!(spec.tools.disable.is_empty(), "{:?}", spec.tools.disable);
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        for tool in ["shell_execute", "read_file", "list_directory", "git_diff"] {
+            assert!(profile.allows(tool), "{tool}");
+        }
+        for tool in [
+            "write_file",
+            "apply_diff",
+            "delete_file",
+            "move_file",
+            "git_add",
+            "git_commit",
+            "git_merge",
+            "execute_code",
+        ] {
+            assert!(!profile.allows(tool), "the tester may not {tool}");
+        }
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for needle in [
+            ".chatty/checks",
+            "README",
+            "python -m pytest -q",
+            "cargo test",
+            "shell_execute",
+            "TESTS: PASS",
+            "TESTS: FAIL",
+            "never answer TESTS: PASS without having run the checks",
+        ] {
+            assert!(preamble.contains(needle), "{needle:?} in {preamble}");
+        }
+    }
+
+    /// AGE-957: the shared reviewer also reviews a code change: against
+    /// the task's acceptance criteria, read with the git tools, its fixes
+    /// numbered and located.
+    #[test]
+    fn the_reviewer_reviews_a_code_change_against_its_criteria() {
+        let spec = load_agent_spec_from("reviewer", None, None).unwrap().spec;
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for needle in [
+            "acceptance criterion",
+            "git_diff",
+            "The first line of your answer is APPROVE or REQUEST_CHANGES, then a numbered list",
+        ] {
+            assert!(preamble.contains(needle), "{needle:?} in {preamble:?}");
+        }
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        assert!(profile.allows("git_diff") && profile.allows("git_log"));
+    }
+
     fn names(specs: &[AgentSpec]) -> Vec<&str> {
         specs.iter().map(|spec| spec.agent.name.as_str()).collect()
     }
@@ -1577,9 +1723,12 @@ cap_usd = 2.0
                 "local-agent",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "coder",
+                "coding-lead",
                 "data-analyst",
                 "researcher",
                 "reviewer",
+                "tester",
                 "typesetter",
                 "writer",
             ]
@@ -1617,7 +1766,13 @@ cap_usd = 2.0
         ] {
             assert!(!roster.iter().any(|n| n == internal), "{internal}");
         }
-        for leader in ["crosscheck-lead", "crosscheck-data-lead"] {
+        for leader in [
+            "crosscheck-lead",
+            "crosscheck-data-lead",
+            "coding-lead",
+            "coder",
+            "tester",
+        ] {
             assert!(roster.iter().any(|n| n == leader), "{leader}");
         }
     }
@@ -1651,9 +1806,12 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "coder",
+                "coding-lead",
                 "data-analyst",
                 "researcher",
                 "reviewer",
+                "tester",
                 "typesetter",
             ]
         );
@@ -1667,9 +1825,12 @@ cap_usd = 2.0
                 "writer",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "coder",
+                "coding-lead",
                 "data-analyst",
                 "researcher",
                 "reviewer",
+                "tester",
                 "typesetter",
             ]
         );
@@ -1826,8 +1987,11 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "coder",
+                "coding-lead",
                 "data-analyst",
                 "reviewer",
+                "tester",
                 "typesetter",
                 "writer"
             ]
