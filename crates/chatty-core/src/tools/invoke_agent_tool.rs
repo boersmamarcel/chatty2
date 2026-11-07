@@ -827,6 +827,7 @@ impl InvokeAgentTool {
         let mut response = String::new();
         let mut success = true;
         let mut error_msg = None;
+        let mut saw_terminal = false;
         let mut usage = Vec::new();
         let mut trace = None;
         let mut conversation = None;
@@ -854,6 +855,7 @@ impl InvokeAgentTool {
                             .collect();
                     }
                     if state == "failed" || state == "completed" {
+                        saw_terminal = true;
                         // The handoff rides the terminal status either way
                         // (TD-2, AGE-693).
                         handoff = HandoffReport::from_status_metadata(metadata.as_ref());
@@ -905,6 +907,11 @@ impl InvokeAgentTool {
                     break;
                 }
             }
+        }
+
+        if !saw_terminal && success {
+            success = false;
+            error_msg = Some("stream ended before the task finished".into());
         }
 
         self.finish(
