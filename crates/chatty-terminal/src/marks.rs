@@ -497,4 +497,48 @@ mod tests {
     fn st_terminator_works_like_bel() {
         assert_eq!(mark_of(b"\x1b]133;A\x1b\\"), Some(Mark::PromptStart));
     }
+
+    fn enabled_text(bytes: &[u8]) -> MarkScanner {
+        let mut scanner = MarkScanner::new();
+        scanner.text_mut().set_enabled(true);
+        scanner.feed(bytes, |_, _| {});
+        scanner
+    }
+
+    #[test]
+    fn disabling_drops_what_was_kept() {
+        let mut scanner = enabled_text(b"kept\r\n");
+        assert!(!scanner.text().is_blank());
+        scanner.text_mut().set_enabled(false);
+        assert!(scanner.text().is_blank());
+        assert!(!scanner.text().is_enabled());
+    }
+
+    #[test]
+    fn text_fed_while_disabled_is_not_kept() {
+        let mut scanner = enabled_text(b"");
+        scanner.text_mut().set_enabled(false);
+        scanner.feed(b"ignored\r\n", |_, _| {});
+        assert!(scanner.text().is_blank());
+        assert_eq!(scanner.text().text(), "");
+    }
+
+    #[test]
+    fn re_enabling_keeps_only_text_fed_afterwards() {
+        let mut scanner = enabled_text(b"before\r\n");
+        scanner.text_mut().set_enabled(false);
+        scanner.feed(b"during\r\n", |_, _| {});
+        scanner.text_mut().set_enabled(true);
+        assert!(scanner.text().is_blank());
+        scanner.feed(b"after\r\n", |_, _| {});
+        assert_eq!(scanner.text_mut().take(), "after\n");
+    }
+
+    #[test]
+    fn take_returns_kept_text_and_leaves_it_blank() {
+        let mut scanner = enabled_text(b"one\r\ntwo\r\n");
+        assert_eq!(scanner.text_mut().take(), "one\ntwo\n");
+        assert!(scanner.text().is_blank());
+        assert!(scanner.text().is_enabled());
+    }
 }
