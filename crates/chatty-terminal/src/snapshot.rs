@@ -146,6 +146,15 @@ mod tests {
     }
 
     #[test]
+    fn cursor_row_follows_the_cursor_line() {
+        // `mock_term` writes cells without moving the cursor, so place it
+        // where real output of "a\r\nb\r\nc" would leave it: on row 2.
+        let mut term = mock_term("a\r\nb\r\nc");
+        term.grid_mut().cursor.point.line = Line(2);
+        assert_eq!(snapshot(&term, Region::Screen).cursor_row, 2);
+    }
+
+    #[test]
     fn last_command_region_is_empty_with_the_terminal_size() {
         let term = mock_term("a\r\nb\r\nc");
         let snap = snapshot(&term, Region::LastCommand);
