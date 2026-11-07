@@ -28,6 +28,7 @@ const LEAD_MODEL: &str = "kit/coding-lead";
 const CODER_MODEL: &str = "kit/coder";
 const TESTER_MODEL: &str = "kit/tester";
 const REVIEWER_MODEL: &str = "kit/code-reviewer";
+const GITHUB_MODEL: &str = "kit/github";
 
 /// The conversation's working branch, as hive names it (`chatty/<id>`).
 const WORKING_BRANCH: &str = "chatty/conv-957";
@@ -484,4 +485,344 @@ async fn coding_team_takes_an_issue_to_the_working_branch() {
         String::from_utf8_lossy(&check.stdout).trim(),
         "test result: ok. 2 passed; 0 failed"
     );
+}
+
+// AGE-1034: the CI loop. `github` is a host-side agent on a hosted run, so
+// here it is a test double: a bare agent whose scripted replies are what the
+// host's `open_or_update_pr`, `pr_checks` and `failing_check_log` answer.
+// The coder, tester, reviewer and lead are the same presets as above.
+
+const CALC_WITH_SUB: &str = "add() { echo $(( $1 + $2 )); }\nsub() { echo $(( $1 - $2 )); }\n";
+const PR_OPENED: &str = "PR: https://github.com/acme/calc/pull/7 (draft, opened)";
+const PR_UPDATED: &str = "PR: https://github.com/acme/calc/pull/7 (draft, updated)";
+const REVIEW_PROMPT: &str = "Review the newest commits on the current branch against: \
+                             sub(a, b) returns a - b; tests/test_calc.sh passes.";
+
+fn open_pr(labels: &[&str]) -> Reply {
+    let mut call = serde_json::json!({
+        "tool": "open_or_update_pr",
+        "title": "AGE-1: add sub() to calc.sh",
+        "body": "Adds sub(a, b). TESTS: PASS; APPROVE. Closes AGE-1",
+        "draft": true,
+    });
+    if !labels.is_empty() {
+        call["labels"] = serde_json::json!(labels);
+    }
+    invoke("github", &call.to_string())
+}
+
+fn pr_checks() -> Reply {
+    invoke(
+        "github",
+        &serde_json::json!({"tool": "pr_checks", "wait_secs": 1200}).to_string(),
+    )
+}
+
+fn check_log(check: &str) -> Reply {
+    invoke(
+        "github",
+        &serde_json::json!({"tool": "failing_check_log", "check": check, "max_kb": 16}).to_string(),
+    )
+}
+
+/// The lead's first half, up to an approved change: the coder commits a
+/// right `sub`, the lead merges it, the tester and the reviewer give their
+/// verdicts.
+fn lead_to_approval() -> Vec<Reply> {
+    vec![
+        invoke("coder", TASK),
+        merge("sub-agent/coder-0"),
+        invoke("tester", "Run the repository's checks."),
+        invoke("code-reviewer", REVIEW_PROMPT),
+    ]
+}
+
+/// The coder's first round: `sub` written, added and committed.
+fn coder_adds_sub() -> Vec<Reply> {
+    vec![
+        Reply::tool_call("read_file", serde_json::json!({ "path": "calc.sh" })),
+        Reply::tool_call(
+            "write_file",
+            serde_json::json!({ "path": "calc.sh", "content": CALC_WITH_SUB }),
+        ),
+        Reply::tool_call("git_add", serde_json::json!({ "paths": ["calc.sh"] })),
+        Reply::tool_call(
+            "git_commit",
+            serde_json::json!({ "message": "Add sub() to calc.sh" }),
+        ),
+        Reply::text("Committed \"Add sub() to calc.sh\"; changed calc.sh."),
+    ]
+}
+
+fn tester_passes() -> [Reply; 3] {
+    tester_run("TESTS: PASS\nsh tests/test_calc.sh: exit 0\ntest result: ok. 2 passed; 0 failed")
+}
+
+fn reviewer_approves() -> [Reply; 3] {
+    [
+        Reply::tool_call("git_log", serde_json::json!({ "max_count": 3 })),
+        Reply::tool_call(
+            "shell_execute",
+            serde_json::json!({ "command": "git show --stat HEAD" }),
+        ),
+        Reply::text("APPROVE\n1. sub(a, b) returns a - b.\n2. The test passes."),
+    ]
+}
+
+/// A kit with the four presets and a scripted `github`.
+async fn ci_kit(lead: Vec<Reply>, coder: Vec<Reply>, testers: usize, github: &[&str]) -> SwarmKit {
+    let mut tester = Vec::new();
+    let mut reviewer = Vec::new();
+    for _ in 0..testers {
+        tester.extend(tester_passes());
+        reviewer.extend(reviewer_approves());
+    }
+    let github: Vec<Reply> = github.iter().map(|reply| Reply::text(*reply)).collect();
+    let kit = SwarmKit::start_in_repo(
+        vec![
+            AgentDef::from_spec(preset("coding-lead"), LEAD_MODEL, Endpoint::Sse),
+            AgentDef::from_spec(preset("coder"), CODER_MODEL, Endpoint::Ndjson),
+            AgentDef::from_spec(preset("tester"), TESTER_MODEL, Endpoint::Ndjson),
+            AgentDef::from_spec(preset("code-reviewer"), REVIEWER_MODEL, Endpoint::Ndjson),
+            AgentDef::new("github", GITHUB_MODEL, Endpoint::Ndjson),
+        ],
+        Script::new().route(LEAD_MODEL, lead),
+        Script::new()
+            .route(CODER_MODEL, coder)
+            .route(TESTER_MODEL, tester)
+            .route(REVIEWER_MODEL, reviewer)
+            .route(GITHUB_MODEL, github),
+    )
+    .await;
+    let remote = kit.root().join("remote.git");
+    seed_repository(&kit.workspace(), &remote);
+    kit
+}
+
+/// What the lead sent `github`, in order, as the fake model saw it.
+fn github_prompts(kit: &SwarmKit) -> Vec<String> {
+    kit.ndjson
+        .requests_for(GITHUB_MODEL)
+        .iter()
+        .map(body)
+        .collect()
+}
+
+fn names(kit: &SwarmKit) -> Vec<String> {
+    edges(kit).into_iter().map(|(_, _, to, _)| to).collect()
+}
+
+/// Green on the first try: the lead opens a draft PR with its verdicts,
+/// asks for the checks, sees `CHECKS: PASS` and replies DONE with the link.
+#[tokio::test]
+async fn ci_loop_green_on_the_first_try() {
+    let kit = ci_kit(
+        {
+            let mut lead = lead_to_approval();
+            lead.extend([
+                open_pr(&[]),
+                pr_checks(),
+                Reply::text(format!(
+                    "DONE\n{PR_OPENED}\nCHECKS: PASS\nTESTS: PASS; APPROVE"
+                )),
+            ]);
+            lead
+        },
+        coder_adds_sub(),
+        1,
+        &[PR_OPENED, "CHECKS: PASS\ntest: pass\nlint: pass"],
+    )
+    .await;
+    let run = kit.run_leader(TASK).await;
+    let out = run.output.as_ref().expect("the team run succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response.lines().next(), Some("DONE"));
+    assert!(out.response.contains("pull/7") && out.response.contains("CHECKS: PASS"));
+
+    assert_eq!(
+        names(&kit),
+        [
+            "coder-0",
+            "tester-0",
+            "code-reviewer-0",
+            "github-0",
+            "github-1",
+            "coding-lead-0"
+        ]
+    );
+    let sent = github_prompts(&kit);
+    assert!(sent[0].contains(r#""tool":"open_or_update_pr""#));
+    assert!(sent[0].contains(r#""draft":true"#) && sent[0].contains("Closes AGE-1"));
+    assert!(!sent[0].contains("ship:auto"), "no opt-in, no label");
+    assert!(sent[1].contains(r#""tool":"pr_checks""#) && sent[1].contains("1200"));
+    // The lead saw the PR link and the verdict before it said DONE.
+    let lead_requests = kit.sse.requests_for(LEAD_MODEL);
+    assert!(body(&lead_requests[5]).contains("CHECKS: PASS"));
+}
+
+/// Red then green: the first CI run fails with `CLASS: CODE`; the failing
+/// line reaches the coder word for word, the coder fixes and commits, the
+/// tester and reviewer run again, the PR is updated with `ci-fix`, and CI
+/// passes.
+#[tokio::test]
+async fn ci_loop_red_then_green_after_a_coder_fix() {
+    let failing = "error: unquoted expansion in calc.sh line 1 (SC2086)";
+    let mut coder = coder_adds_sub();
+    coder.extend([
+        Reply::tool_call(
+            "apply_diff",
+            serde_json::json!({
+                "path": "calc.sh",
+                "old_content": "add() { echo $(( $1 + $2 )); }",
+                "new_content": "# shellcheck shell=sh\nadd() { echo $(( $1 + $2 )); }",
+            }),
+        ),
+        Reply::tool_call("git_add", serde_json::json!({ "paths": ["calc.sh"] })),
+        Reply::tool_call(
+            "git_commit",
+            serde_json::json!({ "message": "Fix lint: shellcheck directive" }),
+        ),
+        Reply::text("1. Added the directive. Committed \"Fix lint\"."),
+    ]);
+    let kit = ci_kit(
+        {
+            let mut lead = lead_to_approval();
+            lead.extend([
+                open_pr(&[]),
+                pr_checks(),
+                check_log("lint"),
+                invoke(
+                    "coder",
+                    &format!("CI check lint failed (CLASS: CODE):\n{failing}"),
+                ),
+                merge("sub-agent/coder-1"),
+                invoke("tester", "Run the repository's checks."),
+                invoke("code-reviewer", REVIEW_PROMPT),
+                open_pr(&["ci-fix"]),
+                pr_checks(),
+                Reply::text(format!("DONE\n{PR_UPDATED}\nCHECKS: PASS")),
+            ]);
+            lead
+        },
+        coder,
+        2,
+        &[
+            PR_OPENED,
+            "CHECKS: FAIL\ntest: pass\nlint: fail",
+            &format!("CLASS: CODE\n{failing}"),
+            PR_UPDATED,
+            "CHECKS: PASS\ntest: pass\nlint: pass",
+        ],
+    )
+    .await;
+    let run = kit.run_leader(TASK).await;
+    let out = run.output.as_ref().expect("the team run succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response.lines().next(), Some("DONE"));
+    assert!(out.response.contains("CHECKS: PASS"));
+
+    let sent = github_prompts(&kit);
+    assert_eq!(sent.len(), 5);
+    assert!(sent[2].contains(r#""tool":"failing_check_log""#) && sent[2].contains(r#""lint""#));
+    assert!(sent[3].contains(r#""labels":["ci-fix"]"#), "{}", sent[3]);
+    // The coder got the failing line word for word.
+    let coder_requests = kit.ndjson.requests_for(CODER_MODEL);
+    assert!(body(coder_requests.last().unwrap()).contains(failing));
+    assert_eq!(
+        names(&kit),
+        [
+            "coder-0",
+            "tester-0",
+            "code-reviewer-0",
+            "github-0",
+            "github-1",
+            "github-2",
+            "coder-1",
+            "tester-1",
+            "code-reviewer-1",
+            "github-3",
+            "github-4",
+            "coding-lead-0"
+        ]
+    );
+    let lead_branch = "sub-agent/coding-lead-0";
+    assert_eq!(
+        git(
+            &kit.workspace(),
+            &[
+                "log",
+                "--format=%s",
+                &format!("{WORKING_BRANCH}..{lead_branch}")
+            ]
+        ),
+        "Fix lint: shellcheck directive\nAdd sub() to calc.sh"
+    );
+}
+
+/// An infrastructure failure: no code changes; the coder pushes an empty
+/// commit once, the lead updates the PR and the rerun passes.
+#[tokio::test]
+async fn ci_loop_reruns_an_infra_failure_once() {
+    let mut coder = coder_adds_sub();
+    coder.extend([
+        Reply::tool_call(
+            "shell_execute",
+            serde_json::json!({ "command": "git commit -q --allow-empty -m 'ci: rerun'" }),
+        ),
+        Reply::text("Committed \"ci: rerun\" (empty)."),
+    ]);
+    let kit = ci_kit(
+        {
+            let mut lead = lead_to_approval();
+            lead.extend([
+                open_pr(&[]),
+                pr_checks(),
+                check_log("test"),
+                invoke(
+                    "coder",
+                    "Push an empty commit: git commit --allow-empty -m \"ci: rerun\"",
+                ),
+                merge("sub-agent/coder-1"),
+                open_pr(&["ci-fix"]),
+                pr_checks(),
+                Reply::text(format!("DONE\n{PR_UPDATED}\nCHECKS: PASS")),
+            ]);
+            lead
+        },
+        coder,
+        1,
+        &[
+            PR_OPENED,
+            "CHECKS: FAIL\ntest: fail",
+            "CLASS: INFRA (runner lost communication)\nThe runner received a shutdown signal.",
+            PR_UPDATED,
+            "CHECKS: PASS\ntest: pass",
+        ],
+    )
+    .await;
+    let run = kit.run_leader(TASK).await;
+    let out = run.output.as_ref().expect("the team run succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response.lines().next(), Some("DONE"));
+
+    // No second test or review: the code did not change.
+    let n = names(&kit);
+    assert_eq!(n.iter().filter(|n| n.starts_with("tester")).count(), 1);
+    assert_eq!(
+        n.iter().filter(|n| n.starts_with("code-reviewer")).count(),
+        1
+    );
+    assert_eq!(n.iter().filter(|n| n.starts_with("github")).count(), 5);
+    assert_eq!(
+        git(
+            &kit.workspace(),
+            &[
+                "log",
+                "--format=%s",
+                &format!("{WORKING_BRANCH}..sub-agent/coding-lead-0")
+            ]
+        ),
+        "ci: rerun\nAdd sub() to calc.sh"
+    );
+    assert!(body(&kit.sse.requests_for(LEAD_MODEL)[6]).contains("CLASS: INFRA"));
 }

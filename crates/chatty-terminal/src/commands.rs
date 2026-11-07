@@ -721,4 +721,56 @@ mod tests {
         assert_eq!(t.records.len(), MAX_RECORDS);
         assert_eq!(t.records[0].command_text, "c5");
     }
+
+    #[test]
+    fn begin_agent_command_refuses_without_integration() {
+        let mut t = tracker();
+        assert_eq!(t.begin_agent_command(), Err(PromptState::NoIntegration));
+        assert_eq!(t.agent_command(), AgentCommand::Idle);
+    }
+
+    #[test]
+    fn begin_agent_command_refuses_a_prompt_with_text_typed() {
+        let mut t = tracker();
+        t.feed(PROMPT);
+        t.feed(b"ls -l");
+        assert_eq!(
+            t.begin_agent_command(),
+            Err(PromptState::AtPrompt {
+                typed: "ls -l".to_string()
+            })
+        );
+        assert_eq!(t.agent_command(), AgentCommand::Idle);
+    }
+
+    #[test]
+    fn begin_agent_command_refuses_while_a_command_runs() {
+        let mut t = tracker();
+        t.feed(PROMPT);
+        t.feed(b"sleep 5\r\n\x1b]133;C\x07");
+        assert!(matches!(
+            t.begin_agent_command(),
+            Err(PromptState::Running { .. })
+        ));
+        assert_eq!(t.agent_command(), AgentCommand::Idle);
+    }
+
+    #[test]
+    fn begin_agent_command_accepts_an_empty_prompt() {
+        let mut t = tracker();
+        t.feed(PROMPT);
+        assert_eq!(t.begin_agent_command(), Ok(()));
+        assert_eq!(t.agent_command(), AgentCommand::Waiting);
+    }
+
+    #[test]
+    fn end_agent_command_is_none_when_idle_or_waiting() {
+        let mut t = tracker();
+        assert_eq!(t.end_agent_command(), None);
+        t.feed(PROMPT);
+        t.begin_agent_command().unwrap();
+        assert_eq!(t.agent_command(), AgentCommand::Waiting);
+        assert_eq!(t.end_agent_command(), None);
+        assert_eq!(t.agent_command(), AgentCommand::Idle);
+    }
 }

@@ -245,4 +245,60 @@ mod tests {
             assert!(!ZSH_RC.contains(&format!("${name}")), "{name}");
         }
     }
+
+    #[test]
+    fn bash_not_login_uses_rcfile_and_no_login_marker() {
+        let mut env = HashMap::new();
+        let args = inject("bash", false, &mut env).unwrap();
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "--rcfile");
+        assert!(args[1].ends_with("bashrc"), "{}", args[1]);
+        assert_eq!(args[2], "-i");
+        assert!(!env.contains_key("__CHATTY_LOGIN"));
+    }
+
+    #[test]
+    fn bash_login_sets_login_marker() {
+        let mut env = HashMap::new();
+        let args = inject("bash", true, &mut env).unwrap();
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "--rcfile");
+        assert!(args[1].ends_with("bashrc"), "{}", args[1]);
+        assert_eq!(args[2], "-i");
+        assert_eq!(env["__CHATTY_LOGIN"], "1");
+    }
+
+    #[test]
+    fn zsh_not_login_passes_only_interactive_flag() {
+        let mut env = HashMap::new();
+        let args = inject("zsh", false, &mut env).unwrap();
+        assert_eq!(args, vec!["-i"]);
+        assert!(env["ZDOTDIR"].ends_with("/zsh"), "{}", env["ZDOTDIR"]);
+    }
+
+    #[test]
+    fn zsh_login_passes_login_flag_before_interactive() {
+        let mut env = HashMap::new();
+        let args = inject("zsh", true, &mut env).unwrap();
+        assert_eq!(args, vec!["-l", "-i"]);
+    }
+
+    #[test]
+    fn zsh_remembers_user_zdotdir() {
+        let mut env = HashMap::new();
+        env.insert("ZDOTDIR".to_string(), "/home/u/.config/zsh".to_string());
+        inject("zsh", false, &mut env).unwrap();
+        assert_eq!(env["__CHATTY_USER_ZDOTDIR"], "/home/u/.config/zsh");
+        assert_eq!(env["__CHATTY_ZDOTDIR_SET"], "1");
+        assert_ne!(env["ZDOTDIR"], "/home/u/.config/zsh");
+        assert!(env["ZDOTDIR"].ends_with("/zsh"), "{}", env["ZDOTDIR"]);
+    }
+
+    #[test]
+    fn shell_is_recognised_by_basename_and_others_are_unsupported() {
+        let mut env = HashMap::new();
+        assert!(inject("/usr/bin/bash", false, &mut env).is_some());
+        assert!(inject("fish", false, &mut env).is_none());
+        assert!(inject("sh", false, &mut env).is_none());
+    }
 }
