@@ -142,12 +142,18 @@ chatty-wasm-runtime = { path = "../chatty-wasm-runtime", features = ["test-suppo
 wiremock = "0.6"
 # team_install tests sign spec and module chains under a test root.
 ed25519-dalek.workspace = true
+# tests/pdfium_build.rs compiles scripts/pdfium_build.rs (the build-script helper)
+# as a test target, so it needs the build script's own dependencies.
+reqwest = { version = "0.13.2", features = ["blocking", "rustls"] }
+flate2 = "1.0"
+tar = "0.4"
 
 [build-dependencies]
 # Pdfium library download
 reqwest = { version = "0.13.2", features = ["blocking", "rustls"] }
 flate2 = "1.0"
 tar = "0.4"
+sha2.workspace = true
 
 [features]
 default = ["mcp", "all-tools"]
