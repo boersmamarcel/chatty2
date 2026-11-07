@@ -246,6 +246,40 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn files_dir_is_private_and_holds_the_startup_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = files_dir().unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert!(dir.is_dir());
+        assert_eq!(mode(dir), 0o700);
+        assert!(dir.join("bashrc").is_file());
+        let zsh = dir.join("zsh");
+        assert!(zsh.is_dir());
+        assert_eq!(mode(&zsh), 0o700);
+        for name in [".zshenv", ".zprofile", ".zshrc"] {
+            assert!(zsh.join(name).is_file(), "{name}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_dir_files_carry_the_prompt_hooks() {
+        let dir = files_dir().unwrap();
+        let bashrc = std::fs::read_to_string(dir.join("bashrc")).unwrap();
+        assert!(bashrc.contains("133;A"));
+        let zshrc = std::fs::read_to_string(dir.join("zsh/.zshrc")).unwrap();
+        assert!(zshrc.contains("__chatty_precmd"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_dir_returns_the_same_path_twice() {
+        assert_eq!(files_dir().unwrap(), files_dir().unwrap());
+    }
+
     #[test]
     fn bash_not_login_uses_rcfile_and_no_login_marker() {
         let mut env = HashMap::new();
