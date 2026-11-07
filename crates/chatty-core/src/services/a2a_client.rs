@@ -745,16 +745,38 @@ impl A2aClient {
             )
             .await?;
 
-            let text = value
-                .pointer("/result/artifacts/0/parts/0/text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
             let tid = value
                 .pointer("/result/id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
+                .to_string();
+
+            // A JSON-RPC error, or a failed/canceled task, is a failure --
+            // not a completed task with an empty answer.
+            let failure = match value.get("error") {
+                Some(err) => Some(
+                    err.get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown error")
+                        .to_string(),
+                ),
+                None => task_outcome(&value).err().map(|e| e.to_string()),
+            };
+            if let Some(reason) = failure {
+                let stream = futures::stream::iter(vec![Ok(A2aStreamEvent::StatusUpdate {
+                    task_id: tid,
+                    state: "failed".to_string(),
+                    is_final: true,
+                    message: Some(reason),
+                    metadata: None,
+                })]);
+                return Ok(Box::pin(stream));
+            }
+
+            let text = value
+                .pointer("/result/artifacts/0/parts/0/text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
                 .to_string();
 
             let stream = futures::stream::iter(vec![
@@ -824,6 +846,10 @@ impl A2aClient {
                     let event_block = buffer[..pos].to_string();
                     buffer = buffer[pos + 2..].to_string();
 
+                    if let Some(msg) = parse_sse_error(&event_block) {
+                        yield Err(anyhow::anyhow!("A2A agent returned an error: {msg}"));
+                        return;
+                    }
                     if let Some(evt) = parse_sse_event(&event_block) {
                         let is_final = matches!(&evt, A2aStreamEvent::StatusUpdate { is_final: true, .. });
                         yield Ok(evt);
@@ -841,8 +867,12 @@ impl A2aClient {
             }
 
             // Process any remaining data in the buffer.
-            if !buffer.trim().is_empty() && let Some(evt) = parse_sse_event(&buffer) {
-                yield Ok(evt);
+            if !buffer.trim().is_empty() {
+                if let Some(msg) = parse_sse_error(&buffer) {
+                    yield Err(anyhow::anyhow!("A2A agent returned an error: {msg}"));
+                } else if let Some(evt) = parse_sse_event(&buffer) {
+                    yield Ok(evt);
+                }
             }
         };
 
@@ -928,6 +958,27 @@ impl Default for A2aClient {
 /// data: {"jsonrpc":"2.0","id":1,"result":{"id":"task-123","status":{"state":"working"},"final":false}}
 /// ```
 fn parse_sse_event(block: &str) -> Option<A2aStreamEvent> {
+    let json = sse_json(block)?;
+    parse_sse_json(&json)
+}
+
+/// The JSON-RPC error `message` of an SSE block that carries an `error` and
+/// no `result`; `None` for any other block.
+fn parse_sse_error(block: &str) -> Option<String> {
+    let json = sse_json(block)?;
+    if json.get("result").is_some() {
+        return None;
+    }
+    let err = json.get("error")?;
+    Some(
+        err.get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error")
+            .to_string(),
+    )
+}
+
+fn sse_json(block: &str) -> Option<Value> {
     // Extract the `data:` line(s).
     let data: String = block
         .lines()
@@ -942,8 +993,10 @@ fn parse_sse_event(block: &str) -> Option<A2aStreamEvent> {
         return None;
     }
 
-    let json: Value = serde_json::from_str(&data).ok()?;
+    serde_json::from_str(&data).ok()
+}
 
+fn parse_sse_json(json: &Value) -> Option<A2aStreamEvent> {
     let result = json.get("result")?;
     let task_id = result
         .get("id")
