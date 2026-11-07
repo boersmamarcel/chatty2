@@ -1963,6 +1963,86 @@ mod tests {
         assert!(matches!(result.unwrap_err(), InvokeAgentError::Disabled(_)));
     }
 
+    /// Serve one SSE reply made of `events` (JSON-RPC `result` objects),
+    /// then end the body cleanly, and return the agent's URL.
+    async fn scripted_stream(events: Vec<serde_json::Value>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = [0u8; 4096];
+            let _ = socket.read(&mut buffer).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+            let _ = socket.write_all(head.as_bytes()).await;
+            for result in events {
+                let frame = format!(
+                    "data:{}\n\n",
+                    serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": result })
+                );
+                let _ = socket
+                    .write_all(format!("{:x}\r\n{frame}\r\n", frame.len()).as_bytes())
+                    .await;
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+            let _ = socket.flush().await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    async fn call_scripted(
+        events: Vec<serde_json::Value>,
+    ) -> Result<InvokeAgentOutput, InvokeAgentError> {
+        let url = scripted_stream(events).await;
+        let tool = InvokeAgentTool::new(vec![make_agent("worker", &url, true)]);
+        tool.call(
+            &mut ToolContext::new(),
+            InvokeAgentArgs {
+                agent: "worker".to_string(),
+                prompt: "do the thing".to_string(),
+                include_trace: false,
+            },
+        )
+        .await
+    }
+
+    fn artifact(text: &str) -> serde_json::Value {
+        serde_json::json!({ "id": "t", "final": false,
+            "artifact": { "parts": [{ "text": text }], "lastChunk": true } })
+    }
+
+    /// AGE-1051: a stream that ends after an artifact, with no completed or
+    /// failed status, is a failed delegation, not a success.
+    #[tokio::test]
+    async fn stream_ending_without_terminal_status_fails() {
+        let err = call_scripted(vec![artifact("partial answer")])
+            .await
+            .expect_err("no terminal status must fail");
+        match err {
+            InvokeAgentError::InvocationFailed(text) => {
+                assert!(
+                    text.contains("stream ended before the task finished"),
+                    "{text}"
+                )
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    /// AGE-1051: the same stream with a `completed` status stays a success.
+    #[tokio::test]
+    async fn stream_with_completed_status_stays_success() {
+        let completed = serde_json::json!({
+            "id": "t", "final": true, "status": { "state": "completed" } });
+        let out = call_scripted(vec![artifact("full answer"), completed])
+            .await
+            .expect("a completed stream succeeds");
+        assert!(out.success);
+        assert_eq!(out.response, "full answer");
+    }
+
     /// A fabric that refuses every call with one [`Refusal`].
     struct Refusing(Refusal);
 
