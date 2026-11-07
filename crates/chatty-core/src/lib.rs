@@ -35,6 +35,7 @@ use std::sync::OnceLock;
 pub mod agent_spec;
 pub mod at_mention;
 pub mod auth;
+pub mod coding;
 pub mod curated_mcp;
 pub mod exporters;
 pub mod factories;
