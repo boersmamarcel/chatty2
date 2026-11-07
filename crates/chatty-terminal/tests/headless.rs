@@ -393,3 +393,29 @@ fn input_hidden_follows_stty_echo_but_not_the_line_editor() {
     });
     assert_eq!(term.input_hidden(), None);
 }
+
+/// Spawn `printf '[TERM|COLORTERM]'` with `env` and wait for `want` on screen.
+fn assert_term_env(env: &[(&str, &str)], want: &str) {
+    let mut config = sh("printf '[%s|%s]' \"$TERM\" \"$COLORTERM\"; sleep 5");
+    config.env = env
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let (term, events) = TerminalHandle::spawn(config).unwrap();
+    wait_until(&term, &events, want, |t, _| screen_contains(t, want));
+}
+
+#[test]
+fn term_and_colorterm_default_when_not_given() {
+    assert_term_env(&[], "[xterm-256color|truecolor]");
+}
+
+#[test]
+fn callers_term_wins_over_the_default() {
+    assert_term_env(&[("TERM", "dumb")], "[dumb|truecolor]");
+}
+
+#[test]
+fn callers_colorterm_wins_over_the_default() {
+    assert_term_env(&[("COLORTERM", "24bit")], "[xterm-256color|24bit]");
+}
