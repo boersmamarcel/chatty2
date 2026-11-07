@@ -826,3 +826,285 @@ async fn ci_loop_reruns_an_infra_failure_once() {
     );
     assert!(body(&kit.sse.requests_for(LEAD_MODEL)[6]).contains("CLASS: INFRA"));
 }
+
+// AGE-1048: the lead's state is on the branch. The lead edits nothing, so the
+// coder writes `.chatty/plan.md` and `.chatty/progress.md` in the work's
+// commits and removes them in a final commit before the PR.
+
+const PLAN_FRESH: &str =
+    "# Plan\n\nAcceptance: tests/test_calc.sh passes.\n\n1. [ ] Add sub() to calc.sh\n";
+const PLAN_STEP1_DONE: &str = "# Plan\n\nAcceptance: tests/test_calc.sh passes.\n\n\
+                               1. [x] Add sub() to calc.sh (abc1234)\n2. [ ] Add mul() to calc.sh\n";
+const CALC_WITH_MUL: &str = "add() { echo $(( $1 + $2 )); }\nsub() { echo $(( $1 - $2 )); }\n\
+                             mul() { echo $(( $1 * $2 )); }\n";
+const REMOVE_STATE: &str = "git rm -q -f .chatty/plan.md .chatty/progress.md && \
+                            git commit -q -m \"Remove the lead's state files\"";
+
+fn write_file(path: &str, content: &str) -> Reply {
+    Reply::tool_call(
+        "write_file",
+        serde_json::json!({ "path": path, "content": content }),
+    )
+}
+
+fn commit(paths: &[&str], message: &str) -> [Reply; 2] {
+    [
+        Reply::tool_call("git_add", serde_json::json!({ "paths": paths })),
+        Reply::tool_call("git_commit", serde_json::json!({ "message": message })),
+    ]
+}
+
+/// The lead's closing run: tester, reviewer, then the coder removes the
+/// state files, the lead merges and replies.
+fn lead_finishes(coder_branch: &str, removal_branch: &str) -> Vec<Reply> {
+    vec![
+        merge(coder_branch),
+        invoke("tester", "Run the repository's checks."),
+        invoke("code-reviewer", REVIEW_PROMPT),
+        invoke(
+            "coder",
+            &format!("Remove the lead's state files: {REMOVE_STATE}"),
+        ),
+        merge(removal_branch),
+        Reply::text("DONE\nTESTS: PASS; APPROVE."),
+    ]
+}
+
+fn coder_removes_state() -> Vec<Reply> {
+    vec![
+        Reply::tool_call(
+            "shell_execute",
+            serde_json::json!({ "command": REMOVE_STATE }),
+        ),
+        Reply::text("Committed \"Remove the lead's state files\"."),
+    ]
+}
+
+/// A kit like `ci_kit` without `github`, for a turn of `testers` test runs.
+async fn state_kit(lead: Vec<Reply>, coder: Vec<Reply>) -> SwarmKit {
+    let mut tester = Vec::new();
+    let mut reviewer = Vec::new();
+    tester.extend(tester_passes());
+    reviewer.extend(reviewer_approves());
+    SwarmKit::start_in_repo(
+        vec![
+            AgentDef::from_spec(preset("coding-lead"), LEAD_MODEL, Endpoint::Sse),
+            AgentDef::from_spec(preset("coder"), CODER_MODEL, Endpoint::Ndjson),
+            AgentDef::from_spec(preset("tester"), TESTER_MODEL, Endpoint::Ndjson),
+            AgentDef::from_spec(preset("code-reviewer"), REVIEWER_MODEL, Endpoint::Ndjson),
+        ],
+        Script::new().route(LEAD_MODEL, lead),
+        Script::new()
+            .route(CODER_MODEL, coder)
+            .route(TESTER_MODEL, tester)
+            .route(REVIEWER_MODEL, reviewer),
+    )
+    .await
+}
+
+/// A fresh branch: the lead finds no plan, so the first coder call writes
+/// `.chatty/plan.md` and commits it before any code; the work's commit marks
+/// the step done; a final commit removes the state files, and the diff
+/// against the base holds only `calc.sh`.
+#[tokio::test]
+async fn lead_state_is_written_first_and_removed_before_the_pr() {
+    let kit = state_kit(
+        {
+            let mut lead = vec![
+                Reply::tool_call(
+                    "read_file",
+                    serde_json::json!({ "path": ".chatty/plan.md" }),
+                ),
+                invoke(
+                    "coder",
+                    &format!(
+                        "There is no .chatty/plan.md: write it first and commit it, with an \
+                         empty .chatty/progress.md, before any code. Plan: {PLAN_FRESH}\
+                         Then do step 1: {TASK}"
+                    ),
+                ),
+            ];
+            lead.extend(lead_finishes("sub-agent/coder-0", "sub-agent/coder-1"));
+            lead
+        },
+        {
+            let mut coder = vec![
+                write_file(".chatty/plan.md", PLAN_FRESH),
+                write_file(".chatty/progress.md", ""),
+            ];
+            coder.extend(commit(
+                &[".chatty/plan.md", ".chatty/progress.md"],
+                "Write the plan",
+            ));
+            coder.extend([
+                write_file("calc.sh", CALC_WITH_SUB),
+                write_file(
+                    ".chatty/plan.md",
+                    "# Plan\n\n1. [x] Add sub() to calc.sh (this commit)\n",
+                ),
+                write_file(
+                    ".chatty/progress.md",
+                    "2026-11-07: added sub(); nothing failed.\n",
+                ),
+            ]);
+            coder.extend(commit(
+                &["calc.sh", ".chatty/plan.md", ".chatty/progress.md"],
+                "Add sub() to calc.sh",
+            ));
+            coder.push(Reply::text("Committed \"Add sub() to calc.sh\"."));
+            coder.extend(coder_removes_state());
+            coder
+        },
+    )
+    .await;
+    let workspace = kit.workspace();
+    seed_repository(&workspace, &kit.root().join("remote.git"));
+    let base = git(&workspace, &["rev-parse", "main"]);
+    let run = kit.run_leader(TASK).await;
+    let out = run.output.as_ref().expect("the team run succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response.lines().next(), Some("DONE"));
+
+    // The very first commit on the branch is the plan, ahead of any code.
+    let lead_branch = "sub-agent/coding-lead-0";
+    let range = format!("{WORKING_BRANCH}..{lead_branch}");
+    assert_eq!(
+        git(&workspace, &["log", "--reverse", "--format=%s", &range]),
+        "Write the plan\nAdd sub() to calc.sh\nRemove the lead's state files"
+    );
+    let first = git(&workspace, &["rev-list", "--reverse", &range])
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
+    let first_files = git(&workspace, &["show", "--name-only", "--format=", &first]);
+    assert!(first_files.contains(".chatty/plan.md"), "{first_files}");
+    assert!(!first_files.contains("calc.sh"), "{first_files}");
+    // The plan as committed with the work has the step done.
+    let mid = git(
+        &workspace,
+        &["show", &format!("{lead_branch}~1:.chatty/plan.md")],
+    );
+    assert!(mid.contains("1. [x]"), "{mid}");
+
+    // Before the PR: no `.chatty/` state in the tip, and the diff against the
+    // base is the change alone (the repository's own `.chatty/checks` stays).
+    let stat = git(
+        &workspace,
+        &[
+            "diff",
+            "--stat",
+            &format!("{WORKING_BRANCH}..{lead_branch}"),
+        ],
+    );
+    assert!(
+        stat.contains("calc.sh") && !stat.contains(".chatty"),
+        "{stat}"
+    );
+    let tree = git(&workspace, &["ls-tree", "-r", "--name-only", lead_branch]);
+    assert!(tree.contains(".chatty/checks"), "{tree}");
+    assert!(
+        !tree.contains("plan.md") && !tree.contains("progress.md"),
+        "{tree}"
+    );
+    assert_eq!(git(&workspace, &["rev-parse", "main"]), base);
+}
+
+/// A second turn on a branch whose plan has step 1 done: the lead reads it
+/// (the real file reaches its model), and its delegations go straight to
+/// step 2. The finished step is not delegated again.
+#[tokio::test]
+async fn lead_continues_from_the_first_step_not_done() {
+    let mut lead = vec![
+        Reply::tool_call(
+            "read_file",
+            serde_json::json!({ "path": ".chatty/plan.md" }),
+        ),
+        invoke(
+            "coder",
+            "Step 2 of .chatty/plan.md: add mul(a, b) to calc.sh returning a * b. \
+             Mark step 2 [x] and append to .chatty/progress.md in the same commit.",
+        ),
+    ];
+    lead.extend(lead_finishes("sub-agent/coder-0", "sub-agent/coder-1"));
+    let mut coder = vec![
+        write_file("calc.sh", CALC_WITH_MUL),
+        write_file(
+            ".chatty/plan.md",
+            &PLAN_STEP1_DONE.replace("2. [ ]", "2. [x]"),
+        ),
+        write_file(".chatty/progress.md", "2026-11-07: step 2 added mul().\n"),
+    ];
+    coder.extend(commit(
+        &["calc.sh", ".chatty/plan.md", ".chatty/progress.md"],
+        "Add mul() to calc.sh",
+    ));
+    coder.push(Reply::text("Committed \"Add mul() to calc.sh\"."));
+    coder.extend(coder_removes_state());
+    let kit = state_kit(lead, coder).await;
+    // The branch a killed lease left behind: sub() done and committed, the
+    // plan saying so, the progress file holding the attempt.
+    let workspace = kit.workspace();
+    std::fs::write(workspace.join("calc.sh"), CALC).unwrap();
+    std::fs::create_dir_all(workspace.join("tests")).unwrap();
+    std::fs::write(workspace.join("tests/test_calc.sh"), TEST_SCRIPT).unwrap();
+    std::fs::create_dir_all(workspace.join(".chatty")).unwrap();
+    std::fs::write(workspace.join(".chatty/checks"), "sh tests/test_calc.sh\n").unwrap();
+    git(&workspace, &["add", "."]);
+    git(
+        &workspace,
+        &["commit", "-q", "-m", "calc with add, and its test"],
+    );
+    git(&workspace, &["switch", "-q", "-c", WORKING_BRANCH]);
+    std::fs::write(workspace.join("calc.sh"), CALC_WITH_SUB).unwrap();
+    std::fs::write(workspace.join(".chatty/plan.md"), PLAN_STEP1_DONE).unwrap();
+    std::fs::write(
+        workspace.join(".chatty/progress.md"),
+        "2026-11-07: step 1 added sub(); no problems.\n",
+    )
+    .unwrap();
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-q", "-m", "Add sub() to calc.sh"]);
+    let base = git(&workspace, &["rev-parse", "main"]);
+
+    let run = kit.run_leader(TASK).await;
+    let out = run.output.as_ref().expect("the team run succeeded");
+    assert!(out.success, "{out:?}");
+    assert_eq!(out.response.lines().next(), Some("DONE"));
+
+    // The plan with step 1 [x] reached the lead before it delegated.
+    let lead_requests = kit.sse.requests_for(LEAD_MODEL);
+    assert!(
+        body(&lead_requests[1]).contains("1. [x] Add sub() to calc.sh (abc1234)"),
+        "{}",
+        body(&lead_requests[1])
+    );
+    // One coder call for the work, none for step 1: the delegation is step 2.
+    let coder_requests = kit.ndjson.requests_for(CODER_MODEL);
+    let first_prompt = body(&coder_requests[0]);
+    assert!(first_prompt.contains("Step 2") && !first_prompt.contains("add sub("));
+    assert_eq!(
+        names(&kit),
+        [
+            "coder-0",
+            "tester-0",
+            "code-reviewer-0",
+            "coder-1",
+            "coding-lead-0"
+        ]
+    );
+    // The new commits are step 2 and the removal; no sub() is written again.
+    let lead_branch = "sub-agent/coding-lead-0";
+    assert_eq!(
+        git(
+            &workspace,
+            &[
+                "log",
+                "--format=%s",
+                &format!("{WORKING_BRANCH}..{lead_branch}")
+            ]
+        ),
+        "Remove the lead's state files\nAdd mul() to calc.sh"
+    );
+    assert_eq!(git(&workspace, &["rev-parse", "main"]), base);
+}
