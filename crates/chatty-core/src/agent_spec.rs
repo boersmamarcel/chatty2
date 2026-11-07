@@ -1567,6 +1567,37 @@ cap_usd = 2.0
         );
     }
 
+    /// AGE-1021: the lead refuses an issue that is not swarm-ready before it
+    /// spends anything, and the headings it checks for are exactly
+    /// `coding::REQUIRED_SECTIONS`, so the model's check and the function agree.
+    #[test]
+    fn the_coding_lead_checks_swarm_readiness_first() {
+        let spec = load_agent_spec_from("coding-lead", None, None)
+            .unwrap()
+            .spec;
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        let quoted: Vec<&str> = preamble
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|q| crate::coding::REQUIRED_SECTIONS.contains(q))
+            .collect();
+        assert_eq!(quoted, crate::coding::REQUIRED_SECTIONS);
+        let first = preamble.find("swarm-ready").unwrap();
+        assert!(
+            first < preamble.find("1. Read the task").unwrap(),
+            "the check comes before step 1"
+        );
+        for phrase in [
+            "NOT DONE on the first line",
+            "issue not swarm-ready: <the missing headings",
+            "delegate nothing",
+            "coding::issue_readiness",
+        ] {
+            assert!(preamble.contains(phrase), "{phrase}");
+        }
+    }
+
     /// AGE-957: the coding team's lead plans and delegates and edits
     /// nothing: its profile has no write, commit or shell tool. It
     /// delegates to exactly coder, reviewer and tester, requires both
@@ -1605,6 +1636,8 @@ cap_usd = 2.0
             "At most 3 CI rounds",
             "Never ask github for another repository, head or base",
             "the last CHECKS line",
+            "one call at a time: open_or_update_pr first",
+            "Never send two github calls together",
         ] {
             assert!(preamble.contains(phrase), "{phrase}");
         }
