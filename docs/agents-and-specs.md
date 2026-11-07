@@ -994,7 +994,7 @@ starting the leader, or build the text with
 Two presets ship, both **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
 specs name no models. Besides them, five standalone specs ship: `data-analyst`,
-`researcher`, `reviewer`, `typesetter` and `writer`, and the coding team below. `data-analyst` (AGE-992) answers
+`researcher`, `reviewer`, `typesetter` and `writer`, and the coding and curation teams below. `data-analyst` (AGE-992) answers
 questions from the data files in its workspace with the `coder` profile (DuckDB's
 `query_data` and friends, `calculate`, code execution), capped at 60 tool turns and 15
 minutes per delegation. `typesetter` (AGE-946) assembles the approved texts
@@ -1017,6 +1017,45 @@ milestone of the hosted coding swarm (AGE-956: issue, branch, commits, PR).
 without `--team` (`/agent coding-lead`, `--agent coding-lead`, a delegated worker) is
 offered the roster less every spec that names its callers (`root_agent_names_of`), so a
 callers-only member would be unreachable from its own lead.
+
+**The curation team (AGE-1053)** is four more specs, also without a `team.json`:
+`/agent curator-lead` runs it. It writes the items the coding team takes (design
+`work-queues` §3.5): a source (an issue's text, a debrief's action items) becomes zero or
+more items in the swarm-ready template, and a failed item (its text, the failure reason,
+`.chatty/plan.md` and `progress.md`) becomes a narrower replacement. It writes no code: its
+roster has no `coder`, and no member is offered a write, commit or merge tool.
+
+| Spec | Profile | Role | Budget |
+|------|---------|------|--------|
+| `curator-lead` | `coordinator`, less `git` (so no `git_merge` either) | Rejects a source that plainly asks for no code change (`REJECT`) or needs a human decision first (`ESCALATE`); otherwise delegates to `scout`, then `spec-writer` (small items, split with dependencies; for a replan narrower than the failed item, never the same), then `example-checker`. On anything but `EXAMPLES: OK`, one fix round: `spec-writer` gets the numbered mismatches word for word and `example-checker` checks again; still not OK is `ESCALATE`. It also checks each item has the seven `coding::REQUIRED_SECTIONS` headings. Each item carries `depends-on`, `conflict-keys` and `ship` header lines. Its answer is the `items` outcome grammar below. `delegates_to = ["scout", "spec-writer", "example-checker"]` | 16 turns, 90m |
+| `scout` | `reviewer` (shell on, read-only by instruction) | Finds the files, functions and lines an item needs (quoting `file:line`), the test set-up and the check commands (`.chatty/checks`, else the README, else `cargo test -p` plus clippy and fmt); says for each example whether it ran it or only read the code; for a replan reads the failed branch with `git log`/`git show`. `NOTHING FOUND` on the first line when the repository has nothing the source could change. Leaf, exposed | 24 turns, 15m |
+| `spec-writer` | `reviewer`, less `shell` (read tools only) | Writes each item as text in its answer, in the template's seven sections named exactly as `REQUIRED_SECTIONS` (a test keeps them equal), every example taken from the scout's findings or the code, between `--- ITEM <id> ---` and `--- END ITEM ---`. Writes no file. Leaf, exposed | 8 turns, 10m |
+| `example-checker` | `reviewer` (shell on, read-only by instruction) | Runs every example with the shell when it can (else works it out from the code), and does a dry mutation check: `grep -n -F` confirms each named mutation line exists, and nothing is changed. First line `EXAMPLES: OK`, else `EXAMPLES: MISMATCH` and a numbered list (claim, what the code really gives, the fix); then each claim marked `RAN` or `READ`. Leaf, exposed | 30 turns, 20m |
+
+The `items` grammar, read by `coding::parse_items(answer) -> Result<ParsedItems, ParseItemsError>`
+(pure, in `chatty-core`): the first non-empty line is `ITEMS: <n>`, `REJECT: <why>` or
+`ESCALATE: <why>` (Markdown bold or heading marks around it are ignored). After
+`ITEMS: <n>` come exactly `n` blocks, each a line `--- ITEM <id> ---`, header lines, a
+blank line, the item, and a line `--- END ITEM ---`. The headers are
+`depends-on: <id>[, <id>]` (optional), `conflict-keys: <path or crate>[, …]` (optional;
+without it the first backquoted path of each list line under *Repo and files*) and
+`ship: auto|draft` (required; `draft` for billing, credentials or security); keys and the
+`ship` value are read in any case, and a fenced code block inside an item is text, so an item
+may quote a marker line. A replan adds
+one line outside the blocks, `PARTIAL WORK: SOUND` or `PARTIAL WORK: UNSOUND: <why>`:
+whether the replacement may start from the failed branch's head. Other lines outside the
+blocks are skipped.
+
+`ParsedItems { items: Vec<Item { id, text, depends_on, conflict_keys, ship }>, partial_work:
+Option<PartialWork> }`, with `Ship = Auto | Draft` and `PartialWork = Sound | Unsound(why)`.
+`REJECT` and `ESCALATE` come back as `ParseItemsError::Rejected(why)` / `Escalated(why)`.
+Errors: a count that differs from the blocks, a block with no end marker, a stray end
+marker, an empty block, a duplicate id, a missing `ship:`, a malformed or repeated header, a
+second or malformed `PARTIAL WORK:` line, and a `depends-on` naming the item itself or an
+id not in the same answer. An answer is one self-contained plan: dependencies point only
+inside it, and re-pointing a failed item's dependants at its replacements is the queue's
+job. Every item the e2e (`participant/curation_team.rs`) gets back passes
+`coding::issue_readiness`.
 
 The tester needs the shell group on (`ExecutionSettingsModel::enabled`). A hosted
 worker runs on the user's stored execution settings, where the shell and `execute_code`
