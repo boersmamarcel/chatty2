@@ -5,6 +5,73 @@
 
 const PDFIUM_VERSION: &str = "7543";
 
+/// Environment variable naming a local, pre-fetched pdfium library
+/// (`CHATTY_PDFIUM_LIB=/abs/path/libpdfium.so`). When set, the build uses it instead of
+/// downloading (AGE-1056: a coding lease reaches only the crates proxy, not GitHub).
+/// The file must match the pinned sha256 of the release's library for this platform.
+const PDFIUM_LIB_ENV: &str = "CHATTY_PDFIUM_LIB";
+
+// Pinned sha256 digests for bblanchon/pdfium-binaries chromium/7543. `*_TGZ` is the
+// release asset; `*_LIB` is the library inside it (what `CHATTY_PDFIUM_LIB` points at).
+// Bumping PDFIUM_VERSION means re-pinning all of these.
+const PDFIUM_SHA256_MAC_ARM64_TGZ: &str =
+    "41c269723b4711793de70ff34e65c00fa79907d6c023741837579e906b846faa";
+const PDFIUM_SHA256_MAC_ARM64_LIB: &str =
+    "858f0676a1ac5b666673fc6e56b4401f95907a3fc66fa4635d626097a04c205b";
+const PDFIUM_SHA256_MAC_X64_TGZ: &str =
+    "2510460ac106f14b884598a0da3f53a99e23d79512acf027c5e101c2bb2f26cb";
+const PDFIUM_SHA256_MAC_X64_LIB: &str =
+    "c4ae7ca1583e04449d07f1985ce258a3f935583279fd46fa89f528106301b929";
+const PDFIUM_SHA256_LINUX_X64_TGZ: &str =
+    "9329a3c4b19b3c8d0a93af5440f44be84e4bd879a204e47b1a7a160e96809da4";
+const PDFIUM_SHA256_LINUX_X64_LIB: &str =
+    "2383a414050dd21ae5300b119ad8a72360ef92cff820b4c685c047dc272c2794";
+const PDFIUM_SHA256_WIN_X64_TGZ: &str =
+    "0b08b606792a6cc593426efdefc6622611bce446d9e0270743846956ea1554ca";
+const PDFIUM_SHA256_WIN_X64_LIB: &str =
+    "6b963c2be9cacbaa0c0c7f4bf6d20d2fd16729ebdaa9989978b0f7b119c1c1cb";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Check `bytes` against a pinned lowercase-hex sha256. `what` names the thing being
+/// checked for the error message.
+fn verify_sha256(bytes: &[u8], expected: &str, what: &str) -> Result<(), String> {
+    let actual = sha256_hex(bytes);
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "sha256 mismatch for {what}: expected {expected}, got {actual}"
+        ))
+    }
+}
+
+/// Verify the library at `src` against `expected_sha256` and install it at `dest`.
+/// Nothing is written to `dest` unless the checksum matches.
+fn install_local_pdfium(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    expected_sha256: &str,
+) -> Result<(), String> {
+    let bytes = std::fs::read(src).map_err(|e| format!("cannot read {}: {e}", src.display()))?;
+    verify_sha256(&bytes, expected_sha256, &src.display().to_string())?;
+    // Write via a temp name + rename so a concurrent build never sees a partial file.
+    let tmp = dest.with_extension("tmp-local");
+    std::fs::write(&tmp, &bytes).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).ok();
+    }
+    std::fs::rename(&tmp, dest).map_err(|e| format!("cannot install {}: {e}", dest.display()))
+}
+
 /// Total attempts (including the first) made to download pdfium before giving up.
 /// Bounded on purpose: this runs synchronously inside `cargo build` and must not hang
 /// the build indefinitely on a persistent outage.
@@ -25,13 +92,15 @@ fn setup_pdfium() {
         .join("lib");
     std::fs::create_dir_all(&libs_dir).ok();
 
-    let (lib_name, download_url) = match (target_os.as_str(), target_arch.as_str()) {
+    let (lib_name, download_url, tgz_sha256, lib_sha256) = match (target_os.as_str(), target_arch.as_str()) {
         ("macos", "aarch64") => (
             "libpdfium.dylib",
             format!(
                 "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-mac-arm64.tgz",
                 PDFIUM_VERSION
             ),
+            PDFIUM_SHA256_MAC_ARM64_TGZ,
+            PDFIUM_SHA256_MAC_ARM64_LIB,
         ),
         ("macos", "x86_64") => (
             "libpdfium.dylib",
@@ -39,6 +108,8 @@ fn setup_pdfium() {
                 "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-mac-x64.tgz",
                 PDFIUM_VERSION
             ),
+            PDFIUM_SHA256_MAC_X64_TGZ,
+            PDFIUM_SHA256_MAC_X64_LIB,
         ),
         ("linux", "x86_64") => (
             "libpdfium.so",
@@ -46,6 +117,8 @@ fn setup_pdfium() {
                 "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-linux-x64.tgz",
                 PDFIUM_VERSION
             ),
+            PDFIUM_SHA256_LINUX_X64_TGZ,
+            PDFIUM_SHA256_LINUX_X64_LIB,
         ),
         ("windows", "x86_64") => (
             "pdfium.dll",
@@ -53,6 +126,8 @@ fn setup_pdfium() {
                 "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F{}/pdfium-win-x64.tgz",
                 PDFIUM_VERSION
             ),
+            PDFIUM_SHA256_WIN_X64_TGZ,
+            PDFIUM_SHA256_WIN_X64_LIB,
         ),
         _ => {
             println!(
@@ -65,13 +140,32 @@ fn setup_pdfium() {
 
     let lib_path = libs_dir.join(lib_name);
 
-    if !lib_path.exists() {
+    println!("cargo:rerun-if-env-changed={PDFIUM_LIB_ENV}");
+    let local_lib = std::env::var_os(PDFIUM_LIB_ENV).filter(|v| !v.is_empty());
+    if let Some(local_lib) = local_lib {
+        // A local library is verified and wins over whatever is already in libs/lib,
+        // so a stale or unverified file there is replaced. No network is touched.
+        let local_lib = std::path::PathBuf::from(local_lib);
+        println!("cargo:rerun-if-changed={}", local_lib.display());
+        if let Err(e) = install_local_pdfium(&local_lib, &lib_path, lib_sha256) {
+            panic!(
+                "{PDFIUM_LIB_ENV}={} was rejected: {e}\n\
+                 It must be the {lib_name} from bblanchon/pdfium-binaries chromium/{PDFIUM_VERSION} \
+                 (expected sha256 {lib_sha256}). Unset {PDFIUM_LIB_ENV} to download it instead.",
+                local_lib.display()
+            );
+        }
+        println!(
+            "cargo:warning=Using local pdfium library from {PDFIUM_LIB_ENV} ({}), sha256 verified",
+            local_lib.display()
+        );
+    } else if !lib_path.exists() {
         println!(
             "cargo:warning=Downloading pdfium library for {}-{}...",
             target_os, target_arch
         );
         if let Err(e) =
-            download_with_retries(|| download_and_extract_pdfium(&download_url, &libs_dir))
+            download_with_retries(|| download_and_extract_pdfium(&download_url, tgz_sha256, &libs_dir))
         {
             // Loud, build-failing error rather than a warning: a build that cannot
             // satisfy the "pdf" feature (or chatty-gpui's unconditional pdfium need)
@@ -123,6 +217,7 @@ where
 
 fn download_and_extract_pdfium(
     url: &str,
+    expected_sha256: &str,
     dest_dir: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let response = reqwest::blocking::get(url)?;
@@ -130,6 +225,8 @@ fn download_and_extract_pdfium(
         return Err(format!("HTTP {}", response.status()).into());
     }
     let bytes = response.bytes()?;
+    // Never unpack an archive that is not the pinned release asset.
+    verify_sha256(&bytes, expected_sha256, url)?;
 
     let tar = flate2::read::GzDecoder::new(std::io::Cursor::new(&bytes));
     let mut archive = tar::Archive::new(tar);
@@ -163,15 +260,37 @@ fn download_and_extract_pdfium(
 
 // NOTE ON TEST EXECUTION: this file is spliced into two `build.rs` files via
 // `include!`. Cargo compiles `build.rs` as a build-script binary, never as a
-// `#[cfg(test)]` target, so `cargo test` (workspace-wide or otherwise) does not
-// run the tests below. They exercise `download_with_retries` in isolation as an
-// executable spec; run them directly with, e.g.:
-//   rustc --edition 2024 --test scripts/pdfium_build.rs -o /tmp/pdfium_build_test \
-//     && /tmp/pdfium_build_test
+// `#[cfg(test)]` target, so the tests below are run through
+//   cargo test -p chatty-core --test pdfium_build
+// `crates/chatty-core/tests/pdfium_build.rs`, which `include!`s this file too:
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn verify_sha256_accepts_match_and_rejects_mismatch() {
+        // sha256("abc")
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(verify_sha256(b"abc", abc, "t").is_ok());
+        let err = verify_sha256(b"abd", abc, "thing").unwrap_err();
+        assert!(err.contains("thing") && err.contains(abc), "{err}");
+    }
+
+    #[test]
+    fn local_install_copies_only_when_checksum_matches() {
+        let dir = std::env::temp_dir().join(format!("pdfium_build_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("src.so");
+        let dest = dir.join("dest.so");
+        std::fs::write(&src, b"abc").unwrap();
+        let abc = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(install_local_pdfium(&src, &dest, &"0".repeat(64)).is_err());
+        assert!(!dest.exists(), "a rejected library must not be installed");
+        install_local_pdfium(&src, &dest, abc).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"abc");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn retries_and_succeeds_after_transient_failures() {
