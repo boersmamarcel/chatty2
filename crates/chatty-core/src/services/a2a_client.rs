@@ -2018,4 +2018,93 @@ mod tests {
             );
         }
     }
+
+    // ── AGE-1050: a failure reply is a failure, not an empty answer ─────────
+
+    /// Run `message/stream` against a server that sends `response` once and
+    /// collect every item the stream yields.
+    async fn stream_items(response: String) -> Vec<Result<A2aStreamEvent>> {
+        use futures::StreamExt;
+
+        let (port, server) = http_server(vec![response]).await;
+        let url = format!("http://127.0.0.1:{port}");
+        let client = A2aClient::new();
+        let mut stream = client
+            .send_message_stream(&agent(&url), "do the thing")
+            .await
+            .expect("the stream opens");
+        let mut items = Vec::new();
+        while let Some(item) = stream.next().await {
+            items.push(item);
+        }
+        server.await.unwrap();
+        items
+    }
+
+    #[tokio::test]
+    async fn plain_json_failed_task_is_one_failed_status() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"id":"t1","status":{"state":"failed","message":{"parts":[{"kind":"text","text":"quota exceeded"}]}}}}"#;
+        let items = stream_items(json_response(body)).await;
+
+        assert_eq!(items.len(), 1, "exactly one event: {items:?}");
+        match items[0].as_ref().expect("a status, not an Err") {
+            A2aStreamEvent::StatusUpdate {
+                state,
+                is_final,
+                message,
+                ..
+            } => {
+                assert_eq!(state, "failed");
+                assert!(*is_final);
+                let message = message.as_deref().unwrap_or_default();
+                assert!(message.contains("quota exceeded"), "{message}");
+            }
+            other => panic!("expected a failed StatusUpdate, got {other:?}"),
+        }
+        assert!(
+            !items
+                .iter()
+                .any(|i| matches!(i, Ok(A2aStreamEvent::ArtifactUpdate { .. }))),
+            "a failed task must not produce an artifact"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_json_rpc_error_is_a_failed_status() {
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
+        let items = stream_items(json_response(body)).await;
+
+        assert_eq!(items.len(), 1, "exactly one event: {items:?}");
+        match items[0].as_ref().expect("a status, not an Err") {
+            A2aStreamEvent::StatusUpdate {
+                state,
+                is_final,
+                message,
+                ..
+            } => {
+                assert_eq!(state, "failed");
+                assert!(*is_final);
+                let message = message.as_deref().unwrap_or_default();
+                assert!(message.contains("Method not found"), "{message}");
+            }
+            other => panic!("expected a failed StatusUpdate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_error_block_without_result_is_an_err() {
+        let body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"boom\"}}\n\n";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let items = stream_items(response).await;
+
+        let err = items
+            .iter()
+            .find_map(|i| i.as_ref().err())
+            .expect("the error block must surface as an Err");
+        assert!(format!("{err:#}").contains("boom"), "{err:#}");
+    }
 }

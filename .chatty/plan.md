@@ -9,5 +9,5 @@
 ## Steps
 - [x] 1. Plan
 - [x] 2. Code change in crates/chatty-core/src/services/a2a_client.rs (commit: 02448e3c)
-- [ ] 3. Tests (a, b, c)
+- [x] 3. Tests (a, b, c) (commit: the one adding these tests; see git log)
 - [ ] 4. Run checks (a2a_client tests, clippy -D warnings, fmt)
