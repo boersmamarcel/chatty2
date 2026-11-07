@@ -1585,7 +1585,7 @@ cap_usd = 2.0
         assert_eq!(quoted, crate::coding::REQUIRED_SECTIONS);
         let first = preamble.find("swarm-ready").unwrap();
         assert!(
-            first < preamble.find("1. Read the task").unwrap(),
+            first < preamble.find("1. Read the state files").unwrap(),
             "the check comes before step 1"
         );
         for phrase in [
@@ -1596,6 +1596,43 @@ cap_usd = 2.0
         ] {
             assert!(preamble.contains(phrase), "{phrase}");
         }
+    }
+
+    /// AGE-1048: the lead's state is on the branch: it reads the plan and
+    /// progress files first, continues from the first step not done, has the
+    /// coder write them, and has them removed before the PR.
+    #[test]
+    fn the_coding_lead_keeps_its_state_on_the_branch() {
+        let spec = load_agent_spec_from("coding-lead", None, None)
+            .unwrap()
+            .spec;
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for phrase in [
+            ".chatty/plan.md",
+            ".chatty/progress.md",
+            "append-only",
+            "[ ] not started, [~] in progress or [x] done",
+            "You edit no file, so the coder writes and updates them",
+            "At the start of every turn, and in every new lease, read both first",
+            "continue from the first step that is not [x]",
+            "never redo a finished step",
+            "the first coder call writes .chatty/plan.md",
+            "before any code",
+            "Before the PR",
+            "Remove the lead's state files",
+            "git rm -f .chatty/plan.md",
+            "The PR diff then holds only the change",
+        ] {
+            assert!(preamble.contains(phrase), "{phrase}");
+        }
+        assert!(
+            preamble.find("swarm-ready").unwrap() < preamble.find(".chatty/plan.md").unwrap(),
+            "the readiness check stays first"
+        );
+        assert!(
+            preamble.find("Before the PR").unwrap() < preamble.find("7. Only when github").unwrap(),
+            "the state files go before step 7"
+        );
     }
 
     /// AGE-957: the coding team's lead plans and delegates and edits
@@ -1613,7 +1650,7 @@ cap_usd = 2.0
             ["coder", "code-reviewer", "tester", "github"]
         );
         assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
-        assert_eq!(spec.budget.max_agent_turns, Some(45));
+        assert_eq!(spec.budget.max_agent_turns, Some(50));
         assert_eq!(spec.max_duration(), Some(Duration::from_secs(150 * 60)));
         // AGE-1034: the CI loop is there, and only when github is a roster
         // agent, so a run without it (local, non-GitHub) keeps working.
