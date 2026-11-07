@@ -138,4 +138,29 @@ mod tests {
         let snap = snapshot(&term, Region::Scrollback { lines: 0 });
         assert_eq!(snap.text, "four");
     }
+
+    #[test]
+    fn cursor_row_is_zero_on_the_first_line() {
+        let term = mock_term("x");
+        assert_eq!(snapshot(&term, Region::Screen).cursor_row, 0);
+    }
+
+    #[test]
+    fn cursor_row_follows_the_cursor_line() {
+        // `mock_term` writes cells without moving the cursor, so place it
+        // where real output of "a\r\nb\r\nc" would leave it: on row 2.
+        let mut term = mock_term("a\r\nb\r\nc");
+        term.grid_mut().cursor.point.line = Line(2);
+        assert_eq!(snapshot(&term, Region::Screen).cursor_row, 2);
+    }
+
+    #[test]
+    fn last_command_region_is_empty_with_the_terminal_size() {
+        let term = mock_term("a\r\nb\r\nc");
+        let snap = snapshot(&term, Region::LastCommand);
+        assert_eq!(snap.text, "");
+        assert_eq!(snap.last_command, None);
+        assert_eq!(snap.cols as usize, term.columns());
+        assert_eq!(snap.rows as usize, term.screen_lines());
+    }
 }
