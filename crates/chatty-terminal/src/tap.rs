@@ -90,3 +90,154 @@ impl<P: OnResize> OnResize for Tapped<P> {
         self.pty.on_resize(size);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// Reader that yields one queued result per `read` call; an empty queue is EOF.
+    struct FakeReader {
+        script: VecDeque<io::Result<Vec<u8>>>,
+    }
+
+    impl Read for FakeReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.script.pop_front() {
+                None => Ok(0),
+                Some(Err(e)) => Err(e),
+                Some(Ok(chunk)) => {
+                    assert!(chunk.len() <= buf.len(), "test chunk larger than buffer");
+                    buf[..chunk.len()].copy_from_slice(&chunk);
+                    Ok(chunk.len())
+                }
+            }
+        }
+    }
+
+    struct FakePty {
+        reader: FakeReader,
+        writer: Vec<u8>,
+    }
+
+    impl FakePty {
+        fn new(script: Vec<io::Result<Vec<u8>>>) -> Self {
+            Self {
+                reader: FakeReader {
+                    script: script.into(),
+                },
+                writer: Vec::new(),
+            }
+        }
+    }
+
+    impl EventedReadWrite for FakePty {
+        type Reader = FakeReader;
+        type Writer = Vec<u8>;
+
+        unsafe fn register(&mut self, _: &Arc<Poller>, _: Event, _: PollMode) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn reregister(&mut self, _: &Arc<Poller>, _: Event, _: PollMode) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn deregister(&mut self, _: &Arc<Poller>) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn reader(&mut self) -> &mut FakeReader {
+            &mut self.reader
+        }
+
+        fn writer(&mut self) -> &mut Vec<u8> {
+            &mut self.writer
+        }
+    }
+
+    type Seen = Arc<Mutex<Vec<u8>>>;
+    type Calls = Arc<Mutex<usize>>;
+
+    /// A tap that records every chunk's bytes and the number of calls.
+    fn recording_tap() -> (ByteTap, Seen, Calls) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(Mutex::new(0usize));
+        let (s, c) = (Arc::clone(&seen), Arc::clone(&calls));
+        let tap: ByteTap = Box::new(move |bytes| {
+            s.lock().unwrap().extend_from_slice(bytes);
+            *c.lock().unwrap() += 1;
+        });
+        (tap, seen, calls)
+    }
+
+    #[test]
+    fn tap_sees_the_bytes_read_in_order() {
+        let (tap, seen, calls) = recording_tap();
+        let fake = FakePty::new(vec![
+            Ok(b"hello".to_vec()),
+            Ok(b", ".to_vec()),
+            Ok(b"world".to_vec()),
+        ]);
+        let mut tapped = Tapped::new(fake, Some(tap));
+
+        // The buffer is larger than every read, so a tap handed the whole
+        // buffer instead of the bytes read would show up.
+        let mut buf = [0xAAu8; 16];
+        let mut out = Vec::new();
+        for expected in [&b"hello"[..], &b", "[..], &b"world"[..]] {
+            let n = tapped.read(&mut buf).unwrap();
+            assert_eq!(&buf[..n], expected);
+            out.extend_from_slice(&buf[..n]);
+        }
+
+        assert_eq!(out, b"hello, world");
+        assert_eq!(*seen.lock().unwrap(), b"hello, world");
+        assert_eq!(*calls.lock().unwrap(), 3);
+    }
+
+    #[test]
+    fn eof_does_not_call_the_tap() {
+        let (tap, seen, calls) = recording_tap();
+        let fake = FakePty::new(vec![Ok(b"abc".to_vec()), Ok(Vec::new())]);
+        let mut tapped = Tapped::new(fake, Some(tap));
+
+        let mut buf = [0u8; 8];
+        assert_eq!(tapped.read(&mut buf).unwrap(), 3);
+        assert_eq!(*calls.lock().unwrap(), 1);
+
+        // Explicit end of stream, then an exhausted script: both read 0.
+        assert_eq!(tapped.read(&mut buf).unwrap(), 0);
+        assert_eq!(tapped.read(&mut buf).unwrap(), 0);
+        assert_eq!(*calls.lock().unwrap(), 1, "tap called on EOF");
+        assert_eq!(*seen.lock().unwrap(), b"abc");
+    }
+
+    #[test]
+    fn bytes_pass_through_without_a_tap() {
+        let fake = FakePty::new(vec![Ok(b"xyz".to_vec()), Ok(b"12".to_vec())]);
+        let mut tapped = Tapped::new(fake, None);
+
+        let mut buf = [0u8; 8];
+        let n = tapped.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"xyz");
+        let n = tapped.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"12");
+        assert_eq!(tapped.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn read_error_is_returned_and_the_tap_is_not_called() {
+        let (tap, seen, calls) = recording_tap();
+        let fake = FakePty::new(vec![Err(io::Error::other("pty gone"))]);
+        let mut tapped = Tapped::new(fake, Some(tap));
+
+        let mut buf = [0u8; 8];
+        let err = tapped.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.to_string(), "pty gone");
+        assert_eq!(*calls.lock().unwrap(), 0);
+        assert!(seen.lock().unwrap().is_empty());
+    }
+}

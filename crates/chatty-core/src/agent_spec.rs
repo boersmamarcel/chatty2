@@ -1579,11 +1579,35 @@ cap_usd = 2.0
             .spec;
         assert_eq!(
             spec.swarm.delegates_to,
-            ["coder", "code-reviewer", "tester"]
+            ["coder", "code-reviewer", "tester", "github"]
         );
         assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
-        assert_eq!(spec.budget.max_agent_turns, Some(30));
-        assert_eq!(spec.max_duration(), Some(Duration::from_secs(90 * 60)));
+        assert_eq!(spec.budget.max_agent_turns, Some(45));
+        assert_eq!(spec.max_duration(), Some(Duration::from_secs(150 * 60)));
+        // AGE-1034: the CI loop is there, and only when github is a roster
+        // agent, so a run without it (local, non-GitHub) keeps working.
+        let preamble = spec.agent.preamble.as_deref().unwrap();
+        for phrase in [
+            "Only when github is among your agents",
+            "open_or_update_pr",
+            "\"draft\": true",
+            "Closes <issue id>",
+            "ship:auto",
+            "ci-fix",
+            "pr_checks",
+            "\"wait_secs\": 1200",
+            "CHECKS: PASS",
+            "failing_check_log",
+            "CLASS: INFRA",
+            "CLASS: CODE",
+            "ci: rerun",
+            "once per task",
+            "At most 3 CI rounds",
+            "Never ask github for another repository, head or base",
+            "the last CHECKS line",
+        ] {
+            assert!(preamble.contains(phrase), "{phrase}");
+        }
         let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
         for tool in [
             "invoke_agent",
