@@ -1,8 +1,8 @@
 # The coding team's lead (AGE-957): issue -> branch -> commits, for the hosted
 # coding swarm's first milestone (AGE-956). It edits nothing itself: the
 # coordinator profile reads the repository and merges a worker's branch
-# (git_merge), and nothing more. Its loop is bounded: two fix rounds, then
-# it reports NOT DONE rather than going on.
+# (git_merge), and nothing more. Its loop is bounded: two fix rounds, three CI
+# rounds, then it reports NOT DONE rather than going on.
 [agent]
 name = "coding-lead"
 description = "Leads a coding task: a coder changes and commits, a tester runs the checks, a code-reviewer approves"
@@ -31,8 +31,25 @@ code-reviewer's is APPROVE. Otherwise send coder one numbered list of fixes: the
 tester quoted, code-reviewer's numbered fixes word for word, and for each MUTATION MISSED the \
 test and the line it did not notice. Then merge, test and review again as in 3 to 5. A \
 MUTATION MISSED counts as a fix round. At most 2 fix rounds: after the second, stop.
-7. Reply with DONE or NOT DONE on the first line, then the commits on the branch, tester's \
-and code-reviewer's last verdicts, and, when NOT DONE, what still fails.
+7. Only when github is among your agents, and the task is done as in 6, take the change \
+through CI. Never ask github for another repository, head or base.
+   a. Delegate to github one JSON object as the whole prompt: {"tool": "open_or_update_pr", \
+"title": "<issue id>: <summary>", "body": "<what and why; tester's and code-reviewer's verdicts; \
+Closes <issue id>>", "draft": true}. Add "labels": ["ship:auto"] only when the task explicitly \
+allows it, code-reviewer approved and the change touches no billing, credentials or security. \
+Add "labels": ["ci-fix"] after a CI fix.
+   b. Delegate {"tool": "pr_checks", "wait_secs": 1200}. Its first line is CHECKS: PASS, FAIL, \
+PENDING or NONE. On PENDING or NONE ask at most twice more. On PASS the change is done.
+   c. On CHECKS: FAIL delegate {"tool": "failing_check_log", "check": "<name>", "max_kb": 16} for \
+each failed check. CLASS: INFRA: change no code; once per task, send coder "Push an empty commit: \
+git commit --allow-empty -m \"ci: rerun\"", then go back to a. CLASS: CODE: send coder the check's \
+name and the failing lines word for word, then test and review again as in 4 and 5 (with the \
+mutation check if tests changed), then go back to a.
+   d. At most 3 CI rounds: after the third failed one, stop.
+8. Reply with DONE or NOT DONE on the first line. When github was used, then the PR link and the \
+last CHECKS line. Then the commits on the branch, tester's and code-reviewer's last verdicts, and, \
+when NOT DONE, what still fails (check name and CLASS for a CI failure). Without github the CI \
+steps are skipped and nothing is pushed.
 
 Never switch to, merge into or push the base branch: the work stays on the current branch. If the current branch is the base branch (main or master), stop before delegating and reply NOT DONE, saying the work needs its own branch."""
 
@@ -40,11 +57,15 @@ Never switch to, merge into or push the base branch: the work stays on the curre
 profile = "coordinator"
 
 [swarm]
-delegates_to = ["coder", "code-reviewer", "tester"]
+# github is a host-side agent of hosted runs (hive AGE-958); a local run has none,
+# and a name that is not on the roster is simply never reachable, so the lead then
+# behaves as it did before.
+delegates_to = ["coder", "code-reviewer", "tester", "github"]
 
-# Up to 3 rounds of coder, merge, tester and code-reviewer (12 turns) plus reading
-# the task and the repository. The deadline bounds the callees too: each runs
+# Up to 3 rounds of coder, merge, tester and code-reviewer (12 turns), up to 3 CI
+# rounds (about 4 turns and up to 20 minutes of waiting each) plus reading the task.
+# The deadline bounds the callees too: each runs
 # under the tighter of its own and what the lead has left (AGE-644).
 [budget]
-max_agent_turns = 30
-max_duration = "90m"
+max_agent_turns = 45
+max_duration = "150m"
