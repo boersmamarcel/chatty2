@@ -1,0 +1,1 @@
+- 2026-11-07: AGE-1052 renamed templates/module/Cargo.toml to Cargo.toml.liquid. cargo-generate.toml has no include/exclude lists; README and ci.yml do not reference the old path (ci builds the generated modules/ci-generated/Cargo.toml). No other text changes.
