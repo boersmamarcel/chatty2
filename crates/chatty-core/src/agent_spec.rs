@@ -112,9 +112,16 @@ pub const PRESETS: &[(&str, &str)] = &[
     ),
     ("coder", include_str!("../agents/coder.toml")),
     ("coding-lead", include_str!("../agents/coding-lead.toml")),
+    ("curator-lead", include_str!("../agents/curator-lead.toml")),
     ("data-analyst", include_str!("../agents/data-analyst.toml")),
+    (
+        "example-checker",
+        include_str!("../agents/example-checker.toml"),
+    ),
     ("researcher", include_str!("../agents/researcher.toml")),
     ("reviewer", include_str!("../agents/reviewer.toml")),
+    ("scout", include_str!("../agents/scout.toml")),
+    ("spec-writer", include_str!("../agents/spec-writer.toml")),
     ("tester", include_str!("../agents/tester.toml")),
     ("typesetter", include_str!("../agents/typesetter.toml")),
     ("writer", include_str!("../agents/writer.toml")),
@@ -1856,6 +1863,183 @@ cap_usd = 2.0
         }
     }
 
+    /// The curation team (AGE-1053), as its lead and members are named.
+    const CURATION_TEAM: [&str; 4] = ["curator-lead", "scout", "spec-writer", "example-checker"];
+
+    /// Whether `spec` is offered `tool`: its profile allows it and no
+    /// disabled group takes it away (the git group holds every `git_` tool,
+    /// the shell group every `shell_` one).
+    fn offers(spec: &AgentSpec, tool: &str) -> bool {
+        let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+        let disabled = |group: &str| spec.tools.disable.iter().any(|g| g == group);
+        profile.allows(tool)
+            && !(tool.starts_with("git_") && disabled("git"))
+            && !(tool.starts_with("shell_") && disabled("shell"))
+    }
+
+    /// AGE-1053: the curation team writes no code. Its lead delegates to
+    /// exactly scout, spec-writer and example-checker (no coder); no member
+    /// is offered a write, commit, merge or code-execution tool; scout and
+    /// example-checker have the shell (read-only by instruction), the lead
+    /// and spec-writer do not. Every member is exposed and bounded.
+    #[test]
+    fn the_curation_team_reads_and_writes_text_only() {
+        let lead = load_agent_spec_from("curator-lead", None, None)
+            .unwrap()
+            .spec;
+        assert_eq!(
+            lead.swarm.delegates_to,
+            ["scout", "spec-writer", "example-checker"]
+        );
+        assert_eq!(lead.tools.profile.as_deref(), Some("coordinator"));
+        assert_eq!(lead.budget.max_agent_turns, Some(16));
+        assert_eq!(lead.max_duration(), Some(Duration::from_secs(90 * 60)));
+        for name in CURATION_TEAM {
+            let spec = load_agent_spec_from(name, None, None).unwrap().spec;
+            assert!(spec.swarm.exposed && spec.swarm.callers.is_none(), "{name}");
+            assert!(
+                spec.budget.max_agent_turns.is_some() && spec.max_duration().is_some(),
+                "{name}"
+            );
+            assert!(!spec.swarm.delegates_to.iter().any(|d| d == "coder"));
+            if name != "curator-lead" {
+                assert!(spec.swarm.delegates_to.is_empty(), "{name} is a leaf");
+            }
+            for tool in [
+                "write_file",
+                "apply_diff",
+                "create_directory",
+                "delete_file",
+                "move_file",
+                "git_add",
+                "git_create_branch",
+                "git_switch_branch",
+                "git_commit",
+                "git_merge",
+                "execute_code",
+            ] {
+                assert!(!offers(&spec, tool), "{name} may not {tool}");
+            }
+            assert!(offers(&spec, "read_file"), "{name} reads");
+            let shell = matches!(name, "scout" | "example-checker");
+            assert_eq!(offers(&spec, "shell_execute"), shell, "{name}'s shell");
+        }
+        assert!(offers(&lead, "invoke_agent"));
+    }
+
+    /// AGE-1053: the lead's steps, its one fix round, and the `items`
+    /// outcome grammar that `coding::parse_items` reads. The headings it
+    /// checks for, and the ones spec-writer writes, are exactly
+    /// `coding::REQUIRED_SECTIONS`.
+    #[test]
+    fn the_curator_lead_runs_its_steps_and_answers_in_the_items_grammar() {
+        let preamble = |name: &str| {
+            load_agent_spec_from(name, None, None)
+                .unwrap()
+                .spec
+                .agent
+                .preamble
+                .unwrap()
+        };
+        for name in ["curator-lead", "spec-writer"] {
+            let text = preamble(name);
+            let quoted: Vec<&str> = text
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .filter(|q| crate::coding::REQUIRED_SECTIONS.contains(q))
+                .collect();
+            assert_eq!(quoted, crate::coding::REQUIRED_SECTIONS, "{name}");
+        }
+        let lead = preamble("curator-lead");
+        for phrase in [
+            "change no file yourself",
+            "there is no coder",
+            ".chatty/plan.md and .chatty/progress.md",
+            "2. Delegate to scout",
+            "3. Delegate to spec-writer",
+            "4. Delegate to example-checker",
+            "EXAMPLES: OK",
+            "At most 1 fix round",
+            "NOTHING FOUND, reply REJECT",
+            "coding::issue_readiness",
+            "ITEMS: <n>",
+            "PARTIAL WORK: SOUND or PARTIAL WORK: UNSOUND: <why>",
+            "--- ITEM <id-suggestion> ---",
+            "--- END ITEM ---",
+            "REJECT: <why>",
+            "ESCALATE: <why>",
+            "depends-on: <id>[, <id>]",
+            "conflict-keys: <path or crate>",
+            "ship: auto or ship: draft",
+            "unique in the answer",
+            "coding::parse_items",
+            "never identical to the failed one",
+            "Never the failed item again as it was",
+        ] {
+            assert!(lead.contains(phrase), "{phrase:?} in {lead}");
+        }
+        // The steps run in order: scout, spec-writer, example-checker, the fix.
+        let at = |phrase: &str| lead.find(phrase).unwrap();
+        assert!(at("2. Delegate to scout") < at("3. Delegate to spec-writer"));
+        assert!(at("3. Delegate to spec-writer") < at("4. Delegate to example-checker"));
+        assert!(at("4. Delegate to example-checker") < at("At most 1 fix round"));
+
+        // The grammar the preamble describes is the one parse_items reads.
+        let answer = "ITEMS: 2\nPARTIAL WORK: SOUND\n--- ITEM a ---\nship: auto\n\nbody\n\
+                      --- END ITEM ---\n--- ITEM b ---\ndepends-on: a\nconflict-keys: x.rs\n\
+                      ship: draft\n\nmore\n--- END ITEM ---";
+        let parsed = crate::coding::parse_items(answer).unwrap();
+        assert_eq!(parsed.partial_work, Some(crate::coding::PartialWork::Sound));
+        assert_eq!(parsed.items[1].depends_on, ["a"]);
+        assert_eq!(parsed.items[1].ship, crate::coding::Ship::Draft);
+
+        let scout = preamble("scout");
+        for phrase in [
+            "change nothing",
+            "file:line",
+            ".chatty/checks",
+            "shell_execute",
+            "whether you ran it or only read the code",
+            "Never edit, install, commit or check out",
+            "NOTHING FOUND",
+        ] {
+            assert!(scout.contains(phrase), "{phrase:?} in {scout}");
+        }
+        let writer = preamble("spec-writer");
+        for phrase in [
+            "You write no file",
+            "never invent one",
+            "Only these files change.",
+            "None: no new tests.",
+            "never for billing, credentials or security",
+            "--- ITEM <id-suggestion> ---",
+            "--- END ITEM ---",
+            "depends-on: <id>[, <id>]",
+            "conflict-keys: <path or crate>",
+            "ship: auto or ship: draft",
+            "draft when the change touches billing, credentials or security",
+            "numbered list of mismatches",
+            "never the same text",
+        ] {
+            assert!(writer.contains(phrase), "{phrase:?} in {writer}");
+        }
+        let checker = preamble("example-checker");
+        for phrase in [
+            "change nothing",
+            "shell_execute",
+            "Dry mutation check",
+            "grep -n -F '<line>' <file>",
+            "Do not change it",
+            "never edit, install, commit or check out",
+            "EXAMPLES: OK",
+            "EXAMPLES: MISMATCH, then a numbered list of mismatches",
+            "RAN or READ",
+        ] {
+            assert!(checker.contains(phrase), "{phrase:?} in {checker}");
+        }
+    }
+
     fn names(specs: &[AgentSpec]) -> Vec<&str> {
         specs.iter().map(|spec| spec.agent.name.as_str()).collect()
     }
@@ -1876,9 +2060,13 @@ cap_usd = 2.0
                 "code-reviewer",
                 "coder",
                 "coding-lead",
+                "curator-lead",
                 "data-analyst",
+                "example-checker",
                 "researcher",
                 "reviewer",
+                "scout",
+                "spec-writer",
                 "tester",
                 "typesetter",
                 "writer",
@@ -1960,9 +2148,13 @@ cap_usd = 2.0
                 "code-reviewer",
                 "coder",
                 "coding-lead",
+                "curator-lead",
                 "data-analyst",
+                "example-checker",
                 "researcher",
                 "reviewer",
+                "scout",
+                "spec-writer",
                 "tester",
                 "typesetter",
             ]
@@ -1980,9 +2172,13 @@ cap_usd = 2.0
                 "code-reviewer",
                 "coder",
                 "coding-lead",
+                "curator-lead",
                 "data-analyst",
+                "example-checker",
                 "researcher",
                 "reviewer",
+                "scout",
+                "spec-writer",
                 "tester",
                 "typesetter",
             ]
@@ -2143,8 +2339,12 @@ cap_usd = 2.0
                 "code-reviewer",
                 "coder",
                 "coding-lead",
+                "curator-lead",
                 "data-analyst",
+                "example-checker",
                 "reviewer",
+                "scout",
+                "spec-writer",
                 "tester",
                 "typesetter",
                 "writer"

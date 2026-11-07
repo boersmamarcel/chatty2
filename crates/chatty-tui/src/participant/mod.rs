@@ -34,6 +34,8 @@ mod call_chain;
 #[cfg(test)]
 mod coding_team;
 #[cfg(test)]
+mod curation_team;
+#[cfg(test)]
 mod delegation;
 #[cfg(test)]
 mod equivalence;
