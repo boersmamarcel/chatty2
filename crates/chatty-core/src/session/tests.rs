@@ -203,6 +203,48 @@ async fn usage_is_folded_from_per_call_records_and_recorded_on_finish() {
     );
 }
 
+/// AGE-989: a turn that ends on a stream error still records the usage of
+/// the calls it completed.
+#[tokio::test]
+async fn a_stream_error_turn_saves_the_usage_of_its_completed_calls() {
+    use crate::models::token_usage::ApiCallUsage;
+
+    let usage = |input| {
+        ScriptedItem::Chunk(StreamChunk::ApiCallUsage(ApiCallUsage {
+            input_tokens: input,
+            output_tokens: 5,
+            ..ApiCallUsage::default()
+        }))
+    };
+    let failing = Scenario {
+        name: "stream_error_with_usage",
+        progress: Vec::new(),
+        items: vec![
+            ScriptedItem::Chunk(StreamChunk::Text("Looking.".to_string())),
+            usage(100),
+            usage(200),
+            ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::ProviderStatus(400),
+                "bad request",
+            ))),
+        ],
+    };
+    let mut session = session_with_conversation().await;
+    let events = run_turn(&mut session, TurnInput::text("hi"), failing).await;
+    for event in &events {
+        session.apply(event);
+    }
+    session.finish_turn(None, vec![]);
+    assert_eq!(
+        session
+            .conversation()
+            .unwrap()
+            .token_usage()
+            .total_input_tokens,
+        300
+    );
+}
+
 /// The todo protocol's other nudge: a plan whose todos are all done but
 /// never verified asks for `verify_completion` once the turn ends.
 #[tokio::test]
