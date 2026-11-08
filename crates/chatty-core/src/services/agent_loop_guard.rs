@@ -321,6 +321,11 @@ impl AgentLoopGuard {
         }
         self.recent_tool_calls.push_back(entry);
 
+        // Waiting on CI by asking `pr_checks` again is not a loop (AGE-1059).
+        if is_ci_wait(name, input) {
+            return None;
+        }
+
         // Check if the last two entries are identical.
         if self.loop_pivot_count >= MAX_LOOP_PIVOTS {
             return None;
@@ -411,6 +416,27 @@ impl AgentLoopGuard {
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Whether a tool call is a delegation to the github agent asking for
+/// `pr_checks`. Waiting on CI by asking `pr_checks` again is what the
+/// coding-lead preset asks for on PENDING/NONE and the preset caps the
+/// repeats, so it is not a loop (AGE-1059).
+fn is_ci_wait(name: &str, input: &str) -> bool {
+    if name != "invoke_agent" {
+        return false;
+    }
+    let Ok(args) = serde_json::from_str::<serde_json::Value>(input) else {
+        return false;
+    };
+    let Some(prompt) = args.get("prompt").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(prompt)
+        .ok()
+        .is_some_and(|p| {
+            p.is_object() && p.get("tool").and_then(|v| v.as_str()) == Some("pr_checks")
+        })
+}
 
 /// What a research tool call looks at, normalised so the same page or query
 /// is recognised again; `None` for any other tool. A `fetch` further into a
@@ -732,5 +758,31 @@ mod tests {
         g.on_turn_complete(1, false);
         // Fresh turn: counter reset, no trigger until limit exceeded again.
         assert!(!g.on_text_chunk(100));
+    }
+
+    #[test]
+    fn a_repeated_pr_checks_wait_is_not_a_loop() {
+        const PR_CHECKS: &str =
+            r#"{"agent":"github","prompt":"{\"tool\": \"pr_checks\", \"wait_secs\": 1200}"}"#;
+        let mut g = guard();
+        for _ in 0..3 {
+            assert!(g.on_tool_completed("invoke_agent", PR_CHECKS).is_none());
+        }
+        assert_eq!(g.loop_pivot_count(), 0);
+    }
+
+    #[test]
+    fn a_repeated_other_delegation_is_still_a_loop() {
+        const OPEN_PR: &str =
+            r#"{"agent":"github","prompt":"{\"tool\": \"open_or_update_pr\", \"title\": \"x\"}"}"#;
+        let mut g = guard();
+        assert!(g.on_tool_completed("invoke_agent", OPEN_PR).is_none());
+        let msg = g.on_tool_completed("invoke_agent", OPEN_PR);
+        assert!(msg.is_some_and(|m| m.contains("LOOP DETECTED")));
+
+        const FIX: &str = r#"{"agent":"coder","prompt":"fix the bug"}"#;
+        let mut g = guard();
+        assert!(g.on_tool_completed("invoke_agent", FIX).is_none());
+        assert!(g.on_tool_completed("invoke_agent", FIX).is_some());
     }
 }
