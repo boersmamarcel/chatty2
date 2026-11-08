@@ -165,11 +165,37 @@ impl Tool for RememberTool {
                 .map_err(|e| ToolError::OperationFailed(e.to_string()))?;
         }
 
-        Ok(format!(
-            "Stored in memory: \"{}\"",
-            args.title
-                .as_deref()
-                .unwrap_or(&args.content[..args.content.len().min(80)])
-        ))
+        Ok(confirmation(args.title.as_deref(), &args.content))
+    }
+}
+
+/// Confirmation text for a stored memory: the title, or the first 80 bytes of
+/// the content cut on a char boundary.
+fn confirmation(title: Option<&str>, content: &str) -> String {
+    format!(
+        "Stored in memory: \"{}\"",
+        title.unwrap_or(&content[..content.floor_char_boundary(80)])
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_title_is_echoed_as_given() {
+        assert_eq!(
+            confirmation(Some("Dark mode"), "anything"),
+            "Stored in memory: \"Dark mode\""
+        );
+    }
+
+    #[test]
+    fn a_long_multibyte_content_without_a_title_is_cut_on_a_char_boundary() {
+        let content = format!("{}{}", "a".repeat(79), "é".repeat(5));
+        assert_eq!(
+            confirmation(None, &content),
+            format!("Stored in memory: \"{}\"", "a".repeat(79))
+        );
     }
 }
