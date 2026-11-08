@@ -1,3 +1,0 @@
-- 2026-11-08 attempt 1: step 1 done (helpers.rs); plan.md/progress.md created.
-- 2026-11-08 attempt 2: step 2 done (mod.rs save_new_file + download_generated_files).
-- 2026-11-08 attempt 3: step 3 done (tests.rs, 4 tests). Tests 14 passed, clippy and fmt clean.
