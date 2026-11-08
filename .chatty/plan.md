@@ -8,4 +8,4 @@
 - check_socket_path_len is not called anywhere.
 
 ## Steps
-1. [x] Bring over const + fn + 2 tests only; diff vs origin/main touches only access.rs (done in the commit that adds this file)
+1. [x] Bring over const + fn + 2 tests only; diff vs origin/main touches only access.rs (commit 6f51aec6)
