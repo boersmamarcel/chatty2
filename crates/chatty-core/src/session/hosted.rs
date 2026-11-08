@@ -379,21 +379,25 @@ fn decode_frame(name: &str, data: &str) -> std::result::Result<Option<SessionEve
 /// Only the two fields the server sends are recognised. Frames are separated
 /// by a blank line and a `data:` field may repeat, which is why this
 /// accumulates rather than reading one line at a time.
+///
+/// Bytes are buffered and only complete lines are decoded, so a multi-byte
+/// character split across two chunks arrives intact.
 #[derive(Default)]
 struct SseFrames {
-    buffer: String,
+    buffer: Vec<u8>,
     event: Option<String>,
     data: Vec<String>,
 }
 
 impl SseFrames {
     fn push(&mut self, chunk: &[u8]) -> Vec<(String, String)> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
+        self.buffer.extend_from_slice(chunk);
         let mut out = Vec::new();
 
-        while let Some(newline) = self.buffer.find('\n') {
-            let line = self.buffer[..newline].trim_end_matches('\r').to_string();
-            self.buffer.drain(..=newline);
+        while let Some(newline) = self.buffer.iter().position(|&b| b == b'\n') {
+            let raw: Vec<u8> = self.buffer.drain(..=newline).collect();
+            let line = String::from_utf8_lossy(&raw[..newline]);
+            let line = line.trim_end_matches('\r');
 
             if line.is_empty() {
                 if let Some(event) = self.event.take()
@@ -465,6 +469,26 @@ mod tests {
             out,
             vec![("text".to_string(), "{\"Text\":\"partial\"}".to_string())]
         );
+    }
+
+    #[test]
+    fn a_multibyte_character_split_across_chunks_decodes_intact() {
+        let mut frames = SseFrames::default();
+        assert!(
+            frames
+                .push(b"event: text\ndata: {\"Text\":\"caf\xC3")
+                .is_empty()
+        );
+        let out = frames.push(b"\xA9\"}\n\n");
+        assert_eq!(
+            out,
+            vec![("text".to_string(), "{\"Text\":\"café\"}".to_string())]
+        );
+        let (name, data) = &out[0];
+        match decode_frame(name, data) {
+            Ok(Some(SessionEvent::Text(t))) => assert_eq!(t, "café"),
+            other => panic!("unexpected decode: {other:?}"),
+        }
     }
 
     #[test]
