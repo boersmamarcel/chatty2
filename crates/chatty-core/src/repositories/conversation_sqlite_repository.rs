@@ -149,7 +149,9 @@ impl ConversationSqliteRepository {
     }
 
     /// Create the schema_version table if absent, then apply any pending
-    /// migrations. `migrations` is [`MIGRATIONS`] outside of tests, which
+    /// migrations. Each migration and its version bump run in one
+    /// transaction, so a failure leaves neither a half-applied schema nor a
+    /// bumped version. `migrations` is [`MIGRATIONS`] outside of tests, which
     /// pass a prefix of it to build a database at an older schema version.
     async fn run_migrations(pool: &SqlitePool, migrations: &[(i64, &str)]) -> RepositoryResult<()> {
         sqlx::query(
@@ -172,6 +174,7 @@ impl ConversationSqliteRepository {
         for (version, sql) in migrations {
             if *version > current {
                 info!(version, "Applying schema migration");
+                let mut tx = pool.begin().await?;
                 // sqlx doesn't support multiple statements in a single query call,
                 // so split on ';' and execute each statement individually.
                 for statement in sql.split(';') {
@@ -181,14 +184,15 @@ impl ConversationSqliteRepository {
                         // not user input. sqlx 0.9 requires AssertSqlSafe for
                         // non-'static query strings.
                         sqlx::query(sqlx::AssertSqlSafe(trimmed.to_string()))
-                            .execute(pool)
+                            .execute(&mut *tx)
                             .await?;
                     }
                 }
                 sqlx::query("UPDATE schema_version SET version = ?")
                     .bind(version)
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await?;
+                tx.commit().await?;
             }
         }
 
@@ -456,6 +460,66 @@ mod tests {
                 .is_some(),
             "both handles must see the same database"
         );
+    }
+
+    /// AGE-550: a migration that fails part-way rolls back entirely, leaving
+    /// neither its earlier statements nor a version bump behind.
+    #[tokio::test]
+    async fn a_failed_migration_leaves_no_half_applied_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("conversations.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(SqliteJournalMode::Wal);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open pool");
+
+        ConversationSqliteRepository::run_migrations(&pool, &MIGRATIONS[..4])
+            .await
+            .expect("apply migrations 1-4");
+        let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read version");
+        assert_eq!(version, 4);
+
+        let broken: &[(i64, &str)] = &[(
+            5,
+            "ALTER TABLE conversations ADD COLUMN tool_call_count INTEGER NOT NULL DEFAULT 0; \
+             ALTER TABLE no_such_table ADD COLUMN x INTEGER;",
+        )];
+        assert!(
+            ConversationSqliteRepository::run_migrations(&pool, broken)
+                .await
+                .is_err()
+        );
+
+        let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read version");
+        assert_eq!(version, 4, "the version must not be bumped");
+        let columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'tool_call_count'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count column");
+        assert_eq!(columns, 0, "the first statement must be rolled back");
+
+        ConversationSqliteRepository::run_migrations(&pool, MIGRATIONS)
+            .await
+            .expect("full list applies after the failure");
+        let version: i64 = sqlx::query_scalar("SELECT version FROM schema_version")
+            .fetch_one(&pool)
+            .await
+            .expect("read version");
+        assert_eq!(version, 5);
+        pool.close().await;
     }
 
     /// AGE-351: a database written before the totals columns existed opens
