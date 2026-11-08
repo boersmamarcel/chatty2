@@ -235,7 +235,6 @@ mod tests {
     /// PNG another has just rendered (AGE-176). Serialize the module. pdfium itself
     /// needs no extra care here; `PdfiumHandle` already serializes it.
     /// `pptx_render`'s tests take the same lock (AGE-509).
-
     fn serialized() -> MutexGuard<'static, ()> {
         super::thumbnail_dir_test_lock()
     }
