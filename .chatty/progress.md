@@ -1,0 +1,1 @@
+- 2026-11-08 attempt 1: step 1 done (helpers.rs); plan.md/progress.md created.
