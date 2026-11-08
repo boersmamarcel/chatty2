@@ -415,8 +415,8 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
     }
 
     /// The turn's calls so far as one `TokenUsage`, for a turn that ends
-    /// without the provider's aggregate (cancelled, or stopped on a spent
-    /// budget). Nothing when it made none.
+    /// without the provider's aggregate (cancelled, stopped on a spent budget,
+    /// or ended on a stream error). Nothing when it made none.
     fn emit_calls_usage(&mut self) {
         let calls: Vec<ApiCallUsage> = std::mem::take(&mut self.compaction_calls)
             .into_iter()
@@ -485,6 +485,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             Err(e) => {
                 let error = StreamError::new(StreamErrorKind::Other, e.to_string());
                 self.on_stream_error(&error);
+                self.emit_calls_usage();
                 (self.emit)(SessionEvent::Error(error));
                 return Ok(ChunkAction::Break);
             }
@@ -643,12 +644,9 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             }
             StreamChunk::Error(error) => {
                 self.on_stream_error(&error);
-                // A budget stop never gets the provider's aggregate either;
-                // what the turn spent before the refusal still counts, and
-                // rides the worker's result to its leader (AGE-903).
-                if error.kind == StreamErrorKind::BudgetExhausted {
-                    self.emit_calls_usage();
-                }
+                // Every terminal error sends what the turn's calls spent so
+                // far, a budget stop included (AGE-903).
+                self.emit_calls_usage();
                 (self.emit)(SessionEvent::Error(error));
                 return Ok(ChunkAction::Break);
             }
