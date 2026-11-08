@@ -1,0 +1,1 @@
+- 2026-11-09: AGE-549 step 1 done: cleanup_on_err + create cleanup + 2 tests; tests, clippy, fmt pass.
