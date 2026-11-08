@@ -97,6 +97,7 @@ mod tests {
     /// artifact panel turns this into its muted one-liner.
     #[test]
     fn a_non_deck_is_an_error() {
+        let _dir = crate::services::pdf_thumbnail::thumbnail_dir_test_lock();
         let dir = tempfile::tempdir().expect("temp dir");
         let fake = dir.path().join("not-a-deck.pptx");
         std::fs::write(&fake, b"hello slides").expect("write");
@@ -135,6 +136,7 @@ mod tests {
         );
         let deck = tmp.path().join("deck.pptx");
         write_three_slides(&service, &deck).await;
+        let _dir = crate::services::pdf_thumbnail::thumbnail_dir_test_lock();
 
         assert_eq!(slide_count(&deck).expect("slide count"), 3);
 
