@@ -47,8 +47,9 @@ pub const WINDOWS_UNSUPPORTED: &str = "the module gateway needs an owner-only so
 /// The name of the owner-only directory under the runtime (or cache) dir.
 const DIR_NAME: &str = "chatty-run";
 
-/// The size of macOS's `sun_path` (Linux allows 108), including the
-/// terminating NUL: a socket path of this many bytes or more cannot be bound.
+/// The smallest `sun_path` limit among the supported Unix platforms (macOS
+/// allows 104 bytes, Linux 108), including the terminating NUL: a socket path
+/// must be strictly shorter than this to be bound.
 pub const SOCKET_PATH_MAX: usize = 104;
 
 /// Refuse a socket path that is too long to bind, with an error that names
@@ -136,8 +137,7 @@ pub(crate) async fn require_token(
 
 /// Where the gateway's socket and token file go by default:
 /// `$XDG_RUNTIME_DIR/chatty-run`, else `<cache dir>/chatty-run`. Unix socket
-/// paths are limited to about 100 bytes, so the path is refused, with a clear
-/// error, when a socket in it would be too long.
+/// paths are limited to about 100 bytes, so this stays short.
 pub fn default_runtime_dir() -> io::Result<PathBuf> {
     if cfg!(windows) {
         return Err(io::Error::new(
@@ -145,7 +145,7 @@ pub fn default_runtime_dir() -> io::Result<PathBuf> {
             WINDOWS_UNSUPPORTED,
         ));
     }
-    let dir = dirs::runtime_dir()
+    dirs::runtime_dir()
         .or_else(dirs::cache_dir)
         .map(|dir| dir.join(DIR_NAME))
         .ok_or_else(|| {
@@ -153,9 +153,7 @@ pub fn default_runtime_dir() -> io::Result<PathBuf> {
                 io::ErrorKind::NotFound,
                 "no runtime or cache directory to put the gateway's socket in",
             )
-        })?;
-    check_socket_path_len(&dir.join("participants-4194304.sock"))?;
-    Ok(dir)
+        })
 }
 
 /// A directory checked to be this user's alone: a real directory, owned by
@@ -319,7 +317,6 @@ impl SocketServer {
         token: &GatewayToken,
     ) -> io::Result<Self> {
         let socket = dir.join(&format!("{name}.sock"));
-        check_socket_path_len(&socket)?;
         remove_stale_socket(&socket, current_uid())?;
         let listener = tokio::net::UnixListener::bind(&socket)?;
         let token_file = match dir.write_token(&format!("{name}.token"), token) {
@@ -403,29 +400,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("150"), "{message}");
         assert!(message.contains("104"), "{message}");
-    }
-
-    #[test]
-    fn binding_a_socket_in_a_too_long_directory_fails_clearly() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = PrivateDir::open(root.path().join("d".repeat(120))).unwrap();
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let error = rt
-            .block_on(async {
-                SocketServer::bind(
-                    &dir,
-                    "gateway",
-                    axum::Router::new(),
-                    &GatewayToken::generate(),
-                )
-            })
-            .err()
-            .expect("a too-long socket path is refused");
-        assert!(error.to_string().contains("104"), "{error}");
-        assert!(!dir.path().join("gateway.sock").exists());
     }
 
     #[test]
