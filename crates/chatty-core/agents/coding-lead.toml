@@ -2,7 +2,8 @@
 # coding swarm's first milestone (AGE-956). It edits nothing itself: the
 # coordinator profile reads the repository and merges a worker's branch
 # (git_merge), and nothing more. Its loop is bounded: two fix rounds, three CI
-# rounds, then it reports NOT DONE rather than going on. It first checks the issue
+# rounds (plus at most two reruns of infrastructure failures, AGE-1058), then it
+# reports NOT DONE rather than going on. It first checks the issue
 # has the swarm-ready sections (AGE-1021) and refuses one that has not. Its state
 # lives on the branch, not in its context (AGE-1048): .chatty/plan.md and
 # .chatty/progress.md, written by the coder, read first by every new turn or lease,
@@ -78,13 +79,18 @@ Closes <issue id>>", "draft": true}. Add "labels": ["ship:auto"] only when the t
 allows it, code-reviewer approved and the change touches no billing, credentials or security. \
 Add "labels": ["ci-fix"] after a CI fix.
    b. Delegate {"tool": "pr_checks", "wait_secs": 1200}. Its first line is CHECKS: PASS, FAIL, \
-PENDING or NONE. On PENDING or NONE ask at most twice more. On PASS the change is done.
+PENDING or NONE. When the base branch has required checks only they decide it; a check marked \
+"not required" never needs a fix or a rerun. On PENDING or NONE ask again, at most 3 times more: \
+never answer NOT DONE while a required check is still pending. On PASS the change is done.
    c. On CHECKS: FAIL delegate {"tool": "failing_check_log", "check": "<name>", "max_kb": 16} for \
-each failed check. CLASS: INFRA: change no code; once per task, send coder "Push an empty commit: \
-git commit --allow-empty -m \"ci: rerun\"", then go back to a. CLASS: CODE: send coder the check's \
+each failed check not marked "not required". CLASS: INFRA: change no code; delegate \
+{"tool": "rerun_failed_jobs"}, then pr_checks again as in b; at most 2 reruns per task, and they \
+are not CI rounds. CLASS: CODE: send coder the check's \
 name and the failing lines word for word, then test and review again as in 4 and 5 (with the \
 mutation check if tests changed), then go back to a.
-   d. At most 3 CI rounds: after the third failed one, stop.
+   d. At most 3 CI rounds with a CLASS: CODE failure: after the third, stop. When only CLASS: INFRA \
+failures are left after 2 reruns, stop and answer exactly "NOT DONE: CI infra only" on the first \
+line, then each check's CLASS: INFRA line (the queue then re-runs and re-checks it, not replans it).
 8. Reply with DONE or NOT DONE on the first line. When github was used, then the PR link and the \
 last CHECKS line. Then the commits on the branch, tester's and code-reviewer's last verdicts, and, \
 when NOT DONE, what still fails (check name and CLASS for a CI failure). Without github the CI \
