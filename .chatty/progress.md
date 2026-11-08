@@ -1,1 +1,0 @@
-- 2026-11-08: step 1 done: remember_tool.rs change from d9727d7c kept, memory_query.rs restored to origin/main.
