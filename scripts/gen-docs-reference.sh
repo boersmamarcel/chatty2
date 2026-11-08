@@ -428,7 +428,7 @@ Source: `settings/models/providers_store.rs`. See also
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `name` | `String` | required | Display name |
-| `provider_type` | `ProviderType` | required | JSON: `open_router`, `ollama`, `azure_openai`. Serde `rename_all = "snake_case"` on the variant `OpenRouter` yields `open_router` — the string `openrouter` **does not** deserialize. Legacy aliases `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as OpenRouter |
+| `provider_type` | `ProviderType` | required | JSON: `open_router`, `ollama`, `azure_openai`. Serde `rename_all = "snake_case"` on the variant `OpenRouter` yields `open_router` — the string `openrouter` **does not** deserialize. |
 | **`api_key`** | `Option<String>` | omitted if `null` | Secret. Never expose to the LLM *(store: `api_key_ref` → `provider/<name>`)* |
 | `base_url` | `Option<String>` | omitted if `null` | Ollama / Azure / OpenAI-compat |
 | `extra_config` | `Map<String, String>` | `{}` (omitted if empty) | Azure: `auth_method` = `api_key` (default) or `entra_id` |
@@ -590,7 +590,7 @@ Source: `crates/chatty-core/src/settings/models/providers_store.rs`,
 ### OpenRouter
 
 - Gateway to 200+ upstream models (Anthropic, OpenAI, Google, Mistral, Meta, …).
-- Persisted `ProviderType` JSON is `open_router` (serde snake_case). Legacy values `open_ai`, `open_a_i`, `anthropic`, `gemini`, `mistral` deserialize as OpenRouter. The string `openrouter` is **not** accepted.
+- Persisted `ProviderType` JSON is `open_router` (serde snake_case). The string `openrouter` is **not** accepted.
 - `configured_providers()` requires a non-empty `api_key`.
 - Rig client: `rig_core::providers::openrouter::Client`.
 - MCP tools are sanitized for OpenAI-compatible schemas before attachment.
