@@ -1,0 +1,1 @@
+- 2026-11-08: AGE-529 add_worktree falls back to current_branch() for base; docs and tests updated; test, clippy, fmt pass.
