@@ -9,5 +9,5 @@
 
 ## Steps
 1. [x] helpers.rs: DOWNLOAD_DIR_NAME, download_dir, numbered_name (3be67f61)
-2. [x] mod.rs: save_new_file + download_generated_files rewrite
-3. [ ] tests.rs: four tests
+2. [x] mod.rs: save_new_file + download_generated_files rewrite (0a92b595)
+3. [x] tests.rs: four tests
