@@ -46,6 +46,12 @@ pub const MALFORMED_TOOL_CALL_FOLLOW_UP: &str = "Agent protocol follow-up: your 
      fully closed. If the arguments were large, write the content to a file in smaller steps \
      instead.";
 
+/// The fixed opening of the unknown-tool-call nudge. The rest of the text
+/// carries the per-call error message, so recognising the nudge on a later
+/// turn means matching this prefix.
+pub const UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX: &str =
+    "Agent protocol follow-up: your last tool call failed";
+
 /// Injected when the model calls a tool name that isn't registered or isn't
 /// allowed this turn — an easy one-token mistake (`web_search` for
 /// `search_web`) that used to end the run outright (AGE-497). `error_message`
@@ -53,7 +59,7 @@ pub const MALFORMED_TOOL_CALL_FOLLOW_UP: &str = "Agent protocol follow-up: your 
 /// available and allowed tool names for this turn.
 fn unknown_tool_call_follow_up(error_message: &str) -> String {
     format!(
-        "Agent protocol follow-up: your last tool call failed — {error_message} Call one of \
+        "{UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX} — {error_message} Call one of \
          the listed available tools with its exact name instead."
     )
 }
@@ -127,14 +133,17 @@ pub struct TurnPolicy {
     /// own (AGE-196 decides whether that one folds in here).
     pub loop_guard: bool,
     /// Whether the message this turn sends is already a one-shot recovery
-    /// follow-up — the malformed-tool-call retry, or the cut-off follow-up
-    /// ([`CUT_OFF_FOLLOW_UP`]) — which bounds each to one attempt.
+    /// follow-up — the malformed-tool-call retry, the cut-off follow-up
+    /// ([`CUT_OFF_FOLLOW_UP`]), or the unknown-tool-call nudge
+    /// ([`UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX`]) — which bounds each to one
+    /// attempt.
     ///
-    /// One flag serves both retries, so each one's turn also spends the
-    /// other's: a turn started by the cut-off follow-up gets no
-    /// malformed-tool-call nudge (a malformed call there ends the turn with
-    /// its error), and a turn started by the malformed-tool-call retry that
-    /// is cut off ends with the `EmptyCompletion` error, not a follow-up.
+    /// One flag serves all three recoveries, so a turn started by any of
+    /// them gets none of the others: e.g. a turn started by the cut-off
+    /// follow-up gets no malformed-tool-call nudge (a malformed call there
+    /// ends the turn with its error), and a turn started by the
+    /// malformed-tool-call retry that is cut off ends with the
+    /// `EmptyCompletion` error, not a follow-up.
     pub already_asked_to_retry: bool,
     /// Whether the bound model's `extra_params.think` is `"false"`, which
     /// picks the empty-completion error text (AGE-404).
