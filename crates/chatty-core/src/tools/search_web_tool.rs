@@ -1935,4 +1935,112 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].url, "https://a.com");
     }
+
+    /// Serve `responses` on loopback, one raw HTTP response per accepted
+    /// connection (`connection: close`); with `repeat` the last one is
+    /// served for every further connection.
+    async fn scripted_server(responses: Vec<String>, repeat: bool) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut served = 0;
+            loop {
+                let index = if repeat {
+                    served.min(responses.len() - 1)
+                } else if served < responses.len() {
+                    served
+                } else {
+                    break;
+                };
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 16384];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(responses[index].as_bytes()).await;
+                let _ = socket.shutdown().await;
+                served += 1;
+            }
+        });
+        format!("http://{addr}/start")
+    }
+
+    fn redirect_to(location: &str) -> String {
+        format!(
+            "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn page_fetch_refuses_a_redirect_to_a_refused_address() {
+        let server_url = scripted_server(
+            vec![redirect_to("http://169.254.169.254/latest/meta-data/")],
+            false,
+        )
+        .await;
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorder = asked.clone();
+        let result = get_following_checked_redirects(
+            &crate::services::http_client::no_redirect_client(5),
+            &server_url,
+            "test",
+            move |hop| {
+                let recorder = recorder.clone();
+                async move {
+                    recorder.lock().unwrap().push(hop.clone());
+                    !hop.contains("169.254.169.254")
+                }
+            },
+        )
+        .await;
+        assert!(result.is_none());
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![
+                server_url,
+                "http://169.254.169.254/latest/meta-data/".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn page_fetch_follows_an_allowed_redirect() {
+        let server_url = scripted_server(
+            vec![
+                redirect_to("/next"),
+                "HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello"
+                    .to_string(),
+            ],
+            false,
+        )
+        .await;
+        let (final_url, response) = get_following_checked_redirects(
+            &crate::services::http_client::no_redirect_client(5),
+            &server_url,
+            "test",
+            |_| async { true },
+        )
+        .await
+        .expect("redirect is followed");
+        assert!(final_url.ends_with("/next"), "{final_url}");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "hello");
+    }
+
+    #[tokio::test]
+    async fn page_fetch_gives_up_after_too_many_redirects() {
+        let server_url = scripted_server(vec![redirect_to("/again")], true).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            get_following_checked_redirects(
+                &crate::services::http_client::no_redirect_client(5),
+                &server_url,
+                "test",
+                |_| async { true },
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(None)));
+    }
 }
