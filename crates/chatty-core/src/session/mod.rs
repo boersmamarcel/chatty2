@@ -86,7 +86,7 @@ pub use delegation::Delegation;
 pub use event::SessionEvent;
 pub use handler::{
     BREVITY_FOLLOW_UP, CUT_OFF_FOLLOW_UP, MALFORMED_TOOL_CALL_FOLLOW_UP, SessionStreamHandler,
-    TurnPolicy, is_agent_todo_tool,
+    TurnPolicy, UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX, is_agent_todo_tool,
 };
 pub use hosted::HostedSession;
 pub use mailbox::{Arrival, Decision, Mailbox, Queued, QueuedId, Refusal, TurnEnd};
@@ -578,9 +578,13 @@ impl AgentSession {
         // the nudge turn carries the follow-up text itself, and the handler
         // must not nudge a second time on it.
         let sent = extract_user_text(&contents);
-        let already_asked_to_retry = [MALFORMED_TOOL_CALL_FOLLOW_UP, CUT_OFF_FOLLOW_UP]
-            .iter()
-            .any(|follow_up| sent.trim_start().starts_with(follow_up));
+        let already_asked_to_retry = [
+            MALFORMED_TOOL_CALL_FOLLOW_UP,
+            CUT_OFF_FOLLOW_UP,
+            UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX,
+        ]
+        .iter()
+        .any(|follow_up| sent.trim_start().starts_with(follow_up));
 
         // A human turn is the root's next run: the tree messages waiting
         // for it open the turn, wrapped as untrusted data, and stay with it

@@ -600,6 +600,55 @@ async fn the_retry_turn_itself_does_not_nudge_again() {
     );
 }
 
+/// The unknown-tool nudge is one-shot on the surfaces that queue it: the turn
+/// that carries it must not queue another on a second `UnknownToolCall`.
+#[tokio::test]
+async fn the_unknown_tool_call_nudge_is_sent_once_on_desktop_and_tui() {
+    let unknown = || Scenario {
+        name: "unknown_tool_call",
+        progress: Vec::new(),
+        items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+            StreamErrorKind::UnknownToolCall,
+            "UnknownToolCall: model attempted to call unknown or disallowed tool `web_search`. Available tools: [\"search_web\"]. Allowed tools for this turn: [\"search_web\"]",
+        )))],
+    };
+    for surface in [StreamSurface::Desktop, StreamSurface::InteractiveTui] {
+        let mut session = session_with_conversation().await;
+        session.set_config(AgentSessionConfig {
+            surface,
+            ..config()
+        });
+
+        let first = run_turn(&mut session, TurnInput::text("search"), unknown()).await;
+        let nudges: Vec<String> = first
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::FollowUp(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(nudges.len(), 1, "{surface:?}: exactly one nudge");
+        assert!(
+            nudges[0].starts_with(UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX),
+            "{surface:?}: nudge text"
+        );
+        session.finish_turn(None, vec![]);
+
+        let second = run_turn(
+            &mut session,
+            TurnInput::protocol_follow_up(nudges[0].clone()),
+            unknown(),
+        )
+        .await;
+        assert!(
+            !second
+                .iter()
+                .any(|e| matches!(e, SessionEvent::FollowUp(_))),
+            "{surface:?}: the nudge turn is the last one"
+        );
+    }
+}
+
 /// AGE-401: the three shapes of a silent turn, as a scripted provider. The
 /// in-turn nudge (`EmptyTurnRetry`) has already been spent by the time a
 /// stream reaches `Done`, so what the handler sees is the second silence.
@@ -872,6 +921,13 @@ mod empty_completion {
 fn retry_follow_up_is_recognised_as_a_protocol_nudge() {
     assert!(crate::services::is_protocol_follow_up_text(
         MALFORMED_TOOL_CALL_FOLLOW_UP
+    ));
+}
+
+#[test]
+fn unknown_tool_call_nudge_is_a_protocol_follow_up() {
+    assert!(crate::services::is_protocol_follow_up_text(
+        UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX
     ));
 }
 
