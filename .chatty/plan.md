@@ -8,6 +8,6 @@
 - Only helpers.rs, mod.rs, tests.rs under crates/chatty-core/src/tools/daytona_tool/ change (besides these .chatty notes).
 
 ## Steps
-1. [x] helpers.rs: DOWNLOAD_DIR_NAME, download_dir, numbered_name
-2. [ ] mod.rs: save_new_file + download_generated_files rewrite
+1. [x] helpers.rs: DOWNLOAD_DIR_NAME, download_dir, numbered_name (3be67f61)
+2. [x] mod.rs: save_new_file + download_generated_files rewrite
 3. [ ] tests.rs: four tests
