@@ -148,8 +148,9 @@ impl SecretJsonFile {
         let contents = tokio::fs::read_to_string(&self.path)
             .await
             .map_err(|e| RepositoryError::IoError(e.to_string()))?;
-        let value: Value = serde_json::from_str(&contents)
-            .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
+        let value: Value = serde_json::from_str(&contents).map_err(|e| {
+            RepositoryError::SerializationError(format!("{}: {e}", self.path.display()))
+        })?;
 
         let store = self.store.clone();
         let fields = self.fields;
@@ -248,8 +249,9 @@ where
         let file = self.file.clone_handle();
         Box::pin(async move {
             match file.load().await? {
-                Some(value) => serde_json::from_value(value)
-                    .map_err(|e| RepositoryError::SerializationError(e.to_string())),
+                Some(value) => serde_json::from_value(value).map_err(|e| {
+                    RepositoryError::SerializationError(format!("{}: {e}", file.path.display()))
+                }),
                 None => Ok(T::default()),
             }
         })
@@ -295,8 +297,9 @@ where
         let file = self.file.clone_handle();
         Box::pin(async move {
             match file.load().await? {
-                Some(value) => serde_json::from_value(value)
-                    .map_err(|e| RepositoryError::SerializationError(e.to_string())),
+                Some(value) => serde_json::from_value(value).map_err(|e| {
+                    RepositoryError::SerializationError(format!("{}: {e}", file.path.display()))
+                }),
                 None => Ok(Vec::new()),
             }
         })
@@ -383,6 +386,21 @@ mod tests {
         let store = Arc::new(InMemorySecretStore::new());
         let repo = JsonFileRepository::with_path_and_store(path.clone(), store.clone());
         (path, store, repo)
+    }
+
+    #[tokio::test]
+    async fn a_removed_provider_type_is_a_load_error_naming_the_file_and_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, _store, repo) = providers(&dir);
+        std::fs::write(
+            &path,
+            r#"[{"name": "Claude", "provider_type": "anthropic"}]"#,
+        )
+        .unwrap();
+
+        let err = repo.load_all().await.unwrap_err().to_string();
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("anthropic"), "{err}");
     }
 
     #[tokio::test]
