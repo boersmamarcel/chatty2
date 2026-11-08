@@ -194,7 +194,7 @@ impl ContextStatus {
 ///     }
 /// }).detach();
 /// ```
-// `Relieved` variant and GPUI EventEmitter subscription are not yet wired up.
+// The GPUI EventEmitter subscription is not yet wired up.
 #[derive(Clone, Debug)]
 pub enum ContextPressureEvent {
     /// Utilization crossed the high threshold on the way up (default: 70 %).
@@ -210,14 +210,6 @@ pub enum ContextPressureEvent {
     CriticalPressure {
         utilization: f64,
         estimated_tokens: usize,
-        conversation_id: String,
-    },
-
-    /// Utilization dropped back below the high threshold (e.g. after summarization).
-    Relieved {
-        utilization: f64,
-        /// How many tokens were freed by the operation that relieved pressure.
-        tokens_freed: usize,
         conversation_id: String,
     },
 }
