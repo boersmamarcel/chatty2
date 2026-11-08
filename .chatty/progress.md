@@ -1,2 +1,0 @@
-- 2026-11-08: step 1 done: added UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX, exported, added to prepare_turn recovery list, doc updated.
-- 2026-11-08: step 2 done: added the two tests.
