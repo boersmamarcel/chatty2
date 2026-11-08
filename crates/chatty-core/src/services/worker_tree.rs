@@ -29,7 +29,8 @@
 //! against that branch: the grandchild's envelope shows the grandchild's
 //! commits and nothing its sub-leader did. The root broker passes both in
 //! from the spawn context; a worker spawned for the root starts at the
-//! workspace's `HEAD` and is measured against the default branch.
+//! workspace's `HEAD` and is measured against the branch the workspace was
+//! on (the default branch on a detached HEAD).
 //!
 //! The sub-leader's branch handed in this way can be stale: its own tree
 //! may have collided with a leftover directory or branch from an earlier,
@@ -44,7 +45,7 @@
 //!
 //! Not the worker's word for it. When the task ends the runner commits the
 //! tree and reads back the branch, the commit count, `git diff --stat`
-//! against the default branch and — when the team declares one — the exit
+//! against its base branch and — when the team declares one — the exit
 //! code and last lines of a verification command run in the tree. That is
 //! an [`Evidence`], rendered as a fenced `evidence` block and carried as a
 //! structured field beside it (ADR-0011 C12, AGE-406). A branch with no
@@ -82,7 +83,8 @@ pub struct WorkerTree {
     /// confined to.
     pub path: PathBuf,
     /// The branch it started from and is measured against: its
-    /// sub-leader's (BI-5). `None` measures against the default branch.
+    /// sub-leader's (BI-5), else the branch the workspace was on (AGE-529).
+    /// `None` (detached HEAD) measures against the default branch.
     pub base: Option<String>,
 }
 
@@ -162,6 +164,12 @@ async fn add_worktree(git: &GitService, name: &str, base: Option<&str>) -> Resul
     let path = git
         .worktree_add(&tree_name, &branch, base.as_deref())
         .await?;
+    // AGE-529: no explicit base means the tree starts at the workspace's HEAD,
+    // so measure it against that branch (None on a detached HEAD).
+    let base = match base {
+        Some(base) => Some(base),
+        None => git.current_branch().await.ok().flatten(),
+    };
     Ok(WorkerTree {
         name: tree_name,
         branch,
@@ -764,8 +772,8 @@ mod tests {
     /// `coordinator` profile case, which writes nothing and so never asked
     /// for one — still lets its own workers start somewhere sane: directly
     /// under the workspace's own worktree directory, at `HEAD`, measured
-    /// against the default branch, exactly like a worker spawned for the
-    /// root. Nothing here reconstructs a branch name from the sub-leader's
+    /// against the workspace's branch (`main` here), exactly like a worker
+    /// spawned for the root. Nothing here reconstructs a branch name from the sub-leader's
     /// own name to send it to instead.
     #[tokio::test]
     async fn nested_worker_of_a_treeless_sub_leader_starts_at_head() {
@@ -782,14 +790,42 @@ mod tests {
             "with no sub-leader tree to nest under, the worker's tree sits directly \
              under the workspace's own worktree directory"
         );
-        assert_eq!(nested.base, None);
+        assert_eq!(nested.base.as_deref(), Some("main"));
 
         commit_a_change(&nested, "added.rs", "fn main() {}\n").await;
         let evidence = collect(&nested, None).await.expect("a commit was made");
         assert_eq!(
             evidence.base, "main",
-            "a treeless sub-leader's worker is measured against the default branch"
+            "a treeless sub-leader's worker is measured against the workspace's branch"
         );
+    }
+
+    /// AGE-529: a worker with no base is measured against the branch the
+    /// workspace is on, not the default branch, so a lead's own commits on a
+    /// feature branch are not credited to the worker.
+    #[tokio::test]
+    async fn a_worker_on_a_feature_branch_is_measured_against_that_branch() {
+        let dir = repo().await;
+        let root = dir.path().to_string_lossy().to_string();
+        git(&["checkout", "-q", "-b", "feat/x"], dir.path()).await;
+        std::fs::write(dir.path().join("lead.txt"), "lead\n").unwrap();
+        git(&["add", "lead.txt"], dir.path()).await;
+        git(&["commit", "-q", "-m", "lead"], dir.path()).await;
+
+        let reviewer = create(&root, "local-reviewer-0", None)
+            .await
+            .unwrap()
+            .unwrap();
+        commit(&reviewer, "delegated task").await;
+        assert!(collect(&reviewer, None).await.is_none(), "no changes");
+
+        let coder = create(&root, "local-coder-0", None).await.unwrap().unwrap();
+        commit_a_change(&coder, "coder.txt", "coder\n").await;
+        let evidence = collect(&coder, None).await.expect("one commit");
+        assert_eq!(evidence.base, "feat/x");
+        assert_eq!(evidence.commits, 1);
+        assert!(evidence.diff_stat.contains("coder.txt"), "{evidence:?}");
+        assert!(!evidence.diff_stat.contains("lead.txt"), "{evidence:?}");
     }
 
     /// AGE-820: a sub-leader's tree collided with a leftover
