@@ -37,6 +37,9 @@ const MAX_CACHED_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum binary response size in bytes (10 MB)
 const MAX_BINARY_BYTES: usize = 10 * 1024 * 1024;
 
+/// Most of a non-success response's body that is read (AGE-548).
+const MAX_ERROR_BODY_BYTES: usize = 256 * 1024;
+
 /// Request timeout in seconds
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -615,9 +618,9 @@ impl FetchTool {
         info!(status = status, content_type = %content_type, "Received response");
 
         if !response.status().is_success() {
-            let body = response
-                .text()
+            let body = read_capped(response, MAX_ERROR_BODY_BYTES)
                 .await
+                .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_else(|_| "(failed to read body)".to_string());
             let (content, truncated) = error_body_window(
                 &body,
@@ -732,15 +735,26 @@ impl FetchTool {
             )
         })?;
 
-        // Read binary body
-        let bytes = response.bytes().await.map_err(|e| {
+        // Refuse an oversized declared length before reading any body
+        if let Some(n) = response.content_length()
+            && n > MAX_BINARY_BYTES as u64
+        {
+            return Err(ToolError::OperationFailed(format!(
+                "Response too large: {} bytes (max {} bytes / {} MB)",
+                n,
+                MAX_BINARY_BYTES,
+                MAX_BINARY_BYTES / 1024 / 1024,
+            )));
+        }
+
+        // Read binary body, capped
+        let (bytes, cut) = read_capped(response, MAX_BINARY_BYTES).await.map_err(|e| {
             ToolError::OperationFailed(format!("Failed to read response body: {}", e))
         })?;
 
-        if bytes.len() > MAX_BINARY_BYTES {
+        if cut {
             return Err(ToolError::OperationFailed(format!(
-                "Response too large: {} bytes (max {} bytes / {} MB)",
-                bytes.len(),
+                "Response too large: more than {} bytes (max {} MB)",
                 MAX_BINARY_BYTES,
                 MAX_BINARY_BYTES / 1024 / 1024,
             )));
@@ -782,6 +796,25 @@ impl FetchTool {
             note: None,
         })
     }
+}
+
+/// Read at most `cap` bytes of `response`'s body, chunk by chunk, so an
+/// oversized body is never held in memory whole (AGE-548). Returns the
+/// bytes read and whether the body went on past `cap`; the rest is not read.
+async fn read_capped(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<(Vec<u8>, bool), reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = cap - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
 }
 
 /// Check if a content type indicates binary content that should be saved to disk.
