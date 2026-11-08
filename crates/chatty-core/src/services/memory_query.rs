@@ -28,7 +28,7 @@ pub fn simplify_memory_query(raw: &str) -> String {
         // Fallback: return the raw input (truncated) rather than nothing.
         // An imperfect query is better than skipping the search entirely.
         let trimmed = raw.trim();
-        let truncated = &trimmed[..trimmed.len().min(100)];
+        let truncated = &trimmed[..trimmed.floor_char_boundary(100)];
         truncated.to_string()
     } else {
         content_words.join(" ")
@@ -150,6 +150,13 @@ fn is_stop_word(word: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_raw_fallback_is_cut_on_a_char_boundary() {
+        // 1 + 30 * 4 = 121 bytes; byte 100 falls inside the 25th emoji.
+        let raw = format!("?{}", "🙂".repeat(30));
+        assert_eq!(simplify_memory_query(&raw), format!("?{}", "🙂".repeat(24)));
+    }
 
     #[test]
     fn strips_question_prefix() {

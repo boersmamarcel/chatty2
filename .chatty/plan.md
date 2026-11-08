@@ -9,4 +9,4 @@
 
 ## Steps
 1. [ ] remember_tool.rs: `confirmation()` helper cut with floor_char_boundary(80) + 2 tests. Commit: (pending)
-2. [ ] memory_query.rs: floor_char_boundary(100) + test `the_raw_fallback_is_cut_on_a_char_boundary`. Commit: (pending)
+2. [x] memory_query.rs: floor_char_boundary(100) + test `the_raw_fallback_is_cut_on_a_char_boundary`. Commit: this commit (subject: AGE-519: cut the memory query fallback at a char boundary)
