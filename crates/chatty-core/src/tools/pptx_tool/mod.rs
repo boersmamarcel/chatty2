@@ -299,4 +299,48 @@ Second point
             .await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn write_pptx_refuses_a_non_pptx_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let config = tmp.path().join("config");
+        std::fs::write(&config, "[core]").unwrap();
+        let slides = || {
+            vec![PptxSlideSpec {
+                title: Some("Hello".to_string()),
+                shapes: vec![],
+            }]
+        };
+
+        let tool = WritePptxTool::new(service.clone());
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                WritePptxArgs {
+                    path: config.to_str().unwrap().to_string(),
+                    slides: slides(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(".pptx"));
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "[core]");
+
+        let upper = tmp.path().join("deck.PPTX");
+        tool.call(
+            &mut ToolContext::new(),
+            WritePptxArgs {
+                path: upper.to_str().unwrap().to_string(),
+                slides: slides(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(upper.exists());
+    }
 }

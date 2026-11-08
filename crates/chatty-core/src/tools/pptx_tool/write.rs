@@ -107,6 +107,7 @@ impl Tool for WritePptxTool {
 
     fn description(&self) -> String {
         "Create a PowerPoint presentation (.pptx) from structured JSON slides.\n\
+                         The path must end in .pptx.\n\
                          Supports slide titles plus three shape types: text_box, bullet_list, and table.\n\
                          Shape coordinates and sizes use inches.\n\
                          \n\
@@ -230,6 +231,17 @@ impl Tool for WritePptxTool {
     ) -> Result<Self::Output, Self::Error> {
         if args.slides.is_empty() {
             return Err(anyhow!("slides must contain at least one slide").into());
+        }
+
+        let is_pptx = std::path::Path::new(&args.path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("pptx"));
+        if !is_pptx {
+            return Err(anyhow::anyhow!(
+                "write_pptx only writes .pptx files; '{}' does not end in .pptx",
+                args.path
+            )
+            .into());
         }
 
         let canonical = self.service.resolve_new_path(&args.path).await?;
