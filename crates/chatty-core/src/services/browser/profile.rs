@@ -563,7 +563,10 @@ mod tests {
         let policy = NavigationPolicy::local_only(Some(ws.path().to_path_buf()));
         for rel in ["dist/index.html", "latest/index.html", "dist/new.html"] {
             let url = reqwest::Url::from_file_path(ws.path().join(rel)).unwrap();
-            assert!(policy.check(url.as_str()).is_ok(), "{rel} should be allowed");
+            assert!(
+                policy.check(url.as_str()).is_ok(),
+                "{rel} should be allowed"
+            );
         }
     }
 }
