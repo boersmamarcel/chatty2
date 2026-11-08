@@ -3039,4 +3039,89 @@ mod tests {
             err_msg
         );
     }
+
+    /// Serve one raw HTTP response (`head`, then `body_len` bytes of `a`) on a
+    /// loopback listener and return the client's `reqwest::Response`. The
+    /// server ignores write errors: the client may stop reading early. With
+    /// `hold`, the socket stays open afterwards instead of closing.
+    async fn raw_response(
+        head: &'static str,
+        body_len: usize,
+        hold: bool,
+    ) -> (reqwest::Response, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&vec![b'a'; body_len]).await;
+            if hold {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        (response, url)
+    }
+
+    #[tokio::test]
+    async fn read_capped_stops_at_the_cap() {
+        let (response, _) =
+            raw_response("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n", 65536, false).await;
+        let (body, cut) = read_capped(response, 1024).await.unwrap();
+        assert_eq!(body.len(), 1024);
+        assert!(cut);
+    }
+
+    #[tokio::test]
+    async fn read_capped_keeps_a_body_under_the_cap() {
+        let (response, _) =
+            raw_response("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n", 512, false).await;
+        let (body, cut) = read_capped(response, 1024).await.unwrap();
+        assert_eq!(body, vec![b'a'; 512]);
+        assert!(!cut);
+    }
+
+    #[tokio::test]
+    async fn binary_download_refuses_a_declared_oversize_body_without_reading_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = FetchTool::new(Some(tmp.path().to_path_buf()));
+        let (response, url) = raw_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: 10485761\r\n\r\n",
+            0,
+            true,
+        )
+        .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tool.handle_binary_response(response, &url, 200, "application/octet-stream"),
+        )
+        .await
+        .expect("must refuse without waiting for the body");
+        let err = result.expect_err("oversize declared length must be refused");
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn binary_download_refuses_an_oversize_body_with_no_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = FetchTool::new(Some(tmp.path().to_path_buf()));
+        let (response, url) = raw_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\nconnection: close\r\n\r\n",
+            MAX_BINARY_BYTES + 1,
+            false,
+        )
+        .await;
+        let result = tool
+            .handle_binary_response(response, &url, 200, "application/octet-stream")
+            .await;
+        let err = result.expect_err("oversize body must be refused");
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
 }
