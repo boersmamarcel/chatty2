@@ -864,6 +864,40 @@ mod tests {
         assert!(matches!(&content[0], AssistantContent::Text(t) if t.text == "Looking."));
     }
 
+    /// AGE-989: a turn that ends on a stream error still reports what its
+    /// completed calls spent, ahead of `Error`.
+    #[test]
+    fn a_turn_ending_on_a_stream_error_still_sends_its_calls_usage() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        for input in [100, 200] {
+            handler
+                .on_chunk(Ok(StreamChunk::ApiCallUsage(ApiCallUsage {
+                    input_tokens: input,
+                    output_tokens: 5,
+                    ..ApiCallUsage::default()
+                })))
+                .unwrap();
+        }
+        let error = StreamError::new(StreamErrorKind::ProviderStatus(400), "bad request");
+        handler.on_chunk(Ok(StreamChunk::Error(error))).unwrap();
+        handler.on_stream_ended();
+        drop(handler);
+
+        let tail: Vec<&SessionEvent> = events.iter().rev().take(3).rev().collect();
+        let SessionEvent::TokenUsage(spent) = tail[0] else {
+            panic!("usage first: {tail:?}");
+        };
+        assert_eq!((spent.input_tokens, spent.output_tokens), (300, 10));
+        assert!(matches!(tail[1], SessionEvent::Error(_)), "{tail:?}");
+        assert!(matches!(tail[2], SessionEvent::TurnEnded), "{tail:?}");
+    }
+
     /// A turn that ends on its own keeps rig's record; nothing is rebuilt.
     #[test]
     fn rigs_record_wins_over_the_rebuilt_one() {
