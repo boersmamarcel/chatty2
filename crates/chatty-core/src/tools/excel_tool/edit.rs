@@ -464,11 +464,7 @@ impl Tool for EditExcelTool {
                 content_preview: format!(
                     "Edit Excel: {} operation(s) [{}]",
                     args.operations.len(),
-                    if op_summary.len() > 150 {
-                        format!("{}...", &op_summary[..150])
-                    } else {
-                        op_summary.clone()
-                    }
+                    approval_preview(&op_summary)
                 ),
             },
         )
@@ -743,8 +739,22 @@ impl Tool for EditExcelTool {
     }
 }
 
+/// The approval card's summary of the operations: at most 150 characters,
+/// then `...` (AGE-1089). Cut by characters: sheet names need not be ASCII,
+/// and a byte cut can land inside a character and panic.
+fn approval_preview(summary: &str) -> String {
+    const MAX_CHARS: usize = 150;
+    if summary.chars().count() > MAX_CHARS {
+        let head: String = summary.chars().take(MAX_CHARS).collect();
+        format!("{head}...")
+    } else {
+        summary.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::approval_preview;
     use super::edit_excel_parameters_schema;
     use rig_core::completion::ToolDefinition;
     use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
@@ -836,5 +846,28 @@ mod tests {
                 "operation type tags should be single-value enums"
             );
         }
+    }
+
+    #[test]
+    fn approval_preview_cuts_by_characters() {
+        let long = format!("x{}", "日".repeat(200));
+        let out = approval_preview(&long);
+        assert_eq!(out.chars().count(), 153);
+        assert!(out.starts_with("x日"));
+        assert!(out.ends_with("..."));
+        let mid = format!("x{}", "日".repeat(60));
+        assert_eq!(approval_preview(&mid), mid);
+    }
+
+    #[test]
+    fn approval_preview_keeps_a_short_summary() {
+        assert_eq!(
+            approval_preview("set_cell(Sheet1.A1)"),
+            "set_cell(Sheet1.A1)"
+        );
+        assert_eq!(
+            approval_preview(&"a".repeat(151)),
+            format!("{}...", "a".repeat(150))
+        );
     }
 }
