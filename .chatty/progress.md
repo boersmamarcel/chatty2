@@ -1,0 +1,1 @@
+- 2026-11-09: step 1 done; fetch_tool tests (79 pass), clippy, fmt clean; unique_path gone.
