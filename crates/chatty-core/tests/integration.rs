@@ -564,7 +564,7 @@ fn model_config_missing_optional_fields_use_defaults() {
     let json = r#"{
         "id": "test",
         "name": "Test Model",
-        "provider_type": "open_ai",
+        "provider_type": "open_router",
         "model_identifier": "gpt-4"
     }"#;
 

@@ -248,8 +248,9 @@ where
                 .await
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
-            let items: Vec<T> = serde_json::from_str(&contents)
-                .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
+            let items: Vec<T> = serde_json::from_str(&contents).map_err(|e| {
+                RepositoryError::SerializationError(format!("{}: {e}", path.display()))
+            })?;
 
             Ok(items)
         })
@@ -289,6 +290,18 @@ mod tests {
         let err = repo.load().await.unwrap_err().to_string();
         assert!(err.contains("execution_settings.json"), "{err}");
         assert!(err.contains("line 3"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn unparseable_list_file_is_an_error_naming_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.json");
+        let repo = GenericJsonListRepository::<u32>::with_path(path.clone());
+        assert!(repo.load_all().await.unwrap().is_empty());
+
+        std::fs::write(&path, r#"["nope"]"#).unwrap();
+        let err = repo.load_all().await.unwrap_err().to_string();
+        assert!(err.contains(&path.display().to_string()), "{err}");
     }
 
     /// Overlapping saves of one file all succeed and the last *call* wins,
