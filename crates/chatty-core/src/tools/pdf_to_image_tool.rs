@@ -512,29 +512,80 @@ startxref
         assert_eq!(pending.lock().unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn test_all_pages_out_of_range_errors() {
-        let (tool, _, workspace) = create_test_tool().await;
-        let pdf_path = workspace.join("test_allrange.pdf");
-        create_test_pdf(&pdf_path);
+    /// With no `output_dir`, pages go to the session thumbnail directory
+    /// (`pdf_thumbnail::get_thumbnail_dir`). `pdf_thumbnail`'s tests delete
+    /// that process-global directory, so this test holds their lock
+    /// (AGE-509, AGE-1092). It is a plain `#[test]` with its own runtime so
+    /// the `std::sync::MutexGuard` is never held across an `.await`
+    /// (clippy's `await_holding_lock`).
+    #[test]
+    fn test_no_output_dir_renders_into_the_session_thumbnail_dir() {
+        let _dir = crate::services::pdf_thumbnail::thumbnail_dir_test_lock();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (tool, pending, workspace) = create_test_tool().await;
+            let pdf_path = workspace.join("test_session_dir.pdf");
+            create_test_pdf(&pdf_path);
+            let result = tool
+                .call(
+                    &mut ToolContext::new(),
+                    PdfToImageArgs {
+                        path: "test_session_dir.pdf".into(),
+                        pages: None,
+                        dpi: 72,
+                        output_dir: None,
+                    },
+                )
+                .await;
+            let _ = fs::remove_file(&pdf_path);
 
-        let result = tool
-            .call(
-                &mut ToolContext::new(),
-                PdfToImageArgs {
-                    path: "test_allrange.pdf".into(),
-                    pages: Some(vec![99, 100]),
-                    dpi: 150,
-                    output_dir: None,
-                },
-            )
-            .await;
+            let output = result.expect("renders into the session directory");
+            let session_dir = crate::services::pdf_thumbnail::get_thumbnail_dir().unwrap();
+            let image = PathBuf::from(&output.images[0]);
+            assert!(
+                image.starts_with(&session_dir),
+                "{image:?} is not in {session_dir:?}"
+            );
+            assert!(image.exists(), "the PNG is on disk");
+            assert_eq!(output.page_count, 1);
+            assert_eq!(pending.lock().unwrap().len(), 1);
+            assert!(!output.message.contains("Saved to workspace directory"));
+        });
+    }
 
-        let _ = fs::remove_file(&pdf_path);
+    #[test]
+    fn test_all_pages_out_of_range_errors() {
+        let _dir = crate::services::pdf_thumbnail::thumbnail_dir_test_lock();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (tool, _, workspace) = create_test_tool().await;
+            let pdf_path = workspace.join("test_allrange.pdf");
+            create_test_pdf(&pdf_path);
 
-        assert!(result.is_err());
-        let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("No valid pages"));
+            let result = tool
+                .call(
+                    &mut ToolContext::new(),
+                    PdfToImageArgs {
+                        path: "test_allrange.pdf".into(),
+                        pages: Some(vec![99, 100]),
+                        dpi: 150,
+                        output_dir: None,
+                    },
+                )
+                .await;
+
+            let _ = fs::remove_file(&pdf_path);
+
+            assert!(result.is_err());
+            let err = format!("{}", result.unwrap_err());
+            assert!(err.contains("No valid pages"));
+        });
     }
 
     #[tokio::test]
