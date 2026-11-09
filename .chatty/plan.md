@@ -7,5 +7,5 @@
 - Only title_generator.rs changes (plus .chatty/ state files, removed later).
 
 ## Steps
-1. [ ] Replace byte-slicing arm in clean_title with char-counting; add doc line.
-2. [ ] Add `#[cfg(test)] mod tests` with the 4 tests at end of title_generator.rs.
+1. [x] Replace byte-slicing arm in clean_title with char-counting; add doc line. (commit: AGE-1088 fix commit)
+2. [x] Add `#[cfg(test)] mod tests` with the 4 tests at end of title_generator.rs. (commit: AGE-1088 fix commit)
