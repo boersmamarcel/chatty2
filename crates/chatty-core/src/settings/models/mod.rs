@@ -73,10 +73,7 @@ mod schema_docs {
             serde_json::from_str::<ProviderType>("\"open_router\"").unwrap(),
             ProviderType::OpenRouter
         );
-        assert_eq!(
-            serde_json::from_str::<ProviderType>("\"open_ai\"").unwrap(),
-            ProviderType::OpenRouter
-        );
+        assert!(serde_json::from_str::<ProviderType>("\"open_ai\"").is_err());
         assert!(serde_json::from_str::<ProviderType>("\"openrouter\"").is_err());
         assert_eq!(
             serde_json::to_string(&ProviderType::Ollama).unwrap(),

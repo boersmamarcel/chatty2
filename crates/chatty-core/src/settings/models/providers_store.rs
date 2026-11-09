@@ -14,14 +14,6 @@ pub enum AzureAuthMethod {
 #[allow(clippy::upper_case_acronyms)]
 pub enum ProviderType {
     /// OpenRouter — gateway to 200+ models (Anthropic, Google, Mistral, Meta, etc.)
-    /// Accepts legacy JSON values from removed provider variants for backward compatibility.
-    #[serde(
-        alias = "open_ai",
-        alias = "open_a_i",
-        alias = "anthropic",
-        alias = "gemini",
-        alias = "mistral"
-    )]
     OpenRouter,
     Ollama,
     #[serde(rename = "azure_openai")]
@@ -563,22 +555,19 @@ mod tests {
     }
 
     #[test]
-    fn test_provider_type_backward_compat_deserialization() {
-        // Old JSON values for removed providers should deserialize as OpenRouter
-        let openai: ProviderType = serde_json::from_str("\"open_ai\"").unwrap();
-        assert_eq!(openai, ProviderType::OpenRouter);
-
-        let legacy_openai: ProviderType = serde_json::from_str("\"open_a_i\"").unwrap();
-        assert_eq!(legacy_openai, ProviderType::OpenRouter);
-
-        let anthropic: ProviderType = serde_json::from_str("\"anthropic\"").unwrap();
-        assert_eq!(anthropic, ProviderType::OpenRouter);
-
-        let gemini: ProviderType = serde_json::from_str("\"gemini\"").unwrap();
-        assert_eq!(gemini, ProviderType::OpenRouter);
-
-        let mistral: ProviderType = serde_json::from_str("\"mistral\"").unwrap();
-        assert_eq!(mistral, ProviderType::OpenRouter);
+    fn removed_provider_types_no_longer_deserialize() {
+        for removed in ["open_ai", "open_a_i", "anthropic", "gemini", "mistral"] {
+            let json = format!("\"{removed}\"");
+            assert!(
+                serde_json::from_str::<ProviderType>(&json).is_err(),
+                "{removed} must not deserialize"
+            );
+        }
+        for kept in ["open_router", "ollama", "azure_openai"] {
+            let json = format!("\"{kept}\"");
+            let parsed: ProviderType = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+        }
     }
 
     fn openrouter(base_url: Option<&str>) -> ProviderConfig {
