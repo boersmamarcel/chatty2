@@ -213,42 +213,62 @@ impl DockerSandbox {
             .await
             .context("Failed to create container")?;
 
-        docker
-            .start_container(&container.id, None::<StartContainerOptions>)
-            .await
-            .context("Failed to start container")?;
-
-        // Inspect the container to discover the actual host ports Docker assigned.
-        let port_mappings = if config.expose_ports.is_empty() {
-            HashMap::new()
-        } else {
-            let info = docker
-                .inspect_container(&container.id, None)
+        let started = async {
+            docker
+                .start_container(&container.id, None::<StartContainerOptions>)
                 .await
-                .context("Failed to inspect container for port mappings")?;
+                .context("Failed to start container")?;
 
-            info.network_settings
-                .and_then(|ns| ns.ports)
-                .map(|ports| {
-                    let mut mappings = HashMap::new();
-                    for (key, bindings) in ports {
-                        // key is like "8080/tcp"
-                        if let Some(container_port) =
-                            key.split('/').next().and_then(|p| p.parse::<u16>().ok())
-                            && let Some(Some(binding_list)) = bindings
-                                .as_ref()
-                                .map(|b| if b.is_empty() { None } else { Some(b) })
-                            && let Some(host_port_str) =
-                                binding_list.first().and_then(|b| b.host_port.as_deref())
-                            && let Ok(host_port) = host_port_str.parse::<u16>()
-                        {
-                            mappings.insert(container_port, host_port);
+            // Inspect the container to discover the actual host ports Docker assigned.
+            let port_mappings = if config.expose_ports.is_empty() {
+                HashMap::new()
+            } else {
+                let info = docker
+                    .inspect_container(&container.id, None)
+                    .await
+                    .context("Failed to inspect container for port mappings")?;
+
+                info.network_settings
+                    .and_then(|ns| ns.ports)
+                    .map(|ports| {
+                        let mut mappings = HashMap::new();
+                        for (key, bindings) in ports {
+                            // key is like "8080/tcp"
+                            if let Some(container_port) =
+                                key.split('/').next().and_then(|p| p.parse::<u16>().ok())
+                                && let Some(Some(binding_list)) = bindings
+                                    .as_ref()
+                                    .map(|b| if b.is_empty() { None } else { Some(b) })
+                                && let Some(host_port_str) =
+                                    binding_list.first().and_then(|b| b.host_port.as_deref())
+                                && let Ok(host_port) = host_port_str.parse::<u16>()
+                            {
+                                mappings.insert(container_port, host_port);
+                            }
                         }
-                    }
-                    mappings
-                })
-                .unwrap_or_default()
-        };
+                        mappings
+                    })
+                    .unwrap_or_default()
+            };
+
+            Ok::<_, anyhow::Error>(port_mappings)
+        }
+        .await;
+        let port_mappings = cleanup_on_err(started, || async {
+            if let Err(e) = docker
+                .remove_container(
+                    &container.id,
+                    Some(RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await
+            {
+                tracing::warn!(error = %e, container = %container.id, "Failed to remove a sandbox container that did not start");
+            }
+        })
+        .await?;
 
         Ok(Self {
             docker,
@@ -403,5 +423,51 @@ impl SandboxBackend for DockerSandbox {
 
     async fn is_available(docker_host: Option<&str>) -> Result<bool> {
         Ok(connect_docker(docker_host).await.is_ok())
+    }
+}
+
+/// Run `cleanup` when `result` is an error, then hand `result` back
+/// unchanged: a step that fails after the container exists must not
+/// leave it behind (AGE-549).
+async fn cleanup_on_err<T, F, Fut>(result: Result<T>, cleanup: F) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if result.is_err() {
+        cleanup().await;
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn cleanup_runs_when_the_step_failed() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        let result = cleanup_on_err(
+            Err::<(), _>(anyhow::anyhow!("start failed")),
+            || async move { flag.store(true, Ordering::SeqCst) },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().to_string(), "start failed");
+        assert!(ran.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cleanup_does_not_run_on_success() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        let result = cleanup_on_err(Ok::<u16, anyhow::Error>(8080), || async move {
+            flag.store(true, Ordering::SeqCst)
+        })
+        .await;
+        assert_eq!(result.unwrap(), 8080);
+        assert!(!ran.load(Ordering::SeqCst));
     }
 }
