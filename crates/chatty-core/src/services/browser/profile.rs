@@ -213,14 +213,36 @@ fn check_allowlist(url: &str, origins: &[String]) -> Result<(), BrowserError> {
     }
 }
 
-/// Containment check that resolves `..` without requiring the path to exist.
+/// Containment check that resolves `..` and symlinks without requiring the
+/// path to exist (AGE-547).
 ///
 /// `Path::starts_with` alone is not enough: `/ws/../etc/passwd` starts with
-/// nothing useful until the traversal is folded out.
+/// nothing useful until the traversal is folded out, and a symlink inside the
+/// workspace can point outside it. The existing part of each path is
+/// canonicalized; the not-yet-existing tail is kept as is.
 fn path_is_within(path: &Path, root: &Path) -> bool {
-    let path = normalize(path);
-    let root = normalize(root);
-    path.starts_with(&root)
+    resolve(path).starts_with(resolve(root))
+}
+
+/// Lexically fold `..`, then canonicalize the longest existing prefix and
+/// append the remaining components unchanged.
+fn resolve(path: &Path) -> PathBuf {
+    let normalized = normalize(path);
+    let mut existing = normalized.as_path();
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(mut canonical) = existing.canonicalize() {
+            canonical.extend(tail.iter().rev());
+            return canonical;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                existing = parent;
+            }
+            _ => return normalized,
+        }
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {
@@ -511,5 +533,40 @@ mod tests {
             Err(BrowserError::NavigationRefused(_))
         ));
         assert!(open_with_private_access().check_chain(&hops).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_the_workspace_is_refused() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), ws.path().join("home")).unwrap();
+        let url = reqwest::Url::from_file_path(ws.path().join("home/secret.txt")).unwrap();
+        let local = NavigationPolicy::local_only(Some(ws.path().to_path_buf()));
+        let open = NavigationPolicy::open(Some(ws.path().to_path_buf()), false);
+        for policy in [local, open] {
+            assert!(matches!(
+                policy.check(url.as_str()),
+                Err(BrowserError::NavigationRefused(_))
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_files_and_inward_symlinks_stay_allowed() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir(ws.path().join("dist")).unwrap();
+        std::fs::write(ws.path().join("dist/index.html"), "<p>hi</p>").unwrap();
+        std::os::unix::fs::symlink(ws.path().join("dist"), ws.path().join("latest")).unwrap();
+        let policy = NavigationPolicy::local_only(Some(ws.path().to_path_buf()));
+        for rel in ["dist/index.html", "latest/index.html", "dist/new.html"] {
+            let url = reqwest::Url::from_file_path(ws.path().join(rel)).unwrap();
+            assert!(
+                policy.check(url.as_str()).is_ok(),
+                "{rel} should be allowed"
+            );
+        }
     }
 }
