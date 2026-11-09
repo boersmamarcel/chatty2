@@ -84,6 +84,16 @@ fn doc_retriever_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// Whether the agent may reach the open web: `fetch`, `search_web`, the
+/// browser's open-web access, `browser_use` and `daytona_run`. No
+/// execution settings means every tool group is off (see
+/// `gated_exec_settings`), so no internet either (AGE-533).
+fn internet_access_allowed(
+    exec_settings: Option<&crate::settings::models::ExecutionSettingsModel>,
+) -> bool {
+    exec_settings.is_some_and(|s| s.fetch_enabled)
+}
+
 /// Workspace-scoped services that depend only on the workspace directory:
 /// `FileSystemService::new`, `CodeSearchService::new`, and `GitService::new`
 /// all take just the directory, so a second agent build against the same
@@ -728,11 +738,7 @@ impl AgentClient {
         };
 
         // Create fetch tool if enabled in settings
-        let fetch_tool = if exec_settings
-            .as_ref()
-            .map(|s| s.fetch_enabled)
-            .unwrap_or(true)
-        {
+        let fetch_tool = if internet_access_allowed(exec_settings.as_ref()) {
             let workspace = exec_settings
                 .as_ref()
                 .and_then(|s| s.workspace_dir.as_ref())
@@ -745,11 +751,9 @@ impl AgentClient {
         };
 
         // Create search web tool
-        let search_web_tool: Option<SearchWebTool> = if exec_settings
-            .as_ref()
-            .map(|s| s.fetch_enabled)
-            .unwrap_or(true)
-        {
+        let search_web_tool: Option<SearchWebTool> = if internet_access_allowed(
+            exec_settings.as_ref(),
+        ) {
             use crate::settings::models::search_settings::SearchProvider;
             let max_results = search_settings.as_ref().map(|s| s.max_results).unwrap_or(5);
             let api_tool = search_settings.as_ref().and_then(|search_cfg| {
@@ -803,10 +807,7 @@ impl AgentClient {
                 .as_ref()
                 .map(|s| s.browser_enabled)
                 .unwrap_or(false);
-            let internet_access = exec_settings
-                .as_ref()
-                .map(|s| s.fetch_enabled)
-                .unwrap_or(true);
+            let internet_access = internet_access_allowed(exec_settings.as_ref());
             let allow_private_network_access = exec_settings
                 .as_ref()
                 .map(|s| s.allow_private_network_access)
@@ -860,36 +861,29 @@ impl AgentClient {
         };
 
         // Create browser-use tool
-        let browser_use_tool: Option<BrowserUseTool> = if exec_settings
-            .as_ref()
-            .map(|s| s.fetch_enabled)
-            .unwrap_or(true)
-        {
-            search_settings.as_ref().and_then(|s| {
-                if s.browser_use_enabled {
-                    s.browser_use_api_key
-                        .clone()
-                        .filter(|k| !k.is_empty())
-                        .map(|key| {
-                            tracing::info!("browser-use tool enabled");
-                            BrowserUseTool::new(key)
-                        })
-                } else {
-                    tracing::info!("browser-use tool disabled (toggle is off)");
-                    None
-                }
-            })
-        } else {
-            tracing::info!("browser-use tool disabled (internet access is off)");
-            None
-        };
+        let browser_use_tool: Option<BrowserUseTool> =
+            if internet_access_allowed(exec_settings.as_ref()) {
+                search_settings.as_ref().and_then(|s| {
+                    if s.browser_use_enabled {
+                        s.browser_use_api_key
+                            .clone()
+                            .filter(|k| !k.is_empty())
+                            .map(|key| {
+                                tracing::info!("browser-use tool enabled");
+                                BrowserUseTool::new(key)
+                            })
+                    } else {
+                        tracing::info!("browser-use tool disabled (toggle is off)");
+                        None
+                    }
+                })
+            } else {
+                tracing::info!("browser-use tool disabled (internet access is off)");
+                None
+            };
 
         // Create Daytona tool
-        let daytona_tool: Option<DaytonaTool> = if exec_settings
-            .as_ref()
-            .map(|s| s.fetch_enabled)
-            .unwrap_or(true)
-        {
+        let daytona_tool: Option<DaytonaTool> = if internet_access_allowed(exec_settings.as_ref()) {
             search_settings.as_ref().and_then(|s| {
                 if s.daytona_enabled {
                     s.daytona_api_key
@@ -1745,6 +1739,22 @@ async fn calibrate_context_shaper(
 mod tests {
     use super::mcp_helpers::filter_mcp_tool_info;
     use super::tool_registry::{ToolAvailability, active_native_tool_names};
+
+    #[test]
+    fn internet_access_needs_execution_settings_with_fetch_on() {
+        use crate::settings::models::ExecutionSettingsModel;
+        assert!(!super::internet_access_allowed(None));
+        let on = ExecutionSettingsModel {
+            fetch_enabled: true,
+            ..Default::default()
+        };
+        assert!(super::internet_access_allowed(Some(&on)));
+        let off = ExecutionSettingsModel {
+            fetch_enabled: false,
+            ..Default::default()
+        };
+        assert!(!super::internet_access_allowed(Some(&off)));
+    }
 
     #[test]
     fn active_native_tool_names_always_includes_read_skill() {
