@@ -214,3 +214,23 @@ pub(super) fn extract_output_paths(code: &str) -> Vec<String> {
     }
     paths
 }
+
+/// Directory under the workspace that receives files downloaded from the sandbox (AGE-538).
+pub(super) const DOWNLOAD_DIR_NAME: &str = "daytona_outputs";
+
+/// Where sandbox downloads go: `<workspace>/daytona_outputs`, or `None` without a workspace.
+pub(super) fn download_dir(workspace_dir: Option<&str>) -> Option<PathBuf> {
+    workspace_dir.map(|dir| PathBuf::from(dir).join(DOWNLOAD_DIR_NAME))
+}
+
+/// `name` with `-<n>` placed before the extension: `data.csv` -> `data-1.csv`.
+pub(super) fn numbered_name(name: &str, n: u32) -> String {
+    let path = std::path::Path::new(name);
+    match (
+        path.file_stem().and_then(|s| s.to_str()),
+        path.extension().and_then(|e| e.to_str()),
+    ) {
+        (Some(stem), Some(ext)) => format!("{stem}-{n}.{ext}"),
+        _ => format!("{name}-{n}"),
+    }
+}
