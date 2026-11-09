@@ -778,29 +778,26 @@ impl FetchTool {
         let filename = extract_filename(url, content_type);
         let save_path = workspace.join(&filename);
 
-        // Ensure we don't overwrite existing files — add a numeric suffix if needed
-        let save_path = unique_path(save_path);
-
-        info!(
-            path = %save_path.display(),
-            size = bytes.len(),
-            "Saving binary content to workspace"
-        );
-
-        tokio::fs::write(&save_path, &bytes).await.map_err(|e| {
-            ToolError::OperationFailed(format!(
-                "Failed to save file to {}: {}",
-                save_path.display(),
-                e
-            ))
-        })?;
+        // create_new picks a free name and never follows a planted symlink
+        let size = bytes.len();
+        let save_path = tokio::task::spawn_blocking(move || save_new_file(save_path, &bytes))
+            .await
+            .map_err(|e| ToolError::OperationFailed(format!("Task join error: {e}")))?
+            .map_err(|e| {
+                ToolError::OperationFailed(format!(
+                    "Failed to save file in {}: {}",
+                    workspace.display(),
+                    e
+                ))
+            })?;
+        info!(path = %save_path.display(), size, "Saved binary content to workspace");
 
         Ok(FetchToolOutput {
             status,
             content: format!(
                 "Downloaded {} ({} bytes) and saved to: {}",
                 content_type,
-                bytes.len(),
+                size,
                 save_path.display()
             ),
             content_type: content_type.to_string(),
@@ -927,28 +924,47 @@ fn extract_filename(url: &str, content_type: &str) -> String {
     format!("download.{}", extension)
 }
 
-/// Generate a unique file path by appending a numeric suffix if the file already exists.
-fn unique_path(path: PathBuf) -> PathBuf {
-    if !path.exists() {
-        return path;
-    }
-
+/// Create `path` as a new file holding `bytes`, or `stem-1.ext`,
+/// `stem-2.ext`, … when that name is taken. `create_new` refuses any
+/// existing path, a dangling symlink included, so a download never
+/// replaces a file or writes through a planted link (AGE-1097).
+fn save_new_file(path: PathBuf, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("download");
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("bin");
-    let parent = path.parent().unwrap_or(std::path::Path::new("."));
-
-    for i in 1..1000 {
-        let candidate = parent.join(format!("{}-{}.{}", stem, i, ext));
-        if !candidate.exists() {
-            return candidate;
+        .unwrap_or("download")
+        .to_string();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bin")
+        .to_string();
+    let parent = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    let mut last_err = None;
+    for i in 0..1000u32 {
+        let candidate = if i == 0 {
+            path.clone()
+        } else {
+            parent.join(format!("{stem}-{i}.{ext}"))
+        };
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_err = Some(e),
+            Err(e) => return Err(e),
         }
     }
-
-    // Extremely unlikely fallback
-    parent.join(format!("{}-{}.{}", stem, uuid::Uuid::new_v4(), ext))
+    Err(last_err.unwrap_or_else(|| std::io::ErrorKind::AlreadyExists.into()))
 }
 
 /// Validate that a URL does not target private, internal, or reserved network hosts.
@@ -2984,9 +3000,36 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_path_no_conflict() {
-        let path = PathBuf::from("/tmp/nonexistent_test_file_12345.txt");
-        assert_eq!(unique_path(path.clone()), path);
+    fn save_new_file_takes_the_name_when_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        assert_eq!(save_new_file(path.clone(), b"x").unwrap(), path);
+        assert_eq!(std::fs::read(&path).unwrap(), b"x");
+    }
+
+    #[test]
+    fn save_new_file_never_replaces_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        std::fs::write(&path, b"old").unwrap();
+        let first = save_new_file(path.clone(), b"new").unwrap();
+        assert_eq!(first, dir.path().join("a-1.png"));
+        assert_eq!(std::fs::read(&first).unwrap(), b"new");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old");
+        let second = save_new_file(path, b"new").unwrap();
+        assert_eq!(second, dir.path().join("a-2.png"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_new_file_does_not_write_through_a_dangling_symlink() {
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target.pdf");
+        std::os::unix::fs::symlink(&target, ws.path().join("report.pdf")).unwrap();
+        let saved = save_new_file(ws.path().join("report.pdf"), b"x").unwrap();
+        assert_eq!(saved, ws.path().join("report-1.pdf"));
+        assert!(!target.exists());
     }
 
     // --- SSRF protection tests ---
