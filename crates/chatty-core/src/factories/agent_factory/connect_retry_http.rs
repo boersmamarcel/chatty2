@@ -23,10 +23,16 @@
 //! model's own tokenizer counts far more. So the refused request is
 //! compacted here — the oldest tool results replaced by a one-line stub
 //! until their text is half what it was, the newest cut to its head and
-//! tail if it alone is more ([`compact_tool_results`]) — and sent once more.
-//! The refusal is recorded on the agent's [`WindowOverflows`], so its guard
-//! keeps more headroom on every later request. A second refusal is the
-//! caller's, as before.
+//! tail if it alone is more ([`compact_tool_results`]), and the text of the
+//! earlier messages halved the same way ([`compact_message_texts`]; the
+//! task's first message, the latest user message and the last message are
+//! kept) — and sent again. A request refused again is compacted further and
+//! resent, up to [`OVERFLOW_RETRIES`] times (AGE-994): the guard had already
+//! one-lined the old tool results, so a long conversation's bulk is
+//! assistant text, and one halving of its tool results was not enough. Each
+//! refusal is recorded on the agent's [`WindowOverflows`], so its guard
+//! keeps more headroom on every later request. The last refusal is the
+//! caller's.
 //!
 //! # A request that asks for more output than the window leaves (AGE-985)
 //!
@@ -69,6 +75,10 @@ use crate::token_budget::counter::TokenCounter;
 /// connection race or a brief overload, short of a server restart, which
 /// headless's own (slower) retry of the turn covers.
 pub const CONNECT_RETRY_ATTEMPTS: usize = 4;
+
+/// Further sends a request refused as over the model's window gets, each
+/// smaller than the last (AGE-994).
+pub const OVERFLOW_RETRIES: usize = 3;
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Wraps an HTTP client so a request whose send failed at the connection
@@ -278,11 +288,108 @@ pub(crate) fn compact_tool_results(body: &mut Value) -> bool {
     remaining < total
 }
 
-/// `body` with its tool results compacted for a retry, or `None` when it is
-/// not JSON or has nothing to compact.
+/// A message's text slots: its `content` when that is a string, else each
+/// text part's `text` (`text`, Responses `input_text`/`output_text`) —
+/// never a tool result block.
+fn text_slots(item: &mut Value) -> Vec<&mut Value> {
+    match item.get_mut("content") {
+        Some(content @ Value::String(_)) => vec![content],
+        Some(Value::Array(parts)) => parts
+            .iter_mut()
+            .filter(|part| {
+                matches!(
+                    part.get("type").and_then(Value::as_str),
+                    Some("text" | "input_text" | "output_text")
+                )
+            })
+            .filter_map(|part| part.get_mut("text"))
+            .filter(|text| text.is_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a request item is a user message with text of its own (not only
+/// tool results).
+fn is_user_text(item: &Value) -> bool {
+    if item.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    match item.get("content") {
+        Some(Value::String(_)) => true,
+        Some(Value::Array(parts)) => parts.iter().any(|part| {
+            matches!(
+                part.get("type").and_then(Value::as_str),
+                Some("text" | "input_text")
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// Shrink the text of a refused request's earlier messages, for a retry
+/// (AGE-994): every user or assistant message but the first user message
+/// (the task), the latest user message and the last message, oldest first,
+/// each replaced by a one-line stub until their text is at most half what it
+/// was. Tool calls and results are left to [`compact_tool_results`], so no
+/// round-trip loses a half. Returns whether anything changed.
+pub(crate) fn compact_message_texts(body: &mut Value) -> bool {
+    let list = if body.get("messages").is_some() {
+        body.get_mut("messages")
+    } else {
+        body.get_mut("input")
+    };
+    let Some(Value::Array(items)) = list else {
+        return false;
+    };
+    let first_user = items.iter().position(is_user_text);
+    let latest_user = items.iter().rposition(is_user_text);
+    let last = items.len().saturating_sub(1);
+    let mut slots: Vec<&mut Value> = items
+        .iter_mut()
+        .enumerate()
+        .filter(|(i, item)| {
+            Some(*i) != first_user
+                && Some(*i) != latest_user
+                && *i != last
+                && matches!(
+                    item.get("role").and_then(Value::as_str),
+                    Some("user" | "assistant")
+                )
+        })
+        .flat_map(|(_, item)| text_slots(item))
+        .collect();
+    let lens: Vec<usize> = slots
+        .iter()
+        .map(|slot| slot.as_str().map_or(0, str::len))
+        .collect();
+    let total: usize = lens.iter().sum();
+    let target = total / 2;
+    let mut remaining = total;
+    for (slot, len) in slots.iter_mut().zip(lens) {
+        if remaining <= target {
+            break;
+        }
+        let stub = format!(
+            "[earlier message text dropped — {len} chars; the request did not fit the \
+             model's context window]"
+        );
+        if stub.len() < len {
+            remaining -= len - stub.len();
+            **slot = Value::String(stub);
+        }
+    }
+    remaining < total
+}
+
+/// `body` compacted for a retry — its tool results and its earlier
+/// messages' text — or `None` when it is not JSON or has nothing left to
+/// compact.
 fn compacted(body: &Bytes) -> Option<Bytes> {
     let mut json: Value = serde_json::from_slice(body).ok()?;
-    if !compact_tool_results(&mut json) {
+    let results = compact_tool_results(&mut json);
+    let texts = compact_message_texts(&mut json);
+    if !(results || texts) {
         return None;
     }
     serde_json::to_vec(&json).ok().map(Bytes::from)
@@ -443,48 +550,53 @@ fn overflow_message(error: &http_client::Error) -> &str {
 }
 
 /// Send `body` with connection retries; when the provider refuses it as
-/// over its window, count that on `overflows` and send it once more: with
-/// its output cap lowered when the refusal says the requested output was
-/// what did not fit (AGE-985), else with its tool results compacted.
+/// over its window, count that on `overflows` and send it again: with its
+/// output cap lowered when the refusal says the requested output was what
+/// did not fit (AGE-985), else compacted — further on every refusal, up to
+/// [`OVERFLOW_RETRIES`] times (AGE-994).
 async fn send_fitting<R, F, Fut>(
     backoff: Duration,
     overflows: &WindowOverflows,
-    body: Bytes,
+    mut body: Bytes,
     mut send: F,
 ) -> http_client::Result<R>
 where
     F: FnMut(Bytes) -> Fut,
     Fut: Future<Output = http_client::Result<R>>,
 {
-    match with_connect_retries(backoff, || send(body.clone())).await {
-        Err(error) if is_context_overflow(&error) => {
-            let message = overflow_message(&error);
-            let (smaller, path) = if let Some(lowered) = lower_output_cap(&body, message) {
-                (lowered, "with a lower max_tokens")
-            } else if output_cap_refusal(message, 0, OutputMargin::default())
-                == OutputCapRefusal::Unfixable
-            {
-                // The refusal is about the output cap and names no number to
-                // lower it to: compacting tool results would change nothing
-                // and would raise the headroom of every later request.
-                return Err(error);
-            } else if let Some(compacted) = compacted(&body) {
-                // Only a compaction counts as a window overflow: it is the
-                // input that was too large, so later requests keep more
-                // headroom. A lowered cap says nothing about the input.
-                overflows.record();
-                (compacted, "with its oldest tool results compacted")
-            } else {
-                return Err(error);
-            };
-            tracing::warn!(
-                bytes_before = body.len(),
-                bytes_after = smaller.len(),
-                "Model request refused as over the context window; sending it once more {path}"
-            );
-            with_connect_retries(backoff, || send(smaller.clone())).await
-        }
-        result => result,
+    let mut retry = 0;
+    loop {
+        let error = match with_connect_retries(backoff, || send(body.clone())).await {
+            Err(error) if retry < OVERFLOW_RETRIES && is_context_overflow(&error) => error,
+            result => return result,
+        };
+        let message = overflow_message(&error);
+        let (smaller, path) = if let Some(lowered) = lower_output_cap(&body, message) {
+            (lowered, "with a lower max_tokens")
+        } else if output_cap_refusal(message, 0, OutputMargin::default())
+            == OutputCapRefusal::Unfixable
+        {
+            // The refusal is about the output cap and names no number to
+            // lower it to: compacting would change nothing and would raise
+            // the headroom of every later request.
+            return Err(error);
+        } else if let Some(compacted) = compacted(&body) {
+            // Only a compaction counts as a window overflow: it is the
+            // input that was too large, so later requests keep more
+            // headroom. A lowered cap says nothing about the input.
+            overflows.record();
+            (compacted, "compacted")
+        } else {
+            return Err(error);
+        };
+        tracing::warn!(
+            retry = retry + 1,
+            bytes_before = body.len(),
+            bytes_after = smaller.len(),
+            "Model request refused as over the context window; sending it again {path}"
+        );
+        body = smaller;
+        retry += 1;
     }
 }
 
@@ -888,18 +1000,81 @@ mod tests {
         assert_eq!(overflows.count(), 1);
     }
 
-    /// One retry only: a compacted request refused again is the caller's
-    /// error, as before.
+    /// AGE-994: a compacted request refused again is compacted further and
+    /// sent again, each time smaller, until one is answered.
     #[tokio::test]
-    async fn a_second_overflow_is_returned() {
+    async fn a_refused_retry_is_compacted_further() {
+        let (url, bodies) = refusing_server(2);
+        let overflows = WindowOverflows::default();
+        let client = client().reporting_overflows(overflows.clone());
+        let response = client
+            .send_streaming(with_tool_results(&url))
+            .await
+            .expect("the third request is answered");
+        assert_eq!(response.status(), 200);
+        let bodies = bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 3, "two refusals, two retries");
+        assert!(bodies[2].len() < bodies[1].len() && bodies[1].len() < bodies[0].len());
+        assert_eq!(overflows.count(), 2);
+    }
+
+    /// The retries are bounded: the last refusal is the caller's error.
+    #[tokio::test]
+    async fn overflow_retries_are_bounded() {
         let (url, bodies) = refusing_server(usize::MAX);
         let error = client()
             .send_streaming(with_tool_results(&url))
             .await
             .map(|response| response.status())
-            .expect_err("refused twice");
+            .expect_err("always refused");
         assert!(is_context_overflow(&error), "{error}");
-        assert_eq!(bodies.lock().unwrap().len(), 2);
+        assert_eq!(bodies.lock().unwrap().len(), 1 + OVERFLOW_RETRIES);
+    }
+
+    /// AGE-994: the earlier messages' text is halved too, oldest first; the
+    /// system prompt, the task, the latest user message and the last
+    /// message are kept, and so is every tool call.
+    #[test]
+    fn compaction_halves_the_earlier_messages_text() {
+        let long = |tag: &str| format!("{tag}-START {} {tag}-END", "y".repeat(4_000));
+        let mut body = serde_json::json!({ "messages": [
+            { "role": "system", "content": long("SYS") },
+            { "role": "user", "content": long("TASK") },
+            { "role": "assistant", "content": long("A1"), "tool_calls": [
+                { "id": "a", "type": "function", "function": { "name": "f", "arguments": "{}" } }
+            ] },
+            { "role": "tool", "tool_call_id": "a", "content": "ok" },
+            { "role": "assistant", "content": [{ "type": "text", "text": long("A2") }] },
+            { "role": "assistant", "content": long("A3") },
+            { "role": "user", "content": long("CONTINUE") },
+            { "role": "assistant", "content": long("LAST") },
+        ]});
+        let before = body.clone();
+        assert!(compact_message_texts(&mut body));
+        let m = &body["messages"];
+        assert!(
+            m[2]["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("[earlier message text dropped")
+        );
+        assert_eq!(m[2]["tool_calls"], before["messages"][2]["tool_calls"]);
+        assert!(
+            m[4]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[earlier message text dropped")
+        );
+        assert_eq!(m[5], before["messages"][5], "half is reached by then");
+        for i in [0, 1, 3, 6, 7] {
+            assert_eq!(m[i], before["messages"][i]);
+        }
+
+        let mut short = serde_json::json!({ "messages": [
+            { "role": "user", "content": "task" },
+            { "role": "assistant", "content": "ok" },
+        ]});
+        assert!(!compact_message_texts(&mut short), "nothing to take");
     }
 
     /// A status the server sent back is an answer, not a lost connection.

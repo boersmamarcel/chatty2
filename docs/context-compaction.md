@@ -63,9 +63,20 @@ whole for as long as possible.
 | 2 | Compact | Replace every tool result outside the tail with a one-liner (`[compacted] …`, 120 chars) |
 | 3 | Snip | Keep the first 2 and last 8 messages, replace the middle with one marker; both ends of the cut move off a tool round-trip first (see below) |
 | 4 | Cap the tail | Stub, then one-line, tool results inside the tail, oldest first; the last message is never touched |
+| 5 | Trim | Drop the tail's messages too, oldest first, a call together with the results answering it; never the latest user message or the last message |
 
-A history still over budget after stage 4 is sent as is (a warning is logged): without
-summarising there is nothing left to take.
+Stages 3 and 5 keep the **latest user message** wherever it is: mid-run it is what the
+run is answering, and the head keeps the task's first message. Stage 5 is what fits a new
+turn of a long conversation (AGE-994): at turn start the history is every earlier turn,
+and its bulk is assistant text — replies, plans, the code a tool call carries — which no
+earlier stage shrinks. On a 32k model with the full tool set (~16k of base) the eight
+kept tail messages alone could be over the history budget.
+
+A history still over budget after stage 5 (the head, the latest user message and the last
+message alone do not fit) is sent as is, with a warning — unless the request then counts
+more than the model's *configured* window: that is a certain refusal, so the hook stops the
+run with an error saying the conversation does not fit (`ContextShaper::window_overflow`)
+and nothing is sent. With only the assumed 32k window it is the provider's call.
 
 **Neither half of a tool round-trip is dropped alone.** Because the guard runs on every
 model call of a run, stage 3's cut usually falls inside a live tool loop, where the
@@ -112,11 +123,14 @@ more. A request refused as over the window (vLLM's `maximum context length is �
 OpenAI's `context_length_exceeded`, Anthropic's `prompt is too long`, llama.cpp's `exceeds
 the available context size`) would end the run, and a hosted worker's whole invocation with
 it. The HTTP layer under every provider (`ConnectRetryHttpClient`) instead sends that request
-once more with its tool results compacted — oldest first, each replaced by a one-line stub,
-until their text is half what it was; the newest keeps its head and tail if it alone is more —
-and counts the refusal on the agent's guard, which then keeps another tenth of the window as
-headroom on every later request (up to three tenths). A second refusal of the same request
-fails the turn as before.
+again compacted: its tool results oldest first, each replaced by a one-line stub, until their
+text is half what it was (the newest keeps its head and tail if it alone is more), and the
+text of its earlier messages halved the same way — every user or assistant message but the
+task's first message, the latest user message and the last one (AGE-994: by then the guard has
+one-lined the old tool results, so a long conversation's bulk is assistant text). Each refusal
+is counted on the agent's guard, which then keeps another tenth of the window as headroom on
+every later request (up to three tenths). A request refused again is compacted further and
+resent, up to three times; the last refusal fails the turn.
 
 **A leader keeps its workers' results: the results ledger (AGE-941).** For a leader, the
 old tool results the stages one-line and snip — and the messages a compaction replaces —
