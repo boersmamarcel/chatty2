@@ -1,1 +1,0 @@
-- 2026-11-09: step 1 code done (encoding_rs dep, decode_text, read_text_capped, read_response uses it).
