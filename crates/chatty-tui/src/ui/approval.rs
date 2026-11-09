@@ -7,6 +7,18 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::engine::ChatEngine;
 use crate::ui::theme;
 
+/// The command as the one-line prompt shows it: at most 60 characters, then
+/// `...` (AGE-1091). Cut by characters: a byte cut can land inside one and panic.
+fn command_preview(command: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    if command.chars().count() > MAX_CHARS {
+        let head: String = command.chars().take(MAX_CHARS).collect();
+        format!("{head}...")
+    } else {
+        command.to_string()
+    }
+}
+
 pub fn render_approval_prompt(frame: &mut Frame, area: Rect, engine: &ChatEngine) {
     let approval = match &engine.pending_approval {
         Some(a) => a,
@@ -19,11 +31,7 @@ pub fn render_approval_prompt(frame: &mut Frame, area: Rect, engine: &ChatEngine
         Span::styled(" [host] ", theme::error())
     };
 
-    let command_display = if approval.command.len() > 60 {
-        format!("{}...", &approval.command[..60])
-    } else {
-        approval.command.clone()
-    };
+    let command_display = command_preview(&approval.command);
 
     let mut spans = vec![
         Span::styled(
@@ -64,4 +72,27 @@ pub fn render_approval_prompt(frame: &mut Frame, area: Rect, engine: &ChatEngine
     );
 
     frame.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_preview;
+
+    #[test]
+    fn a_long_command_is_cut_by_characters() {
+        let long = format!("x{}", "日".repeat(100));
+        let shown = command_preview(&long);
+        assert_eq!(shown.chars().count(), 63);
+        assert!(shown.starts_with("x日"));
+        assert!(shown.ends_with("..."));
+
+        let mid = format!("x{}", "日".repeat(30));
+        assert_eq!(command_preview(&mid), mid);
+    }
+
+    #[test]
+    fn a_short_command_is_shown_whole() {
+        assert_eq!(command_preview("ls -la"), "ls -la");
+        assert_eq!(command_preview(&"a".repeat(61)), "a".repeat(60) + "...");
+    }
 }
