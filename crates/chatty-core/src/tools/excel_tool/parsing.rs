@@ -3,18 +3,26 @@ use serde_json::Value;
 
 use super::ExcelToolError;
 
-/// Convert column letter(s) to 0-based index (A=0, B=1, ..., Z=25, AA=26, ...).
-pub(super) fn col_from_letters(s: &str) -> u16 {
-    let mut col: u16 = 0;
-    for b in s.bytes() {
-        col = col * 26 + (b - b'A') as u16 + 1;
+/// Excel's last column, `XFD`, as a 0-based index.
+const MAX_COL: u32 = 16_383;
+
+/// Convert column letter(s) to a 0-based index (A=0, B=1, ..., Z=25, AA=26, ...).
+/// `None` unless `s` is 1-3 ASCII capitals naming a column up to `XFD` (AGE-1090).
+pub(super) fn col_from_letters(s: &str) -> Option<u16> {
+    if s.is_empty() || s.len() > 3 || !s.bytes().all(|b| b.is_ascii_uppercase()) {
+        return None;
     }
-    col - 1
+    let col = s
+        .bytes()
+        .fold(0u32, |col, b| col * 26 + u32::from(b - b'A') + 1)
+        - 1;
+    (col <= MAX_COL).then_some(col as u16)
 }
 
 /// Parse a cell reference like "A1" or "AB123" into (row, col) 0-based indices.
+/// `$` markers (`$A$1`) are ignored; columns past `XFD` are refused.
 pub(super) fn parse_cell_ref(s: &str) -> Result<(u32, u16), ExcelToolError> {
-    let s = s.trim().to_uppercase();
+    let s = s.trim().to_uppercase().replace('$', "");
     let split = s
         .find(|c: char| c.is_ascii_digit())
         .ok_or_else(|| ExcelToolError::InvalidCellRef(s.clone()))?;
@@ -22,7 +30,7 @@ pub(super) fn parse_cell_ref(s: &str) -> Result<(u32, u16), ExcelToolError> {
     if letters.is_empty() || digits.is_empty() {
         return Err(ExcelToolError::InvalidCellRef(s.clone()));
     }
-    let col = col_from_letters(letters);
+    let col = col_from_letters(letters).ok_or_else(|| ExcelToolError::InvalidCellRef(s.clone()))?;
     let row: u32 = digits
         .parse::<u32>()
         .map_err(|_| ExcelToolError::InvalidCellRef(s.clone()))?

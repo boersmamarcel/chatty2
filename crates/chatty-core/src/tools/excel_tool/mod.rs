@@ -77,12 +77,27 @@ mod tests {
 
     #[test]
     fn test_col_from_letters() {
-        assert_eq!(col_from_letters("A"), 0);
-        assert_eq!(col_from_letters("B"), 1);
-        assert_eq!(col_from_letters("Z"), 25);
-        assert_eq!(col_from_letters("AA"), 26);
-        assert_eq!(col_from_letters("AB"), 27);
-        assert_eq!(col_from_letters("AZ"), 51);
+        assert_eq!(col_from_letters("A"), Some(0));
+        assert_eq!(col_from_letters("B"), Some(1));
+        assert_eq!(col_from_letters("Z"), Some(25));
+        assert_eq!(col_from_letters("AA"), Some(26));
+        assert_eq!(col_from_letters("AB"), Some(27));
+        assert_eq!(col_from_letters("AZ"), Some(51));
+        assert_eq!(col_from_letters("XFD"), Some(16_383));
+        assert_eq!(col_from_letters("XFE"), None);
+        assert_eq!(col_from_letters("A-"), None);
+        assert_eq!(col_from_letters(""), None);
+    }
+
+    #[test]
+    fn parse_cell_ref_handles_dollar_signs_and_refuses_odd_columns() {
+        assert_eq!(parse_cell_ref("$A$1").unwrap(), (0, 0));
+        assert_eq!(parse_cell_ref("$b3").unwrap(), (2, 1));
+        assert_eq!(parse_cell_ref("XFD1").unwrap(), (0, 16_383));
+        for bad in ["XFE1", "AAAAA1", "A-1", "Ä1", "#1"] {
+            assert!(parse_cell_ref(bad).is_err(), "{bad} should be refused");
+        }
+        assert_eq!(parse_range("$A$1:$B$2").unwrap(), ((0, 0), (1, 1)));
     }
 
     #[test]
