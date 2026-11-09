@@ -1850,6 +1850,7 @@ dependencies = [
  "docx-rs",
  "duckdb",
  "ed25519-dalek 3.0.0",
+ "encoding_rs",
  "flate2",
  "futures",
  "glob",

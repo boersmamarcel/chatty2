@@ -3125,6 +3125,76 @@ mod tests {
         assert!(cut);
     }
 
+    /// Serve one canned response (`head` then `body`) on a local port.
+    async fn one_response_server(head: &'static str, body: Vec<u8>, hold_open: bool) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+            if hold_open {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+        format!("http://{addr}/page")
+    }
+
+    #[test]
+    fn decode_text_follows_the_declared_charset() {
+        assert_eq!(
+            decode_text(&[b'c', b'a', b'f', 0xE9], "text/html; charset=ISO-8859-1"),
+            "café"
+        );
+        assert_eq!(decode_text("café".as_bytes(), "text/html"), "café");
+        assert_eq!(
+            decode_text("café".as_bytes(), "text/plain; charset=\"UTF-8\""),
+            "café"
+        );
+        assert_eq!(
+            decode_text(b"plain", "text/html; charset=no-such-charset"),
+            "plain"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_text_capped_stops_at_the_cap_without_waiting_for_the_end() {
+        let url = one_response_server(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n",
+            vec![b'a'; 65536],
+            true,
+        )
+        .await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client.get(&url).send().await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_text_capped(response, 1024),
+        )
+        .await;
+        match result {
+            Ok(Ok((text, true))) => assert_eq!(text, "a".repeat(1024)),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_text_capped_reads_a_short_body_whole() {
+        let url = one_response_server(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 6\r\nconnection: close\r\n\r\n",
+            "héllo".as_bytes().to_vec(),
+            false,
+        )
+        .await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client.get(&url).send().await.unwrap();
+        let result = read_text_capped(response, 1024).await.unwrap();
+        assert_eq!(result, ("héllo".to_string(), false));
+    }
+
     #[tokio::test]
     async fn read_capped_keeps_a_body_under_the_cap() {
         let (response, _) =
