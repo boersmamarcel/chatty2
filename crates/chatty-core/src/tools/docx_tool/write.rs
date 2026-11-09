@@ -120,6 +120,24 @@ impl Tool for WriteDocxTool {
 
         let canonical = self.service.resolve_new_path(&args.path).await?;
 
+        if let Some((mode, pending)) = &self.write_approval {
+            let approved = request_write_approval(
+                pending,
+                mode,
+                WriteOperation::WriteFile {
+                    path: canonical.display().to_string(),
+                    is_overwrite: canonical.exists(),
+                    content_preview: format!(
+                        "Word document from {} bytes of markdown",
+                        args.content.len()
+                    ),
+                },
+            )
+            .await?;
+            if !approved {
+                return Err(anyhow::anyhow!("Write denied by user").into());
+            }
+        }
 
         // Ensure parent directory exists
         if let Some(parent) = canonical.parent() {
