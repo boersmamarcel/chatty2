@@ -19,8 +19,8 @@ fn normalize_path(path: &Path) -> PathBuf {
 /// bounds-checking.
 ///
 /// Path resolution rules:
-/// - `~` paths expand to the home directory and are **not** workspace-bounded (the
-///   user explicitly requested a path outside the workspace root).
+/// - `~/` paths expand to the home directory and are **not** workspace-bounded, but must
+///   stay inside the home directory; `~` alone is refused.
 /// - Absolute paths are normalized. When `workspace_dir` is configured they **must**
 ///   remain within the workspace.
 /// - Relative paths are resolved against `workspace_dir` (falling back to the home
@@ -34,9 +34,24 @@ pub(super) fn resolve_output_path(
 ) -> Result<PathBuf, String> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
 
-    // Home-relative: expand `~` and allow unrestricted (explicit user choice).
-    if path.starts_with("~/") || path == "~" {
-        return Ok(normalize_path(&home.join(&path[2..])));
+    // Home-relative: `~/…` may leave the workspace (an explicit user choice)
+    // but never the home directory (AGE-1087).
+    if path == "~" {
+        return Err(format!(
+            "Output path '{}' is the home directory, not a file",
+            path
+        ));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home_norm = normalize_path(&home);
+        let resolved = normalize_path(&home.join(rest));
+        if !resolved.starts_with(&home_norm) {
+            return Err(format!(
+                "Output path '{}' resolves outside the home directory",
+                path
+            ));
+        }
+        return Ok(resolved);
     }
 
     let p = Path::new(path);
@@ -173,5 +188,30 @@ mod tests {
         let resolved =
             resolve_output_path("/workspace/a/../b/report.pdf", Some("/workspace")).unwrap();
         assert_eq!(resolved, PathBuf::from("/workspace/b/report.pdf"));
+    }
+
+    #[test]
+    fn tilde_alone_is_refused_not_a_panic() {
+        for ws in [None, Some("/workspace")] {
+            let err = resolve_output_path("~", ws).unwrap_err();
+            assert!(err.contains("home directory"), "{err}");
+        }
+    }
+
+    #[test]
+    fn tilde_path_cannot_climb_out_of_home() {
+        for (path, ws) in [
+            ("~/../../etc/passwd", None),
+            ("~/../other-user/x", Some("/workspace")),
+        ] {
+            let err = resolve_output_path(path, ws).unwrap_err();
+            assert!(err.contains("outside the home directory"), "{err}");
+        }
+    }
+
+    #[test]
+    fn tilde_path_with_inner_dotdot_stays_in_home() {
+        let resolved = resolve_output_path("~/docs/../report.pdf", None).unwrap();
+        assert_eq!(resolved, dirs::home_dir().unwrap().join("report.pdf"));
     }
 }
