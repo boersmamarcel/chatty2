@@ -160,3 +160,41 @@ fn save_new_file_writes_a_dotfile_inside_the_dir() {
     let path = save_new_file(dir, ".bashrc", b"x").unwrap();
     assert_eq!(path, dir.join(".bashrc"));
 }
+
+#[test]
+fn prepare_download_dir_creates_a_missing_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("daytona_outputs");
+    prepare_download_dir(&dir).unwrap();
+    assert!(dir.is_dir());
+}
+
+#[test]
+fn prepare_download_dir_accepts_an_existing_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("daytona_outputs");
+    std::fs::create_dir(&dir).unwrap();
+    assert!(prepare_download_dir(&dir).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn prepare_download_dir_refuses_a_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let dir = tmp.path().join("daytona_outputs");
+    std::os::unix::fs::symlink(&elsewhere, &dir).unwrap();
+    let err = prepare_download_dir(&dir).unwrap_err();
+    assert!(err.to_string().contains("symlink"));
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+#[test]
+fn prepare_download_dir_refuses_a_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("daytona_outputs");
+    std::fs::write(&dir, b"x").unwrap();
+    let err = prepare_download_dir(&dir).unwrap_err();
+    assert!(err.to_string().contains("not a directory"));
+}

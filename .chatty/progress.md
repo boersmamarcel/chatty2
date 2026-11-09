@@ -1,0 +1,1 @@
+- 2026-11-09: AGE-1093 added prepare_download_dir (refuses symlink/non-dir), wired into download_generated_files, 4 tests.
