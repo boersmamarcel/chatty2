@@ -1326,6 +1326,7 @@ fn strip_html_tags(html: &str) -> String {
 /// MAX_PAGE_REDIRECTS of them here. Every URL, the first and each
 /// redirect target, must pass `allowed` before it is requested; `None` if
 /// one does not, on a transport error, or after too many hops (AGE-532).
+/// The final body is read at most to [`MAX_PAGE_BYTES`].
 async fn get_following_checked_redirects<F, Fut>(
     client: &reqwest::Client,
     url: &str,
@@ -1359,7 +1360,11 @@ where
                 .to_string();
             continue;
         }
-        let body = response.text().await.ok()?;
+        // At most MAX_PAGE_BYTES of the body is read; the rest is never
+        // buffered (AGE-548, AGE-1095).
+        let (body, _cut) = crate::tools::fetch_tool::read_text_capped(response, MAX_PAGE_BYTES)
+            .await
+            .ok()?;
         return Some((current, RawResponse { status, body }));
     }
     None
@@ -2042,5 +2047,40 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Ok(None)));
+    }
+
+    /// AGE-1095: a page that never ends is read only up to MAX_PAGE_BYTES,
+    /// and the read returns without waiting for the server to close.
+    #[tokio::test]
+    async fn page_fetch_stops_reading_at_the_page_cap() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            let _ = socket.write_all(&vec![b'a'; MAX_PAGE_BYTES + 4096]).await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            get_following_checked_redirects(
+                &crate::services::http_client::no_redirect_client(5),
+                &format!("http://{addr}/page"),
+                "test",
+                |_| async { true },
+            ),
+        )
+        .await
+        .expect("the read does not wait for the server to close");
+        let (_, response) = result.expect("the page is read up to the cap");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.len(), MAX_PAGE_BYTES);
     }
 }
