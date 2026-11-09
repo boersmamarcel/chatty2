@@ -953,7 +953,7 @@ fn save_new_file(path: PathBuf, bytes: &[u8]) -> std::io::Result<PathBuf> {
         };
         match std::fs::OpenOptions::new()
             .write(true)
-            .create(true).truncate(true)
+            .create_new(true)
             .open(&candidate)
         {
             Ok(mut file) => {
