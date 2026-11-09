@@ -31,6 +31,8 @@ fn truncate_text(text: &str, max_len: usize) -> String {
 }
 
 /// Clean and validate generated title
+///
+/// Titles longer than 100 characters keep the first 97 and get `...`.
 fn clean_title(raw_title: &str) -> String {
     let cleaned = raw_title
         .trim()
@@ -41,8 +43,9 @@ fn clean_title(raw_title: &str) -> String {
         .unwrap_or("New Chat")
         .to_string();
 
-    if cleaned.len() > 100 {
-        format!("{}...", &cleaned[..97])
+    if cleaned.chars().count() > 100 {
+        let head: String = cleaned.chars().take(97).collect();
+        format!("{head}...")
     } else if cleaned.is_empty() {
         "New Chat".to_string()
     } else {
@@ -129,4 +132,31 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
     debug!(cleaned_title = %title, "Title cleaned");
 
     Ok(title)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_title;
+
+    #[test]
+    fn a_long_title_with_multibyte_characters_is_cut_by_characters() {
+        assert_eq!(clean_title(&"é".repeat(120)), "é".repeat(97) + "...");
+    }
+
+    #[test]
+    fn a_title_of_60_multibyte_characters_is_kept_whole() {
+        assert_eq!(clean_title(&"é".repeat(60)), "é".repeat(60));
+    }
+
+    #[test]
+    fn an_ascii_title_over_100_characters_keeps_97_and_an_ellipsis() {
+        assert_eq!(clean_title(&"a".repeat(150)), "a".repeat(97) + "...");
+    }
+
+    #[test]
+    fn quotes_extra_lines_and_blanks() {
+        assert_eq!(clean_title("\"Trip to Paris\""), "Trip to Paris");
+        assert_eq!(clean_title("Trip to Paris\nsecond line"), "Trip to Paris");
+        assert_eq!(clean_title("   "), "New Chat");
+    }
 }
