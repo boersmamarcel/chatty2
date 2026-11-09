@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-core"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1850,6 +1850,7 @@ dependencies = [
  "docx-rs",
  "duckdb",
  "ed25519-dalek 3.0.0",
+ "encoding_rs",
  "flate2",
  "futures",
  "glob",
@@ -1905,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-fabric"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "async-trait",
  "futures",
@@ -1922,14 +1923,14 @@ dependencies = [
 
 [[package]]
 name = "chatty-flow"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "chatty-gpui"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1974,7 +1975,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-module-registry"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "anyhow",
  "chatty-wasm-runtime",
@@ -1991,7 +1992,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-optimize"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "csv",
  "rand 0.8.8",
@@ -2005,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-playbook"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "serde",
  "serde_json",
@@ -2014,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-protocol-gateway"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2046,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-terminal"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "alacritty_terminal",
  "nix 0.31.3",
@@ -2056,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-trace"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "serde_json",
  "thiserror 2.0.20",
@@ -2064,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-tui"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -2097,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "chatty-wasm-runtime"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5558,7 +5559,7 @@ dependencies = [
 
 [[package]]
 name = "hive-client"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "base64",
  "bytes",
@@ -5583,7 +5584,7 @@ dependencies = [
 
 [[package]]
 name = "hive-e2e"
-version = "0.7.50"
+version = "0.7.51"
 dependencies = [
  "axum",
  "base64",
