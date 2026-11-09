@@ -89,6 +89,15 @@ pub fn cleanup_thumbnails() {
     }
 }
 
+/// Serializes tests that use the process-global thumbnail directory:
+/// `cleanup_thumbnails()` deletes it under any other test using it
+/// (AGE-176, AGE-509).
+#[cfg(test)]
+pub(crate) fn thumbnail_dir_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Render PDF first page to a temporary thumbnail PNG file
 pub fn render_pdf_thumbnail(pdf_path: &Path) -> Result<PathBuf, PdfThumbnailError> {
     let pdfium = create_pdfium()
@@ -218,17 +227,16 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     /// Every test here goes through the process-global `THUMBNAIL_DIR` session
     /// directory (`super::THUMBNAIL_DIR`), and most end with `cleanup_thumbnails()`,
     /// which deletes and resets it: run in parallel, one test's cleanup removes the
     /// PNG another has just rendered (AGE-176). Serialize the module. pdfium itself
     /// needs no extra care here; `PdfiumHandle` already serializes it.
-    static SERIAL: Mutex<()> = Mutex::new(());
-
+    /// `pptx_render`'s tests take the same lock (AGE-509).
     fn serialized() -> MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+        super::thumbnail_dir_test_lock()
     }
 
     /// Helper to create a minimal valid PDF file for testing
