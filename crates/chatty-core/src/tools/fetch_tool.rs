@@ -39,6 +39,10 @@ const MAX_BINARY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Most of a non-success response's body that is read (AGE-548).
 const MAX_ERROR_BODY_BYTES: usize = 256 * 1024;
+/// Most of a page's text body that is read (AGE-1094).
+const MAX_TEXT_BYTES: usize = 5 * 1024 * 1024;
+/// Note added to a page whose body went on past [`MAX_TEXT_BYTES`].
+const TEXT_CUT_NOTE: &str = "Only the first 5 MiB of this page were read.";
 
 /// Request timeout in seconds
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -650,9 +654,19 @@ impl FetchTool {
         }
 
         // Read body text
-        let body = response.text().await.map_err(|e| {
-            ToolError::OperationFailed(format!("Failed to read response body: {}", e))
-        })?;
+        let (body, cut) = read_text_capped(response, MAX_TEXT_BYTES)
+            .await
+            .map_err(|e| {
+                ToolError::OperationFailed(format!("Failed to read response body: {}", e))
+            })?;
+        let note = if cut {
+            Some(match note {
+                Some(n) => format!("{n} {TEXT_CUT_NOTE}"),
+                None => TEXT_CUT_NOTE.to_string(),
+            })
+        } else {
+            note
+        };
 
         // Convert HTML to readable text if appropriate. Relative links resolve
         // against the URL the body actually came from, i.e. after redirects.
@@ -815,6 +829,40 @@ async fn read_capped(
         body.extend_from_slice(&chunk);
     }
     Ok((body, false))
+}
+
+/// Decode `bytes` in the charset `content_type` names (`charset=`), or
+/// UTF-8 when it names none or one encoding_rs does not know: what
+/// reqwest's `Response::text()` does (AGE-1094).
+fn decode_text(bytes: &[u8], content_type: &str) -> String {
+    let encoding = content_type
+        .split(';')
+        .skip(1)
+        .filter_map(|param| param.split_once('='))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("charset"))
+        .and_then(|(_, value)| {
+            encoding_rs::Encoding::for_label(value.trim().trim_matches('"').as_bytes())
+        })
+        .unwrap_or(encoding_rs::UTF_8);
+    let (text, _, _) = encoding.decode(bytes);
+    text.into_owned()
+}
+
+/// Read at most `cap` bytes of a text body and decode them in the
+/// response's charset. Returns the text and whether the body went on past
+/// `cap`; the rest is not read (AGE-1094).
+pub(crate) async fn read_text_capped(
+    response: reqwest::Response,
+    cap: usize,
+) -> Result<(String, bool), reqwest::Error> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let (bytes, cut) = read_capped(response, cap).await?;
+    Ok((decode_text(&bytes, &content_type), cut))
 }
 
 /// Check if a content type indicates binary content that should be saved to disk.
@@ -3075,6 +3123,76 @@ mod tests {
         let (body, cut) = read_capped(response, 1024).await.unwrap();
         assert_eq!(body.len(), 1024);
         assert!(cut);
+    }
+
+    /// Serve one canned response (`head` then `body`) on a local port.
+    async fn one_response_server(head: &'static str, body: Vec<u8>, hold_open: bool) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&body).await;
+            if hold_open {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+        format!("http://{addr}/page")
+    }
+
+    #[test]
+    fn decode_text_follows_the_declared_charset() {
+        assert_eq!(
+            decode_text(&[b'c', b'a', b'f', 0xE9], "text/html; charset=ISO-8859-1"),
+            "café"
+        );
+        assert_eq!(decode_text("café".as_bytes(), "text/html"), "café");
+        assert_eq!(
+            decode_text("café".as_bytes(), "text/plain; charset=\"UTF-8\""),
+            "café"
+        );
+        assert_eq!(
+            decode_text(b"plain", "text/html; charset=no-such-charset"),
+            "plain"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_text_capped_stops_at_the_cap_without_waiting_for_the_end() {
+        let url = one_response_server(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\nconnection: close\r\n\r\n",
+            vec![b'a'; 65536],
+            true,
+        )
+        .await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client.get(&url).send().await.unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            read_text_capped(response, 1024),
+        )
+        .await;
+        match result {
+            Ok(Ok((text, true))) => assert_eq!(text, "a".repeat(1024)),
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_text_capped_reads_a_short_body_whole() {
+        let url = one_response_server(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: 6\r\nconnection: close\r\n\r\n",
+            "héllo".as_bytes().to_vec(),
+            false,
+        )
+        .await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client.get(&url).send().await.unwrap();
+        let result = read_text_capped(response, 1024).await.unwrap();
+        assert_eq!(result, ("héllo".to_string(), false));
     }
 
     #[tokio::test]
