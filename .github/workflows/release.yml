@@ -37,6 +37,11 @@ env:
   CARGO_TERM_COLOR: always
   APP_NAME: chatty
 
+# Least privilege: every job only reads. upload-assets raises itself to
+# contents: write to attach the release files.
+permissions:
+  contents: read
+
 # Caching policy: restore-only. Release workflows must not write default-branch
 # caches (CodeQL cache-poisoning). Warm caches come from CI on main
 # (ci.yml `warm-release-cache`, key from scripts/release-cache-key.sh).
