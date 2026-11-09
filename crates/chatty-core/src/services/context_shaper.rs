@@ -55,8 +55,9 @@
 //! | 0 | Terminal context | Stub every `<terminal_context>` snapshot but the newest (AGE-587) |
 //! | 1 | Cap | Stub every tool result over `tool_result_cap_bytes` outside the tail |
 //! | 2 | Compact | Replace every tool result outside the tail with a one-liner |
-//! | 3 | Snip | Keep the first `keep_head` and last `keep_tail` messages, drop the middle |
+//! | 3 | Snip | Keep the first `keep_head` and last `keep_tail` messages and the latest user message, drop the rest |
 //! | 4 | Cap the tail | Stub, then one-line, tool results inside the tail, oldest first, never the last message |
+//! | 5 | Trim | Drop the kept tail's messages too, oldest first and a whole round-trip at a time, never the latest user message or the last message |
 //!
 //! Stage 3's cut steps off a tool round-trip before it fires: the kept tail
 //! starts no later than the assistant message issuing the calls it answers,
@@ -65,8 +66,18 @@
 //! and since the guard runs inside a live tool loop that is the cut's usual
 //! shape, not an edge case (AGE-512).
 //!
-//! A history that is still over budget after stage 4 is sent as is: without
-//! summarising there is nothing left to take.
+//! Stage 5 is what fits a new turn of a long conversation (AGE-994): at
+//! turn start the history is every earlier turn, and its bulk is assistant
+//! text — replies, reasoning, the code a tool call carries — which no stage
+//! before it shrinks. The latest user message is kept by stages 3 and 5
+//! wherever it is: mid-run it is what the run is answering, and the head
+//! keeps the task's first message.
+//!
+//! A history still over budget after stage 5 — the head, the latest user
+//! message and the last message alone do not fit — is sent as is, unless
+//! the request then counts more than the model's configured window: that
+//! is a certain refusal, and the hook stops the run with an error saying
+//! so ([`ContextShaper::window_overflow`]) instead of sending it.
 //!
 //! # The one result that can never fit
 //!
@@ -303,6 +314,8 @@ pub enum ContextShaperStage {
     Compact,
     Snip,
     CapTail,
+    /// Messages of the kept tail dropped, oldest round-trip first (AGE-994).
+    Trim,
 }
 
 /// Settings that control the shaping pipeline.
@@ -809,12 +822,7 @@ impl ContextShaper {
     /// base; `None` without a configured window.
     fn reply_room_left(&self, history: &[Message], prompt: &Message) -> Option<usize> {
         let window = self.inner.context_window?;
-        let counter = &self.inner.counter;
-        let request: usize = history
-            .iter()
-            .chain(std::iter::once(prompt))
-            .map(|m| counter.count_message(m))
-            .sum();
+        let request = self.request_tokens(history, prompt);
         let base = self.inner.base_tokens.load(Ordering::Relaxed);
         // The window headroom, or the margin on the counted input when that
         // is more (AGE-985): the input is undercounted by a share of itself.
@@ -827,6 +835,39 @@ impl ContextShaper {
                 .saturating_sub(base)
                 .saturating_sub(request),
         )
+    }
+
+    /// `history` and `prompt` in tokens: a request's messages.
+    fn request_tokens(&self, history: &[Message], prompt: &Message) -> usize {
+        let counter = &self.inner.counter;
+        history
+            .iter()
+            .chain(std::iter::once(prompt))
+            .map(|m| counter.count_message(m))
+            .sum()
+    }
+
+    /// Why a request carrying `history` (as shaped) and `prompt` cannot be
+    /// sent: the history is what takes it over the model's configured
+    /// window, so the provider would refuse it whatever the reply (AGE-994).
+    /// `None` when it can go; when the model has no configured window (the
+    /// assumed one may be far below a hosted model's real one); and when
+    /// the base and the prompt alone fill the window, which no shaping of
+    /// the history changes and the cut-off ladder reports (AGE-967).
+    pub fn window_overflow(&self, history: &[Message], prompt: &Message) -> Option<String> {
+        let window = self.inner.context_window?;
+        let base = self.inner.base_tokens.load(Ordering::Relaxed);
+        let fixed = base + self.inner.counter.count_message(prompt);
+        let tokens = base + self.request_tokens(history, prompt);
+        (fixed <= window && tokens > window).then(|| {
+            format!(
+                "the conversation does not fit the model's context window of {window} tokens: \
+                 shaped as far as it goes — the first message, the latest user message, the \
+                 last message and the new prompt kept — the request still counts {tokens} \
+                 tokens, {base} of them the system prompt and tool schemas. Start a new \
+                 conversation or send a shorter message."
+            )
+        })
     }
 
     /// Whether this agent's latest request left less room for the reply
@@ -1037,27 +1078,32 @@ impl ContextShaper {
 
         // Stage 3: drop the middle. Both ends of the cut step off a tool
         // round-trip first, so neither half of one is ever dropped without
-        // the other (AGE-512).
+        // the other (AGE-512). The latest user message stays, right after
+        // the marker: mid-run it is what the run is answering (AGE-994).
+        let mut snip: Option<Snip> = None;
         if !fits(&counts) && len > settings.keep_head + settings.keep_tail + 1 {
             let head = round_trip_safe_head(&messages, settings.keep_head);
             let snip_end = round_trip_safe_tail_start(&messages, head, tail_start);
-            if snip_end > head {
+            let kept_user = latest_user_message(&messages).filter(|i| (head..snip_end).contains(i));
+            if snip_end > head + usize::from(kept_user.is_some()) {
                 stage = ContextShaperStage::Snip;
-                let dropped = snip_end - head;
-                let marker = Message::User {
-                    content: vec![UserContent::Text(Text::new(format!(
-                        "[CONTEXT SHAPER: {dropped} messages snipped to reduce context size]"
-                    )))],
-                };
+                let dropped = snip_end - head - usize::from(kept_user.is_some());
+                let marker = snip_marker(dropped);
                 let marker_tokens = counter.count_message(&marker);
                 let tail = messages.split_off(snip_end);
                 let tail_counts = counts.split_off(snip_end);
+                let kept_user = kept_user.map(|i| (messages[i].clone(), counts[i]));
                 messages.truncate(head);
                 counts.truncate(head);
                 messages.push(marker);
                 counts.push(marker_tokens);
+                if let Some((message, tokens)) = kept_user {
+                    messages.push(message);
+                    counts.push(tokens);
+                }
                 messages.extend(tail);
                 counts.extend(tail_counts);
+                snip = Some(Snip { at: head, dropped });
             }
         }
 
@@ -1083,12 +1129,56 @@ impl ContextShaper {
             }
         }
 
+        // Stage 5: drop the kept tail's messages too, oldest first (AGE-994).
+        // What is left over budget here is text no stage shrinks — earlier
+        // turns' replies, the code a tool call carries — and at turn start
+        // that is most of a long conversation. A call goes with the results
+        // answering it, so no round-trip is split; the latest user message
+        // and the last message stay.
+        if !fits(&counts) {
+            let (at, mut dropped) = match snip {
+                Some(Snip { at, dropped }) => (at, dropped),
+                None => {
+                    let at =
+                        round_trip_safe_head(&messages, settings.keep_head.min(messages.len()));
+                    let marker = snip_marker(0);
+                    counts.insert(at, counter.count_message(&marker));
+                    messages.insert(at, marker);
+                    (at, 0)
+                }
+            };
+            let snipped = dropped;
+            let mut protected = latest_user_message(&messages).filter(|i| *i > at);
+            let mut i = at + 1;
+            while !fits(&counts) && i + 1 < messages.len() {
+                if protected == Some(i) {
+                    i += 1;
+                    continue;
+                }
+                let end = round_trip_end(&messages, i);
+                if end >= messages.len() {
+                    break;
+                }
+                messages.drain(i..end);
+                counts.drain(i..end);
+                dropped += end - i;
+                protected = protected.map(|p| if p > i { p - (end - i) } else { p });
+            }
+            if dropped > snipped {
+                stage = ContextShaperStage::Trim;
+                messages[at] = snip_marker(dropped);
+                counts[at] = counter.count_message(&messages[at]);
+            } else if snip.is_none() {
+                messages.remove(at);
+                counts.remove(at);
+            }
+        }
+
         let tokens_after = counts.iter().sum();
         if tokens_after > budget {
             warn!(
                 tokens = tokens_after,
-                budget,
-                "context shaper: history is still over budget after every stage; sending as is"
+                budget, "context shaper: history is still over budget after every stage"
             );
         }
         Some(ShapedContext {
@@ -1117,6 +1207,10 @@ impl AgentHook for ContextShaper {
             .prepare_request_reserving(event.history, event.prompt, event.turn, extra_reserve)
             .await;
         let sent = shaped.as_deref().unwrap_or(event.history);
+        if let Some(reason) = self.window_overflow(sent, event.prompt) {
+            warn!(turn = event.turn, %reason, "context shaper: request over the window; not sent");
+            return CompletionCallAction::stop(reason);
+        }
         let cap = self.clamped_output_cap(sent, event.prompt);
         let exhausted = self
             .reply_room_left(sent, event.prompt)
@@ -1202,6 +1296,59 @@ pub(crate) fn omitted_marker(omitted: usize) -> String {
          smaller part: read_file with start_line/end_line, or grep, head, tail or \
          sed -n in the shell …]\n"
     )
+}
+
+// ── Snipping ──────────────────────────────────────────────────────────────────
+
+/// Where the snip marker stands in a shaped history, and how many messages
+/// it stands for.
+#[derive(Clone, Copy)]
+struct Snip {
+    at: usize,
+    dropped: usize,
+}
+
+/// The one message standing where `dropped` messages were.
+fn snip_marker(dropped: usize) -> Message {
+    Message::User {
+        content: vec![UserContent::Text(Text::new(format!(
+            "[CONTEXT SHAPER: {dropped} messages snipped to reduce context size]"
+        )))],
+    }
+}
+
+/// The index of the newest user message that carries text and no tool
+/// result: what a person, or the run's own protocol, last asked.
+fn latest_user_message(messages: &[Message]) -> Option<usize> {
+    messages.iter().rposition(|message| {
+        let Message::User { content } = message else {
+            return false;
+        };
+        content
+            .iter()
+            .any(|item| matches!(item, UserContent::Text(_)))
+            && !content
+                .iter()
+                .any(|item| matches!(item, UserContent::ToolResult(_)))
+    })
+}
+
+/// The end of the round-trip starting at `start`: the message itself and,
+/// when it makes tool calls, the result messages right after it that
+/// answer them.
+fn round_trip_end(messages: &[Message], start: usize) -> usize {
+    let calls: HashSet<&ToolCallId> = call_ids(&messages[start]).collect();
+    let mut end = start + 1;
+    if calls.is_empty() {
+        return end;
+    }
+    while end < messages.len()
+        && result_ids(&messages[end]).next().is_some()
+        && result_ids(&messages[end]).all(|id| calls.contains(id))
+    {
+        end += 1;
+    }
+    end
 }
 
 // ── Round trips ───────────────────────────────────────────────────────────────
@@ -2029,6 +2176,284 @@ mod tests {
             overflows.record();
         }
         assert_eq!(shaper.history_budget(0), 6_000, "at most three tenths more");
+    }
+}
+
+/// AGE-994: a new turn on a long conversation. At turn start the history is
+/// every earlier turn, most of it assistant text no stage before the trim
+/// shrinks; the turn's first request must still fit the window, with the
+/// task's first message, the latest user message and every tool round-trip
+/// intact — or the run stops with an error saying why, before any request.
+#[cfg(test)]
+mod turn_start_tests {
+    use super::*;
+    use futures::StreamExt;
+    use rig_agent::agent::AgentBuilder;
+    use rig_agent::streaming::StreamingPrompt;
+    use rig_agent::test_utils::MockAddTool;
+    use rig_core::completion::message::AssistantContent;
+    use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+    const TASK: &str = "Answer the DABstep question: which merchant paid the most fees in 2023?";
+    const WINDOW: usize = 32_768;
+    /// The preamble plus the full native tool set's schemas on a 32k model.
+    const BASE: usize = 16_000;
+
+    fn counter() -> TokenCounter {
+        TokenCounter::for_model("test")
+    }
+
+    fn tokens(messages: &[Message]) -> usize {
+        let counter = counter();
+        messages.iter().map(|m| counter.count_message(m)).sum()
+    }
+
+    fn words(n: usize, tag: &str) -> String {
+        format!("{tag}: {}", vec!["analysis"; n].join(" "))
+    }
+
+    /// One turn: the user's message, four round-trips whose calls carry a
+    /// plan and code, and a long final answer.
+    fn turn(user: &str, n: usize) -> Vec<Message> {
+        let mut messages = vec![Message::user(user)];
+        for r in 0..4 {
+            let id = format!("t{n}-{r}");
+            messages.push(Message::Assistant {
+                id: None,
+                content: vec![
+                    AssistantContent::text(words(300, &format!("plan {id}"))),
+                    AssistantContent::tool_call(
+                        &id,
+                        "execute_code",
+                        serde_json::json!({ "code": words(1_500, "code") }),
+                    ),
+                ],
+            });
+            messages.push(Message::User {
+                content: vec![UserContent::ToolResult(ToolResult {
+                    call: ToolCallId::new(&id).unwrap(),
+                    provider: None,
+                    name: "execute_code".to_string(),
+                    content: vec![ToolResultContent::Text(Text::new("fee 12.34 EUR"))],
+                })],
+            });
+        }
+        messages.push(Message::assistant(words(3_000, &format!("answer {n}"))));
+        messages
+    }
+
+    /// The task's turn, then "continue" turns, to at least `target` tokens.
+    fn conversation(target: usize) -> Vec<Message> {
+        let mut history = turn(TASK, 0);
+        let mut n = 1;
+        while tokens(&history) < target {
+            history.extend(turn(&format!("continue, part {n}"), n));
+            n += 1;
+        }
+        history
+    }
+
+    fn shaper(window: Option<usize>) -> ContextShaper {
+        let shaper = ContextShaper::new(ContextShaperSettings::default(), counter(), window);
+        shaper.set_base_tokens(BASE);
+        shaper
+    }
+
+    fn text_of(message: &Message) -> Option<String> {
+        match message {
+            Message::User { content } => content.iter().find_map(|item| match item {
+                UserContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            }),
+            Message::Assistant { content, .. } => content.iter().find_map(|item| match item {
+                AssistantContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            }),
+            Message::System { content } => Some(content.clone()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_turn_on_a_long_conversation_is_shaped_to_fit() {
+        let history = conversation(40_000);
+        let prompt = Message::user("continue the task");
+        let shaper = shaper(Some(WINDOW));
+        let budget = shaper.history_budget(counter().count_message(&prompt));
+
+        let sent = shaper
+            .prepare_request(&history, &prompt, 0)
+            .await
+            .expect("a 40k history is shaped");
+
+        assert!(tokens(&sent) <= budget, "{} > {budget}", tokens(&sent));
+        assert_eq!(sent[0], history[0], "the task's first message is whole");
+        assert_eq!(sent.last(), history.last(), "the last message is whole");
+        let latest = latest_user_message(&history).unwrap();
+        assert!(
+            sent.contains(&history[latest]),
+            "the latest user message survives"
+        );
+        assert!(tool_round_trips_intact(&sent, &[]));
+        assert_eq!(shaper.window_overflow(&sent, &prompt), None);
+    }
+
+    /// Mid-run on the new turn: its user message is older than the kept
+    /// tail, and still sent.
+    #[tokio::test]
+    async fn the_latest_user_message_survives_the_snip() {
+        let mut history = conversation(40_000);
+        history.extend(turn("now check the 2022 fees too", 99));
+        history.pop();
+        let prompt = Message::user("go on");
+        let shaper = shaper(Some(WINDOW));
+
+        let sent = shaper
+            .prepare_request(&history, &prompt, 3)
+            .await
+            .expect("shaped");
+
+        assert!(
+            sent.iter()
+                .any(|m| text_of(m).as_deref() == Some("now check the 2022 fees too"))
+        );
+        assert_eq!(sent[0], history[0]);
+        assert!(tool_round_trips_intact(&sent, &[]));
+    }
+
+    #[tokio::test]
+    async fn a_short_conversation_is_sent_as_recorded() {
+        let history = turn(TASK, 0);
+        let shaper = shaper(Some(200_000));
+        assert_eq!(
+            shaper
+                .prepare_request(&history, &Message::user("continue"), 0)
+                .await,
+            None
+        );
+    }
+
+    /// The trim drops a call with its results, never one without the other.
+    #[test]
+    fn the_trim_drops_whole_round_trips() {
+        let history = conversation(40_000);
+        let shaper = shaper(Some(WINDOW));
+        let shaped = shaper.shape(&history, 10).expect("over budget");
+        assert_eq!(shaped.stage_applied, ContextShaperStage::Trim);
+        assert!(tool_round_trips_intact(&shaped.messages, &[]));
+        assert!(shaped.tokens_after <= shaper.history_budget(10));
+        let marker = shaped
+            .messages
+            .iter()
+            .filter_map(text_of)
+            .find(|t| t.starts_with("[CONTEXT SHAPER:"))
+            .expect("one marker");
+        let dropped: usize = marker
+            .trim_start_matches("[CONTEXT SHAPER: ")
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // Everything but the marker is a message of the history.
+        assert_eq!(dropped, history.len() - (shaped.messages.len() - 1));
+    }
+
+    /// A first message larger than the window: nothing shaping may take
+    /// makes it fit, so the request is not sent.
+    #[test]
+    fn a_history_that_cannot_fit_is_an_error_not_a_request() {
+        let history = vec![
+            Message::user(words(40_000, "task")),
+            Message::assistant("ok"),
+        ];
+        let prompt = Message::user("continue");
+        let configured = shaper(Some(WINDOW));
+        let shaped = configured.shape(&history, 3).expect("over budget");
+        let error = configured
+            .window_overflow(&shaped.messages, &prompt)
+            .expect("over the window");
+        assert!(error.contains("does not fit the model's context window of 32768 tokens"));
+
+        // Without a configured window it is the provider's call.
+        assert_eq!(
+            shaper(None).window_overflow(&shaped.messages, &prompt),
+            None
+        );
+    }
+
+    fn agent(model: &MockCompletionModel, shaper: &ContextShaper) -> rig_agent::agent::Agent {
+        AgentBuilder::new(model.clone())
+            .tool(MockAddTool)
+            .add_hook(shaper.clone())
+            .build()
+    }
+
+    /// The issue's case on rig's own loop: a 32k model and a 40k-token
+    /// earlier conversation. The turn's first request fits, carries the
+    /// task, and the turn completes.
+    #[tokio::test]
+    async fn the_first_request_of_a_new_turn_fits_and_the_turn_completes() {
+        let history = conversation(40_000);
+        let shaper = shaper(Some(WINDOW));
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]]);
+        let mut stream = agent(&model, &shaper)
+            .stream_prompt("continue the task")
+            .history(history.clone())
+            .max_turns(2)
+            .await;
+        while let Some(item) = stream.next().await {
+            item.expect("the turn completes");
+        }
+
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1);
+        let sent = &requests[0].chat_history;
+        assert!(
+            BASE + tokens(sent) <= WINDOW - WINDOW / 10 - RESPONSE_RESERVE,
+            "{} tokens sent",
+            BASE + tokens(sent)
+        );
+        assert_eq!(text_of(&sent[0]).as_deref(), Some(TASK));
+        assert_eq!(
+            text_of(sent.last().unwrap()).as_deref(),
+            Some("continue the task")
+        );
+        assert!(tool_round_trips_intact(sent, &[]));
+    }
+
+    /// One that cannot fit ends the run with that error, and the model is
+    /// never called.
+    #[tokio::test]
+    async fn a_request_that_cannot_fit_stops_the_run_before_the_model() {
+        let history = vec![
+            Message::user(words(40_000, "task")),
+            Message::assistant("ok"),
+        ];
+        let shaper = shaper(Some(WINDOW));
+        let model = MockCompletionModel::from_stream_turns([vec![
+            MockStreamEvent::text("done"),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]]);
+        let mut stream = agent(&model, &shaper)
+            .stream_prompt("continue")
+            .history(history)
+            .max_turns(2)
+            .await;
+        let mut error = None;
+        while let Some(item) = stream.next().await {
+            if let Err(e) = item {
+                error = Some(e.to_string());
+            }
+        }
+        let error = error.expect("the run ends with an error");
+        assert!(
+            error.contains("does not fit the model's context window"),
+            "{error}"
+        );
+        assert!(model.requests().is_empty(), "no request was sent");
     }
 }
 
