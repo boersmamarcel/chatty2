@@ -121,3 +121,42 @@ df.to_csv('/tmp/results.csv')
     assert!(paths.contains(&"population_chart.png".to_string()));
     assert!(paths.contains(&"/tmp/results.csv".to_string()));
 }
+
+#[test]
+fn download_dir_needs_a_workspace() {
+    assert_eq!(download_dir(None), None);
+    assert_eq!(
+        download_dir(Some("/w")),
+        Some(PathBuf::from("/w/daytona_outputs"))
+    );
+}
+
+#[test]
+fn numbered_name_keeps_the_extension() {
+    assert_eq!(numbered_name("data.csv", 1), "data-1.csv");
+    assert_eq!(numbered_name("chart.png", 2), "chart-2.png");
+    assert_eq!(numbered_name(".bashrc", 1), ".bashrc-1");
+}
+
+#[test]
+fn save_new_file_never_replaces_a_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("data.csv"), b"old").unwrap();
+
+    let first = save_new_file(dir, "data.csv", b"new").unwrap();
+    assert_eq!(first, dir.join("data-1.csv"));
+    assert_eq!(std::fs::read(dir.join("data.csv")).unwrap(), b"old");
+    assert_eq!(std::fs::read(&first).unwrap(), b"new");
+
+    let second = save_new_file(dir, "data.csv", b"newer").unwrap();
+    assert_eq!(second, dir.join("data-2.csv"));
+}
+
+#[test]
+fn save_new_file_writes_a_dotfile_inside_the_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let path = save_new_file(dir, ".bashrc", b"x").unwrap();
+    assert_eq!(path, dir.join(".bashrc"));
+}
