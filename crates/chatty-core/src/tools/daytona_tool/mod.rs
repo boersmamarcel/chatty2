@@ -51,6 +51,25 @@ fn save_new_file(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::Re
     Err(last_err.unwrap_or_else(|| std::io::ErrorKind::AlreadyExists.into()))
 }
 
+/// Make `dir` ready to download into: create it when it is missing, and
+/// refuse it when it is a symlink or not a directory, so a planted
+/// `daytona_outputs -> elsewhere` cannot redirect downloads (AGE-1093).
+fn prepare_download_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(std::io::Error::other(format!(
+            "{} is a symlink; refusing to download into it",
+            dir.display()
+        ))),
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(std::io::Error::other(format!(
+            "{} exists and is not a directory",
+            dir.display()
+        ))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir_all(dir),
+        Err(e) => Err(e),
+    }
+}
+
 use crate::models::message_types::ExecutionEngine;
 
 /// Base URL for the Daytona cloud API
@@ -781,8 +800,8 @@ impl DaytonaTool {
             return Vec::new();
         };
 
-        if let Err(e) = std::fs::create_dir_all(&output_dir) {
-            warn!(error = %e, dir = %output_dir.display(), "Failed to create output directory");
+        if let Err(e) = prepare_download_dir(&output_dir) {
+            warn!(error = %e, dir = %output_dir.display(), "Refusing or failing to prepare the download directory");
             return Vec::new();
         }
 
