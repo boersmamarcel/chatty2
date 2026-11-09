@@ -37,6 +37,9 @@ const MAX_CACHED_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum binary response size in bytes (10 MB)
 const MAX_BINARY_BYTES: usize = 10 * 1024 * 1024;
 
+/// Most of a non-success response's body that is read (AGE-548).
+const MAX_ERROR_BODY_BYTES: usize = 256 * 1024;
+
 /// Request timeout in seconds
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -615,9 +618,9 @@ impl FetchTool {
         info!(status = status, content_type = %content_type, "Received response");
 
         if !response.status().is_success() {
-            let body = response
-                .text()
+            let body = read_capped(response, MAX_ERROR_BODY_BYTES)
                 .await
+                .map(|(bytes, _)| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_else(|_| "(failed to read body)".to_string());
             let (content, truncated) = error_body_window(
                 &body,
@@ -732,15 +735,26 @@ impl FetchTool {
             )
         })?;
 
-        // Read binary body
-        let bytes = response.bytes().await.map_err(|e| {
+        // Refuse an oversized declared length before reading any body
+        if let Some(n) = response.content_length()
+            && n > MAX_BINARY_BYTES as u64
+        {
+            return Err(ToolError::OperationFailed(format!(
+                "Response too large: {} bytes (max {} bytes / {} MB)",
+                n,
+                MAX_BINARY_BYTES,
+                MAX_BINARY_BYTES / 1024 / 1024,
+            )));
+        }
+
+        // Read binary body, capped
+        let (bytes, cut) = read_capped(response, MAX_BINARY_BYTES).await.map_err(|e| {
             ToolError::OperationFailed(format!("Failed to read response body: {}", e))
         })?;
 
-        if bytes.len() > MAX_BINARY_BYTES {
+        if cut {
             return Err(ToolError::OperationFailed(format!(
-                "Response too large: {} bytes (max {} bytes / {} MB)",
-                bytes.len(),
+                "Response too large: more than {} bytes (max {} MB)",
                 MAX_BINARY_BYTES,
                 MAX_BINARY_BYTES / 1024 / 1024,
             )));
@@ -782,6 +796,25 @@ impl FetchTool {
             note: None,
         })
     }
+}
+
+/// Read at most `cap` bytes of `response`'s body, chunk by chunk, so an
+/// oversized body is never held in memory whole (AGE-548). Returns the
+/// bytes read and whether the body went on past `cap`; the rest is not read.
+async fn read_capped(
+    mut response: reqwest::Response,
+    cap: usize,
+) -> Result<(Vec<u8>, bool), reqwest::Error> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        let room = cap - body.len();
+        if chunk.len() > room {
+            body.extend_from_slice(&chunk[..room]);
+            return Ok((body, true));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, false))
 }
 
 /// Check if a content type indicates binary content that should be saved to disk.
@@ -3005,5 +3038,90 @@ mod tests {
             "Error should mention SSRF: {}",
             err_msg
         );
+    }
+
+    /// Serve one raw HTTP response (`head`, then `body_len` bytes of `a`) on a
+    /// loopback listener and return the client's `reqwest::Response`. The
+    /// server ignores write errors: the client may stop reading early. With
+    /// `hold`, the socket stays open afterwards instead of closing.
+    async fn raw_response(
+        head: &'static str,
+        body_len: usize,
+        hold: bool,
+    ) -> (reqwest::Response, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 16 * 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&vec![b'a'; body_len]).await;
+            if hold {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+        let response = reqwest::Client::new().get(&url).send().await.unwrap();
+        (response, url)
+    }
+
+    #[tokio::test]
+    async fn read_capped_stops_at_the_cap() {
+        let (response, _) =
+            raw_response("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n", 65536, false).await;
+        let (body, cut) = read_capped(response, 1024).await.unwrap();
+        assert_eq!(body.len(), 1024);
+        assert!(cut);
+    }
+
+    #[tokio::test]
+    async fn read_capped_keeps_a_body_under_the_cap() {
+        let (response, _) =
+            raw_response("HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n", 512, false).await;
+        let (body, cut) = read_capped(response, 1024).await.unwrap();
+        assert_eq!(body, vec![b'a'; 512]);
+        assert!(!cut);
+    }
+
+    #[tokio::test]
+    async fn binary_download_refuses_a_declared_oversize_body_without_reading_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = FetchTool::new(Some(tmp.path().to_path_buf()));
+        let (response, url) = raw_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: 10485761\r\n\r\n",
+            0,
+            true,
+        )
+        .await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tool.handle_binary_response(response, &url, 200, "application/octet-stream"),
+        )
+        .await
+        .expect("must refuse without waiting for the body");
+        let err = result.expect_err("oversize declared length must be refused");
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn binary_download_refuses_an_oversize_body_with_no_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = FetchTool::new(Some(tmp.path().to_path_buf()));
+        let (response, url) = raw_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\nconnection: close\r\n\r\n",
+            MAX_BINARY_BYTES + 1,
+            false,
+        )
+        .await;
+        let result = tool
+            .handle_binary_response(response, &url, 200, "application/octet-stream")
+            .await;
+        let err = result.expect_err("oversize body must be refused");
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 }
