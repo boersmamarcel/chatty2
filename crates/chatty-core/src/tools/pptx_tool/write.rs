@@ -14,7 +14,10 @@ use pptx_writer::units::{Emu, Inches, PlaceholderIndex, ShapeId};
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
+use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation};
 use crate::services::filesystem_service::FileSystemService;
+use crate::settings::models::execution_settings::ApprovalMode;
+use crate::tools::filesystem_write_tool::request_write_approval;
 
 use super::PptxToolError;
 
@@ -91,11 +94,27 @@ pub struct WritePptxOutput {
 #[derive(Clone)]
 pub struct WritePptxTool {
     service: Arc<FileSystemService>,
+    write_approval: Option<(ApprovalMode, PendingWriteApprovals)>,
 }
 
 impl WritePptxTool {
     pub fn new(service: Arc<FileSystemService>) -> Self {
-        Self { service }
+        Self {
+            service,
+            write_approval: None,
+        }
+    }
+
+    /// Ask for write approval under `mode` before every write (AGE-1096,
+    /// ADR-0023 § 2). The agent factory always sets this; `new` alone is for
+    /// callers that are not an agent (deck rendering, tests).
+    pub fn with_write_approval(
+        mut self,
+        mode: ApprovalMode,
+        pending: PendingWriteApprovals,
+    ) -> Self {
+        self.write_approval = Some((mode, pending));
+        self
     }
 }
 
@@ -245,6 +264,22 @@ impl Tool for WritePptxTool {
         }
 
         let canonical = self.service.resolve_new_path(&args.path).await?;
+
+        if let Some((mode, pending)) = &self.write_approval {
+            let approved = request_write_approval(
+                pending,
+                mode,
+                WriteOperation::WriteFile {
+                    path: canonical.display().to_string(),
+                    is_overwrite: canonical.exists(),
+                    content_preview: format!("PowerPoint deck with {} slide(s)", args.slides.len()),
+                },
+            )
+            .await?;
+            if !approved {
+                return Err(anyhow::anyhow!("Write denied by user").into());
+            }
+        }
         if let Some(parent) = canonical.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory '{}'", parent.display()))?;
