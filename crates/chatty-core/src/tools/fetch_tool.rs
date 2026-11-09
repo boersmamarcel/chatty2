@@ -39,6 +39,10 @@ const MAX_BINARY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Most of a non-success response's body that is read (AGE-548).
 const MAX_ERROR_BODY_BYTES: usize = 256 * 1024;
+/// Most of a page's text body that is read (AGE-1094).
+const MAX_TEXT_BYTES: usize = 5 * 1024 * 1024;
+/// Note added to a page whose body went on past [`MAX_TEXT_BYTES`].
+const TEXT_CUT_NOTE: &str = "Only the first 5 MiB of this page were read.";
 
 /// Request timeout in seconds
 const REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -650,9 +654,19 @@ impl FetchTool {
         }
 
         // Read body text
-        let body = response.text().await.map_err(|e| {
-            ToolError::OperationFailed(format!("Failed to read response body: {}", e))
-        })?;
+        let (body, cut) = read_text_capped(response, MAX_TEXT_BYTES)
+            .await
+            .map_err(|e| {
+                ToolError::OperationFailed(format!("Failed to read response body: {}", e))
+            })?;
+        let note = if cut {
+            Some(match note {
+                Some(n) => format!("{n} {TEXT_CUT_NOTE}"),
+                None => TEXT_CUT_NOTE.to_string(),
+            })
+        } else {
+            note
+        };
 
         // Convert HTML to readable text if appropriate. Relative links resolve
         // against the URL the body actually came from, i.e. after redirects.
@@ -815,6 +829,40 @@ async fn read_capped(
         body.extend_from_slice(&chunk);
     }
     Ok((body, false))
+}
+
+/// Decode `bytes` in the charset `content_type` names (`charset=`), or
+/// UTF-8 when it names none or one encoding_rs does not know: what
+/// reqwest's `Response::text()` does (AGE-1094).
+fn decode_text(bytes: &[u8], content_type: &str) -> String {
+    let encoding = content_type
+        .split(';')
+        .skip(1)
+        .filter_map(|param| param.split_once('='))
+        .find(|(name, _)| name.trim().eq_ignore_ascii_case("charset"))
+        .and_then(|(_, value)| {
+            encoding_rs::Encoding::for_label(value.trim().trim_matches('"').as_bytes())
+        })
+        .unwrap_or(encoding_rs::UTF_8);
+    let (text, _, _) = encoding.decode(bytes);
+    text.into_owned()
+}
+
+/// Read at most `cap` bytes of a text body and decode them in the
+/// response's charset. Returns the text and whether the body went on past
+/// `cap`; the rest is not read (AGE-1094).
+pub(crate) async fn read_text_capped(
+    response: reqwest::Response,
+    cap: usize,
+) -> Result<(String, bool), reqwest::Error> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let (bytes, cut) = read_capped(response, cap).await?;
+    Ok((decode_text(&bytes, &content_type), cut))
 }
 
 /// Check if a content type indicates binary content that should be saved to disk.

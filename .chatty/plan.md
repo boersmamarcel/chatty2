@@ -8,5 +8,5 @@
 - Only fetch_tool.rs, crates/chatty-core/Cargo.toml, Cargo.lock change (plus .chatty state files); Cargo.lock only gains "encoding_rs" in chatty-core's dependency list.
 
 ## Steps
-1. [ ] Code: encoding_rs dep, MAX_TEXT_BYTES/TEXT_CUT_NOTE, decode_text, read_text_capped, use in read_response.
+1. [x] (commit: code commit, see git log) Code: encoding_rs dep, MAX_TEXT_BYTES/TEXT_CUT_NOTE, decode_text, read_text_capped, use in read_response.
 2. [ ] Tests: decode_text, read_text_capped cap, read_text_capped short body; run checks.
