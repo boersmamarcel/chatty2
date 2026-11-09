@@ -1362,9 +1362,7 @@ where
         }
         // At most MAX_PAGE_BYTES of the body is read; the rest is never
         // buffered (AGE-548, AGE-1095).
-        let (body, _cut) = crate::tools::fetch_tool::read_text_capped(response, MAX_PAGE_BYTES)
-            .await
-            .ok()?;
+        let body = response.text().await.ok()?;
         return Some((current, RawResponse { status, body }));
     }
     None
