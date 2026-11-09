@@ -46,6 +46,7 @@ impl Tool for WriteDocxTool {
 
     fn description(&self) -> String {
         "Create a Word document (.docx) from simplified markdown content.\n\
+                         The path must end in .docx.\n\
                          Supports headings (#/##/###), paragraphs, bullet lists (- item), and tables.\n\
                          \n\
                          Content format:\n\
@@ -87,6 +88,17 @@ impl Tool for WriteDocxTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        let is_docx = std::path::Path::new(&args.path)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"));
+        if !is_docx {
+            return Err(anyhow::anyhow!(
+                "write_docx only writes .docx files; '{}' does not end in .docx",
+                args.path
+            )
+            .into());
+        }
+
         let canonical = self.service.resolve_new_path(&args.path).await?;
 
         // Ensure parent directory exists

@@ -89,4 +89,42 @@ mod tests {
             .await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn write_docx_refuses_a_non_docx_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let main_rs = tmp.path().join("main.rs");
+        std::fs::write(&main_rs, "fn main() {}").unwrap();
+
+        let tool = WriteDocxTool::new(service.clone());
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                WriteDocxArgs {
+                    path: main_rs.to_str().unwrap().to_string(),
+                    content: "# Hi".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains(".docx"));
+        assert_eq!(std::fs::read_to_string(&main_rs).unwrap(), "fn main() {}");
+
+        let upper = tmp.path().join("report.DOCX");
+        tool.call(
+            &mut ToolContext::new(),
+            WriteDocxArgs {
+                path: upper.to_str().unwrap().to_string(),
+                content: "# Hi".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(upper.exists());
+    }
 }
