@@ -1,1 +1,0 @@
-- 2026-11-09: Steps 1+2 done: clean_title counts chars; 4 tests added. fmt --check, clippy -D warnings, and 4 title_generator tests pass.
