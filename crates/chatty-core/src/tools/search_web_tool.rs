@@ -49,6 +49,9 @@ const PAGE_FETCH_BUDGET_SECS: u64 = 6;
 /// Page bodies above this are cut before extraction.
 const MAX_PAGE_BYTES: usize = 2_000_000;
 
+/// Redirect hops `page_text` follows (each one SSRF-checked) before giving up.
+const MAX_PAGE_REDIRECTS: usize = 5;
+
 /// Passages per page (the BM25 top ones) the cross-encoder judges.
 const RERANK_PASSAGES_PER_PAGE: usize = 3;
 
@@ -169,6 +172,8 @@ pub struct SearchWebTool {
     /// Client for public APIs (Wikipedia): not the browser-impersonating one
     /// used for scraping. Wikipedia requests also set `WIKIPEDIA_USER_AGENT`.
     api_client: reqwest::Client,
+    /// Client for result pages (page_text): never follows redirects itself; page_text follows them hop by hop behind the SSRF guard (AGE-532).
+    page_client: reqwest::Client,
     /// None means fallback mode (use DuckDuckGo lite HTML scraping)
     provider: Option<SearchProvider>,
     /// None means fallback mode (no API key configured)
@@ -215,6 +220,7 @@ impl SearchWebTool {
         let client = crate::services::http_client::default_client(SEARCH_TIMEOUT_SECS);
         Self {
             api_client: client.clone(),
+            page_client: crate::services::http_client::open_web_client(SEARCH_TIMEOUT_SECS),
             client,
             provider: Some(provider),
             api_key: Some(api_key),
@@ -231,6 +237,7 @@ impl SearchWebTool {
         Self {
             client,
             api_client: crate::services::http_client::default_client(SEARCH_TIMEOUT_SECS),
+            page_client: crate::services::http_client::open_web_client(SEARCH_TIMEOUT_SECS),
             provider: None,
             api_key: None,
             endpoint: None,
@@ -732,13 +739,19 @@ impl SearchWebTool {
                 .map(str::to_string);
         }
 
-        let url = result.url.clone();
-        let check = url.clone();
-        tokio::task::spawn_blocking(move || crate::services::ssrf_guard::check_public_host(&check))
-            .await
-            .ok()?
-            .ok()?;
-        let response = self.send("Page", self.client.get(&url)).await.ok()?;
+        let (final_url, response) = get_following_checked_redirects(
+            &self.page_client,
+            &result.url,
+            crate::services::http_client::BROWSER_USER_AGENT,
+            |hop| async move {
+                tokio::task::spawn_blocking(move || {
+                    crate::services::ssrf_guard::check_public_host(&hop).is_ok()
+                })
+                .await
+                .unwrap_or(false)
+            },
+        )
+        .await?;
         if !is_success(response.status) || response.body.starts_with("%PDF") {
             return None;
         }
@@ -750,7 +763,7 @@ impl SearchWebTool {
             }
             body.truncate(cut);
         }
-        let text = crate::tools::fetch_tool::html_to_text(&body, Some(&url), None);
+        let text = crate::tools::fetch_tool::html_to_text(&body, Some(&final_url), None);
         Some(crate::tools::passages::strip_link_targets(&text))
     }
 
@@ -1307,6 +1320,49 @@ fn strip_html_tags(html: &str) -> String {
         }
     }
     decode_html_entities(&result)
+}
+
+/// GET `url` with a client that does not follow redirects, following up to
+/// MAX_PAGE_REDIRECTS of them here. Every URL, the first and each
+/// redirect target, must pass `allowed` before it is requested; `None` if
+/// one does not, on a transport error, or after too many hops (AGE-532).
+async fn get_following_checked_redirects<F, Fut>(
+    client: &reqwest::Client,
+    url: &str,
+    user_agent: &str,
+    allowed: F,
+) -> Option<(String, RawResponse)>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let mut current = url.to_string();
+    for _ in 0..=MAX_PAGE_REDIRECTS {
+        if !allowed(current.clone()).await {
+            return None;
+        }
+        let response = client
+            .get(&current)
+            .header(reqwest::header::USER_AGENT, user_agent)
+            .send()
+            .await
+            .ok()?;
+        let status = response.status().as_u16();
+        if matches!(status, 301 | 302 | 303 | 307 | 308)
+            && let Some(location) = response.headers().get(reqwest::header::LOCATION)
+        {
+            let location = location.to_str().ok()?;
+            current = reqwest::Url::parse(&current)
+                .ok()?
+                .join(location)
+                .ok()?
+                .to_string();
+            continue;
+        }
+        let body = response.text().await.ok()?;
+        return Some((current, RawResponse { status, body }));
+    }
+    None
 }
 
 fn is_success(status: u16) -> bool {
@@ -1878,5 +1934,113 @@ mod tests {
         let results = parse_bing_results(html, 1);
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].url, "https://a.com");
+    }
+
+    /// Serve `responses` on loopback, one raw HTTP response per accepted
+    /// connection (`connection: close`); with `repeat` the last one is
+    /// served for every further connection.
+    async fn scripted_server(responses: Vec<String>, repeat: bool) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut served = 0;
+            loop {
+                let index = if repeat {
+                    served.min(responses.len() - 1)
+                } else if served < responses.len() {
+                    served
+                } else {
+                    break;
+                };
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = vec![0u8; 16384];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(responses[index].as_bytes()).await;
+                let _ = socket.shutdown().await;
+                served += 1;
+            }
+        });
+        format!("http://{addr}/start")
+    }
+
+    fn redirect_to(location: &str) -> String {
+        format!(
+            "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        )
+    }
+
+    #[tokio::test]
+    async fn page_fetch_refuses_a_redirect_to_a_refused_address() {
+        let server_url = scripted_server(
+            vec![redirect_to("http://169.254.169.254/latest/meta-data/")],
+            false,
+        )
+        .await;
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorder = asked.clone();
+        let result = get_following_checked_redirects(
+            &crate::services::http_client::no_redirect_client(5),
+            &server_url,
+            "test",
+            move |hop| {
+                let recorder = recorder.clone();
+                async move {
+                    recorder.lock().unwrap().push(hop.clone());
+                    !hop.contains("169.254.169.254")
+                }
+            },
+        )
+        .await;
+        assert!(result.is_none());
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec![
+                server_url,
+                "http://169.254.169.254/latest/meta-data/".to_string()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn page_fetch_follows_an_allowed_redirect() {
+        let server_url = scripted_server(
+            vec![
+                redirect_to("/next"),
+                "HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello"
+                    .to_string(),
+            ],
+            false,
+        )
+        .await;
+        let (final_url, response) = get_following_checked_redirects(
+            &crate::services::http_client::no_redirect_client(5),
+            &server_url,
+            "test",
+            |_| async { true },
+        )
+        .await
+        .expect("redirect is followed");
+        assert!(final_url.ends_with("/next"), "{final_url}");
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, "hello");
+    }
+
+    #[tokio::test]
+    async fn page_fetch_gives_up_after_too_many_redirects() {
+        let server_url = scripted_server(vec![redirect_to("/again")], true).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            get_following_checked_redirects(
+                &crate::services::http_client::no_redirect_client(5),
+                &server_url,
+                "test",
+                |_| async { true },
+            ),
+        )
+        .await;
+        assert!(matches!(result, Ok(None)));
     }
 }
