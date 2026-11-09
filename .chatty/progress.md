@@ -1,2 +1,0 @@
-- 2026-11-09: step 1 done; fetch_tool tests (79 pass), clippy, fmt clean; unique_path gone.
-- 2026-11-09: commit 233c0603 (tester-1 mutation check) accidentally changed .create_new(true) to .create(true).truncate(true) in fetch_tool.rs save_new_file; reverted by forward commit (git revert), crates/ identical to 13cfcee7 again.
