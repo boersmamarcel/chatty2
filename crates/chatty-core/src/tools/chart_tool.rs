@@ -349,11 +349,12 @@ mod tests {
     /// AGE-1114: a chart renders to PNG in memory. It needs no writable temp
     /// dir (a predictable name there could be raced or symlinked), and the PNG
     /// is the same as rendering the same SVG from a file.
-    #[cfg(feature = "mermaid")]
+    #[cfg(all(feature = "mermaid", unix))]
     #[test]
     fn a_chart_renders_to_png_without_a_temp_file() {
         use crate::services::chart_svg_renderer::{DEFAULT_CHART_COLORS, render_chart_svg};
         use crate::services::mermaid_renderer_service::MermaidRendererService;
+        use std::os::unix::fs::PermissionsExt;
 
         let spec = ChartSpec {
             chart_type: "bar".to_string(),
@@ -379,9 +380,7 @@ mod tests {
         // that renders in memory doesn't notice. CI runs tests on one thread
         // (`--test-threads=1`), so changing TMPDIR here is not raced.
         let readonly = tempfile::tempdir().unwrap();
-        let mut perms = std::fs::metadata(readonly.path()).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(readonly.path(), perms.clone()).unwrap();
+        std::fs::set_permissions(readonly.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
         let old_tmpdir = std::env::var_os("TMPDIR");
         // SAFETY: tests run single-threaded in CI; the value is restored below.
         unsafe { std::env::set_var("TMPDIR", readonly.path()) };
@@ -393,8 +392,7 @@ mod tests {
                 None => std::env::remove_var("TMPDIR"),
             }
         }
-        perms.set_readonly(false);
-        std::fs::set_permissions(readonly.path(), perms).unwrap();
+        std::fs::set_permissions(readonly.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let png = rendered.expect("the chart renders with no writable temp dir");
         assert!(png.starts_with(b"\x89PNG"), "PNG bytes");
 
