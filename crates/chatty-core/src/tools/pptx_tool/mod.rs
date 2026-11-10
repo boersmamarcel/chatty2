@@ -343,4 +343,82 @@ Second point
         .unwrap();
         assert!(upper.exists());
     }
+
+    #[tokio::test]
+    async fn write_pptx_asks_before_writing_under_always_ask() {
+        use std::time::Duration;
+
+        use crate::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
+        use crate::settings::models::execution_settings::ApprovalMode;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let target = tmp.path().join("deck.pptx");
+        let path = target.to_str().unwrap().to_string();
+
+        let mut store = WriteApprovalStore::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resolution_tx, _resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+        store.set_notifiers(tx, resolution_tx);
+        let tool = WritePptxTool::new(service)
+            .with_write_approval(ApprovalMode::AlwaysAsk, store.get_pending_approvals());
+
+        // Denied: the call fails and nothing is written.
+        let denied = {
+            let tool = tool.clone();
+            let path = path.clone();
+            tokio::spawn(async move {
+                tool.call(
+                    &mut ToolContext::new(),
+                    WritePptxArgs {
+                        path,
+                        slides: vec![PptxSlideSpec {
+                            title: Some("Title".to_string()),
+                            shapes: vec![],
+                        }],
+                    },
+                )
+                .await
+                .map(|_| ())
+            })
+        };
+        let asked = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the write is asked about")
+            .expect("notifier open");
+        assert!(store.resolve(&asked.id, WriteApprovalDecision::Denied));
+        assert!(denied.await.unwrap().is_err(), "a denied write fails");
+        assert!(!target.exists(), "a denied write writes nothing");
+
+        // Approved: the call succeeds and the file exists.
+        let approved = {
+            let tool = tool.clone();
+            let path = path.clone();
+            tokio::spawn(async move {
+                tool.call(
+                    &mut ToolContext::new(),
+                    WritePptxArgs {
+                        path,
+                        slides: vec![PptxSlideSpec {
+                            title: Some("Title".to_string()),
+                            shapes: vec![],
+                        }],
+                    },
+                )
+                .await
+                .map(|_| ())
+            })
+        };
+        let asked = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the second write is asked about")
+            .expect("notifier open");
+        assert!(store.resolve(&asked.id, WriteApprovalDecision::Approved));
+        approved.await.unwrap().unwrap();
+        assert!(target.exists(), "an approved write is written");
+    }
 }

@@ -645,8 +645,11 @@ impl AgentClient {
                     // DOCX write tool
                     #[cfg(feature = "docx")]
                     if write_tools.is_some() {
-                        tracing::info!(workspace = %workspace_dir, "DOCX write tool enabled");
-                        docx_write_tool = Some(WriteDocxTool::new(service.clone()));
+                        docx_write_tool = pending_write_approvals.as_ref().map(|approvals| {
+                            tracing::info!(workspace = %workspace_dir, "DOCX write tool enabled");
+                            WriteDocxTool::new(service.clone())
+                                .with_write_approval(write_approval_mode.clone(), approvals.clone())
+                        });
                     }
 
                     // PPTX read tool
@@ -659,8 +662,11 @@ impl AgentClient {
                     // PPTX write tool
                     #[cfg(feature = "pptx")]
                     if write_tools.is_some() {
-                        tracing::info!(workspace = %workspace_dir, "PPTX write tool enabled");
-                        pptx_write_tool = Some(WritePptxTool::new(service.clone()));
+                        pptx_write_tool = pending_write_approvals.as_ref().map(|approvals| {
+                            tracing::info!(workspace = %workspace_dir, "PPTX write tool enabled");
+                            WritePptxTool::new(service.clone())
+                                .with_write_approval(write_approval_mode.clone(), approvals.clone())
+                        });
                     }
 
                     // Data query tools
