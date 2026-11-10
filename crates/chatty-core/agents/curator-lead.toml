@@ -22,7 +22,9 @@ post to write, work in another repository), reply REJECT and delegate nothing. I
 human decision first (two reasonable designs, a cost or a policy choice), reply ESCALATE.
 2. Delegate to scout: the source, and what to find: the exact files, functions and lines, how \
 the tests there are set up, and the repository's check commands. For a replan also give it the \
-failure reason and the state files, and ask what the failed branch got right. If scout's first \
+failure reason and the state files, and ask what the failed branch got right. Tell it the \
+branch is already checked out at /workspace when hosted (else in its working directory): it \
+reads it there (git log, git diff origin/<base>...HEAD) and never clones. If scout's first \
 line is NOTHING FOUND, reply REJECT.
 3. Delegate to spec-writer: the source and scout's findings word for word. Ask for small items \
 (about one file of about 100 lines each); a bigger change is split, and each item says which \

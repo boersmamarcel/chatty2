@@ -1965,6 +1965,7 @@ cap_usd = 2.0
             "EXAMPLES: OK",
             "At most 1 fix round",
             "NOTHING FOUND, reply REJECT",
+            "already checked out at /workspace",
             "coding::issue_readiness",
             "ITEMS: <n>",
             "PARTIAL WORK: SOUND or PARTIAL WORK: UNSOUND: <why>",
@@ -2006,6 +2007,9 @@ cap_usd = 2.0
             "whether you ran it or only read the code",
             "Never edit, install, commit or check out",
             "NOTHING FOUND",
+            "already checked out at /workspace",
+            "Never clone",
+            "git branch -r names the base",
         ] {
             assert!(scout.contains(phrase), "{phrase:?} in {scout}");
         }
