@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use memvid_core::{Memvid, PutOptions, SearchRequest};
+use memvid_core::{DocMetadata, Memvid, PutOptions, SearchRequest};
 use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
@@ -559,7 +559,8 @@ fn handle_list_all(memvid: &mut Memvid, limit: usize) -> Result<Vec<MemoryHit>> 
         };
 
         // Prefer search_text (set explicitly by handle_remember), fall back to
-        // frame_text_by_id which runs the extraction pipeline on the blob.
+        // frame_text_by_id, which reads the stored text back from the frame
+        // (it does not run memvid's extraction pipeline).
         let text = if let Some(ref st) = frame.search_text {
             st.clone()
         } else {
@@ -587,24 +588,48 @@ fn handle_list_all(memvid: &mut Memvid, limit: usize) -> Result<Vec<MemoryHit>> 
     Ok(hits)
 }
 
-fn handle_remember(
-    memvid: &mut Memvid,
+/// Put options for a memory: the content is plain text and is stored as text,
+/// never run through memvid's extraction pipeline.
+///
+/// memvid's `put_internal` runs its extractor when
+/// `need_search_text || need_metadata || auto_tag`, and the extractor routes
+/// the bytes by content sniffing: text that starts with `%PDF` goes to lopdf,
+/// whose nested-array recursion (RUSTSEC-2026-0187) can overflow the stack and
+/// abort the process (AGE-1080). Each of the three inputs is turned off here:
+/// - `search_text` is the content itself (tantivy indexes it directly; the
+///   extractor could also produce empty text for short entries), so
+///   `need_search_text` is false for any content that is not blank;
+/// - `metadata` names the content `text/plain`, so `need_metadata` is false;
+/// - `auto_tag(false)`: memvid's derived keyword tags, labels and dates are
+///   not added (the caller's own `tags` still are).
+fn remember_put_options(
     content: &str,
     title: Option<&str>,
     tags: &[(String, String)],
-) -> Result<()> {
+) -> PutOptions {
     let mut builder = PutOptions::builder()
-        // Explicitly set search_text so tantivy indexes the content directly,
-        // bypassing the extraction pipeline which may silently produce empty text
-        // for short entries (< 2400 chars).
-        .search_text(content);
+        .search_text(content)
+        .metadata(DocMetadata {
+            mime: Some("text/plain".to_string()),
+            ..DocMetadata::default()
+        })
+        .auto_tag(false);
     if let Some(t) = title {
         builder = builder.title(t);
     }
     for (key, value) in tags {
         builder = builder.tag(key, value);
     }
-    let opts = builder.build();
+    builder.build()
+}
+
+fn handle_remember(
+    memvid: &mut Memvid,
+    content: &str,
+    title: Option<&str>,
+    tags: &[(String, String)],
+) -> Result<()> {
+    let opts = remember_put_options(content, title, tags);
 
     memvid
         .put_bytes_with_options(content.as_bytes(), opts)
@@ -627,14 +652,7 @@ fn handle_remember_with_embedding(
     title: Option<&str>,
     tags: &[(String, String)],
 ) -> Result<()> {
-    let mut builder = PutOptions::builder().search_text(content);
-    if let Some(t) = title {
-        builder = builder.title(t);
-    }
-    for (key, value) in tags {
-        builder = builder.tag(key, value);
-    }
-    let opts = builder.build();
+    let opts = remember_put_options(content, title, tags);
 
     memvid
         .put_with_embedding_and_options(content.as_bytes(), embedding, opts)
@@ -812,6 +830,66 @@ mod tests {
             hits.is_empty(),
             "BM25 cannot match 'fruits' to 'bananas' — needs vec feature for semantic search"
         );
+    }
+
+    /// A structurally valid PDF whose Catalog holds an array nested `depth`
+    /// levels deep. lopdf 0.39 parses nested arrays with unbounded recursion
+    /// (RUSTSEC-2026-0187), so handing this to `lopdf::Document::load_mem`
+    /// overflows the stack and aborts the process. The xref offsets are
+    /// computed so lopdf gets past its early structural checks and recurses.
+    fn crafted_nested_array_pdf(depth: usize) -> String {
+        let nested = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let mut pdf = String::from("%PDF-1.4\n");
+        let catalog_offset = pdf.len();
+        pdf.push_str(&format!(
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R /X {nested} >>\nendobj\n"
+        ));
+        let pages_offset = pdf.len();
+        pdf.push_str("2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+        let xref_offset = pdf.len();
+        pdf.push_str(&format!(
+            "xref\n0 3\n0000000000 65535 f \n{catalog_offset:010} 00000 n \n\
+             {pages_offset:010} 00000 n \ntrailer\n<< /Size 3 /Root 1 0 R >>\n\
+             startxref\n{xref_offset}\n%%EOF\n"
+        ));
+        pdf
+    }
+
+    /// AGE-1080: `remember` takes model-supplied text. Text that happens to be
+    /// a PDF must be stored as text, never handed to memvid's extractor (which
+    /// routes `%PDF` bytes to lopdf). If the extractor is reachable again this
+    /// test does not fail politely: lopdf overflows the stack and the test
+    /// process aborts with SIGABRT.
+    #[tokio::test]
+    async fn test_remember_crafted_pdf_does_not_reach_pdf_parser() {
+        let _guard = SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+
+        let pdf = crafted_nested_array_pdf(1_000);
+        assert!(pdf.starts_with("%PDF"));
+
+        svc.remember(&pdf, Some("crafted pdf"), &[]).await.unwrap();
+
+        // Stored verbatim as text and still findable by a word it contains.
+        let hits = svc.search("Catalog", None).await.unwrap();
+        assert!(!hits.is_empty(), "the PDF-shaped text should be stored");
+        assert!(hits[0].text.starts_with("%PDF"), "got: {}", hits[0].text);
+    }
+
+    /// Both remember paths (`handle_remember` and
+    /// `handle_remember_with_embedding`) build their options here. memvid runs
+    /// its extractor when `need_search_text || need_metadata || auto_tag`, so
+    /// all three must be off: `auto_tag(false)` alone is not enough.
+    #[test]
+    fn test_remember_put_options_keep_memvid_extractor_off() {
+        let opts = remember_put_options("%PDF-1.4", Some("t"), &[]);
+        assert!(!opts.auto_tag, "auto_tag would run the extractor");
+        assert!(
+            opts.metadata.is_some(),
+            "missing metadata would run the extractor"
+        );
+        assert_eq!(opts.search_text.as_deref(), Some("%PDF-1.4"));
     }
 
     #[tokio::test]
