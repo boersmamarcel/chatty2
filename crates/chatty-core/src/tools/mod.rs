@@ -318,7 +318,7 @@ mod gemini_compat_tests {
     #[tokio::test]
     async fn chart_tool_gemini_compat() {
         use crate::tools::chart_tool::CreateChartTool;
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         check_gemini_compat(rig_agent::tool::tool_definition(&tool));
     }
 

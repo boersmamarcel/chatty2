@@ -2,8 +2,13 @@
 use rig_agent::tool::tool_definition;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
+use crate::models::write_approval_store::PendingWriteApprovals;
+use crate::services::filesystem_service::FileSystemService;
+use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::ToolError;
+use crate::tools::path_utils::{approve_output_write, resolve_workspace_output, write_output_file};
 
 /// A single data point for bar, line, pie, donut, and area charts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -47,9 +52,9 @@ pub struct CreateChartArgs {
     pub inner_radius: Option<f32>,
     /// Angle gap between slices in radians (default: 0.03 for pie/donut)
     pub pad_angle: Option<f32>,
-    /// Optional absolute file path to save the chart as a PNG (e.g. "/home/user/charts/revenue.png").
+    /// Optional workspace-relative file path to save the chart as a PNG (e.g. "charts/revenue.png").
     /// If omitted the chart is only shown inline. Use this when you need to reference the image
-    /// later (e.g. in a Markdown report).
+    /// later (e.g. in a Markdown report). Needs filesystem writes (AGE-534).
     pub save_path: Option<String>,
 }
 
@@ -71,20 +76,42 @@ pub struct ChartSpec {
 
 #[derive(Clone)]
 pub struct CreateChartTool {
-    /// The configured workspace directory, used as base for relative save paths.
-    pub workspace_dir: Option<String>,
     /// Theme chart colors captured at agent creation time (hex strings, e.g. "#4e79a7").
     /// Used when saving charts to disk so the file matches the inline chart appearance.
     /// Falls back to `DEFAULT_CHART_COLORS` when not set.
     pub theme_colors: Option<[String; 5]>,
+    /// The workspace `save_path` writes into. `None` (filesystem writes off,
+    /// or no workspace) refuses `save_path`; the chart still shows inline.
+    save_service: Option<Arc<FileSystemService>>,
+    write_approval: Option<(ApprovalMode, PendingWriteApprovals)>,
 }
 
 impl CreateChartTool {
-    pub fn new(workspace_dir: Option<String>, theme_colors: Option<[String; 5]>) -> Self {
+    pub fn new(theme_colors: Option<[String; 5]>) -> Self {
         Self {
-            workspace_dir,
             theme_colors,
+            save_service: None,
+            write_approval: None,
         }
+    }
+
+    /// Let `save_path` write PNGs into `service`'s workspace (AGE-534). The
+    /// agent factory sets this only when filesystem writes are on, and
+    /// always together with [`with_write_approval`](Self::with_write_approval).
+    pub fn with_save_path(mut self, service: Arc<FileSystemService>) -> Self {
+        self.save_service = Some(service);
+        self
+    }
+
+    /// Ask for write approval under `mode` before every `save_path` write
+    /// (AGE-534, as AGE-1096 did for `write_docx`).
+    pub fn with_write_approval(
+        mut self,
+        mode: ApprovalMode,
+        pending: PendingWriteApprovals,
+    ) -> Self {
+        self.write_approval = Some((mode, pending));
+        self
     }
 }
 
@@ -242,65 +269,58 @@ impl Tool for CreateChartTool {
 
         // Save to disk if the caller requested it.
         if let Some(save_path) = args.save_path {
-            match save_chart_png(
-                &spec,
-                &save_path,
-                self.workspace_dir.as_deref(),
-                self.theme_colors.as_ref(),
-            ) {
-                Ok(resolved) => {
-                    return Ok(ChartSpec {
-                        saved_path: Some(resolved),
-                        ..spec
-                    });
-                }
-                Err(e) => {
-                    return Err(ToolError::OperationFailed(format!(
-                        "Chart created but failed to save PNG to '{save_path}': {e}"
-                    )));
-                }
+            let Some(service) = &self.save_service else {
+                return Err(ToolError::OperationFailed(format!(
+                    "Cannot save the chart to '{save_path}': filesystem writes are disabled \
+                     (or no workspace is set). Call create_chart again without save_path \
+                     to show the chart inline."
+                )));
+            };
+            let root = service.workspace_root();
+            let failed = |e: String| {
+                ToolError::OperationFailed(format!(
+                    "Chart created but failed to save PNG to '{save_path}': {e}"
+                ))
+            };
+            let resolved = resolve_workspace_output(root, &save_path).map_err(failed)?;
+            let png = render_chart_png(&spec, self.theme_colors.as_ref()).map_err(failed)?;
+            let approved = approve_output_write(
+                self.write_approval.as_ref(),
+                &resolved,
+                format!("PNG chart '{}', {} bytes", spec.chart_type, png.len()),
+            )
+            .await
+            .map_err(failed)?;
+            if !approved {
+                return Err(ToolError::OperationFailed(
+                    "Write denied by user".to_string(),
+                ));
             }
+            write_output_file(root, &resolved, &png).map_err(failed)?;
+            return Ok(ChartSpec {
+                saved_path: Some(resolved.to_string_lossy().into_owned()),
+                ..spec
+            });
         }
 
         Ok(spec)
     }
 }
 
-/// Render `spec` to a PNG file at `save_path`.
+/// Render `spec` to PNG bytes.
 ///
 /// Uses `theme_colors` when provided (captured at agent-creation time so the saved
 /// file matches the inline chart the user sees). Falls back to `DEFAULT_CHART_COLORS`
 /// when no theme is available.
-///
-/// Creates parent directories if they don't exist.
-/// Path resolution priority for relative paths:
-///   1. `workspace_dir` if set (the user's configured working directory)
-///   2. User's home directory as fallback
-///
-/// `~` is always expanded to the home directory.
-/// Returns the resolved absolute path on success.
-fn save_chart_png(
+fn render_chart_png(
     spec: &ChartSpec,
-    save_path: &str,
-    workspace_dir: Option<&str>,
     theme_colors: Option<&[String; 5]>,
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     use crate::services::chart_svg_renderer::{DEFAULT_CHART_COLORS, render_chart_svg};
 
     let fallback: [String; 5] = DEFAULT_CHART_COLORS.map(str::to_owned);
     let colors = theme_colors.unwrap_or(&fallback);
     let svg = render_chart_svg(spec, colors);
-
-    let resolved = super::path_utils::resolve_output_path(save_path, workspace_dir)?;
-    let path = resolved.as_path();
-
-    // Ensure parent directory exists
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Could not create directory '{}': {e}", parent.display()))?;
-    }
 
     // Write SVG to a temp file, then convert to PNG via resvg (mermaid feature)
     #[cfg(feature = "mermaid")]
@@ -317,18 +337,15 @@ fn save_chart_png(
         std::fs::write(&tmp_svg, &svg).map_err(|e| format!("Failed to write temp SVG: {e}"))?;
 
         let png_bytes = MermaidRendererService::render_svg_to_png(&tmp_svg)
-            .map_err(|e| format!("SVG→PNG render failed: {e}"))?;
+            .map_err(|e| format!("SVG→PNG render failed: {e}"));
 
         let _ = std::fs::remove_file(&tmp_svg);
 
-        std::fs::write(path, &png_bytes)
-            .map_err(|e| format!("Failed to write PNG to '{save_path}': {e}"))?;
-
-        Ok(path.to_string_lossy().into_owned())
+        png_bytes
     }
     #[cfg(not(feature = "mermaid"))]
     {
-        let _ = (svg, path);
+        let _ = svg;
         Err(
             "PNG chart export requires the `mermaid` feature (resvg). Rebuild with mermaid enabled."
                 .to_string(),
@@ -343,7 +360,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bar_chart() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -376,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_line_chart() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -400,7 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_series_line_chart() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -451,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_line_chart_requires_data_or_series() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -472,7 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pie_chart() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -502,7 +519,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_donut_chart() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -535,7 +552,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_area_chart() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -559,7 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_candlestick_chart() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -586,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_candlestick_requires_data() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -607,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_chart_type() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -631,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_empty_data() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let result = tool
             .call(
                 &mut ToolContext::new(),
@@ -650,9 +667,130 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn bar_with_save_path(save_path: &str) -> CreateChartArgs {
+        CreateChartArgs {
+            chart_type: "bar".to_string(),
+            title: Some("Sales".to_string()),
+            data: vec![ChartDataPoint {
+                label: "Jan".to_string(),
+                value: 45.0,
+            }],
+            series: None,
+            candlestick_data: None,
+            inner_radius: None,
+            pad_angle: None,
+            save_path: Some(save_path.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn save_path_writes_nothing_when_writes_are_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sales.png");
+        // No `with_save_path`: what the factory builds with writes off.
+        let tool = CreateChartTool::new(None);
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                bar_with_save_path(target.to_str().unwrap()),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("filesystem writes are disabled"),
+            "{err}"
+        );
+        assert!(!target.exists(), "nothing is written with writes off");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn save_path_outside_the_workspace_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = CreateChartTool::new(None).with_save_path(service);
+        for path in ["~", "~/../../x.png", "../x.png", "/etc/x.png"] {
+            let err = tool
+                .call(&mut ToolContext::new(), bar_with_save_path(path))
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("not allowed")
+                    || err.to_string().contains("outside the workspace"),
+                "{path}: {err}"
+            );
+        }
+    }
+
+    #[cfg(feature = "mermaid")]
+    #[tokio::test]
+    async fn save_path_asks_before_writing_under_always_ask() {
+        use std::time::Duration;
+
+        use crate::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("charts/sales.png");
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+
+        let mut store = WriteApprovalStore::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resolution_tx, _resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+        store.set_notifiers(tx, resolution_tx);
+        let tool = CreateChartTool::new(None)
+            .with_save_path(service)
+            .with_write_approval(ApprovalMode::AlwaysAsk, store.get_pending_approvals());
+        let spawn = |tool: CreateChartTool| {
+            tokio::spawn(async move {
+                tool.call(
+                    &mut ToolContext::new(),
+                    bar_with_save_path("charts/sales.png"),
+                )
+                .await
+            })
+        };
+
+        // Denied: the call fails and nothing is written.
+        let denied = spawn(tool.clone());
+        let asked = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the save is asked about")
+            .expect("notifier open");
+        assert!(
+            asked.command.starts_with("Create file:"),
+            "{}",
+            asked.command
+        );
+        assert!(store.resolve(&asked.id, WriteApprovalDecision::Denied));
+        assert!(denied.await.unwrap().is_err(), "a denied save fails");
+        assert!(!target.exists(), "a denied save writes nothing");
+
+        // Approved: the PNG is written and its path returned.
+        let approved = spawn(tool);
+        let asked = tokio::time::timeout(Duration::from_secs(30), rx.recv())
+            .await
+            .expect("the second save is asked about")
+            .expect("notifier open");
+        assert!(store.resolve(&asked.id, WriteApprovalDecision::Approved));
+        let spec = approved.await.unwrap().unwrap();
+        assert!(target.exists(), "an approved save is written");
+        assert_eq!(
+            spec.saved_path.as_deref(),
+            Some(std::fs::canonicalize(&target).unwrap().to_str().unwrap())
+        );
+    }
+
     #[tokio::test]
     async fn test_definition_metadata() {
-        let tool = CreateChartTool::new(None, None);
+        let tool = CreateChartTool::new(None);
         let def = tool_definition(&tool);
         assert_eq!(def.name, "create_chart");
         assert!(def.description.contains("bar"));
