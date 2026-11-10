@@ -82,6 +82,8 @@ The agent can run SQL over CSV, Parquet and JSON files in the workspace and desc
 
 Reading and querying never ask. Writing spreadsheets and other files follows your approval mode.
 
+Typeset PDFs (`compile_typst`) and charts saved to a file (`create_chart` with a save path) are written only inside the workspace, need filesystem writes turned on, and follow your approval mode too; a `~` path is refused. Without writes, a chart is still shown in the chat but is not saved.
+
 ### Web and the built-in browser
 
 With **Settings → Internet** on, the agent can search the web (Tavily or Brave if you add a key, a basic fallback otherwise) and fetch any public page as readable text. A rate-limited fetch is retried automatically, and a page that's blocked or gone is served from the Wayback Machine's closest archived copy instead, labelled with its capture date. The same page also holds optional cloud services — a hosted browser agent and a cloud code sandbox — which need their own API keys and stay off until you add one.
