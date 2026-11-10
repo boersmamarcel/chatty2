@@ -495,6 +495,14 @@ impl AgentClient {
         let mut pptx_write_tool: Option<WritePptxTool> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
+        // Where `create_chart`'s save_path and `compile_typst` may write,
+        // with the approval they ask under (AGE-534): set only when the
+        // filesystem write tools are, so it fails closed like they do.
+        let mut output_writes: Option<(
+            std::sync::Arc<FileSystemService>,
+            crate::settings::models::execution_settings::ApprovalMode,
+            crate::models::write_approval_store::PendingWriteApprovals,
+        )> = None;
         let (fs_read_tools, fs_write_tools) = match exec_settings
             .as_ref()
             .and_then(|s| s.workspace_dir.as_ref())
@@ -607,6 +615,16 @@ impl AgentClient {
                         tracing::info!(workspace = %workspace_dir, "Filesystem write tools disabled");
                         None
                     };
+
+                    if write_tools.is_some() {
+                        output_writes = pending_write_approvals.as_ref().map(|approvals| {
+                            (
+                                service.clone(),
+                                write_approval_mode.clone(),
+                                approvals.clone(),
+                            )
+                        });
+                    }
 
                     // Excel read tool
                     #[cfg(feature = "excel")]
@@ -1045,26 +1063,24 @@ impl AgentClient {
         )
         .with_team_skill(team_skill);
 
-        // Chart tool is always available
-        let chart_tool: Option<CreateChartTool> = Some(CreateChartTool::new(
-            exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
-            theme_colors,
-        ));
+        // Chart tool is always available (inline charts); its save_path
+        // writes only with filesystem writes on, asking first (AGE-534).
+        let chart_tool: Option<CreateChartTool> = Some(match &output_writes {
+            Some((service, mode, approvals)) => CreateChartTool::new(theme_colors)
+                .with_save_path(service.clone())
+                .with_write_approval(mode.clone(), approvals.clone()),
+            None => CreateChartTool::new(theme_colors),
+        });
 
-        // Typst compile tool
+        // Typst compile tool: writes a PDF, so only with filesystem writes
+        // on (a workspace and the approval store), asking first (AGE-534).
         #[cfg(feature = "math-render")]
-        let typst_tool: Option<CompileTypstTool> = if exec_settings
-            .as_ref()
-            .map(|s| s.filesystem_write_enabled)
-            .unwrap_or(false)
-        {
-            tracing::info!("Typst compile tool enabled");
-            Some(CompileTypstTool::new(
-                exec_settings.as_ref().and_then(|s| s.workspace_dir.clone()),
-            ))
-        } else {
-            None
-        };
+        let typst_tool: Option<CompileTypstTool> =
+            output_writes.as_ref().map(|(service, mode, approvals)| {
+                tracing::info!("Typst compile tool enabled");
+                CompileTypstTool::new(service.clone())
+                    .with_write_approval(mode.clone(), approvals.clone())
+            });
 
         // Code execution tool (Monty and optional Docker fallback)
         let execute_code_tool: Option<ExecuteCodeTool> = if exec_settings
@@ -1933,5 +1949,78 @@ mod tests {
         let without = tool_names_with(true, None).await;
         assert!(!without.contains(&terminal_read));
         assert!(!without.contains(&terminal_run));
+    }
+
+    /// Tool names an Ollama agent is built with when filesystem writes are
+    /// `writes_on` in a temp workspace, with or without a write-approval
+    /// store (AGE-534).
+    async fn tool_names_for_writes(writes_on: bool, with_store: bool) -> Vec<String> {
+        use super::{AgentBuildContext, AgentClient, AgentServices};
+        use crate::models::write_approval_store::WriteApprovalStore;
+        use crate::settings::models::execution_settings::ExecutionSettingsModel;
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+
+        let _ = crate::init_repositories();
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let ctx = AgentBuildContext {
+            pending_write_approvals: with_store
+                .then(|| WriteApprovalStore::new().get_pending_approvals()),
+            ..AgentBuildContext::from_services(AgentServices {
+                exec_settings: Some(ExecutionSettingsModel {
+                    workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
+                    filesystem_write_enabled: writes_on,
+                    fetch_enabled: false,
+                    ..ExecutionSettingsModel::default()
+                }),
+                ..AgentServices::default()
+            })
+        };
+        let built = AgentClient::from_model_config_with_tools(
+            &ModelConfig::new(
+                "m".to_string(),
+                "M".to_string(),
+                ProviderType::Ollama,
+                "llama3.2".to_string(),
+            ),
+            &ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+            ctx,
+        )
+        .await
+        .expect("agent builds without network access");
+        built
+            .client
+            .agent
+            .tool_definitions(None)
+            .await
+            .expect("tool definitions resolve")
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect()
+    }
+
+    /// AGE-534: `compile_typst` writes, so it is registered only with
+    /// filesystem writes on *and* a write-approval store to ask through
+    /// (fail closed, like `write_file`); `create_chart` is always there for
+    /// inline charts.
+    #[cfg(feature = "math-render")]
+    #[tokio::test]
+    async fn compile_typst_needs_writes_and_an_approval_store() {
+        let typst = "compile_typst".to_string();
+        let chart = "create_chart".to_string();
+
+        let on = tool_names_for_writes(true, true).await;
+        assert!(on.contains(&typst), "{on:?}");
+        assert!(on.contains(&"write_file".to_string()), "{on:?}");
+        assert!(on.contains(&chart));
+
+        let off = tool_names_for_writes(false, true).await;
+        assert!(!off.contains(&typst), "{off:?}");
+        assert!(off.contains(&chart), "{off:?}");
+
+        let no_store = tool_names_for_writes(true, false).await;
+        assert!(!no_store.contains(&typst), "{no_store:?}");
+        assert!(!no_store.contains(&"write_file".to_string()));
+        assert!(no_store.contains(&chart));
     }
 }

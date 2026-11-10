@@ -1,217 +1,327 @@
-use std::path::{Path, PathBuf};
+//! Output paths for tools that render a file into the workspace
+//! (`create_chart`'s `save_path`, `compile_typst`'s `output_path`).
+//!
+//! Both write only inside the workspace (AGE-534): no `~` escape hatch, no
+//! absolute path outside the workspace root, no write through a symlink, and
+//! the write is asked about (`request_write_approval`) like every other
+//! file write.
+
+use std::path::{Component, Path, PathBuf};
+
+use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation};
+use crate::settings::models::execution_settings::ApprovalMode;
+use crate::tools::filesystem_write_tool::request_write_approval;
 
 /// Normalize a path by resolving `.` and `..` components without filesystem access.
 fn normalize_path(path: &Path) -> PathBuf {
     let mut components = Vec::new();
     for component in path.components() {
         match component {
-            std::path::Component::ParentDir => {
+            Component::ParentDir => {
                 components.pop();
             }
-            std::path::Component::CurDir => {}
+            Component::CurDir => {}
             c => components.push(c),
         }
     }
     components.iter().collect()
 }
 
-/// Resolve an output file path for tool use, expanding `~` and applying workspace
-/// bounds-checking.
-///
-/// Path resolution rules:
-/// - `~/` paths expand to the home directory and are **not** workspace-bounded, but must
-///   stay inside the home directory; `~` alone is refused.
-/// - Absolute paths are normalized. When `workspace_dir` is configured they **must**
-///   remain within the workspace.
-/// - Relative paths are resolved against `workspace_dir` (falling back to the home
-///   directory when no workspace is configured) and bounds-checked against the workspace.
-///
-/// Returns the resolved absolute [`PathBuf`], or an error string if the path would
-/// escape the configured workspace.
-pub(super) fn resolve_output_path(
-    path: &str,
-    workspace_dir: Option<&str>,
-) -> Result<PathBuf, String> {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+/// `path` with its deepest existing ancestor canonicalized (symlinks
+/// resolved) and the not-yet-existing rest appended. `path` must be
+/// normalized, so the rest holds plain names only.
+fn anchor_to_disk(path: &Path) -> Result<PathBuf, String> {
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut existing = path;
+    loop {
+        if std::fs::symlink_metadata(existing).is_ok() {
+            let canonical = std::fs::canonicalize(existing).map_err(|e| {
+                format!(
+                    "Could not resolve '{}' (a broken symlink?): {e}",
+                    existing.display()
+                )
+            })?;
+            return Ok(rest
+                .iter()
+                .rev()
+                .fold(canonical, |acc, name| acc.join(name)));
+        }
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name);
+                existing = parent;
+            }
+            _ => return Err(format!("No existing ancestor for '{}'", path.display())),
+        }
+    }
+}
 
-    // Home-relative: `~/…` may leave the workspace (an explicit user choice)
-    // but never the home directory (AGE-1087).
-    if path == "~" {
+/// Resolve a tool's output file inside the workspace `root` (canonical, as
+/// [`FileSystemService::workspace_root`] returns it).
+///
+/// - `~` and `~/…` are refused: these tools write into the workspace only.
+/// - Relative paths are taken against `root`; absolute paths must land in
+///   it, except that Harbor / AppWorld's `/app/…` maps onto `root`.
+/// - Symlinks in the existing part of the path are resolved before the
+///   bounds check, so a link out of the workspace is refused, and an
+///   existing target must be a regular file (not a symlink or directory).
+///
+/// [`FileSystemService::workspace_root`]: crate::services::filesystem_service::FileSystemService::workspace_root
+pub(super) fn resolve_workspace_output(root: &Path, path: &str) -> Result<PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err("Output path cannot be empty".to_string());
+    }
+    if path == "~" || path.starts_with("~/") {
         return Err(format!(
-            "Output path '{}' is the home directory, not a file",
-            path
+            "Output path '{path}' is home-relative; '~' is not allowed. \
+             Give a path inside the workspace (e.g. relative to the workspace root)"
         ));
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        let home_norm = normalize_path(&home);
-        let resolved = normalize_path(&home.join(rest));
-        if !resolved.starts_with(&home_norm) {
+
+    let p = Path::new(path);
+    let mut candidates = vec![normalize_path(&if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    })];
+    // Harbor / AppWorld agents often emit `/app/...`. Map that onto the
+    // workspace instead of rejecting it or writing to a host `/app`.
+    if p.is_absolute()
+        && let Ok(rest) = candidates[0].strip_prefix("/app")
+    {
+        candidates.push(normalize_path(&root.join(rest)));
+    }
+
+    for candidate in candidates {
+        let resolved = anchor_to_disk(&candidate)?;
+        if !resolved.starts_with(root) || resolved == root {
+            continue;
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(&resolved)
+            && !meta.file_type().is_file()
+        {
             return Err(format!(
-                "Output path '{}' resolves outside the home directory",
-                path
+                "Output path '{path}' exists and is not a regular file; refusing to write over it"
             ));
         }
         return Ok(resolved);
     }
+    Err(format!(
+        "Output path '{path}' is outside the workspace directory"
+    ))
+}
 
-    let p = Path::new(path);
+/// Ask for approval to write `path` under `approval`'s mode; `None` (no
+/// approval wired, i.e. not an agent's tool) lets the write through.
+/// Returns whether the write may go ahead.
+pub(super) async fn approve_output_write(
+    approval: Option<&(ApprovalMode, PendingWriteApprovals)>,
+    path: &Path,
+    content_preview: String,
+) -> Result<bool, String> {
+    let Some((mode, pending)) = approval else {
+        return Ok(true);
+    };
+    request_write_approval(
+        pending,
+        mode,
+        WriteOperation::WriteFile {
+            path: path.display().to_string(),
+            is_overwrite: std::fs::symlink_metadata(path).is_ok(),
+            content_preview,
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
 
-    if p.is_absolute() {
-        let normalized = normalize_path(p);
-        // When a workspace is configured, absolute paths must stay within it.
-        if let Some(workspace) = workspace_dir {
-            let workspace_norm = normalize_path(Path::new(workspace));
-            if normalized.starts_with(&workspace_norm) {
-                return Ok(normalized);
-            }
-            // Harbor / AppWorld agents often emit `/app/...`. Map that onto the
-            // configured workspace instead of rejecting or writing to a host `/app`.
-            if let Ok(rest) = normalized.strip_prefix(Path::new("/app")) {
-                let remapped = if rest.as_os_str().is_empty() {
-                    workspace_norm.clone()
-                } else {
-                    normalize_path(&workspace_norm.join(rest))
-                };
-                if remapped.starts_with(&workspace_norm) {
-                    return Ok(remapped);
-                }
-            }
-            return Err(format!(
-                "Output path '{}' is outside the workspace directory",
-                path
-            ));
-        }
-        return Ok(normalized);
+/// Write `bytes` to `path` (from [`resolve_workspace_output`]) without
+/// following a symlink: a new file is created with `create_new`, and an
+/// existing regular file is replaced by renaming a fresh sibling over it,
+/// which swaps the directory entry rather than writing through it
+/// (AGE-1097's approach). Parent directories are created, then checked to
+/// still resolve inside `root`.
+pub(super) fn write_output_file(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Output path '{}' has no parent", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Could not create directory '{}': {e}", parent.display()))?;
+    let canonical_parent = std::fs::canonicalize(parent)
+        .map_err(|e| format!("Could not resolve '{}': {e}", parent.display()))?;
+    if !canonical_parent.starts_with(root) {
+        return Err(format!(
+            "Output path '{}' is outside the workspace directory",
+            path.display()
+        ));
     }
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("Output path '{}' has no file name", path.display()))?;
+    let target = canonical_parent.join(name);
 
-    // Relative path: resolve against workspace_dir (or home as fallback).
-    let base = workspace_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.clone());
-    let resolved = normalize_path(&base.join(p));
+    let create_new = |at: &Path| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(at)?;
+        file.write_all(bytes)
+    };
 
-    // Bounds-check: ensure the resolved path stays within the workspace.
-    if let Some(workspace) = workspace_dir {
-        let workspace_norm = normalize_path(Path::new(workspace));
-        if !resolved.starts_with(&workspace_norm) {
-            return Err(format!(
-                "Output path '{}' resolves outside the workspace directory",
-                path
+    match std::fs::symlink_metadata(&target) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            create_new(&target).map_err(|e| format!("Failed to write '{}': {e}", target.display()))
+        }
+        Err(e) => Err(format!("Could not inspect '{}': {e}", target.display())),
+        Ok(meta) if !meta.file_type().is_file() => Err(format!(
+            "'{}' is not a regular file (a symlink?); refusing to write through it",
+            target.display()
+        )),
+        Ok(_) => {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let tmp = canonical_parent.join(format!(
+                ".{}.chatty-{}-{nanos}.tmp",
+                name.to_string_lossy(),
+                std::process::id()
             ));
+            create_new(&tmp)
+                .and_then(|()| std::fs::rename(&tmp, &target))
+                .map_err(|e| {
+                    let _ = std::fs::remove_file(&tmp);
+                    format!("Failed to write '{}': {e}", target.display())
+                })
         }
     }
-
-    Ok(resolved)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_absolute_path_no_workspace() {
-        let resolved = resolve_output_path("/tmp/report.pdf", None).unwrap();
-        assert_eq!(resolved, PathBuf::from("/tmp/report.pdf"));
+    fn workspace() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        (tmp, root)
     }
 
     #[test]
-    fn test_absolute_path_inside_workspace() {
-        let resolved = resolve_output_path("/workspace/report.pdf", Some("/workspace")).unwrap();
-        assert_eq!(resolved, PathBuf::from("/workspace/report.pdf"));
-    }
-
-    #[test]
-    fn test_absolute_path_outside_workspace_rejected() {
-        let result = resolve_output_path("/tmp/report.pdf", Some("/workspace"));
-        assert!(
-            result.is_err(),
-            "absolute path outside workspace should be rejected"
+    fn relative_and_nested_paths_resolve_inside_the_workspace() {
+        let (_tmp, root) = workspace();
+        assert_eq!(
+            resolve_workspace_output(&root, "report.pdf").unwrap(),
+            root.join("report.pdf")
         );
-        let err = result.unwrap_err();
-        assert!(err.contains("outside the workspace directory"));
+        assert_eq!(
+            resolve_workspace_output(&root, "sub/dir/a/../out.pdf").unwrap(),
+            root.join("sub/dir/out.pdf")
+        );
+    }
+
+    #[test]
+    fn absolute_path_inside_workspace_is_kept() {
+        let (_tmp, root) = workspace();
+        let inside = root.join("charts/x.png");
+        assert_eq!(
+            resolve_workspace_output(&root, inside.to_str().unwrap()).unwrap(),
+            inside
+        );
+    }
+
+    #[test]
+    fn absolute_path_outside_workspace_is_refused() {
+        let (_tmp, root) = workspace();
+        let err = resolve_workspace_output(&root, "/etc/report.pdf").unwrap_err();
+        assert!(err.contains("outside the workspace directory"), "{err}");
+    }
+
+    #[test]
+    fn traversal_out_of_the_workspace_is_refused() {
+        let (_tmp, root) = workspace();
+        for path in ["../../etc/passwd", "a/../../x.pdf", ".."] {
+            let err = resolve_workspace_output(&root, path).unwrap_err();
+            assert!(
+                err.contains("outside the workspace directory"),
+                "{path}: {err}"
+            );
+        }
     }
 
     #[test]
     fn harbor_app_prefix_remaps_into_workspace() {
-        let resolved =
-            resolve_output_path("/app/charts/sales.png", Some("/Users/me/project")).unwrap();
+        let (_tmp, root) = workspace();
         assert_eq!(
-            resolved,
-            PathBuf::from("/Users/me/project/charts/sales.png")
+            resolve_workspace_output(&root, "/app/charts/sales.png").unwrap(),
+            root.join("charts/sales.png")
         );
     }
 
     #[test]
-    fn test_absolute_path_subdirectory_inside_workspace() {
-        let resolved =
-            resolve_output_path("/workspace/subdir/out.pdf", Some("/workspace")).unwrap();
-        assert_eq!(resolved, PathBuf::from("/workspace/subdir/out.pdf"));
-    }
-
-    #[test]
-    fn test_relative_path_with_workspace() {
-        let resolved = resolve_output_path("report.pdf", Some("/workspace")).unwrap();
-        assert_eq!(resolved, PathBuf::from("/workspace/report.pdf"));
-    }
-
-    #[test]
-    fn test_relative_path_traversal_blocked() {
-        let result = resolve_output_path("../../etc/passwd", Some("/workspace/project"));
-        assert!(result.is_err(), "traversal should be blocked");
-        let err = result.unwrap_err();
-        assert!(err.contains("outside the workspace directory"));
-    }
-
-    #[test]
-    fn test_relative_path_nested_allowed() {
-        let resolved = resolve_output_path("subdir/report.pdf", Some("/workspace")).unwrap();
-        assert_eq!(resolved, PathBuf::from("/workspace/subdir/report.pdf"));
-    }
-
-    #[test]
-    fn test_home_tilde_path_no_workspace() {
-        let resolved = resolve_output_path("~/documents/report.pdf", None).unwrap();
-        let home = dirs::home_dir().unwrap();
-        assert_eq!(resolved, home.join("documents/report.pdf"));
-    }
-
-    #[test]
-    fn test_home_tilde_path_bypasses_workspace_bound() {
-        // `~` paths are an explicit user choice to write outside the workspace root.
-        let resolved = resolve_output_path("~/documents/report.pdf", Some("/workspace")).unwrap();
-        let home = dirs::home_dir().unwrap();
-        assert_eq!(resolved, home.join("documents/report.pdf"));
-    }
-
-    #[test]
-    fn test_dotdot_normalization_in_absolute_path() {
-        let resolved =
-            resolve_output_path("/workspace/a/../b/report.pdf", Some("/workspace")).unwrap();
-        assert_eq!(resolved, PathBuf::from("/workspace/b/report.pdf"));
-    }
-
-    #[test]
     fn tilde_alone_is_refused_not_a_panic() {
-        for ws in [None, Some("/workspace")] {
-            let err = resolve_output_path("~", ws).unwrap_err();
-            assert!(err.contains("home directory"), "{err}");
-        }
+        let (_tmp, root) = workspace();
+        let err = resolve_workspace_output(&root, "~").unwrap_err();
+        assert!(err.contains("'~' is not allowed"), "{err}");
     }
 
     #[test]
-    fn tilde_path_cannot_climb_out_of_home() {
-        for (path, ws) in [
-            ("~/../../etc/passwd", None),
-            ("~/../other-user/x", Some("/workspace")),
-        ] {
-            let err = resolve_output_path(path, ws).unwrap_err();
-            assert!(err.contains("outside the home directory"), "{err}");
+    fn tilde_paths_are_refused() {
+        let (_tmp, root) = workspace();
+        for path in ["~/../../x", "~/documents/report.pdf"] {
+            let err = resolve_workspace_output(&root, path).unwrap_err();
+            assert!(err.contains("'~' is not allowed"), "{path}: {err}");
         }
     }
 
+    #[cfg(unix)]
     #[test]
-    fn tilde_path_with_inner_dotdot_stays_in_home() {
-        let resolved = resolve_output_path("~/docs/../report.pdf", None).unwrap();
-        assert_eq!(resolved, dirs::home_dir().unwrap().join("report.pdf"));
+    fn a_symlinked_directory_out_of_the_workspace_is_refused() {
+        let (_tmp, root) = workspace();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("escape")).unwrap();
+        let err = resolve_workspace_output(&root, "escape/x.png").unwrap_err();
+        assert!(err.contains("outside the workspace directory"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_target_file_is_refused() {
+        let (_tmp, root) = workspace();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "keep").unwrap();
+        // Pointing-out and dangling links are both refused.
+        std::os::unix::fs::symlink(&victim, root.join("out.png")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling.png")).unwrap();
+        assert!(resolve_workspace_output(&root, "out.png").is_err());
+        assert!(resolve_workspace_output(&root, "dangling.png").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_never_follows_a_symlink_planted_after_resolving() {
+        let (_tmp, root) = workspace();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "keep").unwrap();
+        let target = resolve_workspace_output(&root, "out.png").unwrap();
+        std::os::unix::fs::symlink(&victim, &target).unwrap();
+        assert!(write_output_file(&root, &target, b"png").is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    }
+
+    #[test]
+    fn write_creates_parents_and_overwrites_a_regular_file() {
+        let (_tmp, root) = workspace();
+        let target = resolve_workspace_output(&root, "a/b/out.pdf").unwrap();
+        write_output_file(&root, &target, b"one").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"one");
+        write_output_file(&root, &target, b"two").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"two");
+        assert_eq!(std::fs::read_dir(root.join("a/b")).unwrap().count(), 1);
     }
 }
