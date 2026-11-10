@@ -62,6 +62,8 @@ pub mod memory_service;
 #[cfg(feature = "mermaid")]
 pub mod mermaid_renderer_service;
 pub mod message_helpers;
+/// Writes that never follow a symlink at the target (AGE-534, AGE-1113).
+pub(crate) mod no_follow_write;
 pub mod path_validator;
 #[cfg(feature = "pdf")]
 pub mod pdf_thumbnail;

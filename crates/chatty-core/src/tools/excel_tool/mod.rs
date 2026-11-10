@@ -730,4 +730,199 @@ mod tests {
             other => panic!("Expected numeric age in edited workbook, got {:?}", other),
         }
     }
+
+    fn one_sheet(cell: &str) -> Vec<SheetSpec> {
+        vec![SheetSpec {
+            name: "Sheet1".to_string(),
+            data: vec![vec![Value::String(cell.to_string())]],
+            column_widths: vec![],
+            formatting: None,
+            cell_formats: vec![],
+            merged_cells: vec![],
+            formulas: vec![],
+        }]
+    }
+
+    /// Symlinks planted in `workspace`: `link.xlsx` to a file outside it,
+    /// `dangling.xlsx` to a not-yet-existing file outside it. Returns
+    /// (the outside dir, the victim, the path the dangling link names).
+    #[cfg(unix)]
+    fn plant_links(
+        workspace: &std::path::Path,
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.xlsx");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, workspace.join("link.xlsx")).unwrap();
+        let would_be = outside.path().join("created.xlsx");
+        std::os::unix::fs::symlink(&would_be, workspace.join("dangling.xlsx")).unwrap();
+        (outside, victim, would_be)
+    }
+
+    /// AGE-1113: write_excel refuses a symlink at the target (out of the
+    /// workspace, or dangling) and writes nothing where it points.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_write_excel_refuses_a_symlink_at_the_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_outside, victim, would_be) = plant_links(tmp.path());
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = WriteExcelTool::new(
+            service,
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        );
+        for path in ["link.xlsx", "dangling.xlsx"] {
+            let err = tool
+                .call(
+                    &mut ToolContext::new(),
+                    WriteExcelArgs {
+                        path: path.to_string(),
+                        sheets: one_sheet("pwned"),
+                    },
+                )
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{path}: written through the link"));
+            assert!(
+                err.to_string().contains("not a regular file"),
+                "{path}: {err}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!would_be.exists());
+    }
+
+    /// AGE-1113: write_excel still creates and overwrites a regular file,
+    /// leaving no temp file behind.
+    #[tokio::test]
+    async fn test_write_excel_overwrites_a_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = WriteExcelTool::new(
+            service,
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        );
+        for cell in ["one", "two"] {
+            tool.call(
+                &mut ToolContext::new(),
+                WriteExcelArgs {
+                    path: "book.xlsx".to_string(),
+                    sheets: one_sheet(cell),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let mut workbook = open_workbook_auto(tmp.path().join("book.xlsx")).unwrap();
+        let range = workbook.worksheet_range("Sheet1").unwrap();
+        assert_eq!(range.get((0, 0)), Some(&Data::String("two".to_string())));
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    /// AGE-1113: edit_excel refuses a symlink at `output_path` (out of the
+    /// workspace, or dangling), in both the style-preserving and the
+    /// legacy (format_range) mode, and writes nothing where it points.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_edit_excel_refuses_a_symlink_at_the_output_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_path = create_test_xlsx(tmp.path(), "input.xlsx");
+        let (_outside, victim, would_be) = plant_links(tmp.path());
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = EditExcelTool::new(
+            service,
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        );
+        let set_cell = EditOperation::SetCell {
+            sheet: "Data".to_string(),
+            cell: "B2".to_string(),
+            value: Value::Number(31.into()),
+        };
+        let format_range: EditOperation = serde_json::from_value(serde_json::json!({
+            "type": "format_range", "sheet": "Data", "range": "A1:A1", "bold": true
+        }))
+        .unwrap();
+        for output in ["link.xlsx", "dangling.xlsx"] {
+            for op in [set_cell.clone(), format_range.clone()] {
+                let err = tool
+                    .call(
+                        &mut ToolContext::new(),
+                        EditExcelArgs {
+                            path: input_path.to_str().unwrap().to_string(),
+                            output_path: Some(output.to_string()),
+                            operations: vec![op],
+                        },
+                    )
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{output}: written through the link"));
+                assert!(
+                    err.to_string().contains("not a regular file"),
+                    "{output}: {err}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!would_be.exists());
+    }
+
+    /// AGE-1113: edit_excel still overwrites an existing regular
+    /// `output_path` in both modes, leaving no temp file behind.
+    #[tokio::test]
+    async fn test_edit_excel_overwrites_a_regular_output_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input_path = create_test_xlsx(tmp.path(), "input.xlsx");
+        let output_path = create_test_xlsx(tmp.path(), "out.xlsx");
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = EditExcelTool::new(
+            service,
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        );
+        let format_range: EditOperation = serde_json::from_value(serde_json::json!({
+            "type": "format_range", "sheet": "Data", "range": "A1:A1", "bold": true
+        }))
+        .unwrap();
+        for (age, extra) in [(31, None), (32, Some(format_range))] {
+            let mut operations = vec![EditOperation::SetCell {
+                sheet: "Data".to_string(),
+                cell: "B2".to_string(),
+                value: Value::Number(age.into()),
+            }];
+            operations.extend(extra);
+            tool.call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: input_path.to_str().unwrap().to_string(),
+                    output_path: Some("out.xlsx".to_string()),
+                    operations,
+                },
+            )
+            .await
+            .unwrap();
+            let mut workbook = open_workbook_auto(&output_path).unwrap();
+            let range = workbook.worksheet_range("Data").unwrap();
+            assert_eq!(range.get((1, 1)), Some(&Data::Float(age as f64)));
+        }
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
 }
