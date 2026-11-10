@@ -67,14 +67,8 @@ fn build_chart_copy_png_button(
     .on_click(move |_event, _window, _cx| {
         let svg_str = chart_svg_renderer::render_chart_svg(&spec_clone, &colors);
 
-        // Write SVG to a temp file so render_svg_to_png can read it
-        let tmp_path = std::env::temp_dir().join(format!("chatty_chart_{msg_idx}_{tool_idx}.svg"));
-        if let Err(e) = std::fs::write(&tmp_path, &svg_str) {
-            tracing::warn!(error = ?e, "Failed to write chart SVG to temp file");
-            return;
-        }
-
-        match MermaidRendererService::render_svg_to_png(&tmp_path) {
+        // Rendered in memory: no temp file on a shared /tmp (AGE-1114).
+        match MermaidRendererService::render_svg_data_to_png(svg_str.as_bytes()) {
             Ok(png_bytes) => {
                 #[cfg(target_os = "linux")]
                 {
@@ -92,9 +86,6 @@ fn build_chart_copy_png_button(
                 tracing::warn!(error = ?e, "Failed to render chart PNG for clipboard");
             }
         }
-
-        // Clean up temp file
-        let _ = std::fs::remove_file(&tmp_path);
     })
 }
 

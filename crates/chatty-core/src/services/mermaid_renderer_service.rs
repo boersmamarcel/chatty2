@@ -258,7 +258,13 @@ impl MermaidRendererService {
     /// Loads system fonts so that text elements render correctly.
     pub fn render_svg_to_png(svg_path: &std::path::Path) -> Result<Vec<u8>> {
         let svg_data = std::fs::read(svg_path).context("Failed to read SVG file")?;
+        Self::render_svg_data_to_png(&svg_data)
+    }
 
+    /// Render SVG markup held in memory to PNG bytes, as [`Self::render_svg_to_png`]
+    /// does for a file. Callers that build the SVG themselves use this, so no
+    /// temp file is written (AGE-1114).
+    pub fn render_svg_data_to_png(svg_data: &[u8]) -> Result<Vec<u8>> {
         let default_font_resolver = usvg::FontResolver::default_font_selector();
         let font_resolver = Box::new(
             move |font: &usvg::Font, db: &mut Arc<usvg::fontdb::Database>| {
@@ -276,7 +282,7 @@ impl MermaidRendererService {
             ..Default::default()
         };
 
-        let tree = usvg::Tree::from_data(&svg_data, &opts)
+        let tree = usvg::Tree::from_data(svg_data, &opts)
             .map_err(|e| anyhow::anyhow!("Failed to parse SVG: {}", e))?;
 
         let svg_size = tree.size();

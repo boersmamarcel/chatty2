@@ -322,26 +322,14 @@ fn render_chart_png(
     let colors = theme_colors.unwrap_or(&fallback);
     let svg = render_chart_svg(spec, colors);
 
-    // Write SVG to a temp file, then convert to PNG via resvg (mermaid feature)
+    // Convert the SVG to PNG in memory via resvg (mermaid feature); no temp
+    // file, so nothing on a shared /tmp can be raced or clobbered (AGE-1114).
     #[cfg(feature = "mermaid")]
     {
         use crate::services::mermaid_renderer_service::MermaidRendererService;
 
-        let tmp_svg = std::env::temp_dir().join(format!(
-            "chatty_chart_export_{}.svg",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::write(&tmp_svg, &svg).map_err(|e| format!("Failed to write temp SVG: {e}"))?;
-
-        let png_bytes = MermaidRendererService::render_svg_to_png(&tmp_svg)
-            .map_err(|e| format!("SVG→PNG render failed: {e}"));
-
-        let _ = std::fs::remove_file(&tmp_svg);
-
-        png_bytes
+        MermaidRendererService::render_svg_data_to_png(svg.as_bytes())
+            .map_err(|e| format!("SVG→PNG render failed: {e}"))
     }
     #[cfg(not(feature = "mermaid"))]
     {
@@ -357,6 +345,71 @@ fn render_chart_png(
 mod tests {
     use super::*;
     use rig_agent::tool::{Tool, ToolContext};
+
+    /// AGE-1114: a chart renders to PNG in memory. It needs no writable temp
+    /// dir (a predictable name there could be raced or symlinked), and the PNG
+    /// is the same as rendering the same SVG from a file.
+    #[cfg(feature = "mermaid")]
+    #[test]
+    fn a_chart_renders_to_png_without_a_temp_file() {
+        use crate::services::chart_svg_renderer::{DEFAULT_CHART_COLORS, render_chart_svg};
+        use crate::services::mermaid_renderer_service::MermaidRendererService;
+
+        let spec = ChartSpec {
+            chart_type: "bar".to_string(),
+            title: Some("AGE-1114".to_string()),
+            data: vec![
+                ChartDataPoint {
+                    label: "A".to_string(),
+                    value: 10.0,
+                },
+                ChartDataPoint {
+                    label: "B".to_string(),
+                    value: 20.0,
+                },
+            ],
+            series: None,
+            candlestick_data: None,
+            inner_radius: None,
+            pad_angle: None,
+            saved_path: None,
+        };
+        // Point the temp dir at a read-only directory: a render that still
+        // wrote a temp SVG there fails ("Failed to write temp SVG"), and one
+        // that renders in memory doesn't notice. CI runs tests on one thread
+        // (`--test-threads=1`), so changing TMPDIR here is not raced.
+        let readonly = tempfile::tempdir().unwrap();
+        let mut perms = std::fs::metadata(readonly.path()).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(readonly.path(), perms.clone()).unwrap();
+        let old_tmpdir = std::env::var_os("TMPDIR");
+        // SAFETY: tests run single-threaded in CI; the value is restored below.
+        unsafe { std::env::set_var("TMPDIR", readonly.path()) };
+        let rendered = render_chart_png(&spec, None);
+        // SAFETY: as above.
+        unsafe {
+            match old_tmpdir {
+                Some(value) => std::env::set_var("TMPDIR", value),
+                None => std::env::remove_var("TMPDIR"),
+            }
+        }
+        perms.set_readonly(false);
+        std::fs::set_permissions(readonly.path(), perms).unwrap();
+        let png = rendered.expect("the chart renders with no writable temp dir");
+        assert!(png.starts_with(b"\x89PNG"), "PNG bytes");
+
+        // Same output as the file path the desktop's Mermaid view still uses.
+        let colors: [String; 5] = DEFAULT_CHART_COLORS.map(str::to_owned);
+        let svg = render_chart_svg(&spec, &colors);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("chart.svg");
+        std::fs::write(&file, &svg).unwrap();
+        assert_eq!(
+            MermaidRendererService::render_svg_to_png(&file).unwrap(),
+            png,
+            "in-memory and file rendering give the same PNG"
+        );
+    }
 
     #[tokio::test]
     async fn test_bar_chart() {
