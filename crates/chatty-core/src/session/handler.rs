@@ -619,6 +619,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                         empty_completion_error(self.think_disabled),
                     );
                     self.on_stream_error(&error);
+                    self.emit_calls_usage();
                     (self.emit)(SessionEvent::Error(error));
                     return Ok(ChunkAction::Break);
                 }
@@ -686,6 +687,9 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
     }
 
     fn on_stream_ended(&mut self) {
+        // A stream that ended with calls recorded but no aggregate (AGE-531)
+        // still reports what they spent. Empty after any path that already did.
+        self.emit_calls_usage();
         // Whatever the turn's plugins spent counts however the turn ended.
         for (plugin, calls) in std::mem::take(&mut self.plugin_calls) {
             (self.emit)(SessionEvent::PluginUsage(TokenUsage {
@@ -905,6 +909,133 @@ mod tests {
         assert_eq!((spent.input_tokens, spent.output_tokens), (300, 10));
         assert!(matches!(tail[1], SessionEvent::Error(_)), "{tail:?}");
         assert!(matches!(tail[2], SessionEvent::TurnEnded), "{tail:?}");
+    }
+
+    fn usage_call(input: u32) -> StreamChunk {
+        StreamChunk::ApiCallUsage(ApiCallUsage {
+            input_tokens: input,
+            output_tokens: 5,
+            ..ApiCallUsage::default()
+        })
+    }
+
+    fn usage_events(events: &[SessionEvent]) -> Vec<(u32, u32)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::TokenUsage(u) => Some((u.input_tokens, u.output_tokens)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// AGE-531: a stream that ends with no error, cancel or aggregate still
+    /// reports its calls, ahead of `TurnEnded`.
+    #[test]
+    fn a_stream_ending_without_an_aggregate_sends_its_calls_usage() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        for input in [100, 200] {
+            handler.on_chunk(Ok(usage_call(input))).unwrap();
+        }
+        handler.on_stream_ended();
+        drop(handler);
+        let tail: Vec<&SessionEvent> = events.iter().rev().take(2).rev().collect();
+        assert!(matches!(tail[0], SessionEvent::TokenUsage(_)), "{tail:?}");
+        assert!(matches!(tail[1], SessionEvent::TurnEnded), "{tail:?}");
+        assert_eq!(usage_events(&events), [(300, 10)]);
+    }
+
+    /// AGE-531: usage is sent once per turn. An aggregate that arrived has
+    /// consumed the calls, so a later cancel, error or stream end adds none.
+    #[test]
+    fn usage_is_never_sent_twice_for_one_turn() {
+        for end in ["cancel", "error"] {
+            let mut events = Vec::new();
+            let mut handler = SessionStreamHandler::new(
+                |event| events.push(event),
+                AgentTaskController::new(),
+                Arc::new(AtomicBool::new(false)),
+                test_policy(),
+            );
+            handler.on_chunk(Ok(usage_call(100))).unwrap();
+            handler
+                .on_chunk(Ok(StreamChunk::TurnUsage(ApiCallUsage {
+                    input_tokens: 100,
+                    output_tokens: 5,
+                    ..ApiCallUsage::default()
+                })))
+                .unwrap();
+            if end == "cancel" {
+                handler.on_cancelled();
+            } else {
+                let error = StreamError::new(StreamErrorKind::ProviderStatus(400), "bad");
+                handler.on_chunk(Ok(StreamChunk::Error(error))).unwrap();
+            }
+            handler.on_stream_ended();
+            drop(handler);
+            assert_eq!(usage_events(&events), [(100, 5)], "{end}: {events:?}");
+        }
+    }
+
+    /// AGE-531: a cancelled turn sends its calls once, ahead of `TurnEnded`.
+    #[test]
+    fn a_cancelled_turn_sends_its_calls_usage_once_before_turn_ended() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        for input in [100, 200] {
+            handler.on_chunk(Ok(usage_call(input))).unwrap();
+        }
+        handler.on_cancelled();
+        handler.on_stream_ended();
+        drop(handler);
+        assert_eq!(usage_events(&events), [(300, 10)]);
+        let usage_at = events
+            .iter()
+            .position(|e| matches!(e, SessionEvent::TokenUsage(_)))
+            .unwrap();
+        let ended_at = events
+            .iter()
+            .position(|e| matches!(e, SessionEvent::TurnEnded))
+            .unwrap();
+        assert!(usage_at < ended_at, "{events:?}");
+    }
+
+    /// AGE-531: the empty-completion error sends the calls' usage ahead of
+    /// `Error`, like every other terminal error, never after it.
+    #[test]
+    fn an_empty_completion_error_sends_its_calls_usage_before_the_error() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        handler.on_chunk(Ok(usage_call(100))).unwrap();
+        handler.on_chunk(Ok(StreamChunk::Done)).unwrap();
+        handler.on_stream_ended();
+        drop(handler);
+        assert_eq!(usage_events(&events), [(100, 5)], "{events:?}");
+        let usage_at = events
+            .iter()
+            .position(|e| matches!(e, SessionEvent::TokenUsage(_)))
+            .unwrap();
+        let error_at = events
+            .iter()
+            .position(|e| matches!(e, SessionEvent::Error(_)))
+            .expect("the empty completion ends in an Error");
+        assert!(usage_at < error_at, "{events:?}");
     }
 
     /// A turn that ends on its own keeps rig's record; nothing is rebuilt.
