@@ -648,6 +648,71 @@ mod tests {
         assert_eq!(state, Some(TaskState::Completed));
     }
 
+    /// AGE-962: a task refused for the budget is over for a one-shot
+    /// worker, as a finished one is — it reports `failed` with the typed
+    /// stop and returns promptly, so its process can exit and its
+    /// connection close. Nothing the test does closes the broker's end
+    /// for it.
+    #[tokio::test]
+    async fn a_worker_refused_for_the_budget_returns_within_a_second() {
+        let registry = ParticipantRegistry::new();
+        let node = registry
+            .admit("analyst", chatty_fabric::AgentOrigin::Fleet, None)
+            .unwrap();
+        let admitted = node.name().to_string();
+        let (broker_end, worker_end) = UnixStream::pair().unwrap();
+        tokio::spawn(crate::participant::serve_connection(
+            broker_end,
+            registry.clone(),
+            node,
+        ));
+        let worker = WorkerConnection::connect(worker_end, worker_card("test"))
+            .await
+            .expect("the broker welcomes the worker");
+        let (_task, mut updates) = registry
+            .submit_task(&admitted, DelegatedTask::from_root("read the readme"))
+            .await
+            .expect("the worker is registered");
+
+        let refusal = "budget_exhausted: Budget of $2.00 spent";
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            worker.serve_one_task(move |_task, sink, _inputs| async move {
+                sink(&SessionEvent::Error(StreamError {
+                    kind: StreamErrorKind::BudgetExhausted,
+                    message: refusal.to_string(),
+                }));
+                anyhow::bail!("the turn ended with an unrecovered stream error: {refusal}")
+            }),
+        )
+        .await
+        .expect("a worker refused for the budget returns within a second");
+        assert!(outcome.is_err(), "the run's failure is the worker's");
+
+        let mut state = None;
+        let mut message = None;
+        while let Some(update) = updates.recv().await {
+            if let crate::participant::TaskUpdate::Status {
+                state: s,
+                message: m,
+                ..
+            } = update
+            {
+                state = Some(s);
+                message = m;
+            }
+        }
+        assert_eq!(state, Some(TaskState::Failed));
+        assert_eq!(message.as_deref(), Some(refusal));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while registry.is_registered(&admitted) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker's connection is closed, so the node deregisters");
+    }
+
     /// BI-4: three calls in flight in one task, over one connection, finish
     /// out of order, and each result reaches the call that asked for it. A
     /// fourth, to nobody, fails on its own without disturbing the rest.
