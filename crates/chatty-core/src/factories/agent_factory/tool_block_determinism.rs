@@ -292,3 +292,99 @@ fn dump_hash_order_for_parent() {
     println!("{}", names.keys().copied().collect::<Vec<_>>().join(","));
     println!("{END}");
 }
+
+// ── The roster stays out of the prompt (RO-3) ───────────────────────────────
+
+/// A broker that is configured and never started: `list_agents` and
+/// `invoke_agent` are built as they are beside a real one.
+struct NeverStarted;
+
+#[async_trait::async_trait]
+impl crate::services::lazy_broker::LazyBroker for NeverStarted {
+    fn bound_sockets(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+}
+
+/// The first request an agent with `size` local specs and `size` remote
+/// agents sends: its tool definitions and its preamble, byte for byte, as
+/// the provider receives them.
+async fn first_request_with_roster(size: usize) -> Vec<u8> {
+    use rig_agent::completion::Prompt;
+
+    let _ = crate::init_repositories();
+    let daemon = crate::testing::fake_model::FakeDaemon::ollama(vec![
+        serde_json::json!({
+            "model": "llama3.2",
+            "created_at": "2026-01-01T00:00:00Z",
+            "message": { "role": "assistant", "content": "ok" },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 10,
+            "eval_count": 1
+        })
+        .to_string()
+            + "\n",
+    ]);
+    let context = AgentBuildContext {
+        lazy_broker: Some(std::sync::Arc::new(NeverStarted)),
+        local_agents: (0..size).map(|i| format!("roster-spec-{i:02}x")).collect(),
+        remote_agents: (0..size)
+            .map(|i| crate::settings::models::a2a_store::A2aAgentConfig {
+                name: format!("roster-remote-{i:02}x"),
+                url: format!("https://example.com/a2a/{i}"),
+                api_key: None,
+                enabled: true,
+                skills: vec![format!("skill-{i}")],
+                allow_private_network: false,
+            })
+            .collect(),
+        ..AgentBuildContext::from_services(AgentServices {
+            exec_settings: Some(fixture_execution_settings()),
+            ..AgentServices::default()
+        })
+    };
+    let built = AgentClient::from_model_config_with_tools(
+        &fixture_model_config(),
+        &fixture_provider_config().with_base_url(daemon.base_url()),
+        context,
+    )
+    .await
+    .expect("the fixture agent builds");
+    // Only the request matters, not what the canned reply parses to.
+    let _ = built.client.agent.prompt("hello").await;
+    daemon
+        .bodies()
+        .into_iter()
+        .next()
+        .expect("the agent sent one request")
+}
+
+/// Invariant 5 (ADR-0011 C10): the serialized tool definitions plus the
+/// preamble hash identically with 1 and with 20 roster entries. The roster
+/// only ever reaches the model in `list_agents`' result.
+#[tokio::test]
+async fn tool_block_is_byte_stable() {
+    use sha2::{Digest, Sha256};
+
+    let one = first_request_with_roster(1).await;
+    let twenty = first_request_with_roster(20).await;
+
+    let text = String::from_utf8_lossy(&one);
+    assert!(
+        text.contains("\"list_agents\"") && text.contains("\"invoke_agent\""),
+        "the request carries the agent tools: {text}"
+    );
+    assert!(
+        !text.contains("roster-spec-00x") && !text.contains("roster-remote-00x"),
+        "no roster entry is in the prompt: {text}"
+    );
+    if let Some(offset) = first_difference(&one, &twenty) {
+        panic!(
+            "the request differs with 20 roster entries at byte {offset}\n  1:  {}\n  20: {}",
+            context_at(&one, offset),
+            context_at(&twenty, offset),
+        );
+    }
+    assert_eq!(Sha256::digest(&one), Sha256::digest(&twenty));
+}

@@ -475,6 +475,8 @@ type StartFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Bro
 pub struct PendingBroker {
     start: Box<dyn Fn() -> StartFuture + Send + Sync>,
     once: tokio::sync::OnceCell<Broker>,
+    /// The spec the broker checks the root's own calls against.
+    root: Option<AgentSpec>,
 }
 
 impl PendingBroker {
@@ -491,6 +493,7 @@ impl PendingBroker {
         auto_approve: bool,
         provider_flags: Vec<String>,
     ) -> Self {
+        let root_spec = root.clone();
         let start = move || -> StartFuture {
             let root = root.clone();
             let leader_model = leader_model.clone();
@@ -520,6 +523,7 @@ impl PendingBroker {
         Self {
             start: Box::new(start),
             once: tokio::sync::OnceCell::new(),
+            root: root_spec,
         }
     }
 
@@ -547,6 +551,7 @@ impl PendingBroker {
         Self {
             start: Box::new(start),
             once: tokio::sync::OnceCell::new(),
+            root: None,
         }
     }
 }
@@ -558,6 +563,12 @@ impl chatty_core::services::lazy_broker::LazyBroker for PendingBroker {
     async fn transport(&self) -> anyhow::Result<Option<Arc<dyn Transport>>> {
         let broker = self.once.get_or_try_init(|| (self.start)()).await?;
         Ok(Some(broker.transport()))
+    }
+
+    /// The root spec its broker's policy checks the root against: the
+    /// same one `list_agents` filters by.
+    fn root_spec(&self) -> Option<AgentSpec> {
+        self.root.clone()
     }
 
     fn bound_sockets(&self) -> Vec<PathBuf> {

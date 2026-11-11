@@ -421,47 +421,69 @@ conversation.
 
 ### `list_agents`
 
-One flat list of everything addressable, each entry saying whose machine it runs on:
+The roster (below), filtered to what *this* caller may call and scoped to its
+conversation (PL-S1 RO-3, AGE-660). One compact row per agent:
 
 ```json
 {
   "agents": [
-    { "name": "leased-vm", "origin": "fleet", "kind": "worker", "description": "...", "enabled": true },
-    { "name": "local-agent", "origin": "local", "kind": "worker", "description": "...", "enabled": true },
-    { "name": "voucher-agent", "origin": "remote_configured", "kind": "remote", "url": "https://...", "enabled": true, "has_api_key": true, "skills": ["..."] }
+    { "name": "local-coder-0", "origin": "node", "reach": "live", "description": "...", "runs_on": "local" },
+    { "name": "local-reviewer", "origin": "local_spec", "reach": "startable", "description": "...", "runs_on": "local", "model": "qwen3:4b", "profile": "reviewer", "plugins": ["benford"] },
+    { "name": "voucher-agent", "origin": "remote", "reach": "live", "description": "Remote A2A agent at https://...", "runs_on": "remote_configured" }
   ],
   "total": 3,
   "note": "To invoke an agent, use the `invoke_agent` tool..."
 }
 ```
 
-Two sources feed it. **Settings** give the configured remotes and the roster's specs
-(names only, as a stand-in until the broker answers). The **broker's aggregated card** gives whatever registered since — a worker
-spawned a minute ago is addressable, and only the broker knows it exists. A name in both
-keeps the settings label, because what the user configured is the more informative
-answer. A gateway that is off or slow to answer is not an error: the list is then what
-settings know. API key values are **never exposed** to the LLM — only
-`has_api_key: true/false`.
+`origin` is the roster origin; `runs_on` says whose machine it runs on (table below). A
+handle's row adds `owner`, `state`, `pending_messages` and `behind_by` (RO-4 fills them
+in); a shadowed entry carries `shadowed_by`. An unreachable one carries `reason`.
 
-**The roster read model (PL-S1 RO-1).** `chatty_core::services::roster` is the one read
-model `list_agents` moves onto in RO-3 (AGE-660); nothing reads it yet. Five sources feed
-it, one `RosterSource` each:
+- **Policy.** An agent built from a spec (`AgentBuildContext::from_spec`) is offered only
+  the agents DP-1's `may_call` lets it call: listed in its `swarm.delegates_to`, exposed,
+  and allowing it in their `callers`. A node is checked against the spec it runs as
+  (`<spec>-<n>`); a name with no spec on disk is a bare spec, exposed to anyone. A root
+  with a broker is checked as its broker checks it (`LazyBroker::root_spec`, the spec
+  `SpecPolicy::with_root` gets): a `--team` leader or `--agent <spec>` root by that spec,
+  a bare root (no spec) not at all — it sees everyone.
+- **Scope.** Nodes and handles come only from the caller's `ConversationScope`. A host
+  that holds the broker's `Directory` hands the tool a `NodeTable` and nodes are read with
+  `in_scope`. Otherwise — the in-process root over its direct handle, a worker over the
+  fabric — the nodes are the ones the broker's own `ListAgents` answer names
+  (`BrokerNodeSource`): the broker knows which conversation the calling node works for.
+  Today it admits every node into its one scope (`ROOT_SCOPE`), so in production every
+  conversation served by one broker still sees the same nodes; `BrokerNodeSource` trusts
+  the broker's answer until the broker admits nodes per conversation.
+- **Byte-stable.** The tool's name, description and schema are constants; the roster only
+  appears in the result, never in the tool block or the preamble (ADR-0011 C10,
+  `tool_block_is_byte_stable`).
+
+A broker that is off or slow to answer is not an error: the list is then what settings
+and spec files know, and the note says the broker did not answer. API key values are
+**never exposed** to the LLM.
+
+**The roster read model (PL-S1 RO-1).** `chatty_core::services::roster` is the read
+model `list_agents` reads. Five sources feed it, one `RosterSource` each:
 
 | Roster origin | Source | Reach |
 |:--|:--|:--|
 | `handle` | resumable handles in the caller's swarm (none until RC-3) | `live` or `idle` |
-| `node` | running nodes: `Directory::in_scope(caller.scope)`, less ended ones | `live`, `idle`, `unreachable` |
+| `node` | running nodes: `Directory::in_scope(caller.scope)`, less ended ones, or the broker's answer | `live`, `idle`, `unreachable` |
 | `local_spec` | agent specs, from the spec loader (`load_roster_from`) | `startable` |
 | `hosted` | the user's hosted agents (none until PL-S6) | — |
 | `remote` | Settings → A2A Agents | `live`, or `unreachable` when disabled |
 
 A name two origins share goes to the higher one, **`handle > node > local_spec > hosted >
 remote`** (PL-D4); the loser is still listed, with `shadowed_by` naming the origin that
-owns the name. The broker's cards are cached for 30 s (`LiveCards::TTL`), failures
+owns the name. One exception in `list_agents`: `invoke_agent` still reaches a configured
+remote first, so there a remote owns any name it shares and the other rows are listed as
+shadowed by `remote` — the listing says what a call reaches today. AGE-1131 aligns
+`invoke_agent` with PL-D4. The broker's cards are cached for 30 s (`LiveCards::TTL`), failures
 included: after one failed fetch a node is `unreachable`, with the reason, until a later
 fetch succeeds. A startable spec needs no process to be listed.
 
-#### `origin` — whose machine it runs on (ADR-0011 C5)
+#### `runs_on` — whose machine it runs on (ADR-0011 C5)
 
 | Origin | Means | Inside the fleet? |
 |:-------|:------|:------------------|
