@@ -27,6 +27,7 @@ mod origin;
 mod pending;
 mod permit;
 mod question;
+mod relay;
 mod swarm;
 mod task_table;
 mod transport;
@@ -48,6 +49,7 @@ pub use permit::{
     WeakRunPermit,
 };
 pub use question::{Answer, AskReply, AskRequest, Question, QuestionOrigin};
+pub use relay::RelayCounter;
 pub use swarm::{CapturedConversation, FORWARD_INTERVAL, SwarmBatcher, SwarmEvent, SwarmItem};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{

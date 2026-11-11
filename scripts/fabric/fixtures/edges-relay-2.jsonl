@@ -1,0 +1,9 @@
+{"ts":1,"kind":"task","from":"root","to":"x-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-4"}
+{"ts":1,"kind":"task","from":"root","to":"x-1","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-4"}
+{"ts":1,"kind":"task","from":"root","to":"x-1","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-4"}
+{"ts":1,"kind":"task","from":"root","to":"y-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-5"}
+{"ts":1,"kind":"task","from":"root","to":"y-1","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-5"}
+{"ts":1,"kind":"message","from":"y-0","to":"root","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"pending","root_task_id":"t-5","names_sibling":true,"sibling_names":["y-1"]}
+{"ts":1,"kind":"message","from":"y-1","to":"root","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"dropped","root_task_id":"t-5","names_sibling":true,"sibling_names":["y-0"]}
+{"ts":1,"kind":"refusal","from":"loopback caller","to":"x","scope":null,"run":null,"chain":[],"bytes":0,"outcome":"refused"}
+{"ts":1,"kind":"task","from":"root","to":"x","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"failed"}
