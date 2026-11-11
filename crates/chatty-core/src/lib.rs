@@ -39,6 +39,7 @@ pub mod coding;
 pub mod curated_mcp;
 pub mod exporters;
 pub mod factories;
+pub mod feature_card;
 pub use hive_client as hive;
 pub mod install;
 pub mod models;

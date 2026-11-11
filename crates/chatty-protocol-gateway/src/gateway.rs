@@ -55,6 +55,9 @@ pub struct GatewayState {
     pub(crate) calls: Arc<BrokerCalls>,
     /// How many HTTP requests reached a role or the directory.
     pub(crate) routes: RouteCounter,
+    /// Feature cards (RO-2, AGE-659) by agent name, served at
+    /// `/a2a/{name}/.well-known/agent.json` for names that are not roles.
+    pub(crate) feature_cards: Arc<BTreeMap<String, serde_json::Value>>,
 }
 
 /// How many requests the HTTP side served for the broker's roles — the
@@ -160,6 +163,7 @@ pub struct ProtocolGateway {
     /// Built on first use, from the virtual agents published by then.
     calls: OnceLock<Arc<BrokerCalls>>,
     routes: RouteCounter,
+    feature_cards: BTreeMap<String, serde_json::Value>,
 }
 
 impl ProtocolGateway {
@@ -187,7 +191,16 @@ impl ProtocolGateway {
             usage_pricer: None,
             calls: OnceLock::new(),
             routes: RouteCounter::default(),
+            feature_cards: BTreeMap::new(),
         }
+    }
+
+    /// Serve `cards` (name to A2A card JSON, secret-free by construction:
+    /// `chatty_core::feature_card`) at `/a2a/{name}/.well-known/agent.json`.
+    /// A name that is also a role is still refused over loopback (BI-7).
+    pub fn with_feature_cards(mut self, cards: BTreeMap<String, serde_json::Value>) -> Self {
+        self.feature_cards = cards;
+        self
     }
 
     /// Bind in `dir` instead of [`access::default_runtime_dir`]. It is
@@ -331,6 +344,7 @@ impl ProtocolGateway {
             sse_sessions: SseSessions::default(),
             calls: self.calls(),
             routes: self.routes.clone(),
+            feature_cards: Arc::new(self.feature_cards.clone()),
         };
 
         Router::new()
