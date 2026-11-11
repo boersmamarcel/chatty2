@@ -108,7 +108,7 @@ name = "echo"
 version = "0.2.0"
 description = "A simple echo plugin"
 wasm = "echo.wasm"              # Plain relative path inside this directory (no `..`, no absolute)
-# execution_mode = "local"      # "local" | "remote" | "remote_only"; remote modules run on the hive-runner (PL-H8 retires this)
+# execution_mode = "local"      # "local" | "remote" | "remote_only"; nothing serves a remote module (PL-H8b)
 
 [capabilities]
 tools = ["echo", "reverse"]     # Tool names the plugin exposes

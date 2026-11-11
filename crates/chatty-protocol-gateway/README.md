@@ -40,8 +40,8 @@ TCP port (see [Running](#running)).
   loopback (`null` included), gets **403**, a guard against DNS rebinding
   for any listener an embedder puts in front of the socket. A request
   without `Host` (not a browser's) is served.
-- **The `/a2a/{name}` surface is modules and the remote-runner forward only
-  (BI-7, ADR-0020).** Once a worker calls over its own connection (BI-4), a
+- **The `/a2a/{name}` surface is module routes only
+  (BI-7, ADR-0020; narrowed by PL-H8b).** Once a worker calls over its own connection (BI-4), a
   `{name}` that is a role — a registered participant or a virtual agent —
   or the aggregated card when this gateway has any role at all, is refused
   with **403** `{"error":"fabric: roles are reached over the worker
@@ -84,10 +84,9 @@ Two transports, one dispatcher:
 ### 2 · A2A (Agent-to-Agent)
 
 Speaks the A2A JSON-RPC 2.0 schema (`message/send`, `message/stream`,
-`tasks/get`), but only for the remote-runner forward now (BI-7, ADR-0020): a
-module whose Hive metadata says `execution_mode = "remote"` is forwarded to
-the Hive runner over this shape until PL-H8b removes that path. A local
-plugin has no A2A route (PL-U3). A role — a registered participant or a
+`tasks/get`), but module routes only now (BI-7, ADR-0020). Nothing is forwarded to
+the Hive runner any more (PL-H8b): a module name answers "module not found".
+A local plugin has no A2A route (PL-U3). A role — a registered participant or a
 virtual agent — is refused here with **403**; it answers `message/send` and
 `message/stream` over the connection the broker made for its caller instead
 (see [Local participants](#local-participants)), which is where the frame
@@ -122,7 +121,7 @@ HTTP client               │   chatty-protocol-gateway     │
                           │                              │
 POST /mcp/{m}        ────►│ mcp.rs handler               ├──► ModuleRegistry
                           │                              │    (wasmtime instances)
-POST /a2a/{module}   ────►│ a2a.rs handler  ─────────────┼──► remote runner (PL-H8b)
+POST /a2a/{module}   ────►│ a2a.rs handler  ─────────────┼──► module not found
 GET  /.well-known/…  ────►│ a2a.rs handler  (403 once     │
                           │  this gateway has a role)     │
                           └──────────────────────────────┘

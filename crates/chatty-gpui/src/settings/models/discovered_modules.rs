@@ -10,7 +10,7 @@ pub enum ModuleLoadStatus {
     Loaded,
     /// The registry's scan refused the module, with its reason.
     Error(String),
-    /// Module runs remotely on hive-runner; no local WASM binary.
+    /// Module declares a remote execution mode: no local WASM binary, and nothing serves it (PL-H8b).
     Remote,
 }
 

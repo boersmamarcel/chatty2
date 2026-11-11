@@ -1,7 +1,7 @@
 //! BI-7 (AGE-639): once a worker calls over its own connection (BI-4), the
 //! gateway's loopback HTTP route stops serving roles. A role, a node or the
-//! swarm directory returns 403; module routes and the remote-runner forward
-//! (PL-H8b) are unaffected. The deleted `x-chatty-broker-caller` header
+//! swarm directory returns 403; module routes are unaffected (the
+//! remote-runner forward is gone, PL-H8b). The deleted `x-chatty-broker-caller` header
 //! (AGE-628, #915) has no effect any more: identity comes from the
 //! connection, not from a claim on this route.
 

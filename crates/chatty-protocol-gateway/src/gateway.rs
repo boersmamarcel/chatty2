@@ -17,7 +17,7 @@ use tokio::sync::RwLock;
 use tracing::info;
 
 use chatty_module_registry::ModuleRegistry;
-use hive_client::{HiveRegistryClient, ModuleMeter};
+use hive_client::ModuleMeter;
 
 use crate::access::{self, GatewayToken};
 use crate::handlers::a2a;
@@ -37,8 +37,6 @@ pub struct GatewayState {
     /// Admits and reports every module call: the same meter a spec's
     /// plugins are called through (AGE-837).
     pub meter: Arc<ModuleMeter>,
-    pub hive_client: Option<Arc<HiveRegistryClient>>,
-    pub runner_url: Option<String>,
     /// Processes registered over the participant socket (ADR-0011), served
     /// at `/a2a/{name}` and consulted first.
     pub participants: ParticipantRegistry,
@@ -141,8 +139,6 @@ pub struct ProtocolGateway {
     #[cfg(unix)]
     server: Option<access::SocketServer>,
     meter: Arc<ModuleMeter>,
-    hive_client: Option<Arc<HiveRegistryClient>>,
-    runner_url: Option<String>,
     participants: ParticipantRegistry,
     /// Where local participants register. `None` disables the socket, which
     /// is the default: only an embedder that wants child processes to reach
@@ -176,8 +172,6 @@ impl ProtocolGateway {
             #[cfg(unix)]
             server: None,
             meter: Arc::default(),
-            hive_client: None,
-            runner_url: None,
             participants: ParticipantRegistry::new(),
             participant_socket: None,
             participant_task: None,
@@ -207,18 +201,6 @@ impl ProtocolGateway {
     /// paid, and the credit guard and usage collector that bill them.
     pub fn with_meter(mut self, meter: Arc<ModuleMeter>) -> Self {
         self.meter = meter;
-        self
-    }
-
-    /// Attach a [`HiveRegistryClient`] for remote module execution.
-    pub fn with_hive_client(mut self, client: Arc<HiveRegistryClient>) -> Self {
-        self.hive_client = Some(client);
-        self
-    }
-
-    /// Set the runner URL for remote module execution.
-    pub fn with_runner_url(mut self, url: impl Into<String>) -> Self {
-        self.runner_url = Some(url.into());
         self
     }
 
@@ -324,8 +306,6 @@ impl ProtocolGateway {
         let state = GatewayState {
             registry: Arc::clone(&self.registry),
             meter: Arc::clone(&self.meter),
-            hive_client: self.hive_client.clone(),
-            runner_url: self.runner_url.clone(),
             participants: self.participants.clone(),
             runners: Arc::new(self.runners.clone()),
             sse_sessions: SseSessions::default(),

@@ -349,7 +349,6 @@ Source: `settings/models/hive_settings.rs`.
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `registry_url` | `String` | `http://localhost:8080` | `DEFAULT_REGISTRY_URL` |
-| `runner_url` | `String` | `http://localhost:8081` | `DEFAULT_RUNNER_URL` |
 | **`token`** | `Option<String>` | `null` | One-hour access JWT. Secret *(store: `token_ref` → `hive/token`)*. `is_logged_in()` = token present |
 | **`refresh_token`** | `Option<String>` | `null` | 30-day refresh token, rotated on every refresh. Secret *(store: `refresh_token_ref` → `hive/refresh_token`)* |
 | `expires_at` | `Option<DateTime>` | `null` | When `token` expires |

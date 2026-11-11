@@ -8,10 +8,10 @@
 //! disappears from the file (provider removed or renamed, Hive logout) is
 //! deleted from the store.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -19,6 +19,34 @@ use serde_json::{Map, Value};
 use super::generic_json_repository::SaveTicket;
 use super::provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
 use crate::settings::secret_store::{SecretStore, SecretStoreError};
+
+/// Single-object secret files whose last load failed, with the reason. A file
+/// that did not load must not be saved over: the caller would write defaults,
+/// and the save would delete the secrets the file still references (a Hive
+/// login, after an upgrade left a removed field in `hive_settings.json`).
+static UNLOADED: Mutex<Option<HashMap<PathBuf, String>>> = Mutex::new(None);
+
+fn mark_unloaded(path: &Path, reason: Option<String>) {
+    let mut guard = UNLOADED.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    match reason {
+        Some(reason) => map.insert(path.to_path_buf(), reason),
+        None => map.remove(path),
+    };
+}
+
+fn unloaded_reason(path: &Path) -> Option<String> {
+    let guard = UNLOADED.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref()?.get(path).cloned()
+}
+
+/// Why a secret settings file (today `hive_settings.json`) failed to load
+/// and is therefore write-protected, or `None` when none is. For startup to
+/// show the user.
+pub fn unloaded_settings_error() -> Option<String> {
+    let guard = UNLOADED.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref()?.values().next().cloned()
+}
 
 /// Where a secret field's value is filed in the store.
 #[derive(Debug, Clone, Copy)]
@@ -169,6 +197,13 @@ impl SecretJsonFile {
     /// the ticket is taken now and held across the store writes.
     fn save(&self, value: Value) -> BoxFuture<'static, RepositoryResult<()>> {
         let path = self.path.clone();
+        if let Some(reason) = unloaded_reason(&path) {
+            let e = RepositoryError::SerializationError(format!(
+                "refusing to write {} because it failed to load ({reason}); fix the file and restart",
+                path.display()
+            ));
+            return Box::pin(async move { Err(e) });
+        }
         let store = self.store.clone();
         let fields = self.fields;
         let ticket = SaveTicket::take(&path);
@@ -248,11 +283,32 @@ where
     pub fn load(&self) -> BoxFuture<'static, RepositoryResult<T>> {
         let file = self.file.clone_handle();
         Box::pin(async move {
-            match file.load().await? {
-                Some(value) => serde_json::from_value(value).map_err(|e| {
-                    RepositoryError::SerializationError(format!("{}: {e}", file.path.display()))
-                }),
-                None => Ok(T::default()),
+            let loaded = match file.load().await {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    mark_unloaded(&file.path, Some(e.to_string()));
+                    return Err(e);
+                }
+            };
+            match loaded {
+                Some(value) => match serde_json::from_value(value) {
+                    Ok(model) => {
+                        mark_unloaded(&file.path, None);
+                        Ok(model)
+                    }
+                    Err(e) => {
+                        let e = RepositoryError::SerializationError(format!(
+                            "{}: {e}",
+                            file.path.display()
+                        ));
+                        mark_unloaded(&file.path, Some(e.to_string()));
+                        Err(e)
+                    }
+                },
+                None => {
+                    mark_unloaded(&file.path, None);
+                    Ok(T::default())
+                }
             }
         })
     }
@@ -435,13 +491,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hive_settings_file_with_runner_url_fails_to_load_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hive_settings.json");
+        std::fs::write(
+            &path,
+            r#"{"registry_url":"https://hive.example","runner_url":"https://runner.example"}"#,
+        )
+        .unwrap();
+        let repo = HiveSettingsJsonRepository::with_path_and_store(
+            path,
+            Arc::new(InMemorySecretStore::new()),
+        );
+        let err = repo.load().await.expect_err("the file must not load");
+        assert!(err.to_string().contains("runner_url"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn an_unloadable_hive_file_survives_startup_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hive_settings.json");
+        let store = Arc::new(InMemorySecretStore::new());
+        store.set("hive/token", "jwt-keep").unwrap();
+        store.set("hive/refresh_token", "rt-keep").unwrap();
+        let before = r#"{"registry_url":"https://hive.example","runner_url":"https://runner.example","token_ref":"hive/token","refresh_token_ref":"hive/refresh_token","username":"marcel"}"#;
+        std::fs::write(&path, before).unwrap();
+        let repo = HiveSettingsJsonRepository::with_path_and_store(path.clone(), store.clone());
+
+        let err = repo.load().await.expect_err("runner_url is refused");
+        assert!(err.to_string().contains("runner_url"), "{err}");
+        assert!(super::unloaded_settings_error().is_some());
+
+        // What startup does next: save defaults (registry sync), save a
+        // session-state change. Both are refused and touch nothing.
+        let synced = HiveSettingsModel {
+            registry_url: "https://other.example".into(),
+            ..Default::default()
+        };
+        assert!(repo.save(synced).await.is_err());
+        assert!(repo.save(HiveSettingsModel::default()).await.is_err());
+
+        assert_eq!(read(&path), before, "the file is unchanged");
+        assert_eq!(
+            store.get("hive/token").unwrap().as_deref(),
+            Some("jwt-keep")
+        );
+        assert_eq!(
+            store.get("hive/refresh_token").unwrap().as_deref(),
+            Some("rt-keep")
+        );
+
+        // Once the line is removed the file loads and saves again.
+        std::fs::write(
+            &path,
+            r#"{"registry_url":"https://hive.example","token_ref":"hive/token","refresh_token_ref":"hive/refresh_token"}"#,
+        )
+        .unwrap();
+        let loaded = repo.load().await.unwrap();
+        assert_eq!(loaded.token.as_deref(), Some("jwt-keep"));
+        repo.save(loaded).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn hive_tokens_round_trip_through_the_store() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hive_settings.json");
         let store = Arc::new(InMemorySecretStore::new());
         let repo = HiveSettingsJsonRepository::with_path_and_store(path.clone(), store.clone());
         let initial: HiveSettingsModel = serde_json::from_str(
-            r#"{"registry_url":"https://hive.example","runner_url":"https://runner.example","token":"jwt-old","refresh_token":"rt-old","username":"marcel"}"#,
+            r#"{"registry_url":"https://hive.example","token":"jwt-old","refresh_token":"rt-old","username":"marcel"}"#,
         )
         .unwrap();
         repo.save(initial).await.unwrap();

@@ -197,9 +197,9 @@ call to one never holds up another; a guest reply over the 1 MiB output cap is a
 ### A2A via the gateway
 
 `/a2a/{agent}` reaches a local participant or a virtual agent (below); a message's
-text parts are all joined into the task's prompt. A module whose Hive metadata says
-`execution_mode = "remote"` is still forwarded to the hive-runner until PL-H8b removes
-that path.
+text parts are all joined into the task's prompt. A module name is never served, and
+nothing is forwarded to the hive-runner (PL-H8b); `runner_url` is no longer a setting
+and a `hive_settings.json` still carrying it fails to load.
 
 `GET /.well-known/agent.json` returns a gateway-level card
 (`{"schema_version": "0.1", "gateway": true, "agents": [...]}`) listing every

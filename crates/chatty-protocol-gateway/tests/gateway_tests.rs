@@ -448,3 +448,29 @@ async fn gateway_start_and_shutdown() {
     assert!(!socket.exists(), "shutdown removes the socket");
     assert!(!token_file.exists(), "and the token file");
 }
+
+// ---------------------------------------------------------------------------
+// A2A module routes: nothing is forwarded to a runner (AGE-697, PL-H8b)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a2a_module_name_is_not_found_and_never_forwarded() {
+    for method in ["message/send", "message/stream"] {
+        let (status, body) = post_json(
+            gateway_router(),
+            "/a2a/some-remote-module",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": { "message": { "parts": [{ "kind": "text", "text": "hi" }] } },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method}: {body}");
+        assert!(
+            body.to_string().contains("some-remote-module"),
+            "{method}: {body}"
+        );
+    }
+}

@@ -1583,7 +1583,12 @@ async fn start_mcp_servers() -> Option<McpService> {
     let (ext_result, hive_result) = tokio::join!(ext_repo.load(), hive_repo.load());
 
     let mut extensions = ext_result.unwrap_or_default();
-    let hive_settings = hive_result.unwrap_or_default();
+    let hive_settings = hive_result.unwrap_or_else(|e| {
+        eprintln!(
+            "chatty: hive_settings.json was not loaded and will not be modified (you appear signed out): {e}"
+        );
+        Default::default()
+    });
 
     let hive_added = chatty_core::install::ensure_default_hive_mcp(
         &hive_settings.registry_url,

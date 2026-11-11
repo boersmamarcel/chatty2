@@ -269,13 +269,11 @@ fn configured_module_dir(cx: &App) -> PathBuf {
     PathBuf::from(&cx.global::<ModuleSettingsModel>().module_dir)
 }
 
-/// Install a WASM module (or register a remote module) from the Hive registry
+/// Install a WASM module from the Hive registry
 /// into the configured module directory.
 ///
-/// For `execution_mode = "remote"` / `"remote_only"`: fetches version metadata
-/// to extract capabilities, writes a `module.toml` marker, and registers in
-/// `ExtensionsModel` — no WASM binary is downloaded. Otherwise the `.wasm` is
-/// downloaded through [`install::download_wasm_module`] (name and version
+/// A module with `execution_mode = "remote"` / `"remote_only"` is refused
+/// (PL-H8b). Otherwise the `.wasm` is downloaded through [`install::download_wasm_module`] (name and version
 /// validated first, body capped while it streams, hash and signature
 /// checked) and written with its install record.
 pub fn install_extension(
@@ -304,125 +302,91 @@ pub fn install_extension(
         client = client.with_session(session);
     }
 
-    let is_remote = matches!(execution_mode.as_str(), "remote" | "remote_only");
+    // A remote module has no WASM to install and nothing serves it any more
+    // (PL-H8b): refuse it instead of writing a marker nothing routes.
+    if matches!(execution_mode.as_str(), "remote" | "remote_only") {
+        warn!(name = %name, execution_mode = %execution_mode, "Refusing to install a remote module");
+        cx.global_mut::<MarketplaceState>().set_error(format!(
+            "Install failed: {name} runs on a remote runner, which chatty no longer supports"
+        ));
+        cx.refresh_windows();
+        return;
+    }
 
     cx.spawn(async move |cx| {
-        if is_remote {
-            // Fetch version list to get capabilities manifest without downloading WASM.
-            let version_manifest = match client.list_versions(&name).await {
-                Ok(list) => {
-                    list.items
-                        .into_iter()
-                        .find(|v| v.version == version)
-                        .map(|v| v.manifest)
-                        .unwrap_or_default()
+        // Signal download start so the UI can show the progress bar.
+        cx.update(|cx| {
+            cx.global_mut::<MarketplaceState>()
+                .set_download_progress(&name, 0.0);
+            cx.refresh_windows();
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to signal download start in UI"))
+        .ok();
+
+        let downloaded = install::download_wasm_module(&client, &name, &version, |read, total| {
+            if total > 0 {
+                let progress = (read as f32 / total as f32).min(0.99);
+                cx.update(|cx| {
+                    cx.global_mut::<MarketplaceState>()
+                        .set_download_progress(&name, progress);
+                    cx.refresh_windows();
+                })
+                .map_err(|e| warn!(error = ?e, "Failed to update download progress in UI"))
+                .ok();
+            }
+        })
+        .await;
+
+        cx.update(|cx| {
+            cx.global_mut::<MarketplaceState>()
+                .clear_download_progress(&name);
+            let download = match downloaded {
+                Ok(download) => download,
+                Err(install::InstallError::Client(
+                    chatty_core::hive::ClientError::Unauthorized,
+                )) => {
+                    warn!(name = %name, "Download requires authentication");
+                    cx.global_mut::<MarketplaceState>().set_error(
+                        "Login required to download modules. Please sign in first.".to_string(),
+                    );
+                    cx.refresh_windows();
+                    return;
                 }
                 Err(e) => {
-                    warn!(name = %name, error = ?e, "Failed to fetch version metadata for remote install; using empty manifest");
-                    serde_json::Value::Object(Default::default())
+                    error!(error = ?e, name = %name, "Module download failed");
+                    cx.global_mut::<MarketplaceState>()
+                        .set_error(format!("Download failed: {e}"));
+                    cx.refresh_windows();
+                    return;
                 }
             };
 
-            cx.update(|cx| {
-                let extensions = cx.global_mut::<ExtensionsModel>();
-                match install::install_remote_module(
-                    &name,
-                    &version,
-                    &display_name,
-                    &description,
-                    &pricing_model,
-                    &version_manifest,
-                    &module_dir,
-                    extensions,
-                ) {
-                    Ok(ext) => {
-                        info!(id = %ext.id, "Installed remote extension from Hive");
-                        save_extensions_async(extensions.clone(), cx);
-                        module_settings_controller::refresh_runtime(cx);
-                    }
-                    Err(e) => {
-                        error!(error = ?e, "Failed to install remote extension");
-                        let state = cx.global_mut::<MarketplaceState>();
-                        state.set_error(format!("Install failed: {e}"));
-                    }
+            let extensions = cx.global_mut::<ExtensionsModel>();
+            match install::install_wasm_module(
+                &download,
+                &name,
+                &version,
+                &display_name,
+                &description,
+                &pricing_model,
+                &module_dir,
+                extensions,
+            ) {
+                Ok(ext) => {
+                    info!(id = %ext.id, "Installed extension from Hive");
+                    save_extensions_async(extensions.clone(), cx);
+                    module_settings_controller::refresh_runtime(cx);
                 }
-                cx.refresh_windows();
-            })
-            .map_err(|e| warn!(error = ?e, "Failed to update UI after remote install"))
-            .ok();
-        } else {
-            // Signal download start so the UI can show the progress bar.
-            cx.update(|cx| {
-                cx.global_mut::<MarketplaceState>().set_download_progress(&name, 0.0);
-                cx.refresh_windows();
-            })
-            .map_err(|e| warn!(error = ?e, "Failed to signal download start in UI"))
-            .ok();
-
-            let downloaded = install::download_wasm_module(&client, &name, &version, |read, total| {
-                if total > 0 {
-                    let progress = (read as f32 / total as f32).min(0.99);
-                    cx.update(|cx| {
-                        cx.global_mut::<MarketplaceState>()
-                            .set_download_progress(&name, progress);
-                        cx.refresh_windows();
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to update download progress in UI"))
-                    .ok();
+                Err(e) => {
+                    error!(error = ?e, "Failed to install extension");
+                    let state = cx.global_mut::<MarketplaceState>();
+                    state.set_error(format!("Install failed: {e}"));
                 }
-            })
-            .await;
-
-            cx.update(|cx| {
-                cx.global_mut::<MarketplaceState>().clear_download_progress(&name);
-                let download = match downloaded {
-                    Ok(download) => download,
-                    Err(install::InstallError::Client(
-                        chatty_core::hive::ClientError::Unauthorized,
-                    )) => {
-                        warn!(name = %name, "Download requires authentication");
-                        cx.global_mut::<MarketplaceState>().set_error(
-                            "Login required to download modules. Please sign in first.".to_string(),
-                        );
-                        cx.refresh_windows();
-                        return;
-                    }
-                    Err(e) => {
-                        error!(error = ?e, name = %name, "Module download failed");
-                        cx.global_mut::<MarketplaceState>()
-                            .set_error(format!("Download failed: {e}"));
-                        cx.refresh_windows();
-                        return;
-                    }
-                };
-
-                let extensions = cx.global_mut::<ExtensionsModel>();
-                match install::install_wasm_module(
-                    &download,
-                    &name,
-                    &version,
-                    &display_name,
-                    &description,
-                    &pricing_model,
-                    &module_dir,
-                    extensions,
-                ) {
-                    Ok(ext) => {
-                        info!(id = %ext.id, "Installed extension from Hive");
-                        save_extensions_async(extensions.clone(), cx);
-                        module_settings_controller::refresh_runtime(cx);
-                    }
-                    Err(e) => {
-                        error!(error = ?e, "Failed to install extension");
-                        let state = cx.global_mut::<MarketplaceState>();
-                        state.set_error(format!("Install failed: {e}"));
-                    }
-                }
-                cx.refresh_windows();
-            })
-            .map_err(|e| warn!(error = ?e, "Failed to update UI after install"))
-            .ok();
-        }
+            }
+            cx.refresh_windows();
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to update UI after install"))
+        .ok();
     })
     .detach();
 }

@@ -15,7 +15,7 @@ use crate::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel, InstalledExtension,
 };
 use crate::settings::models::mcp_store::McpServerConfig;
-use chatty_module_registry::{INSTALL_RECORD_FILE, InstallRecord};
+use chatty_module_registry::InstallRecord;
 use hive_client::HiveRegistryClient;
 use hive_client::models::DownloadResult;
 use thiserror::Error;
@@ -153,60 +153,6 @@ pub fn install_wasm_module(
         Some(download.publisher_public_key.clone()),
     )
     .write(&dest)?;
-
-    let ext = InstalledExtension {
-        id: name.to_string(),
-        display_name: display_name.to_string(),
-        description: description.to_string(),
-        kind: ExtensionKind::WasmModule,
-        source: ExtensionSource::Hive {
-            module_name: name.to_string(),
-            version: version.to_string(),
-        },
-        pricing_model: Some(pricing_model.to_string()),
-        enabled: true,
-    };
-
-    extensions.add(ext.clone());
-    Ok(ext)
-}
-
-/// Install a remote module (no WASM download) into `module_dir` — writes a
-/// `module.toml` that declares `execution_mode = "remote"` so the gateway
-/// routes calls to the hive-runner. Removes any stale `.wasm` and install
-/// record left from a previous local install of the same module.
-#[allow(clippy::too_many_arguments)]
-pub fn install_remote_module(
-    name: &str,
-    version: &str,
-    display_name: &str,
-    description: &str,
-    pricing_model: &str,
-    version_manifest: &serde_json::Value,
-    module_dir: &Path,
-    extensions: &mut ExtensionsModel,
-) -> Result<InstalledExtension, InstallError> {
-    validate_module_name(name)?;
-    validate_version(version)?;
-    if extensions.is_installed(name) {
-        return Err(InstallError::AlreadyInstalled(name.to_string()));
-    }
-
-    let dest = module_dir.join(name);
-    std::fs::create_dir_all(&dest)?;
-
-    // Remove any stale WASM binary and its record from a previous local install.
-    for stale in [format!("{name}.wasm"), INSTALL_RECORD_FILE.to_string()] {
-        let path = dest.join(stale);
-        if path.exists() {
-            std::fs::remove_file(&path)?;
-        }
-    }
-
-    // Write module.toml with execution_mode = "remote" (no wasm field).
-    let toml_content =
-        build_module_toml(name, version, description, None, "remote", version_manifest);
-    std::fs::write(dest.join("module.toml"), toml_content)?;
 
     let ext = InstalledExtension {
         id: name.to_string(),
@@ -916,23 +862,6 @@ mod tests {
         assert_eq!(record.trust_level, TrustLevel::Signed);
         assert_eq!(record.publisher_key_id, Some("ab".repeat(32)));
         assert_eq!(record.sha256, hex::encode(sha2::Sha256::digest(b"\0asm")));
-
-        // Remote installs land there too, and uninstall removes from there.
-        let mut extensions = ExtensionsModel::default();
-        install_remote_module(
-            "remote-mod",
-            "1.0.0",
-            "Remote",
-            "",
-            "free",
-            &serde_json::json!({}),
-            configured.path(),
-            &mut extensions,
-        )
-        .unwrap();
-        assert!(configured.path().join("remote-mod/module.toml").is_file());
-        uninstall_extension("remote-mod", configured.path(), &mut extensions).unwrap();
-        assert!(!configured.path().join("remote-mod").exists());
     }
 
     #[test]

@@ -225,8 +225,8 @@ impl ModuleRegistry {
                 warn!(module = %manifest.name, dir = %module_dir.display(), %warning, "module manifest");
             }
 
-            // Remote modules have no local WASM binary — they execute on the
-            // hive-runner, and the gateway routes them there.
+            // Remote modules have no local WASM binary, and nothing serves
+            // them any more (PL-H8b): report them, do not load them.
             if manifest.execution_mode.is_remote() {
                 debug!(module = %manifest.name, "remote module: not loaded into the WASM runtime");
                 report.remote.push((module_dir, manifest));
@@ -356,9 +356,8 @@ impl ModuleRegistry {
         let manifest = ModuleManifest::from_file(&module_dir.join("module.toml"))?;
         let name = manifest.name.clone();
 
-        // Remote modules have no local WASM binary — they execute on the
-        // hive-runner.  Skip them; the gateway routes them via the runner's
-        // OpenAI-compat endpoint instead.
+        // Remote modules have no local WASM binary, and nothing serves them
+        // any more (PL-H8b). Skip them.
         if manifest.execution_mode.is_remote() {
             debug!(module = %name, "remote module: not loaded into the WASM runtime");
             return Ok(name);
