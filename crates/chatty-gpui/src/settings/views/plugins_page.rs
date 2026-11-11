@@ -9,14 +9,16 @@ use crate::settings::models::extensions_store::ExtensionsModel;
 use crate::settings::models::{
     AgentSpecsModel, DiscoveredModulesModel, ModuleLoadStatus, ModuleSettingsModel,
 };
+use crate::settings::views::agent_spec_editor;
 use crate::settings::views::extensions_page::trust_badge;
 use chatty_core::agent_spec::SpecListing;
 use chatty_wasm_runtime::SPECLESS_DEFAULTS;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use gpui_component::button::Button;
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::switch::Switch;
-use gpui_component::{ActiveTheme, h_flex, v_flex};
+use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 
 pub fn plugins_page() -> SettingPage {
     SettingPage::new("Plugins")
@@ -126,8 +128,7 @@ fn plugins_group() -> SettingGroup {
                         format!("Runs: {}", module.execution_mode)
                     });
                     facts.push(if used_by.is_empty() {
-                        "Used by no agent spec yet: list it under [[plugins]] in a spec."
-                            .to_string()
+                        "Used by no agent spec yet: Add to agent… lists it in one.".to_string()
                     } else {
                         format!("Used by: {}", used_by.join("; "))
                     });
@@ -148,7 +149,9 @@ fn plugins_group() -> SettingGroup {
                                 )
                                 .when_some(module.trust_level.clone(), |el, trust| {
                                     el.child(trust_badge(&trust, cx))
-                                }),
+                                })
+                                .child(div().flex_1())
+                                .child(add_to_agent_button(&module.name)),
                         )
                         .children(facts.into_iter().map(|fact| {
                             div()
@@ -174,6 +177,17 @@ fn plugins_group() -> SettingGroup {
                 }))
                 .into_any_element()
         })])
+}
+
+/// "Add to agent…" for a plugin (PL-U5b, AGE-718): on its Plugins row and
+/// on its installed marketplace row.
+pub(crate) fn add_to_agent_button(module: &str) -> Button {
+    let name = module.to_string();
+    Button::new(SharedString::from(format!("add-to-agent-{module}")))
+        .small()
+        .outline()
+        .label("Add to agent…")
+        .on_click(move |_, window, cx| agent_spec_editor::open_add_to_agent(&name, window, cx))
 }
 
 /// One requested capability of a module served with no agent spec (SEC-11,
