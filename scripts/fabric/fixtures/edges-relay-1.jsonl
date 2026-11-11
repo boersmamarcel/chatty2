@@ -1,0 +1,9 @@
+{"ts":1,"kind":"task","from":"leader-0","to":"a-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-1"}
+{"ts":1,"kind":"task","from":"leader-0","to":"a-1","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-1"}
+{"ts":1,"kind":"message","from":"a-0","to":"leader-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"pending","root_task_id":"t-1","names_sibling":true,"sibling_names":["a-1"]}
+{"ts":1,"kind":"task","from":"leader-0","to":"a-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-2"}
+{"ts":1,"kind":"task","from":"leader-0","to":"b-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-2"}
+{"ts":1,"kind":"message","from":"a-0","to":"leader-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"pending","root_task_id":"t-2","names_sibling":false,"sibling_names":[]}
+{"ts":1,"kind":"task","from":"root","to":"top-0","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"completed","root_task_id":"t-3"}
+{"ts":1,"kind":"message","from":"top-0","to":"root","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"pending","root_task_id":"t-3","names_sibling":false,"sibling_names":[]}
+{"ts":1,"kind":"task","from":"leader-0","to":"a","scope":"root","run":null,"chain":[],"bytes":10,"outcome":"failed"}

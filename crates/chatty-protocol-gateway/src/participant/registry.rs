@@ -38,7 +38,8 @@ use super::limits::MAX_FRAME_BYTES;
 use super::protocol::{BrokerFrame, DelegatedTask, ParticipantCard, ParticipantFrame, TaskState};
 use chatty_fabric::{
     AgentOrigin, AskRequest, ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName,
-    NodeState, RunId, RunPermit, SpawnContext, SwarmItem, TaskTable, WeakRunPermit,
+    NodeState, ROOT_NAME, RelayCounter, RunId, RunPermit, SpawnContext, SwarmItem, TaskTable,
+    WeakRunPermit,
 };
 
 /// The conversation scope every node this broker admits works for, until
@@ -166,6 +167,10 @@ struct Inner {
     /// The name each open run goes by: the `taskId` of the `task.run` that
     /// opened it, which is what a node's call names.
     run_names: HashMap<RunId, String>,
+    /// The run (`root_task_id`) each node was last handed a task under. Kept
+    /// after the run closes and the node ends: the relay counter (TM-3)
+    /// must tell a sibling of this run from an ended one of an earlier run.
+    node_roots: HashMap<NodeId, String>,
     /// Why the broker closed a node's connection before welcoming it, by
     /// node name (AGE-818). The worker only sees the socket close; whoever
     /// spawned it reads this to say why.
@@ -512,6 +517,31 @@ impl ParticipantRegistry {
         Some((node, owner))
     }
 
+    /// The names of `name`'s siblings that `text` names, when `to` is
+    /// `name`'s owner (the root's name when the root owns it): a relay
+    /// request (TM-3). Empty otherwise.
+    pub(crate) fn relay_siblings_named(&self, name: &str, to: &str, text: &str) -> Vec<String> {
+        let inner = self.lock();
+        let Some(node) = inner.directory.by_name(name) else {
+            return Vec::new();
+        };
+        let owner = node
+            .owner()
+            .and_then(|id| inner.directory.get(id))
+            .map_or(ROOT_NAME, |owner| owner.name().as_str());
+        if owner != to {
+            return Vec::new();
+        }
+        // Only siblings of this run: an ended one of an earlier run under
+        // the same owner is not in the conversation any more.
+        let Some(root) = inner.node_roots.get(&node.id()) else {
+            return Vec::new();
+        };
+        RelayCounter::siblings_named(&inner.directory, node.id(), text, |sibling| {
+            inner.node_roots.get(&sibling.id()) == Some(root)
+        })
+    }
+
     pub fn card(&self, name: &str) -> Option<ParticipantCard> {
         self.lock().participants.get(name).map(|p| p.card.clone())
     }
@@ -624,6 +654,7 @@ impl ParticipantRegistry {
                 return None;
             }
         }
+        let root = call.chain.root_task_id.clone();
         let run = match inner.runs.open(caller, callee, call.from_run, call.chain) {
             Ok(run) => run,
             Err(error) => {
@@ -632,6 +663,7 @@ impl ParticipantRegistry {
             }
         };
         inner.run_names.insert(run, task_id.clone());
+        inner.node_roots.insert(callee, root);
         let participant = inner.participants.get_mut(name)?;
         participant
             .tasks
@@ -885,7 +917,9 @@ impl ParticipantRegistry {
         let mut inner = self.lock();
         let callee = inner.directory.by_name(callee)?.id();
         let caller = caller.and_then(|name| inner.directory.by_name(name).map(Node::id));
+        let root = chain.root_task_id.clone();
         let run = inner.runs.open(caller, callee, from, chain).ok()?;
+        inner.node_roots.insert(callee, root);
         inner.run_names.insert(run, run.to_string());
         drop(inner);
         Some(RunGuard {

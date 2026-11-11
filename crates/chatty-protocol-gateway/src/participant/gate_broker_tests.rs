@@ -124,6 +124,27 @@ impl Kit {
         task_id
     }
 
+    /// [`connect`](Self::connect), owned by the node `owner`.
+    fn connect_under(&self, spec: &str, owner: &str) -> (String, mpsc::Receiver<BrokerFrame>) {
+        let admitted = self
+            .registry
+            .admit(spec, AgentOrigin::Local, Some(owner))
+            .unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        let name = self
+            .registry
+            .register(admitted, ParticipantCard::default(), tx);
+        (name, rx)
+    }
+
+    fn edge_rows(&self) -> Vec<EdgeRow> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     fn resolve(&self, name: &str) -> Caller {
         self.calls.resolve(&Peer::Node(name.to_string()))
     }
@@ -782,4 +803,94 @@ impl VirtualAgent for Answering {
             Ok((handle, updates))
         })
     }
+}
+
+/// TM-3: a message to the owner records which siblings of its own run it
+/// names, by broker-assigned or role name, under the run's `root_task_id`;
+/// an ended sibling of an earlier run is not one; a message to anyone else
+/// names none; and a task row for a worker that never started carries no
+/// `root_task_id`, so its spec is not counted as a worker.
+#[tokio::test]
+async fn message_rows_name_the_siblings_a_relay_request_names() {
+    let kit = Kit::new(&["kit-a"]);
+    let (lead, _lead_frames) = kit.connect("lead");
+    let lead_task = kit.hand(&lead, "t-1", &["lead"]).await;
+
+    // A start that fails writes a row whose `to` is still the spec.
+    kit.invoke(Peer::Node(lead.clone()), "kit-a", Some(&lead_task))
+        .await;
+    let stamp_root = kit.spawned()[0]
+        .as_ref()
+        .unwrap()
+        .chain
+        .root_task_id
+        .clone();
+    assert_eq!(stamp_root, "t-1");
+    let failed = kit.edge_rows();
+    assert_eq!(failed[0].kind, EdgeKind::Task);
+    assert_eq!(failed[0].to, "kit-a");
+    assert_eq!(failed[0].root_task_id, None);
+
+    // Three children of the lead in run t-1, and one that ended in run t-0.
+    let mut frames = Vec::new();
+    let mut child = |spec: &str, root: &str| {
+        let (name, rx) = kit.connect_under(spec, &lead);
+        frames.push(rx);
+        (name, root.to_string(), spec.to_string())
+    };
+    let old = child("reviewer", "t-0");
+    let coder = child("coder", "t-1");
+    let twin = child("coder", "t-1");
+    let reviewer = child("reviewer", "t-1");
+    for (name, root, spec) in [&old, &coder, &twin, &reviewer] {
+        kit.hand(name, root, &["lead", spec]).await;
+    }
+    kit.registry.end_node(&old.0);
+
+    let send = |text: String, to: String| {
+        let calls = kit.calls.clone();
+        let peer = Peer::Node(coder.0.clone());
+        async move {
+            calls
+                .call(
+                    peer,
+                    CallRequest::SendMessage(SendMessageParams { to, text }),
+                )
+                .collect::<Vec<_>>()
+                .await
+        }
+    };
+    send(format!("ask {} to rebase", twin.0), lead.clone()).await;
+    send("the reviewer should look".into(), lead.clone()).await;
+    send("as a coder, done".into(), lead.clone()).await;
+    send("the reviewer should look".into(), reviewer.0.clone()).await;
+
+    let rows: Vec<EdgeRow> = kit
+        .edge_rows()
+        .into_iter()
+        .filter(|row| row.kind == EdgeKind::Message)
+        .collect();
+    let names: Vec<_> = rows
+        .iter()
+        .map(|r| r.sibling_names.clone().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            vec![twin.0.clone()],
+            vec![reviewer.0.clone()],
+            vec![],
+            vec![]
+        ],
+        "reviewer-0 ended in an earlier run and is not named"
+    );
+    assert_eq!(
+        rows.iter().map(|r| r.names_sibling).collect::<Vec<_>>(),
+        [Some(true), Some(true), Some(false), Some(false)]
+    );
+    // The message rows carry the root the task rows are stamped with.
+    assert!(
+        rows.iter()
+            .all(|r| r.root_task_id.as_deref() == Some(stamp_root.as_str()))
+    );
 }
