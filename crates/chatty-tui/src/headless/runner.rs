@@ -548,11 +548,15 @@ impl HeadlessRunner {
                 lazy_broker: self.config.broker.clone(),
                 local_agents: match self.config.team.as_ref() {
                     Some(team) => team.agent_names(),
-                    None => self.config.module_settings.roster_names(
+                    // A named spec (a worker's `--agent-json`, an
+                    // `--agent` root) is offered its callers-only members
+                    // too; the broker's policy decides (AGE-998).
+                    None => self.config.module_settings.local_agent_names(
                         self.execution_settings
                             .workspace_dir
                             .as_deref()
                             .map(std::path::Path::new),
+                        self.config.runs_as_spec,
                     ),
                 },
                 remote_agents: self.config.remote_agents.clone(),

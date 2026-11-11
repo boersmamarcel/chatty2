@@ -1,7 +1,8 @@
 # The curation team's spec-writer (AGE-1053): writes items in the swarm-ready
 # template (vault dev/swarm-ready-issue), as text in its answer. It writes no
 # file: the `reviewer` profile less the shell leaves read tools only. Exposed
-# for the reason coder.toml gives.
+# with no `callers` (AGE-998 lets a lead reach callers-only members; not
+# flipped here).
 [agent]
 name = "spec-writer"
 description = "The curation team's writer: writes swarm-ready items as text from a scout's findings, and writes no file"

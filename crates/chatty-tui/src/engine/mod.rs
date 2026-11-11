@@ -416,6 +416,8 @@ pub struct ChatEngine {
     /// "read_skill <skill> and follow it", prepended to the first human turn
     /// of a `--team` run and then gone.
     pending_first_turn: Option<String>,
+    /// See [`ChatEngineConfig::runs_as_spec`] (AGE-998).
+    runs_as_spec: bool,
     /// When `true`, this engine is itself a delegated worker: `/agent` is
     /// refused, so a worker cannot fan out further from the chat box.
     pub is_sub_agent: bool,
@@ -622,6 +624,11 @@ pub struct ChatEngineConfig {
     /// AGE-407): its skill is served by `read_skill`, and its first-turn
     /// instruction opens the first human turn. `None` for everything else.
     pub team: Option<Team>,
+    /// Whether `spec` is a named spec (`--agent <spec>`, a delegated
+    /// worker's `--agent-json`) rather than the bare root: without a team,
+    /// a named spec is offered its callers-only members too, and the
+    /// broker's delegation policy decides (AGE-998).
+    pub runs_as_spec: bool,
     pub is_sub_agent: bool,
     /// Set to `true` when all services were loaded eagerly (headless mode).
     /// Set to `false` when services are deferred to background (interactive mode).
@@ -670,6 +677,7 @@ impl ChatEngine {
             spec: config.spec,
             pending_first_turn: config.team.as_ref().and_then(Team::first_turn_instruction),
             team: config.team,
+            runs_as_spec: config.runs_as_spec,
             is_sub_agent: config.is_sub_agent,
             transcript: Transcript::new(),
             is_streaming: false,
@@ -817,15 +825,17 @@ impl ChatEngine {
     /// The broker's virtual agents by name: the `--team` roster when this
     /// process leads a team (held apart from `module_settings`, which
     /// `/modules` saves to disk; AGE-382/AGE-407), else what module settings
-    /// declare, else every exposed spec (PL-U5).
+    /// declare, else every exposed spec (PL-U5); a named spec's include the
+    /// callers-only members (AGE-998).
     pub(crate) fn local_agents(&self) -> Vec<String> {
         match self.team.as_ref() {
             Some(team) => team.agent_names(),
-            None => self.module_settings.roster_names(
+            None => self.module_settings.local_agent_names(
                 self.execution_settings
                     .workspace_dir
                     .as_deref()
                     .map(std::path::Path::new),
+                self.runs_as_spec,
             ),
         }
     }
@@ -1768,6 +1778,7 @@ mod tests {
                 remote_agents: Vec::new(),
                 spec: AgentSpec::named("chatty"),
                 team: None,
+                runs_as_spec: false,
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,
@@ -2213,6 +2224,7 @@ mod tests {
                 remote_agents: Vec::new(),
                 spec: AgentSpec::named("chatty"),
                 team: None,
+                runs_as_spec: false,
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,

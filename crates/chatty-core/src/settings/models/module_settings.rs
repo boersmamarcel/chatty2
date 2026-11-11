@@ -153,6 +153,39 @@ impl ModuleSettingsModel {
     ) -> Vec<String> {
         crate::agent_spec::roster_names_from(&self.virtual_agents, workspace, data_dir)
     }
+
+    /// The names an agent is offered as its `local_agents` when no team
+    /// decides them. A bare root gets [`Self::roster_names`], which hides a
+    /// team's callers-only members. An agent that runs as a named spec
+    /// (`--agent <spec>`, a delegated worker's `--agent-json`) gets the
+    /// whole served roster, those members included: the broker's delegation
+    /// policy (`callers`, `delegates_to`) decides whether it may call them,
+    /// so `/agent crosscheck-lead` reaches its judge without `--team`
+    /// (AGE-998).
+    pub fn local_agent_names(
+        &self,
+        workspace: Option<&std::path::Path>,
+        runs_as_spec: bool,
+    ) -> Vec<String> {
+        self.local_agent_names_from(workspace, dirs::data_dir().as_deref(), runs_as_spec)
+    }
+
+    /// [`Self::local_agent_names`] with the data directory given rather
+    /// than the platform's.
+    pub fn local_agent_names_from(
+        &self,
+        workspace: Option<&std::path::Path>,
+        data_dir: Option<&std::path::Path>,
+        runs_as_spec: bool,
+    ) -> Vec<String> {
+        if !runs_as_spec {
+            return self.roster_names_from(workspace, data_dir);
+        }
+        crate::agent_spec::roster_names_of(
+            &self.virtual_agents,
+            &crate::agent_spec::inspect_agent_specs_from(workspace, data_dir),
+        )
+    }
 }
 
 /// Returns the platform-native default module directory.
@@ -329,6 +362,59 @@ mod tests {
 
         let old: ModuleSettingsModel = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
         assert!(old.virtual_agents.is_empty());
+    }
+
+    /// AGE-998: an agent that runs as a named spec (`/agent crosscheck-lead`
+    /// runs it as a worker with `--agent-json` and no `--team`) is offered
+    /// its callers-only members; the broker's delegation policy decides
+    /// whether it may call them. A bare root still never sees them.
+    #[test]
+    fn a_named_spec_is_offered_callers_only_members_and_a_bare_root_is_not() {
+        let settings = ModuleSettingsModel::default();
+        let members = [
+            "crosscheck-judge",
+            "crosscheck-solver-direct",
+            "crosscheck-solver-plan",
+            "crosscheck-solver-verify",
+            "crosscheck-writer",
+            "coder",
+            "tester",
+        ];
+
+        let named = settings.local_agent_names_from(None, None, true);
+        for member in members {
+            assert!(named.iter().any(|n| n == member), "{member} in {named:?}");
+        }
+        for lead in ["local-agent", "crosscheck-lead", "coding-lead"] {
+            assert!(named.iter().any(|n| n == lead), "{lead} in {named:?}");
+        }
+
+        let bare = settings.local_agent_names_from(None, None, false);
+        assert_eq!(bare, settings.roster_names_from(None, None));
+        for member in members {
+            assert!(!bare.iter().any(|n| n == member), "{member} in {bare:?}");
+        }
+        for lead in ["local-agent", "crosscheck-lead", "coding-lead"] {
+            assert!(bare.iter().any(|n| n == lead), "{lead} in {bare:?}");
+        }
+
+        // A declared roster is the roster either way; its callers-only
+        // names stay for a named spec only.
+        let declared = ModuleSettingsModel {
+            virtual_agents: vec![
+                "crosscheck-lead".to_string(),
+                "crosscheck-judge".to_string(),
+            ],
+            ..ModuleSettingsModel::default()
+        };
+        assert_eq!(
+            declared.local_agent_names_from(None, None, true),
+            ["crosscheck-lead", "crosscheck-judge"]
+        );
+        assert_eq!(
+            declared.local_agent_names_from(None, None, false),
+            ["crosscheck-lead"]
+        );
     }
 
     #[test]

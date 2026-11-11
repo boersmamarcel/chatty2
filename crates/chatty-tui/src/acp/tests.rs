@@ -44,12 +44,34 @@ fn test_server() -> Arc<Server> {
             remote_agents: Vec::new(),
             spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
             team: None,
+            runs_as_spec: false,
             is_sub_agent: false,
             services_loaded: true,
             surface: StreamSurface::InteractiveTui,
         },
         sessions: Default::default(),
     })
+}
+
+/// AGE-998: an ACP session run as a named spec (`chatty-tui acp --agent
+/// crosscheck-lead`) is offered its callers-only members; a bare root's
+/// ACP session is not.
+#[test]
+fn an_acp_named_spec_is_offered_its_callers_only_members() {
+    let server = |runs_as_spec: bool| {
+        let mut server = Arc::into_inner(test_server()).expect("one owner");
+        server.config.module_settings.virtual_agents = vec![
+            "crosscheck-lead".to_string(),
+            "crosscheck-judge".to_string(),
+        ];
+        server.config.runs_as_spec = runs_as_spec;
+        server
+    };
+    assert_eq!(
+        server(true).local_agents(None),
+        ["crosscheck-lead", "crosscheck-judge"]
+    );
+    assert_eq!(server(false).local_agents(None), ["crosscheck-lead"]);
 }
 
 fn scenario(name: &str) -> Scenario {

@@ -36,8 +36,11 @@ presets, first definition of each name
 `researcher` preset is on the default roster and an agent like any other,
 `list_agents` lists it, `invoke_agent` reaches it at `/a2a/researcher`, and
 `/agent researcher …` runs it. A spec that names its `callers` (a team-internal worker
-such as `crosscheck-writer`) is served for its lead but never offered to the root's
-`list_agents`/`invoke_agent`. A spec file that does not load is left out of the roster
+such as `crosscheck-writer`) is served for its lead but never offered to a bare root's
+`list_agents`/`invoke_agent`. An agent that runs as a named spec (`--agent <spec>`, or a
+delegated worker's `--agent-json`, such as the lead `/agent crosscheck-lead` starts) is
+offered the whole served roster, callers-only members included; the broker's delegation
+policy (`callers`, `delegates_to`) decides which of them it may call (AGE-998). A spec file that does not load is left out of the roster
 with a warning; Settings → Agents and `/agents` show it with its error.
 
 On the desktop, "the workspace" a conversation's own `list_agents`/`invoke_agent`/`/agent`
@@ -1009,14 +1012,14 @@ milestone of the hosted coding swarm (AGE-956: issue, branch, commits, PR).
 | Spec | Profile | Role | Budget |
 |------|---------|------|--------|
 | `coding-lead` | `coordinator` | Reads the task, writes its acceptance criteria, delegates to `coder`, merges the coder's branch (`git_merge`; on hosted the commits are already on the working branch), then requires `tester` `TESTS: PASS` and `code-reviewer` `APPROVE`. When the change adds tests it also asks `tester` for a mutation check (one broken line per new test) and a `MUTATION MISSED` counts as a fix round (AGE-1032). Otherwise it sends the numbered fixes back to `coder`, at most 2 rounds. When the host-side `github` agent is on the roster (hosted runs; hive AGE-958) and the change is done, it takes the change through CI (AGE-1034): `open_or_update_pr` (draft, `Closes <issue>`, `ship:auto` only when the task allows it, the review approved and nothing touches billing, credentials or security, `ci-fix` after a CI fix), `pr_checks` (`wait_secs` 1200, at most twice more on `PENDING`/`NONE`), and on `FAIL` `failing_check_log` per failed check: `CLASS: INFRA` gets one empty-commit rerun per task and no code change, `CLASS: CODE` goes to `coder` word for word, then `tester` and `code-reviewer`. At most 3 CI rounds. Without `github` (local runs) this is skipped and nothing is pushed. It replies `DONE` or `NOT DONE`, with the PR link and last `CHECKS:` line when `github` was used. Edits nothing. Its state lives on the branch (AGE-1048), not in its context: `.chatty/plan.md` (criteria, then steps marked `[ ]`/`[~]`/`[x]` with their commit) and `.chatty/progress.md` (append-only attempts), written by `coder` in the same commits as the work. Every new turn or lease reads them first and continues from the first step not `[x]`; before the PR `coder` removes just those two files in a final commit, so the PR diff holds only the change. `delegates_to = ["coder", "code-reviewer", "tester", "github"]` (a name not on the roster is never reachable) | 50 turns, 150m |
-| `coder` | `coder`, less `code-exec` | Smallest change, committed on the current branch with `git_add`/`git_commit`; never creates, switches or merges a branch, never pushes. Leaf, exposed | 40 turns, 20m |
-| `tester` | `reviewer` (read tools plus the shell, which can write: the tester stays read-only by instruction, not by tool) | Runs the repository's checks: each line of `.chatty/checks`, else the README's test command, else `python -m pytest -q` (a `pytest.ini` or `tests/`) or `cargo test` (a `Cargo.toml`), with `shell_execute`. First line `TESTS: PASS` or `TESTS: FAIL`, then each command's exit code, every test binary's `test result:` line (never just the output tail), the failing output trimmed, and the files changed (`git show --stat HEAD`). No checks or no shell is `TESTS: FAIL`, never a pass. On request it runs a mutation check: breaks the one line the lead names per new test, runs that test, expects it to fail, restores with `git checkout -- <file>` and never commits, and reports `MUTATION CAUGHT` or `MUTATION MISSED` per test (AGE-1032). Leaf, exposed | 24 turns, 20m |
+| `coder` | `coder`, less `code-exec` | Smallest change, committed on the current branch with `git_add`/`git_commit`; never creates, switches or merges a branch, never pushes. Leaf, `callers = ["coding-lead"]` | 40 turns, 20m |
+| `tester` | `reviewer` (read tools plus the shell, which can write: the tester stays read-only by instruction, not by tool) | Runs the repository's checks: each line of `.chatty/checks`, else the README's test command, else `python -m pytest -q` (a `pytest.ini` or `tests/`) or `cargo test` (a `Cargo.toml`), with `shell_execute`. First line `TESTS: PASS` or `TESTS: FAIL`, then each command's exit code, every test binary's `test result:` line (never just the output tail), the failing output trimmed, and the files changed (`git show --stat HEAD`). No checks or no shell is `TESTS: FAIL`, never a pass. On request it runs a mutation check: breaks the one line the lead names per new test, runs that test, expects it to fail, restores with `git checkout -- <file>` and never commits, and reports `MUTATION CAUGHT` or `MUTATION MISSED` per test (AGE-1032). Leaf, `callers = ["coding-lead"]` | 24 turns, 20m |
 | `code-reviewer` | `reviewer` (shell on, read-only by instruction; AGE-1032) | The coding team's reviewer: reads `git_log`/`git_diff`, lists the commit's files with `git show --stat`, may run the tests the change adds or touches through the shell, and checks each acceptance criterion: `APPROVE` or `REQUEST_CHANGES` and numbered fixes. With no shell it reviews by reading. Leaf, exposed. The shared `reviewer` (shell off) is unchanged | 40 turns, 15m |
 
-`coder`, `tester` and `code-reviewer` are exposed rather than `callers = ["coding-lead"]`: an agent run
-without `--team` (`/agent coding-lead`, `--agent coding-lead`, a delegated worker) is
-offered the roster less every spec that names its callers (`root_agent_names_of`), so a
-callers-only member would be unreachable from its own lead.
+`coder` and `tester` are `callers = ["coding-lead"]`: only the lead may call them, and a
+bare root is not offered them. The lead reaches them without `--team` (`/agent
+coding-lead`, `--agent coding-lead`), since an agent that runs as a named spec is offered
+the whole served roster (AGE-998). `code-reviewer` is still exposed.
 
 **The curation team (AGE-1053)** is four more specs, also without a `team.json`:
 `/agent curator-lead` runs it. It writes the items the coding team takes (design
