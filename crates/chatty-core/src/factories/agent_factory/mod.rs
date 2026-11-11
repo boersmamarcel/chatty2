@@ -335,6 +335,7 @@ impl AgentClient {
             embedded_terminals,
             fabric_transport,
             fabric_owner,
+            caller_spec,
             plugins,
             plugin_host,
         } = ctx;
@@ -1390,7 +1391,11 @@ impl AgentClient {
                     .and_then(|settings| settings.workspace_dir.as_ref())
                     .map(std::path::PathBuf::from),
                 dirs::data_dir(),
-            );
+            )
+            .with_caller(crate::tools::list_agents_tool::caller_policy(
+                lazy_broker.as_ref(),
+                caller_spec,
+            ));
         // With a broker there is a live participant table to read, not just
         // the settings snapshot (ADR-0011 C5); the tool starts the broker
         // itself on first use.

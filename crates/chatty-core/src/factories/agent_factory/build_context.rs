@@ -154,6 +154,12 @@ pub struct AgentBuildContext {
     /// its recipient (tree messages, TM-1). `None` beside a transport means
     /// the root owns it ([`chatty_fabric::ROOT_NAME`]).
     pub fabric_owner: Option<String>,
+    /// The spec this agent runs as, when it runs as one ([`Self::from_spec`]):
+    /// `list_agents` offers only what its delegation policy lets it call
+    /// (DP-1, RO-3). A root with a `lazy_broker` is checked as the broker
+    /// checks it instead ([`LazyBroker::root_spec`]); `None` is a plain root,
+    /// which may call anyone.
+    pub caller_spec: Option<AgentSpec>,
     /// The spec's `[[plugins]]` (PL-U2, AGE-616): loaded by the factory, one
     /// instance per plugin for this agent, their tools registered beside the
     /// native ones. Empty for an agent that is not built from a spec.
@@ -323,6 +329,8 @@ impl AgentBuildContext {
             // Only a delegated worker has a connection to its broker.
             fabric_transport: None,
             fabric_owner: None,
+            // Only an agent built from a spec runs as one (`from_spec`).
+            caller_spec: None,
             // Only a spec lists plugins (`from_spec`).
             plugins: Vec::new(),
             plugin_host,
@@ -387,6 +395,7 @@ impl AgentBuildContext {
                 .and_then(|s| s.workspace_dir.as_ref())
                 .map(PathBuf::from),
             plugins: spec.plugins.clone(),
+            caller_spec: Some(spec.clone()),
             ..Self::from_services(AgentServices {
                 exec_settings: settings.as_ref().and_then(gated_exec_settings),
                 ..services

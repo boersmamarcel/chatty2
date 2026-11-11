@@ -125,7 +125,7 @@
       "type": "function",
       "function": {
         "name": "list_agents",
-        "description": "List all available agents: remote A2A agents configured via Settings → A2A Agents, and locally installed WASM module agents. Returns each agent's name, type, enabled state, and the skills/tools it provides. \n\nUse this to discover what agents are available before deciding whether to delegate a task. Agents can be invoked with `/agent <name> <prompt>` — each agent runs its own full agentic loop and returns a result.",
+        "description": "List the agents you may delegate to: agent specs this machine can start, agents already running in this conversation's swarm, and remote A2A agents configured in Settings. Returns each agent's name, origin, reach, a one-line description and, when known, its model, tool profile and plugins. Only agents you are allowed to call are listed.\n\nUse this to discover what agents are available before deciding whether to delegate a task. Call one with `invoke_agent` — each agent runs its own full agentic loop and returns a result.",
         "parameters": {
           "type": "object",
           "properties": {},

@@ -114,10 +114,11 @@ Watch the transcript. First the leader looks at the roster — the folded tool l
   "agents": [
     {
       "name": "local-reviewer",
-      "origin": "local",
-      "kind": "worker",
+      "origin": "local_spec",
+      "reach": "startable",
       "description": "A chatty agent in its own process, with its own workspace. Delegate a self-contained task to it and it works autonomously and reports back. Model: qwen2.5-coder:14b. Tool profile: reviewer. Role: You are the reviewer.",
-      "enabled": true
+      "runs_on": "local",
+      "profile": "reviewer"
     }
   ],
   "total": 1
