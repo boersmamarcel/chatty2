@@ -867,6 +867,7 @@ mod tests {
                 remote_agents: Vec::new(),
                 spec: chatty_core::agent_spec::AgentSpec::named("chatty"),
                 team: None,
+                runs_as_spec: false,
                 is_sub_agent: false,
                 services_loaded: true,
                 surface: StreamSurface::InteractiveTui,

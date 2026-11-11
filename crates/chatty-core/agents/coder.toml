@@ -1,9 +1,8 @@
 # The coding team's coder (AGE-957): the one member that edits and commits.
-# Exposed, not `callers = ["coding-lead"]`: an agent run without `--team` is
-# offered the roster less every spec that names its callers, the lead's own
-# run included, so a callers-only coder would be unreachable from
-# `/agent coding-lead`. Code execution is off: its shell runs the
-# repository's own checks, and a hosted guest has execute_code off anyway.
+# Only the coding lead may call it; a lead run as a named spec without
+# `--team` (`/agent coding-lead`) is still offered it (AGE-998). Code
+# execution is off: its shell runs the repository's own checks, and a hosted
+# guest has execute_code off anyway.
 [agent]
 name = "coder"
 description = "The coding team's coder: makes the smallest change a task needs and commits it on the current branch"
@@ -25,7 +24,7 @@ profile = "coder"
 disable = ["code-exec"]
 
 [swarm]
-exposed = true
+callers = ["coding-lead"]
 
 [budget]
 max_agent_turns = 40

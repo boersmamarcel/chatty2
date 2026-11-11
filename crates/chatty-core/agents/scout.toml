@@ -1,7 +1,8 @@
 # The curation team's scout (AGE-1053): finds what an item needs in the
 # repository, quoting file:line. The `reviewer` profile is read tools plus
 # the shell; the scout is read-only by instruction, as the tester is (AGE-957).
-# Exposed for the reason coder.toml gives.
+# Exposed with no `callers` (AGE-998 lets a lead reach callers-only members;
+# not flipped here).
 [agent]
 name = "scout"
 description = "The curation team's scout: finds the files, lines, test set-up and check commands an item needs, quoting file:line"

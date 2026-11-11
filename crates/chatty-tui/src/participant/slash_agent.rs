@@ -315,6 +315,7 @@ async fn tui_slash_agent_delegates_through_broker() {
             remote_agents: Vec::new(),
             spec: root_spec,
             team: None,
+            runs_as_spec: false,
             is_sub_agent: false,
             services_loaded: true,
             surface: StreamSurface::InteractiveTui,
