@@ -175,6 +175,15 @@ fn internal_error(message: impl Into<String>) -> agent_client_protocol::Error {
 }
 
 impl Server {
+    /// The broker's virtual agents this session's agent is offered: a bare
+    /// root's roster, or for a named spec (`acp --agent <spec>`) the whole
+    /// served roster, callers-only members included (AGE-998).
+    fn local_agents(&self, workspace: Option<&std::path::Path>) -> Vec<String> {
+        self.config
+            .module_settings
+            .local_agent_names(workspace, self.config.runs_as_spec)
+    }
+
     fn get(&self, id: &SessionId) -> Option<AcpSession> {
         self.sessions
             .lock()
@@ -231,9 +240,8 @@ impl Server {
                 search_settings: config.search_settings.clone(),
                 embedding_service: config.embedding_service.clone(),
                 lazy_broker: config.broker.clone(),
-                local_agents: config
-                    .module_settings
-                    .roster_names(settings.workspace_dir.as_deref().map(std::path::Path::new)),
+                local_agents: self
+                    .local_agents(settings.workspace_dir.as_deref().map(std::path::Path::new)),
                 remote_agents: config.remote_agents.clone(),
                 plugin_host: crate::engine::plugin_host(
                     &config.module_settings,

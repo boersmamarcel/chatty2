@@ -19,6 +19,8 @@
 //! leaves for the turn, filled with the headless runner.
 
 #[cfg(test)]
+mod answer_file_usage;
+#[cfg(test)]
 mod approval_relay;
 #[cfg(test)]
 mod best_of;
@@ -33,6 +35,8 @@ mod budget_stop;
 mod call_chain;
 #[cfg(test)]
 mod coding_team;
+#[cfg(test)]
+mod crosscheck_lead;
 #[cfg(test)]
 mod curation_team;
 #[cfg(test)]

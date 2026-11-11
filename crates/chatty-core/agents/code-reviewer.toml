@@ -2,7 +2,8 @@
 # shell, so a code review can run the tests and git show/log, read-only by
 # instruction as for the tester (AGE-957). The shared `reviewer` keeps the
 # shell off. With the shell off for the user (a hosted default) this one still
-# reviews by reading. Exposed for the reason coder.toml gives.
+# reviews by reading. Exposed with no `callers`
+# (AGE-998 lets a lead reach callers-only members; not flipped here).
 [agent]
 name = "code-reviewer"
 description = "The coding team's reviewer: checks a code change against its task, can run the tests read-only, answers APPROVE or REQUEST_CHANGES"

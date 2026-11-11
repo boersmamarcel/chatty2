@@ -4,7 +4,7 @@
 # per new test and expects the test to fail (MUTATION CAUGHT / MISSED). The `reviewer`
 # profile is read-only apart from its shell (shell_execute), which is how it
 # runs them; with the shell off (a hosted user's default) it can run nothing
-# and says so instead of passing. Exposed for the reason coder.toml gives.
+# and says so instead of passing. Only the coding lead may call it (AGE-998).
 [agent]
 name = "tester"
 description = "The coding team's tester: runs the repository's own checks and answers TESTS: PASS or TESTS: FAIL"
@@ -49,7 +49,7 @@ checks run on the unbroken tree. If you cannot do a mutation, say why and count 
 profile = "reviewer"
 
 [swarm]
-exposed = true
+callers = ["coding-lead"]
 
 [budget]
 max_agent_turns = 24

@@ -712,6 +712,9 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
         execution_settings.workspace_dir.as_deref().map(Path::new),
     )?;
     let max_duration = apply_run_limits(&cli, team.as_ref(), &mut spec, &mut execution_settings)?;
+    // A named spec, not the bare root: offered its callers-only members
+    // when no team decides the roster (AGE-998).
+    let runs_as_spec = cli.agent.is_some() || cli.agent_json.is_some();
     // AGE-921: an unattended team run says up front which tools its agents
     // expect but the run has off; nobody is there to notice them missing.
     if cli.headless || cli.pipe || cli.participant_fd.is_some() {
@@ -928,6 +931,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
             remote_agents,
             spec: spec.clone(),
             team: None,
+            runs_as_spec,
             is_sub_agent: false,
             services_loaded: true,
             surface: chatty_core::services::StreamSurface::InteractiveTui,
@@ -960,6 +964,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 remote_agents,
                 spec: spec.clone(),
                 team: team.clone(),
+                runs_as_spec,
                 is_sub_agent: true,
                 services_loaded: true,
                 surface: chatty_core::services::StreamSurface::Headless,
@@ -1058,6 +1063,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
                 remote_agents,
                 spec,
                 team,
+                runs_as_spec,
                 is_sub_agent: false,
                 services_loaded: false,
                 surface: chatty_core::services::StreamSurface::InteractiveTui,

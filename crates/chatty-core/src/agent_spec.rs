@@ -1727,14 +1727,18 @@ cap_usd = 2.0
     }
 
     /// AGE-957: the coder edits, commits on the branch it was started on
-    /// and pushes nothing; it delegates to nobody, and anyone may
-    /// call it: it is exposed, as a callers-only spec is not offered to
-    /// a lead run without `--team`.
+    /// and pushes nothing; it delegates to nobody, and only the coding
+    /// lead may call it (AGE-998: a lead run without `--team` is offered
+    /// its callers-only members).
     #[test]
     fn the_coder_commits_on_its_branch_and_is_a_leaf() {
         let spec = load_agent_spec_from("coder", None, None).unwrap().spec;
         assert!(spec.swarm.delegates_to.is_empty(), "a leaf worker");
-        assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
+        assert!(spec.swarm.exposed);
+        assert_eq!(
+            spec.swarm.callers.as_deref(),
+            Some(&["coding-lead".to_string()][..])
+        );
         assert!(spec.budget.max_agent_turns.is_some() && spec.max_duration().is_some());
         let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
         for tool in [
@@ -1767,7 +1771,12 @@ cap_usd = 2.0
     fn the_tester_runs_the_repository_s_checks_and_changes_nothing() {
         let spec = load_agent_spec_from("tester", None, None).unwrap().spec;
         assert!(spec.swarm.delegates_to.is_empty(), "a leaf worker");
-        assert!(spec.swarm.exposed && spec.swarm.callers.is_none());
+        assert!(spec.swarm.exposed);
+        // Only the coding lead may call it (AGE-998).
+        assert_eq!(
+            spec.swarm.callers.as_deref(),
+            Some(&["coding-lead".to_string()][..])
+        );
         assert!(spec.budget.max_agent_turns.is_some() && spec.max_duration().is_some());
         assert!(spec.tools.disable.is_empty(), "{:?}", spec.tools.disable);
         let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
@@ -2065,7 +2074,6 @@ cap_usd = 2.0
                 "crosscheck-data-lead",
                 "crosscheck-lead",
                 "code-reviewer",
-                "coder",
                 "coding-lead",
                 "curator-lead",
                 "data-analyst",
@@ -2074,7 +2082,6 @@ cap_usd = 2.0
                 "reviewer",
                 "scout",
                 "spec-writer",
-                "tester",
                 "typesetter",
                 "writer",
             ]
@@ -2109,16 +2116,12 @@ cap_usd = 2.0
             "crosscheck-data-direct",
             "crosscheck-data-plan",
             "crosscheck-data-verify",
-        ] {
-            assert!(!roster.iter().any(|n| n == internal), "{internal}");
-        }
-        for leader in [
-            "crosscheck-lead",
-            "crosscheck-data-lead",
-            "coding-lead",
             "coder",
             "tester",
         ] {
+            assert!(!roster.iter().any(|n| n == internal), "{internal}");
+        }
+        for leader in ["crosscheck-lead", "crosscheck-data-lead", "coding-lead"] {
             assert!(roster.iter().any(|n| n == leader), "{leader}");
         }
     }
@@ -2177,7 +2180,6 @@ cap_usd = 2.0
                 "crosscheck-data-lead",
                 "crosscheck-lead",
                 "code-reviewer",
-                "coder",
                 "coding-lead",
                 "curator-lead",
                 "data-analyst",
@@ -2186,7 +2188,6 @@ cap_usd = 2.0
                 "reviewer",
                 "scout",
                 "spec-writer",
-                "tester",
                 "typesetter",
             ]
         );
@@ -2198,13 +2199,20 @@ cap_usd = 2.0
     fn agent_picker_shows_only_entry_points() {
         let listings = inspect_agent_specs_from(None, None);
         let names = root_agent_names_of(&[], &listings);
-        for entry in ["crosscheck-lead", "crosscheck-data-lead", "researcher"] {
+        for entry in [
+            "crosscheck-lead",
+            "crosscheck-data-lead",
+            "coding-lead",
+            "researcher",
+        ] {
             assert!(names.contains(&entry.to_string()), "{entry} in {names:?}");
         }
         for member in [
             "crosscheck-judge",
             "crosscheck-writer",
             "crosscheck-solver-direct",
+            "coder",
+            "tester",
         ] {
             assert!(
                 !names.contains(&member.to_string()),

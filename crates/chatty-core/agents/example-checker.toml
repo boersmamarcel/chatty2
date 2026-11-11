@@ -3,8 +3,8 @@
 # (swarm-ready template rule 8), and answers EXAMPLES: OK or a numbered list
 # of mismatches. The mutation check is dry: it confirms the line exists and
 # breaks nothing. The `reviewer` profile is read tools plus the shell,
-# read-only by instruction, as the tester's is (AGE-957). Exposed for the
-# reason coder.toml gives.
+# read-only by instruction, as the tester's is (AGE-957). Exposed with no
+# `callers` (AGE-998 lets a lead reach callers-only members; not flipped here).
 [agent]
 name = "example-checker"
 description = "The curation team's checker: runs or reads every example in an item against the code, answers EXAMPLES: OK or numbered mismatches"
