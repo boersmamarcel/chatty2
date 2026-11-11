@@ -1630,6 +1630,9 @@ mod tests {
             bytes: 0,
             outcome: outcome.into(),
             usd: None,
+            root_task_id: None,
+            names_sibling: None,
+            sibling_names: None,
         };
         let revision = trace.revision();
         for r in [
