@@ -136,6 +136,15 @@ pub struct AgentBuildContext {
     /// when every tool group is off, yet the project's instructions still
     /// apply. `None` falls back to `exec_settings.workspace_dir`.
     pub instructions_dir: Option<std::path::PathBuf>,
+    /// The home directory whose `~/.agents/AGENTS.md` (else
+    /// `~/.claude/CLAUDE.md`) joins the system prompt and whose
+    /// `~/.agents/skills/` and `~/.claude/skills/` `read_skill` searches
+    /// (AGE-588/589). `from_services` sets the process owner's home, which
+    /// on the desktop and the TUI is the user's. `None` means no global
+    /// instructions and no global skills: a host serving many users from
+    /// one process (`chatty-server` in the `hive` repo) sets it, so no
+    /// tenant gets the operator's files (AGE-590).
+    pub user_home: Option<std::path::PathBuf>,
     /// The desktop's embedded terminal tabs (AGE-583), a live registry the
     /// dock keeps current. When set, `terminal_read` is always offered and
     /// reads the tabs the human shared (per tab, at call time); a tab never
@@ -318,6 +327,9 @@ impl AgentBuildContext {
             // chatty-tui sets it from its ungated settings; everyone else
             // leaves it to `exec_settings`.
             instructions_dir: None,
+            // The process owner's home is the user's on the desktop and the
+            // TUI; a multi-tenant host overrides it (AGE-590).
+            user_home: dirs::home_dir(),
             // Only the desktop has embedded terminals.
             embedded_terminals: None,
             // Only a delegated worker has a connection to its broker.
