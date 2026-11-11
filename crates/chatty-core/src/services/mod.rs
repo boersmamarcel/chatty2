@@ -76,6 +76,9 @@ pub mod project_instructions;
 pub mod results_ledger;
 /// The resume brief a resumed team leader starts from (AGE-922).
 pub mod resume_brief;
+/// One read model of every agent a caller can reach: five origins, name
+/// precedence with shadowing, cached live cards (PL-S1 RO-1, AGE-658).
+pub mod roster;
 /// What a run has left to hand its callees: turns, time and dollars
 /// (PL-S2 DP-3).
 pub mod run_budget;

@@ -443,6 +443,24 @@ answer. A gateway that is off or slow to answer is not an error: the list is the
 settings know. API key values are **never exposed** to the LLM — only
 `has_api_key: true/false`.
 
+**The roster read model (PL-S1 RO-1).** `chatty_core::services::roster` is the one read
+model `list_agents` moves onto in RO-3 (AGE-660); nothing reads it yet. Five sources feed
+it, one `RosterSource` each:
+
+| Roster origin | Source | Reach |
+|:--|:--|:--|
+| `handle` | resumable handles in the caller's swarm (none until RC-3) | `live` or `idle` |
+| `node` | running nodes: `Directory::in_scope(caller.scope)`, less ended ones | `live`, `idle`, `unreachable` |
+| `local_spec` | agent specs, from the spec loader (`load_roster_from`) | `startable` |
+| `hosted` | the user's hosted agents (none until PL-S6) | — |
+| `remote` | Settings → A2A Agents | `live`, or `unreachable` when disabled |
+
+A name two origins share goes to the higher one, **`handle > node > local_spec > hosted >
+remote`** (PL-D4); the loser is still listed, with `shadowed_by` naming the origin that
+owns the name. The broker's cards are cached for 30 s (`LiveCards::TTL`), failures
+included: after one failed fetch a node is `unreachable`, with the reason, until a later
+fetch succeeds. A startable spec needs no process to be listed.
+
 #### `origin` — whose machine it runs on (ADR-0011 C5)
 
 | Origin | Means | Inside the fleet? |
