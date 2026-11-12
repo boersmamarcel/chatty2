@@ -75,7 +75,7 @@ pub(crate) use provider_builder::openrouter_base_url;
 pub(crate) use provider_builder::{completion_model, ollama_think, request_params};
 pub use request_recorder::RequestRecorder;
 pub use tool_loading::{ANSWER_GROUP, CORE_TOOLS, LoadToolsTool, PluginGroup, ToolLoader};
-pub use tool_profile::{ToolProfile, tool_profile, tool_profile_names};
+pub use tool_profile::{PROFILE_UNION_SEPARATOR, ToolProfile, tool_profile, tool_profile_names};
 pub use tool_registry::ToolAvailability;
 
 fn doc_retriever_enabled() -> bool {

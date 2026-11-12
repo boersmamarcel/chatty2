@@ -72,6 +72,8 @@ mod swarm_trace;
 #[cfg(test)]
 mod team_preset;
 #[cfg(test)]
+mod team_scorecard;
+#[cfg(test)]
 mod tui_swarm;
 #[cfg(test)]
 mod typed_handoffs;
