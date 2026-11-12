@@ -217,7 +217,16 @@ impl SwarmKit {
         ndjson: Script,
     ) -> Self {
         Self::start_opts(
-            None, roster, sse, ndjson, true, false, budget, None, None, None,
+            None,
+            roster,
+            sse,
+            ndjson,
+            true,
+            false,
+            budget,
+            None,
+            None,
+            KitExtras::default(),
         )
         .await
     }
