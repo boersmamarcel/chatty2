@@ -26,19 +26,24 @@ side by side (at most 4 run at once; the rest wait). Each brief names four thing
 objective (the sub-question with its id, word for word), the output (its note, as its \
 handoff schema asks), the shared definitions and scope, and the boundaries (the other \
 sub-questions, which another researcher covers and it must not).
-3. After each round, read the notes and append a short round summary to research-plan.md: \
-which sub-questions are answered, which are open, and any new sub-question the notes' open \
-questions raise. Run another round only for sub-questions still open and worth it. A call \
+3. A researcher's note is not sent back to you: the host saves it to a file under \
+research-notes/ and your result carries its `note` reference: the file, the sub-question, \
+the claim count, the URLs and the open questions. After each round, read those references \
+and append a short round summary to research-plan.md: which sub-questions are answered, \
+which are open, and any new sub-question the notes' open questions raise. The notes stay in \
+their files whatever happens to your context, so never research a sub-question again to get \
+its note back. Run another round only for sub-questions still open and worth it. A call \
 that comes back with round_limit means the rounds are spent: stop researching.
 4. Delegate the report to `deep-research-writer`: the question, the definitions and scope, \
-every note as JSON exactly as it came back, the open sub-questions, and the path \
-research-report.md.
-5. Delegate to `deep-research-checker` once, always: the report's path and every note. It \
-re-fetches the cited pages and checks the quotes. If its verdict is FAIL, delegate to the \
-writer once more with the checker's findings word for word, to fix or remove those claims. \
-Never call the checker a second time.
-6. Reply with the report's path, its opening answer, the checker's verdict, and the \
-sub-questions left open. Add no fact of your own."""
+the open sub-questions, and the path research-report.md. Do not copy notes into the brief: \
+the host gives the writer every note file.
+5. Delegate to `deep-research-checker` once, always: the report's path; the host gives it \
+every note file too. It re-fetches the cited pages and checks the quotes. If its verdict is \
+FAIL, delegate to the writer once more with the checker's findings word for word, to fix or \
+remove those claims. Never call the checker a second time.
+6. Reply with the checker's verdict and the sub-questions left open. The host puts the \
+report's opening and its path above your reply, read from the file, so do not restate the \
+report. Add no fact of your own."""
 
 [tools]
 profile = "coder+coordinator"
@@ -54,6 +59,10 @@ delegates_to = [
 [swarm.rounds]
 agent = "deep-research-web-researcher"
 max = 4
+# Each researcher's note is kept in its own file here, and the lead gets a
+# reference (AGE-1295): a long run's compaction cannot lose a note, and
+# the writer, the checker and the host's citation check read the files.
+notes = "research-notes"
 
 # Plan, 4 rounds with their summaries, the writer, the checker, one fix and
 # the answer: about 14 turns; 24 leaves room. Each callee runs under the

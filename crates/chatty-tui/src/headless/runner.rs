@@ -501,33 +501,54 @@ impl HeadlessRunner {
     }
 
     /// Finish a `--team` leader's report file, when its team names one
-    /// (AGE-910): the citation check against the researchers' notes in
-    /// the conversation, and the run's cost; `answer` becomes a partial
-    /// report when the team wrote none. Called when the run ends, however
-    /// it ends.
-    pub(super) fn finish_team_report(&self, answer: &str, wall: std::time::Duration) {
-        use chatty_core::services::team_report::{finish_file, notes_in_history};
+    /// (AGE-910): the citation check against the researchers' notes, and
+    /// the run's cost; `answer` becomes a partial report when the team
+    /// wrote none. Called when the run ends, however it ends.
+    ///
+    /// The notes are the files the host kept them in (AGE-1295), with any
+    /// note the conversation still carries. Returns the run's answer when
+    /// the team wrote its report: the report's opening, then `reply`, the
+    /// lead's last reply.
+    pub(super) fn finish_team_report(
+        &self,
+        answer: &str,
+        reply: &str,
+        wall: std::time::Duration,
+    ) -> Option<String> {
+        use chatty_core::services::research_notes::read_notes;
+        use chatty_core::services::team_report::{
+            answer_from_report, finish_file, notes_in_history,
+        };
         let (Some((workspace, _)), Some(tally)) = (&self.session_record, &self.team_tally) else {
-            return;
+            return None;
         };
-        let Some(relative) = self
-            .config
-            .team
+        let team = self.config.team.as_ref()?;
+        let relative = team.file.report.as_deref()?;
+        let mut notes = team
+            .leader
+            .swarm
+            .rounds
             .as_ref()
-            .and_then(|team| team.file.report.as_deref())
-        else {
-            return;
-        };
+            .and_then(|rounds| rounds.notes.as_deref())
+            .map(|dir| read_notes(workspace, dir))
+            .unwrap_or_default();
         let messages = self
             .session
             .conversation()
             .map(|conversation| conversation.messages())
             .unwrap_or_default();
-        let notes = notes_in_history(&messages);
+        notes.extend(notes_in_history(&messages));
         let tally = tally.tally(Some(self.session.price_book()), wall);
         match finish_file(workspace, relative, answer, &notes, &tally) {
-            Ok(path) => eprintln!("Report: {}", path.display()),
-            Err(error) => eprintln!("report {relative}: {error:#}"),
+            Ok(path) => {
+                eprintln!("Report: {}", path.display());
+                let report = std::fs::read_to_string(&path).ok()?;
+                answer_from_report(&report, relative, reply)
+            }
+            Err(error) => {
+                eprintln!("report {relative}: {error:#}");
+                None
+            }
         }
     }
 

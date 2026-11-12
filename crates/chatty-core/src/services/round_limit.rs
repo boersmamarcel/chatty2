@@ -151,6 +151,7 @@ mod tests {
         RoundLimit::new(Some(RoundsSection {
             agent: RESEARCHER.to_string(),
             max,
+            notes: None,
         }))
     }
 

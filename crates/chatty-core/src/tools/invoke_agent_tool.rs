@@ -24,6 +24,7 @@ use crate::services::budget_stop::{
 };
 use crate::services::handoff::{HandoffLedger, HandoffReport};
 use crate::services::lazy_broker::LazyBroker;
+use crate::services::research_notes::{self, NoteStore};
 use crate::services::run_budget::RunBudget;
 use crate::services::spend_gate::{CapExceeded, SpendGate};
 use crate::services::worker_start::{STOP_NOTE, WorkerStartFailure};
@@ -210,6 +211,12 @@ pub struct InvokeAgentOutput {
     /// the model sees otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<serde_json::Value>,
+    /// The reference to a note the host kept in the workspace instead of
+    /// returning it (AGE-1295, [`NoteStore`]): the file, the sub-question,
+    /// the claim count, the URLs and the open questions. `handoff` is then
+    /// absent. Absent from the JSON for every other result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<serde_json::Value>,
     /// Messages that were waiting for this agent when the result came back
     /// (tree messages, TM-2), oldest first, each wrapped as untrusted data
     /// (`<message from="…" untrusted="true">…</message>`). This result is
@@ -391,6 +398,10 @@ pub struct InvokeAgentTool {
     /// invalid count per role and read-rule misreads. Only a `--team`
     /// leader whose team names `handoffs` has one.
     handoff_ledger: Option<HandoffLedger>,
+    /// Where a lead whose `[swarm.rounds]` names `notes` keeps its
+    /// researchers' notes (AGE-1295). `None` for every other agent, whose
+    /// results are untouched.
+    note_store: Option<NoteStore>,
     /// The headline of the budget stop this run hit, once a delegation
     /// came back with one (AGE-903): every later call is refused, and the
     /// calls still running hang up. Shared by the clones of this tool —
@@ -415,6 +426,7 @@ impl InvokeAgentTool {
             transport: None,
             conversation: None,
             handoff_ledger: None,
+            note_store: None,
             budget_stop: Arc::new(tokio::sync::watch::Sender::new(None)),
         }
     }
@@ -454,6 +466,13 @@ impl InvokeAgentTool {
     /// Record every delegation's handoff in `ledger` (TD-2, AGE-693).
     pub fn with_handoff_ledger(mut self, ledger: HandoffLedger) -> Self {
         self.handoff_ledger = Some(ledger);
+        self
+    }
+
+    /// Keep `store.agent()`'s notes in the workspace and offer them to the
+    /// other callees (AGE-1295).
+    pub fn with_note_store(mut self, store: NoteStore) -> Self {
+        self.note_store = Some(store);
         self
     }
 
@@ -730,7 +749,7 @@ impl Tool for InvokeAgentTool {
 impl InvokeAgentTool {
     async fn run(&self, args: InvokeAgentArgs) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let agent_name = args.agent.trim().to_string();
-        let prompt = args.prompt.trim().to_string();
+        let mut prompt = args.prompt.trim().to_string();
         // An empty handle is no handle: a plain call.
         let handle = args
             .handle
@@ -748,6 +767,11 @@ impl InvokeAgentTool {
             return Err(InvokeAgentError::InvocationFailed(
                 "Prompt cannot be empty".to_string(),
             ));
+        }
+        // A lead that keeps its notes in the workspace offers every note
+        // file to its other callees (AGE-1295).
+        if let Some(store) = self.note_store.as_ref() {
+            prompt = store.offer(&agent_name, prompt);
         }
 
         // The run already stopped on a spent budget (AGE-903): nothing new
@@ -1254,6 +1278,27 @@ impl InvokeAgentTool {
         if let Some(ledger) = self.handoff_ledger.as_ref() {
             ledger.record(agent, handoff.invalid_count, handoff_value.as_ref());
         }
+        // A note the host keeps in the workspace reaches the lead as a
+        // reference (AGE-1295). A note that cannot be written stays in the
+        // result, as it was.
+        let (response, handoff_value, note) = match (self.note_store.as_ref(), handoff_value) {
+            (Some(store), Some(value))
+                if success && store.agent() == agent && research_notes::is_note(&value) =>
+            {
+                match store.store(&value) {
+                    Ok(file) => (
+                        research_notes::reference_text(&file, &value),
+                        None,
+                        Some(research_notes::reference(&file, &value)),
+                    ),
+                    Err(error) => {
+                        warn!(agent, %error, "Could not keep the note in the workspace");
+                        (response, Some(value), None)
+                    }
+                }
+            }
+            (_, value) => (response, value, None),
+        };
 
         if !success {
             // The budget is spent, at the callee or under it (AGE-903):
@@ -1337,6 +1382,7 @@ impl InvokeAgentTool {
             trace,
             conversation,
             handoff: handoff_value,
+            note,
             messages,
             usage,
             handle: None,

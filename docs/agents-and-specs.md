@@ -884,7 +884,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
 | `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
 | `swarm.exposed` | Optional, default `true`. `false`: no other agent may call it. |
-| `swarm.rounds` | Optional. `agent` (named in `delegates_to`) and `max` (at least 1): the most rounds of calls to `agent` this agent may run (AGE-910). A round is one model turn that calls `agent`, however many calls it makes side by side; a turn that would open round `max + 1` has each such call refused with `round_limit: …` as its result, without starting the callee. Calls to other agents are not counted. `chatty_core::services::round_limit::RoundLimit` holds it, across the agent's passes. |
+| `swarm.rounds` | Optional. `agent` (named in `delegates_to`) and `max` (at least 1): the most rounds of calls to `agent` this agent may run (AGE-910). A round is one model turn that calls `agent`, however many calls it makes side by side; a turn that would open round `max + 1` has each such call refused with `round_limit: …` as its result, without starting the callee. Calls to other agents are not counted. `chatty_core::services::round_limit::RoundLimit` holds it, across the agent's passes. An optional `notes` (a relative workspace directory, e.g. `research-notes`; AGE-1295) has the host keep each typed handoff `agent` returns in `<notes>/<round>-<n>.json` and give the caller a `note` reference in its place (the file, the sub-question, the claim count, the URLs, the open questions); every other callee's prompt then lists the note files (`chatty_core::services::research_notes`). |
 | `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. The broker asks it on every worker's `invoke_agent` before anything is spawned, and on the root's when the root runs as a spec (a `--team` leader, an `--agent <spec>` root; a plain root may call anyone), then refuses a call that closes a cycle or goes deeper than 4 levels below the root; the calling model reads `Error: invoke_agent: not_listed: …`, `cycle: root → a → b → a` or `too_deep: depth 5 > max 4` (PL-S2 DP-2). |
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. An `AgentSession` whose agent was built from the spec holds a turn to it even when the host's settings cap less tightly or not at all (hive's hosted worker runs on its user's uncapped settings; AGE-992). A run that spends it is not killed: it gets one tool-free call to answer with what it has, and a delegated worker's answer goes to its caller prefixed with `[limit_reached: turns. …]` (`[limit_reached: time. …]` for the deadline), so the caller's `invoke_agent` result says why the answer may be incomplete. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
@@ -1017,7 +1017,7 @@ beside it.
 | `max_agent_turns` | Optional. The leader's turn budget for the run, ahead of the leader spec's own; without either a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own spec's. |
 | `handoffs` | Optional. Role → a JSON Schema its handoff must match, as a path relative to the team directory (see *Typed handoffs* below). |
 | `verifier` | Optional. `{ "role": "<roster role>", "verdicts": ["APPROVE", "PASS"] }`: the role whose verdict passes the team's work, and the first words of its answer that do (`verdicts` defaults to `APPROVE` and `PASS`). TD-1's scorecard tags a run `verification_passed_wrong` when that role passed work the runner's check then failed (AGE-1137). A role not in `agents`, or no verdict, fails the load. Absent: every roster role whose tool profile is `reviewer`. |
-| `report` | Optional. A path inside the workspace (`research-report.md`) the team writes its report to (AGE-910). When a `--team` run ends, however it ends, headless finishes the file with `chatty_core::services::team_report`: a *Citation check* section listing each cited URL no researcher's note carries, and a *Cost of this run* footer (spend, web searches, page fetches, wall time, counted from the run's swarm trace). When the team wrote no report, the leader's last answer goes there as a partial report. An absolute path or one with `..` fails the load. |
+| `report` | Optional. A path inside the workspace (`research-report.md`) the team writes its report to (AGE-910). When a `--team` run ends, however it ends, headless finishes the file with `chatty_core::services::team_report`: a *Citation check* section listing each cited URL no researcher's note carries, and a *Cost of this run* footer (spend, web searches, page fetches, wall time, counted from the run's swarm trace). The notes are read from the files the leader's `[swarm.rounds] notes` keeps (AGE-1295), and from its history. When the team wrote no report, the leader's last answer and every finished note go there as a partial report; when it did, the run prints the report's opening (title and `## Short answer`) as its answer. An absolute path or one with `..` fails the load. |
 
 A `team.json` in the old shape — a `leader` object, agent objects in `agents` — fails to
 load with an error naming the field.
@@ -1096,16 +1096,20 @@ rounds of `deep-research-web-researcher` (the `web-researcher` profile: the read
 `search_web`, `fetch`, `calculate`) side by side, at most 4 at once and at most 4 rounds
 (`[swarm.rounds]`); each researcher's answer is a note matching `schemas/note.json`
 (at most 8 claims, each with its URL, an exact quote and the access date, and 5 open
-questions, every field capped so a note stays under 12 KiB). `deep-research-writer`
-(`coder` without shell, git, code execution or fetch) writes `research-report.md` from
-the notes only, and `deep-research-checker` (`web-researcher`, thinking off, the
+questions, every field capped so a note stays under 12 KiB). The host keeps each note in
+`research-notes/<round>-<n>.json` and the lead gets a reference (`[swarm.rounds] notes`,
+AGE-1295), so a compacted lead loses none. `deep-research-writer`
+(`coder` without shell, git, code execution or fetch) reads every note file the host lists
+in its brief and writes `research-report.md` from the notes only, and `deep-research-checker` (`web-researcher`, thinking off, the
 crosscheck judge's pattern) re-fetches the cited pages once and checks the quotes
 (`schemas/check.json`, `PASS`/`FAIL`; the team's `verifier`). The team file's
 `report` names the report: when a `--team` run ends, headless finishes it with
 `chatty_core::services::team_report` — a section listing any cited URL that is in no
-note, then the run's spend, web searches, page fetches and wall time counted from the
-swarm trace — or, when no report was written (a spent budget, AGE-903), writes the
-leader's last answer there as a partial report. `participant/deep_research.rs` runs it
+note (the notes read from their files), then the run's spend, web searches, page fetches
+and wall time counted from the swarm trace — or, when no report was written (a spent
+budget, AGE-903), writes the leader's last answer and every finished note there as a
+partial report. The run's printed answer is then the report's title and `## Short
+answer` section, read from the file, its path, and the lead's last reply. `participant/deep_research.rs` runs it
 on the swarm kit's fake model. `analyst-swarm` (EV-1, AGE-668) is an eval preset:
 `analyst-swarm-coordinator` (`coordinator`, no plugins) gets a ledger column's numbers
 clean from `analyst-swarm-data-coder` (`coder`), has `analyst-swarm-benford-analyst`

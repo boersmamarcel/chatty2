@@ -477,6 +477,13 @@ pub struct RoundsSection {
     pub agent: String,
     /// The most rounds the agent may run; at least 1.
     pub max: u32,
+    /// A workspace directory, relative, where the host keeps every typed
+    /// handoff `agent` returns, one file per note (AGE-1295): the caller's
+    /// `invoke_agent` result then carries a short reference instead of the
+    /// note, and the caller's other delegations are offered the files.
+    /// `None`, the default, keeps the notes in the caller's history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 /// `[swarm.best_of]`: who attempts, and who picks (AGE-853).
@@ -774,6 +781,17 @@ impl AgentSpec {
                     "'{}' is not named in swarm.delegates_to",
                     rounds.agent
                 )));
+            }
+            if let Some(dir) = rounds.notes.as_deref() {
+                let path = std::path::Path::new(dir);
+                let inside = path
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)));
+                if dir.trim().is_empty() || !inside {
+                    errors.push(SpecError::BadRounds(format!(
+                        "notes '{dir}' must be a relative directory inside the workspace"
+                    )));
+                }
             }
         }
         if errors.is_empty() {
@@ -2702,7 +2720,18 @@ cap_usd = 2.0
             .unwrap()
         };
         assert!(spec("agent = \"r\"\nmax = 3").validate(None).is_ok());
-        for bad in ["agent = \"x\"\nmax = 3", "agent = \"r\"\nmax = 0"] {
+        assert!(
+            spec("agent = \"r\"\nmax = 3\nnotes = \"research-notes\"")
+                .validate(None)
+                .is_ok()
+        );
+        for bad in [
+            "agent = \"x\"\nmax = 3",
+            "agent = \"r\"\nmax = 0",
+            "agent = \"r\"\nmax = 3\nnotes = \"../out\"",
+            "agent = \"r\"\nmax = 3\nnotes = \"/tmp/notes\"",
+            "agent = \"r\"\nmax = 3\nnotes = \"\"",
+        ] {
             let errors = spec(bad).validate(None).unwrap_err().0;
             assert!(
                 errors.iter().all(|e| matches!(e, SpecError::BadRounds(_))),

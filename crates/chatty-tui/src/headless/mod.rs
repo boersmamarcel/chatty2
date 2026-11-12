@@ -71,7 +71,20 @@ const FINALIZATION_ORIGINAL_PROMPT_CHARS: usize = 6_000;
 const FINALIZATION_EVIDENCE_CHARS: usize = 16_000;
 const FINALIZATION_TOOL_OUTPUT_CHARS: usize = 4_000;
 const TEXT_HARD_STOP_BYTES: usize = 20_000;
-const TEXT_OVERFLOW_RECOVERY_PROMPT: &str = "Stop reasoning — make ONE tool call now. If you already have the answer, call final_answer immediately. Do not write any analysis text before the tool call.";
+/// Sent after a long text-only reply. It names `final_answer` only where
+/// the run offers that tool: a task with an answer file (AGE-758). Any
+/// other agent — a team's worker among them — has no such tool, and one
+/// told to call it said so and sent its answer again (AGE-1295).
+fn text_overflow_recovery_prompt(answer_file_required: bool) -> &'static str {
+    if answer_file_required {
+        "Stop reasoning — make ONE tool call now. If you already have the answer, call \
+         final_answer immediately. Do not write any analysis text before the tool call."
+    } else {
+        "Stop reasoning — make ONE tool call now. If you already have the answer, reply with \
+         it now as plain text: no tool call is needed for that. Do not write any analysis \
+         text before it."
+    }
+}
 /// Sent on the same history after the stall watchdog ended a turn: the
 /// provider went quiet, not the task, so the model picks up where it was.
 /// rig hands back a turn's tool round-trips only when the turn finishes,
@@ -217,6 +230,10 @@ pub async fn run_headless(
 
     // Collect response
     let mut response = String::new();
+    // The text of the last model call that said anything: a team that
+    // writes a report answers with the report's opening and this, not with
+    // every round's narration (AGE-1295).
+    let mut last_reply = String::new();
     let mut text_overflow_attempts = 0usize;
     let mut finalization_attempts = 0usize;
     let mut tool_results_since_finalization = 0usize;
@@ -579,6 +596,9 @@ pub async fn run_headless(
                     break;
                 }
                 let final_call_text = std::mem::take(&mut last_call_text);
+                if !final_call_text.trim().is_empty() {
+                    last_reply.clone_from(&final_call_text);
+                }
                 // Update loop guard: resets per-turn counters and checks for late-game deadline.
                 let turns_used = engine.transcript.assistant_turns();
                 loop_guard.on_turn_complete(turns_used, answer_file_exists(&engine));
@@ -703,7 +723,9 @@ pub async fn run_headless(
                             "Text overflow (no tool call after 4KB): injecting action prompt ({}/{}).",
                             text_overflow_attempts, MAX_TEXT_OVERFLOW_RECOVERY_ATTEMPTS
                         );
-                        engine.send_message(TEXT_OVERFLOW_RECOVERY_PROMPT.to_string());
+                        engine.send_message(
+                            text_overflow_recovery_prompt(answer_file_required).to_string(),
+                        );
                         continue;
                     }
                     // Exhausted recovery attempts — fall through to finalization.
@@ -979,8 +1001,11 @@ pub async fn run_headless(
         )
         .await;
     // AGE-910: a team that names a report gets it finished: citations
-    // checked, the cost appended, or a partial report kept.
-    engine.finish_team_report(&response, run_started.elapsed());
+    // checked, the cost appended, or a partial report kept. AGE-1295: the
+    // run's answer is then the report's opening, read from the file.
+    if let Some(answer) = engine.finish_team_report(&response, &last_reply, run_started.elapsed()) {
+        response = answer;
+    }
 
     if let Some(error) = unrecovered_error {
         // Whatever was streamed before the failure is still worth having;
