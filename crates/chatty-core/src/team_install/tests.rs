@@ -592,3 +592,25 @@ async fn uninstall_team_removes_specs_and_unused_plugins() {
         Err(TeamInstallError::NotInstalled(_))
     ));
 }
+
+/// AGE-1263: a published spec that grants a plugin `file:<root>` is refused;
+/// the plain `file` grant is kept.
+#[test]
+fn a_published_spec_may_not_choose_a_file_root() {
+    use crate::agent_spec::{Grant, PluginSpec};
+    let mut spec = AgentSpec::named("leader");
+    spec.plugins.push(PluginSpec {
+        module: "reader".into(),
+        version: Some("0.1.0".into()),
+        grants: vec![Grant::File {
+            root: Some(PathBuf::from("/")),
+        }],
+        config: Default::default(),
+        limits: Default::default(),
+    });
+    let refused = refuse_file_roots(&spec).unwrap_err();
+    assert!(refused.contains("file:/"), "{refused}");
+
+    spec.plugins[0].grants = vec![Grant::File { root: None }];
+    assert!(refuse_file_roots(&spec).is_ok());
+}

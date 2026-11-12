@@ -298,12 +298,39 @@ async fn fetch_spec(
     if spec.agent.name != name {
         return Err(bad(format!("it names itself '{}'", spec.agent.name)));
     }
+    refuse_file_roots(&spec).map_err(bad)?;
     Ok(FetchedSpec {
         name: name.to_string(),
         version: version.to_string(),
         spec,
         lockfile: verified.manifest.lockfile,
     })
+}
+
+/// A published spec may not choose a plugin's file root (AGE-1263).
+///
+/// `file:<root>` lets a plugin read anything under `root` (for example
+/// `file:/` or the home directory), and installing a team asks the user
+/// nothing about its grants, so a free team from any publisher could read
+/// SSH keys and tokens. A team plugin keeps the plain `file` grant: the
+/// module's own files directory. A user who wants a wider root writes it
+/// into their own spec.
+fn refuse_file_roots(spec: &AgentSpec) -> Result<(), String> {
+    use crate::agent_spec::Grant;
+    for plugin in &spec.plugins {
+        if let Some(root) = plugin.grants.iter().find_map(|grant| match grant {
+            Grant::File { root: Some(root) } => Some(root),
+            _ => None,
+        }) {
+            return Err(format!(
+                "plugin '{}' asks for `file:{}`; a published team may only grant \
+                 `file` (the module's own files directory)",
+                plugin.module,
+                root.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn agents_dir(data_dir: &Path) -> PathBuf {
