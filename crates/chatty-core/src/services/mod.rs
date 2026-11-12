@@ -73,6 +73,9 @@ pub mod plugin_llm;
 #[cfg(feature = "pptx")]
 pub mod pptx_render;
 pub mod project_instructions;
+/// Researchers' notes kept in the workspace, a lead's results carrying a
+/// reference to each (AGE-1295).
+pub mod research_notes;
 /// What a leader's workers returned, kept in front of it once the context
 /// guard has taken their results out of the request (AGE-941).
 pub mod results_ledger;

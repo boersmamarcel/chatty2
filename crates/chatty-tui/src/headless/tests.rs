@@ -2519,3 +2519,14 @@ mod runner {
         );
     }
 }
+
+/// AGE-1295: the long-text nudge names `final_answer` only for a run that
+/// offers it (an answer-file task). A team worker has no such tool; told to
+/// call it, a researcher said so and sent its note again.
+#[test]
+fn the_text_overflow_nudge_names_final_answer_only_where_it_exists() {
+    assert!(text_overflow_recovery_prompt(true).contains("final_answer"));
+    let worker = text_overflow_recovery_prompt(false);
+    assert!(!worker.contains("final_answer"), "{worker}");
+    assert!(worker.contains("no tool call is needed"), "{worker}");
+}

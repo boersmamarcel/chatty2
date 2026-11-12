@@ -21,7 +21,7 @@
           "claim": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 400,
+            "maxLength": 450,
             "description": "One fact, in one sentence."
           },
           "url": {

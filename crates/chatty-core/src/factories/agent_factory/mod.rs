@@ -1439,6 +1439,24 @@ impl AgentClient {
         if let Some(ledger) = handoff_ledger {
             invoke_agent_tool = invoke_agent_tool.with_handoff_ledger(ledger);
         }
+        // The spec's `[swarm.rounds]` cap (AGE-910), counted here so a lead
+        // that keeps its notes in the workspace files each under its round
+        // (AGE-1295).
+        let round_limit = crate::services::round_limit::RoundLimit::new(
+            role.rounds.clone().filter(|_| role.delegates),
+        );
+        if let (Some(rounds), Some(workspace)) = (
+            role.rounds.as_ref().filter(|_| role.delegates),
+            exec_settings
+                .as_ref()
+                .and_then(|s| s.workspace_dir.as_ref()),
+        ) && let Some(store) = crate::services::research_notes::NoteStore::new(
+            std::path::Path::new(workspace),
+            rounds,
+            round_limit.clone(),
+        ) {
+            invoke_agent_tool = invoke_agent_tool.with_note_store(store);
+        }
         let invoke_agent_progress_slot = invoke_agent_tool.progress_slot();
         let delegator = role.delegates.then(|| invoke_agent_tool.clone());
         // `best_of` fans out over this same `invoke_agent` (AGE-853).
@@ -1635,9 +1653,7 @@ impl AgentClient {
             agent.context_shaper.deliver_mid_run_messages(transport);
         }
         agent.delegator = delegator;
-        agent.round_limit = crate::services::round_limit::RoundLimit::new(
-            role.rounds.clone().filter(|_| role.delegates),
-        );
+        agent.round_limit = round_limit;
         agent.plugin_usage = plugins
             .iter()
             .map(|plugin| (plugin.name.clone(), plugin.usage.clone()))

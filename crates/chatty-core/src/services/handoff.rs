@@ -166,16 +166,67 @@ pub fn check(contract: &HandoffContract, answer: &str) -> HandoffOutcome {
     };
     let errors: Vec<String> = validator
         .iter_errors(&value)
-        .map(|error| {
-            let path = error.instance_path().to_string();
-            let at = if path.is_empty() { "/" } else { &path };
-            format!("{at}: {error}")
-        })
+        .map(|e| describe(&e))
         .collect();
     if errors.is_empty() {
         HandoffOutcome::Valid(value)
     } else {
         HandoffOutcome::Invalid { errors }
+    }
+}
+
+/// One schema error, for the worker to fix: which field (by name, with
+/// the item's number for an array element) broke which rule. A length or
+/// count limit says the value's own size and the limit, not the value: a
+/// 435-character claim is named, not echoed (AGE-1295).
+fn describe(error: &jsonschema::ValidationError<'_>) -> String {
+    use jsonschema::error::ValidationErrorKind as Kind;
+    let field = field_name(&error.instance_path().to_string());
+    let chars = || error.instance().as_str().map_or(0, |s| s.chars().count());
+    let items = || error.instance().as_array().map_or(0, Vec::len);
+    let rule = match error.kind() {
+        Kind::MaxLength { limit } => {
+            format!(
+                "{} characters, over its limit of {limit} characters",
+                chars()
+            )
+        }
+        Kind::MinLength { limit } => {
+            format!("{} characters, under its minimum of {limit}", chars())
+        }
+        Kind::MaxItems { limit } => format!("{} items, over its limit of {limit} items", items()),
+        Kind::MinItems { limit } => format!("{} items, under its minimum of {limit}", items()),
+        // Every other rule in jsonschema's words, without the value it
+        // opens with: `"a.rs" is not of type "array"` is `the value is not
+        // of type "array"`.
+        _ => {
+            let message = error.to_string();
+            let value = error.instance().to_string();
+            match message.strip_prefix(value.as_str()) {
+                Some(rest) if !value.is_empty() => format!("the value{rest}"),
+                _ => message,
+            }
+        }
+    };
+    format!("{field}: {rule}")
+}
+
+/// A JSON pointer as the field it names, `/` for the whole handoff; an
+/// array element also says which item it is, counted from 1:
+/// `/claims/7/claim (item 8 of claims)`.
+fn field_name(pointer: &str) -> String {
+    if pointer.is_empty() {
+        return "/".to_string();
+    }
+    let parts: Vec<&str> = pointer.split('/').filter(|part| !part.is_empty()).collect();
+    let item = parts
+        .iter()
+        .rposition(|part| part.parse::<usize>().is_ok())
+        .filter(|&at| at > 0)
+        .and_then(|at| Some((parts[at].parse::<usize>().ok()? + 1, parts[at - 1])));
+    match item {
+        Some((number, array)) => format!("{pointer} (item {number} of {array})"),
+        None => pointer.to_string(),
     }
 }
 
@@ -194,9 +245,10 @@ pub fn instruction(contract: &HandoffContract) -> String {
 pub fn follow_up(contract: &HandoffContract, errors: &[String]) -> String {
     let list: String = errors.iter().map(|e| format!("\n- {e}")).collect();
     format!(
-        "{HANDOFF_FOLLOW_UP_PREFIX} (role `{}`):{list}\n\nAnswer again: end your final \
-         answer with exactly one fenced ```json block that matches the schema. This is the \
-         only retry.",
+        "{HANDOFF_FOLLOW_UP_PREFIX} (role `{}`):{list}\n\nFix exactly those fields and send \
+         the whole handoff again as the text of your reply: no tool call is needed or \
+         expected, the reply itself is the handoff. End the reply with exactly one fenced \
+         ```json block that matches the schema. This is the only retry.",
         contract.role
     )
 }
@@ -413,6 +465,71 @@ mod tests {
         assert!(errors("```json\n{nope\n```").contains("not JSON"));
         let schema = errors("```json\n{\"files_changed\": \"a.rs\"}\n```");
         assert!(schema.contains("/files_changed"), "{schema}");
+    }
+
+    /// AGE-1295: a broken limit is named by field and item, with the
+    /// value's size and the limit, not the value; the retry asks for the
+    /// handoff as the reply's text and names no tool the worker may lack.
+    #[test]
+    fn the_retry_names_the_field_and_the_limit_it_broke() {
+        let notes = HandoffContract {
+            role: "researcher".to_string(),
+            schema: opaque(json!({
+                "type": "object",
+                "properties": {
+                    "claims": {
+                        "type": "array",
+                        "maxItems": 2,
+                        "items": {
+                            "type": "object",
+                            "properties": { "claim": { "type": "string", "maxLength": 10 } }
+                        }
+                    }
+                }
+            })),
+        };
+        let long = "c".repeat(14);
+        let answer = format!(
+            "```json\n{}\n```",
+            json!({ "claims": [{ "claim": "ok" }, { "claim": long }, { "claim": "ok" }] })
+        );
+        let HandoffOutcome::Invalid { errors } = check(&notes, &answer) else {
+            panic!("over two limits");
+        };
+        assert!(
+            errors.contains(
+                &"/claims/1/claim (item 2 of claims): 14 characters, over its limit of 10 \
+                  characters"
+                    .to_string()
+            ),
+            "{errors:?}"
+        );
+        assert!(
+            errors.contains(&"/claims: 3 items, over its limit of 2 items".to_string()),
+            "{errors:?}"
+        );
+        assert!(!errors.join(" ").contains(&long), "the value is not echoed");
+
+        // Any other rule names the field, not the value.
+        let wrong_type = format!("```json\n{}\n```", json!({ "claims": [{ "claim": 4242 }] }));
+        let HandoffOutcome::Invalid { errors: typed } = check(&notes, &wrong_type) else {
+            panic!("a number for a string");
+        };
+        assert_eq!(
+            typed,
+            ["/claims/0/claim (item 1 of claims): the value is not of type \"string\""],
+            "{typed:?}"
+        );
+
+        let retry = follow_up(&notes, &errors);
+        assert!(is_follow_up(&retry));
+        assert!(
+            retry.contains("/claims/1/claim (item 2 of claims)"),
+            "{retry}"
+        );
+        assert!(retry.contains("no tool call"), "{retry}");
+        assert!(!retry.contains("final_answer"), "{retry}");
+        assert!(!retry.contains("final answer"), "{retry}");
     }
 
     #[test]

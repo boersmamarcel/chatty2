@@ -20,11 +20,18 @@ filings, established news) over SEO content farms, aggregators and pages that ci
 Stay inside the brief: use its definitions and scope, and leave the sub-questions it names as \
 another researcher's alone.
 
-Every claim needs a page you fetched: its URL, a quote copied exactly from it (at most 300 \
-characters) and today's date as the access date. A fact you cannot back with a quote is not a \
-claim; put it under open questions. Keep the 8 strongest claims at most. Where sources \
-disagree, give each side as its own claim. Your answer is the note and nothing else from the \
-pages."""
+Every claim needs a page you fetched: its URL, a quote copied exactly from it and today's \
+date as the access date. A fact you cannot back with a quote is not a claim; put it under \
+open questions. Keep the 8 strongest claims at most. Where sources disagree, give each side \
+as its own claim. Your answer is the note and nothing else from the pages.
+
+The host checks every limit and sends a note over one back once, naming the field:
+- sub_question: at most 300 characters;
+- claims: at most 8, each with claim (one sentence, at most 450 characters), url (at most \
+500), quote (at most 300, copied exactly) and accessed (YYYY-MM-DD);
+- open_questions: at most 5, each at most 200 characters.
+Count before you send: shorten a long claim rather than pack two facts into it. The note is \
+the text of your final reply, ending with its one ```json block; no tool call hands it in."""
 
 [tools]
 profile = "web-researcher"

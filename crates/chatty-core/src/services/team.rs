@@ -1073,6 +1073,7 @@ mod tests {
             Some(crate::agent_spec::RoundsSection {
                 agent: "deep-research-web-researcher".to_string(),
                 max: 4,
+                notes: Some("research-notes".to_string()),
             })
         );
         let preamble = team.leader.agent.preamble.as_deref().unwrap_or_default();
@@ -1226,6 +1227,35 @@ mod tests {
             HandoffOutcome::Valid(_)
         ));
         assert!(worst_valid.to_string().len() as u64 <= NOTE_SIZE_CAP);
+
+        // AGE-1295: every field at its cap at once, the 450-character claim
+        // included (400 rejected a real 435-character claim), still fits.
+        let claim_schema = &schema["properties"]["claims"]["items"]["properties"];
+        let at_cap = |field: &str| max_len(&claim_schema[field]).expect("capped") as usize;
+        assert_eq!(at_cap("claim"), 450);
+        let full = serde_json::json!({
+            "sub_question": "s".repeat(300),
+            "claims": (0..8).map(|_| serde_json::json!({
+                "claim": "c".repeat(at_cap("claim")),
+                "url": format!("https://a.example/{}", "p".repeat(at_cap("url") - 18)),
+                "quote": "q".repeat(at_cap("quote")),
+                "accessed": "2026-11-12",
+            })).collect::<Vec<_>>(),
+            "open_questions": (0..5).map(|_| "o".repeat(200)).collect::<Vec<_>>(),
+        });
+        assert!(
+            matches!(check(contract, &answer(&full)), HandoffOutcome::Valid(_)),
+            "{:?}",
+            check(contract, &answer(&full))
+        );
+        let full_len = full.to_string().len() as u64;
+        assert!(full_len <= NOTE_SIZE_CAP, "a full note is {full_len} bytes");
+        let mut long_claim = full.clone();
+        long_claim["claims"][0]["claim"] = "c".repeat(at_cap("claim") + 1).into();
+        assert!(matches!(
+            check(contract, &answer(&long_claim)),
+            HandoffOutcome::Invalid { .. }
+        ));
 
         let invalid = [
             note((0..9).map(|_| claim("https://a.example", "q")).collect()),
