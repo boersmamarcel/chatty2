@@ -23,7 +23,9 @@ use std::future::Future;
 use anyhow::anyhow;
 use bytes::Bytes;
 use reqwest::Url;
-use rig_agent::agent::{AgentBuilder, AgentHook, HookContext, ModelSelection, ModelSelectionAction};
+use rig_agent::agent::{
+    AgentBuilder, AgentHook, HookContext, ModelSelection, ModelSelectionAction,
+};
 use rig_core::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, Response,
     StreamingResponse, Uri,
@@ -237,12 +239,20 @@ impl ChatModels {
 pub(crate) struct ToolsOnResponses;
 
 impl AgentHook for ToolsOnResponses {
-    fn on_model_select(&self, _ctx: &HookContext, event: ModelSelection<'_>) -> ModelSelectionAction {
+    fn on_model_select(
+        &self,
+        _ctx: &HookContext,
+        event: ModelSelection<'_>,
+    ) -> ModelSelectionAction {
         let tool_free = event
             .request_patch
             .and_then(|patch| patch.active_tools.as_ref())
             .is_some_and(Vec::is_empty);
-        ModelSelectionAction::select(if tool_free { CHAT_ROUTE } else { RESPONSES_ROUTE })
+        ModelSelectionAction::select(if tool_free {
+            CHAT_ROUTE
+        } else {
+            RESPONSES_ROUTE
+        })
     }
 }
 
@@ -266,6 +276,9 @@ impl<I> AzureResponsesHttpClient<I> {
         }
     }
 
+    // rig-http 0.46's error keeps a failed reply's headers inline; the
+    // result type is the transport trait's (AGE-1151).
+    #[allow(clippy::result_large_err)]
     fn prepare<B>(&self, req: Request<B>) -> http_client::Result<Request<B>> {
         let (mut parts, body) = req.into_parts();
         if let Some(key) = &self.api_key {
@@ -522,7 +535,12 @@ mod tests {
             &format!("{}/v1", server.uri()),
         );
         ensure_tools_reachable(&model_config, &provider_config).unwrap();
-        send_with_tools(completion_model(&model_config, &provider_config).unwrap().for_request(true)).await;
+        send_with_tools(
+            completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
         assert_eq!(
             only_body(&server).await["tools"][0]["function"]["name"],
             "add"
@@ -563,7 +581,12 @@ mod tests {
         let azure_provider = provider(ProviderType::AzureOpenAI, "sk-azure", &inference);
         let azure = model(ProviderType::AzureOpenAI, false);
         assert_eq!(azure_wire(&inference), AzureWire::ChatCompletionsOnly);
-        send_with_tools(completion_model(&azure, &azure_provider).unwrap().for_request(true)).await;
+        send_with_tools(
+            completion_model(&azure, &azure_provider)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
@@ -603,8 +626,12 @@ mod tests {
             &format!("{}/openai/v1/responses", server.uri()),
         );
         ensure_tools_reachable(&model_config, &provider_config).unwrap();
-        let usage =
-            send_with_tools(completion_model(&model_config, &provider_config).unwrap().for_request(true)).await;
+        let usage = send_with_tools(
+            completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
         assert_eq!(usage.cached_input_tokens, Some(4));
 
         let requests = server.received_requests().await.unwrap();
@@ -647,7 +674,7 @@ mod tests {
                 .for_request(false)
                 .call(CompletionRequest::new(Message::user("hi")))
                 .await
-            .expect("chat completions answers");
+                .expect("chat completions answers");
             assert!(
                 reply
                     .choice
@@ -689,7 +716,12 @@ mod tests {
                 server.uri()
             ),
         );
-        send_with_tools(completion_model(&model_config, &provider_config).unwrap().for_request(true)).await;
+        send_with_tools(
+            completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
     }
 
     /// Every Azure URL a portal shows is read for its resource: the v1 base,
@@ -890,12 +922,10 @@ mod tests {
         assert_eq!(input[output_at]["output"], "5");
 
         let history = history.expect("the run hands back its messages");
-        assert!(
-            history
-                .iter()
-                .any(|m| matches!(m, Message::Assistant(rig_core::message::AssistantMessage { content, .. })
-            if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)))))
-        );
+        assert!(history.iter().any(
+            |m| matches!(m, Message::Assistant(rig_core::message::AssistantMessage { content, .. })
+            if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_))))
+        ));
         assert!(history.iter().any(|m| matches!(m, Message::User { content }
             if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))));
         assert!(tool_round_trips_intact(&history, &[]));

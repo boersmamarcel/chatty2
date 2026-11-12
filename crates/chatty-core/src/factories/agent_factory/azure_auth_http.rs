@@ -76,6 +76,9 @@ impl<I> fmt::Debug for AzureAuthHttpClient<I> {
 }
 
 /// Replace whatever bearer header rig wrote with the current token.
+// rig-http 0.46's error keeps a failed reply's headers inline; the
+// result type is the transport trait's, not chatty's to box (AGE-1151).
+#[allow(clippy::result_large_err)]
 fn authorize<B>(req: Request<B>, token: &str) -> http_client::Result<Request<B>> {
     let (mut parts, body) = req.into_parts();
     let mut value = http_client::HeaderValue::from_str(&format!("Bearer {token}"))?;

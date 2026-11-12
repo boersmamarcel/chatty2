@@ -192,8 +192,7 @@ pub(super) fn call_refs(content: &[AssistantContent]) -> Vec<CallRef> {
         .iter()
         .filter_map(|ac| match ac {
             AssistantContent::ToolCall(tc) => Some(CallRef {
-                ids: std::iter::once(tc.id.to_string())
-                    .collect(),
+                ids: std::iter::once(tc.id.to_string()).collect(),
                 name: tc.function.name.to_string(),
                 agent: tc
                     .function

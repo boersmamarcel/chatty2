@@ -98,7 +98,9 @@ pub async fn generate_title(agent: &AgentClient, history: &[Message]) -> Result<
     let assistant_text = history
         .iter()
         .find_map(|message| match message {
-            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) if !is_tool_call_message(message) => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. })
+                if !is_tool_call_message(message) =>
+            {
                 content.iter().find_map(extract_text_from_assistant_content)
             }
             _ => None,

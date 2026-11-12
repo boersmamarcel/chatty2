@@ -30,10 +30,10 @@
 
 use futures::StreamExt;
 use rig_agent::agent::AgentBuilder;
-use rig_core::providers::openai::OpenAIConfig;
-use rig_core::providers::openai::wire as openai;
 use rig_core::completion::Message;
 use rig_core::message::UserContent;
+use rig_core::providers::openai::OpenAIConfig;
+use rig_core::providers::openai::wire as openai;
 
 use super::AgentClient;
 use super::prompt_cache_http::PromptCachingHttpClient;
@@ -95,9 +95,8 @@ fn filler(words: usize, seed: u64) -> String {
 }
 
 fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
-    let retrying = || {
-        super::connect_retry_http::ConnectRetryHttpClient::new(llm_client().clone().into())
-    };
+    let retrying =
+        || super::connect_retry_http::ConnectRetryHttpClient::new(llm_client().clone().into());
     let http = match arm {
         Arm::MovingBreakpoint => PromptCachingHttpClient::new(retrying()),
         Arm::SystemBreakpointOnly => PromptCachingHttpClient::system_breakpoint_only(retrying()),

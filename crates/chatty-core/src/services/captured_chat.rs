@@ -159,16 +159,30 @@ mod tests {
         let messages: Vec<Message> = vec![
             Message::user("find the answer"),
             Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                    AssistantContent::text("looking"),
-                    AssistantContent::tool_call("c1", crate::testing::tool_name("read_file"), json!({"path": "a.md"})),
-                    AssistantContent::tool_call("c2", crate::testing::tool_name("shell"), json!({"cmd": "ls"})),
-                ])),
+                AssistantContent::text("looking"),
+                AssistantContent::tool_call(
+                    "c1",
+                    crate::testing::tool_name("read_file"),
+                    json!({"path": "a.md"}),
+                ),
+                AssistantContent::tool_call(
+                    "c2",
+                    crate::testing::tool_name("shell"),
+                    json!({"cmd": "ls"}),
+                ),
+            ])),
             Message::User {
                 content: vec![
-                    UserContent::tool_result(rig_core::message::CallId::from_wire("c1"), crate::testing::tool_name("read_file"),
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("c1"),
+                        crate::testing::tool_name("read_file"),
                         vec![ToolResultContent::text("file body")],
                     ),
-                    UserContent::tool_result(rig_core::message::CallId::from_wire("c2"), crate::testing::tool_name("shell"), vec![ToolResultContent::text("a.md")]),
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("c2"),
+                        crate::testing::tool_name("shell"),
+                        vec![ToolResultContent::text("a.md")],
+                    ),
                 ],
             },
             Message::assistant("done"),

@@ -591,7 +591,7 @@ impl ChatEngine {
                     self.transcript.push_user(text);
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 let text = content
                     .iter()
                     .filter_map(|item| match item {

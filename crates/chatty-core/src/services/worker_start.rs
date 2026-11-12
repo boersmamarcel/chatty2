@@ -21,8 +21,7 @@
 
 use chatty_fabric::find_worker_start_failure;
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction,
-    OutcomeEvent,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction, OutcomeEvent,
 };
 use rig_agent::tool::Tool;
 

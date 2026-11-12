@@ -28,8 +28,8 @@ use super::connect_retry_http::ConnectRetryHttpClient;
 use super::empty_turn_retry::EmptyTurnRetry;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 use super::openai_responses::{
-    AzureResponsesHttpClient, AzureWire, ChatModels, CompletionModel, azure_wire, ensure_tools_reachable,
-    openai_platform_responses_base,
+    AzureResponsesHttpClient, AzureWire, ChatModels, CompletionModel, azure_wire,
+    ensure_tools_reachable, openai_platform_responses_base,
 };
 use super::prompt_cache_http::PromptCachingHttpClient;
 use super::request_recorder::RequestRecorder;
@@ -158,8 +158,10 @@ pub(crate) fn completion_model_reporting(
     provider_config: &ProviderConfig,
     overflows: WindowOverflows,
 ) -> Result<ChatModels> {
-    let retrying =
-        || ConnectRetryHttpClient::new(llm_client().clone().into()).reporting_overflows(overflows.clone());
+    let retrying = || {
+        ConnectRetryHttpClient::new(llm_client().clone().into())
+            .reporting_overflows(overflows.clone())
+    };
     let identifier = model_config.model_identifier.as_str();
     // SEC-16 / AGE-756: an OpenAI-compatible base URL carries the API key
     // in a header, so a configured http:// endpoint outside loopback/the

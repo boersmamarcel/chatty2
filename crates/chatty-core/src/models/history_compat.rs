@@ -82,7 +82,10 @@ fn upgrade_rig_042(value: &mut Value) -> bool {
     let mut changed = false;
     let mut emptied = Vec::new();
     for (index, message) in messages.iter_mut().enumerate() {
-        let role = message.get("role").and_then(Value::as_str).map(str::to_owned);
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
             continue;
         };

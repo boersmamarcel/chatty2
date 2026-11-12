@@ -207,7 +207,9 @@ fn extract_assistant_text(content: &[AssistantContent]) -> String {
 fn message_char_len(message: &Message) -> usize {
     match message {
         Message::User { content } => extract_user_text(content).len(),
-        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => extract_assistant_text(content).len(),
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+            extract_assistant_text(content).len()
+        }
         Message::System { content } => content.len(),
     }
 }
@@ -240,7 +242,9 @@ mod tests {
     }
 
     fn assistant_msg(text: &str) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(text.to_string()))]))
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Text(Text::new(text.to_string())),
+        ]))
     }
 
     #[test]

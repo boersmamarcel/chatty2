@@ -127,10 +127,14 @@ fn root_conversation(
                 build_user_step(step_id, content, timestamp, &msg_attachments),
                 Vec::new(),
             ),
-            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) if round_trip => Built::new(
-                build_agent_step(step_id, content, timestamp, None, None),
-                call_refs(content),
-            ),
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. })
+                if round_trip =>
+            {
+                Built::new(
+                    build_agent_step(step_id, content, timestamp, None, None),
+                    call_refs(content),
+                )
+            }
             Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 let metrics = own_usages.get(assistant_turn_idx).map(|u| AtifStepMetrics {
                     prompt_tokens: Some(u.prompt_tokens()),

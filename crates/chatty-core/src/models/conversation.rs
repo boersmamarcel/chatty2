@@ -1141,7 +1141,9 @@ fn finalize_response_state(
     }));
 
     entries.push(MessageEntry {
-        message: Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(response_text))])),
+        message: Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Text(Text::new(response_text)),
+        ])),
         system_trace: trace,
         attachment_paths: attachments,
         timestamp: Some(timestamp),
@@ -1158,7 +1160,8 @@ fn remove_last_turn_state(entries: &mut Vec<MessageEntry>) -> Option<(String, Op
         return None;
     }
     let last = entries.last()?;
-    let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &last.message else {
+    let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &last.message
+    else {
         return None;
     };
     let text = content
@@ -1747,10 +1750,12 @@ mod tests {
         assert_eq!(outcome, TurnOutcome::Persisted);
         assert_eq!(entries.len(), 2);
         match &entries[1].message {
-            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => match &content[0] {
-                AssistantContent::Text(t) => assert_eq!(t.text, "hello there"),
-                other => panic!("expected Text, got {other:?}"),
-            },
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+                match &content[0] {
+                    AssistantContent::Text(t) => assert_eq!(t.text, "hello there"),
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
             other => panic!("expected Assistant message, got {other:?}"),
         }
     }
@@ -1829,14 +1834,20 @@ mod tests {
         if let Some(text) = text {
             content.push(AssistantContent::text(text));
         }
-        content.push(AssistantContent::tool_call(id, crate::testing::tool_name("read_file"),
+        content.push(AssistantContent::tool_call(
+            id,
+            crate::testing::tool_name("read_file"),
             serde_json::json!({ "path": format!("{id}.md") }),
         ));
         Message::Assistant(rig_core::message::AssistantMessage::new(content))
     }
 
     fn tool_result(id: &str) -> Message {
-        Message::tool_result(rig_core::message::CallId::from_wire(id), crate::testing::tool_name("read_file"), format!("contents of {id}"))
+        Message::tool_result(
+            rig_core::message::CallId::from_wire(id),
+            crate::testing::tool_name("read_file"),
+            format!("contents of {id}"),
+        )
     }
 
     /// rig's record of a turn with two tool calls: the prompt, two
@@ -1883,7 +1894,9 @@ mod tests {
                     .checked_sub(1)
                     .map(|p| &entries[p].message)
                     .unwrap_or_else(|| panic!("tool result at index {i} has nothing before it"));
-                let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = previous else {
+                let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) =
+                    previous
+                else {
                     panic!("tool result at index {i} does not follow an assistant message");
                 };
                 assert!(

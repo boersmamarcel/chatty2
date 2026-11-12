@@ -141,6 +141,9 @@ fn is_connection_failure(error: &http_client::Error) -> bool {
 
 /// Run `send` until it succeeds, fails with anything but a connection
 /// failure, or has been retried [`CONNECT_RETRY_ATTEMPTS`] times.
+// rig-http 0.46's error keeps a failed reply's headers inline; the
+// result type is the transport trait's, not chatty's to box (AGE-1151).
+#[allow(clippy::result_large_err)]
 async fn with_connect_retries<R, F, Fut>(backoff: Duration, mut send: F) -> http_client::Result<R>
 where
     F: FnMut() -> Fut,
@@ -552,6 +555,9 @@ fn overflow_message(error: &http_client::Error) -> &str {
 /// output cap lowered when the refusal says the requested output was what
 /// did not fit (AGE-985), else compacted — further on every refusal, up to
 /// [`OVERFLOW_RETRIES`] times (AGE-994).
+// rig-http 0.46's error keeps a failed reply's headers inline; the
+// result type is the transport trait's, not chatty's to box (AGE-1151).
+#[allow(clippy::result_large_err)]
 async fn send_fitting<R, F, Fut>(
     backoff: Duration,
     overflows: &WindowOverflows,

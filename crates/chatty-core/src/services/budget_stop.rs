@@ -23,8 +23,7 @@
 //!   its own caller stops too, and the root shows the final message.
 
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction,
-    OutcomeEvent,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction, OutcomeEvent,
 };
 use rig_agent::tool::Tool;
 

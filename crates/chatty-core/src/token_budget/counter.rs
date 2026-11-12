@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn tool_result_text_is_bpe_counted_but_tool_result_image_is_fixed() {
-        use rig_core::completion::message::{Image, CallId, ToolResult};
+        use rig_core::completion::message::{CallId, Image, ToolResult};
 
         let c = TokenCounter::for_model("gpt-4");
 
@@ -324,15 +324,18 @@ mod tests {
 
     #[test]
     fn tool_call_name_and_arguments_are_bpe_counted() {
-        use rig_core::completion::message::{ToolCall, CallId, ToolFunction};
+        use rig_core::completion::message::{CallId, ToolCall, ToolFunction};
 
         let c = TokenCounter::for_model("gpt-4");
-        let message = Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+        let message = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
                 CallId::Local(rig_core::message::LocalCallId::new()),
-                ToolFunction::new(crate::testing::tool_name("run_command"),
+                ToolFunction::new(
+                    crate::testing::tool_name("run_command"),
                     serde_json::json!({"command": "ls -la"}),
                 ),
-            ))]));
+            )),
+        ]));
         assert!(c.count_message(&message) > 0);
     }
 

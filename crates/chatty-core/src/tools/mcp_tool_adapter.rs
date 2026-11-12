@@ -16,8 +16,8 @@
 use std::time::Duration;
 
 use rig_agent::tool::{DynamicTool, ToolContext, ToolExecutionError, ToolOutput};
-use rig_core::tool::ContextValue;
 use rig_core::message::{ImageMediaType, MimeType, ToolResultContent};
+use rig_core::tool::ContextValue;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, ClientRequest, ContentBlock,
     JsonObject, RequestMetaObject, ResourceContents, ServerResult,

@@ -646,7 +646,7 @@ cap_usd = 2.5
         use crate::settings::models::models_store::ModelConfig;
         use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
         use crate::testing::fake_model::{FakeDaemon, Reply, Script};
-        
+
         let _ = crate::init_repositories();
         let daemon = FakeDaemon::scripted(Script::new().route("dp1-model", [Reply::text("done")]));
         let workspace = tempfile::tempdir().expect("a workspace");

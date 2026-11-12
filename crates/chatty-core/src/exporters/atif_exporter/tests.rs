@@ -92,7 +92,9 @@ fn user_message(text: &str) -> Message {
 }
 
 fn assistant_message(text: &str) -> Message {
-    Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(text.to_string()))]))
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+        AssistantContent::Text(Text::new(text.to_string())),
+    ]))
 }
 
 // ── format_timestamp tests ────────────────────────────────────────
@@ -474,10 +476,18 @@ fn persisted_tool_round_trips_become_steps() {
     let history = vec![
         user_message("Read it"),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                AssistantContent::text("Let me look."),
-                AssistantContent::tool_call("call-1", crate::testing::tool_name("read_file"), serde_json::json!({})),
-            ])),
-        Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "contents"),
+            AssistantContent::text("Let me look."),
+            AssistantContent::tool_call(
+                "call-1",
+                crate::testing::tool_name("read_file"),
+                serde_json::json!({}),
+            ),
+        ])),
+        Message::tool_result(
+            rig_core::message::CallId::from_wire("call-1"),
+            crate::testing::tool_name("read_file"),
+            "contents",
+        ),
         assistant_message("Let me look.\n\nDone"),
     ];
     let conv = make_conversation_data(
@@ -667,7 +677,15 @@ fn tool_calls_with_observation() {
         active_tool_index: None,
     };
 
-    let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_abc"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/file.txt"}),)))]))];
+    let history = vec![Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+            CallId::from_wire("call_abc"),
+            ToolFunction::new(
+                crate::testing::tool_name("read_file"),
+                serde_json::json!({"path": "/tmp/file.txt"}),
+            ),
+        ))]),
+    )];
 
     let conv = make_conversation_data(
         "id",
@@ -767,10 +785,24 @@ fn duplicate_tool_names_matched_by_id() {
         active_tool_index: None,
     };
 
-    let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_001"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/a.txt"}),))),
-            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_002"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/b.txt"}),))),
-        ]))];
+    let history = vec![Message::Assistant(
+        rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_001"),
+                ToolFunction::new(
+                    crate::testing::tool_name("read_file"),
+                    serde_json::json!({"path": "/tmp/a.txt"}),
+                ),
+            )),
+            AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_002"),
+                ToolFunction::new(
+                    crate::testing::tool_name("read_file"),
+                    serde_json::json!({"path": "/tmp/b.txt"}),
+                ),
+            )),
+        ]),
+    )];
 
     let conv = make_conversation_data(
         "id",
@@ -958,9 +990,15 @@ fn snapshot_full_conversation() {
     let history = vec![
         user_message("Read the file /tmp/hello.txt"),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_001"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/hello.txt"}),))),
-                AssistantContent::Text(Text::new("The file contains: Hello, World!")),
-            ])),
+            AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_001"),
+                ToolFunction::new(
+                    crate::testing::tool_name("read_file"),
+                    serde_json::json!({"path": "/tmp/hello.txt"}),
+                ),
+            )),
+            AssistantContent::Text(Text::new("The file contains: Hello, World!")),
+        ])),
     ];
 
     let conv = make_conversation_data(
@@ -1005,7 +1043,7 @@ mod full_run {
     use crate::tools::invoke_agent_tool::{InvokeAgentProgress, STOPPED_BY_USER};
     use chatty_fabric::{CallChain, CapturedConversation, SwarmEvent, SwarmItem};
     use rig_core::completion::message::{
-        Reasoning, ToolCall, CallId, ToolFunction, ToolResult, ToolResultContent,
+        CallId, Reasoning, ToolCall, ToolFunction, ToolResult, ToolResultContent,
     };
     use serde_json::{Value, json};
 
@@ -1024,7 +1062,10 @@ mod full_run {
     }
 
     fn call(id: &str, name: &str, arguments: Value) -> AssistantContent {
-        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire(id), ToolFunction::new(crate::testing::tool_name(name), arguments)))
+        AssistantContent::ToolCall(ToolCall::new(
+            CallId::from_wire(id),
+            ToolFunction::new(crate::testing::tool_name(name), arguments),
+        ))
     }
 
     fn result(id: &str, name: &str, text: &str) -> Message {
@@ -1044,17 +1085,19 @@ mod full_run {
         let mut messages = vec![
             Message::user("write it"),
             Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                    AssistantContent::Reasoning(Reasoning::new("thinking about it")),
-                    call("w-read", "read_file", json!({ "path": "main.rs" })),
-                ])),
+                AssistantContent::Reasoning(Reasoning::new("thinking about it")),
+                call("w-read", "read_file", json!({ "path": "main.rs" })),
+            ])),
             result("w-read", "read_file", "fn main() {}"),
         ];
         if let Some(callee) = callee {
-            messages.push(Message::Assistant(rig_core::message::AssistantMessage::new(vec![call(
+            messages.push(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![call(
                     "w-call",
                     "invoke_agent",
                     json!({ "agent": callee, "prompt": "test it" }),
-                )])));
+                )]),
+            ));
             messages.push(result("w-call", "invoke_agent", "tests pass"));
         }
         messages.push(Message::assistant("done"));

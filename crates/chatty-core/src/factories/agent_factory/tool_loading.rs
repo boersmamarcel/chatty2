@@ -699,7 +699,7 @@ impl Tool for LoadToolsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::{ToolCall, CallId, ToolFunction};
+    use rig_core::message::{CallId, ToolCall, ToolFunction};
 
     fn loader(preload: &[&str]) -> ToolLoader {
         ToolLoader::new(
@@ -815,10 +815,12 @@ mod tests {
     }
 
     fn call(name: &str) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
                 CallId::from_wire("call_1"),
                 ToolFunction::new(crate::testing::tool_name(name), serde_json::json!({})),
-            ))]))
+            )),
+        ]))
     }
 
     #[test]
@@ -883,10 +885,15 @@ mod tests {
     #[test]
     fn a_load_tools_call_in_the_history_keeps_its_group_loaded() {
         let (loader, _) = calibrated(&[]);
-        let load = Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+        let load = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
                 CallId::from_wire("call_1"),
-                ToolFunction::new(crate::testing::tool_name("load_tools"), serde_json::json!({"group": "web"})),
-            ))]));
+                ToolFunction::new(
+                    crate::testing::tool_name("load_tools"),
+                    serde_json::json!({"group": "web"}),
+                ),
+            )),
+        ]));
         loader.load_groups_called_in(&[Message::user("task"), load]);
         assert_eq!(loader.loaded_groups(), ["web"]);
         assert!(
@@ -1031,10 +1038,7 @@ mod tests {
     }
 
     async fn run(agent: &rig_agent::Agent, history: Vec<Message>) {
-        let mut stream = agent
-            .prompt("go")
-            .history(history)
-            .max_turns(5).stream();
+        let mut stream = agent.prompt("go").history(history).max_turns(5).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run succeeds");
         }
@@ -1066,10 +1070,12 @@ mod tests {
         let (agent, model, loader) = mock_agent(vec![done()]).await;
         let earlier = vec![
             Message::user("earlier task"),
-            Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::ToolCall(ToolCall::new(
                     CallId::from_wire("call_0"),
                     ToolFunction::new(crate::testing::tool_name("fetch"), serde_json::json!({})),
-                ))])),
+                )),
+            ])),
             Message::User {
                 content: vec![UserContent::ToolResult(rig_core::message::ToolResult {
                     call: CallId::from_wire("call_0"),

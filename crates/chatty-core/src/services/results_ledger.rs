@@ -469,11 +469,13 @@ mod tests {
     use rig_core::completion::message::{CallId, ToolResult};
 
     fn call(id: &str, agent: &str, prompt: &str) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(
                 id,
                 crate::testing::tool_name(DELEGATION_TOOL),
                 serde_json::json!({ "agent": agent, "prompt": prompt }),
-            )]))
+            ),
+        ]))
     }
 
     fn tool_result(id: &str, content: ToolResultContent) -> Message {

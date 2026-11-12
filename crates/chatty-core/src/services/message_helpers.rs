@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, ToolCall, CallId, ToolResultContent};
+use rig_core::completion::message::{AssistantContent, CallId, ToolCall, ToolResultContent};
 use rig_core::message::UserContent;
 use tracing::info;
 
@@ -114,7 +114,9 @@ pub fn result_ids(message: &Message) -> impl Iterator<Item = &CallId> {
 /// The tool calls `message` makes.
 fn tool_calls(message: &Message) -> impl Iterator<Item = &ToolCall> {
     let content = match message {
-        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => Some(content.iter()),
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+            Some(content.iter())
+        }
         _ => None,
     };
     content.into_iter().flatten().filter_map(|item| match item {
@@ -303,16 +305,21 @@ mod tests {
 
     fn tool_call() -> Message {
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                AssistantContent::text("Let me look."),
-                AssistantContent::tool_call("call-1", crate::testing::tool_name("read_file"), serde_json::json!({})),
-            ]))
+            AssistantContent::text("Let me look."),
+            AssistantContent::tool_call(
+                "call-1",
+                crate::testing::tool_name("read_file"),
+                serde_json::json!({}),
+            ),
+        ]))
     }
 
     /// One assistant message with `n` parallel tool calls, `call-1`..`call-n`
     /// — the shape a provider that supports parallel tool calls sends back
     /// in one turn, and the shape AGE-485's malformed-history bug is about.
     fn parallel_tool_calls(n: usize) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new((1..=n)
+        Message::Assistant(rig_core::message::AssistantMessage::new(
+            (1..=n)
                 .map(|i| {
                     AssistantContent::tool_call(
                         format!("call-{i}"),
@@ -320,13 +327,16 @@ mod tests {
                         serde_json::json!({ "path": format!("/tmp/{i}") }),
                     )
                 })
-                .collect()))
+                .collect(),
+        ))
     }
 
     #[test]
     fn tool_messages_are_recognised_on_both_sides_of_the_round_trip() {
         assert!(is_tool_call_message(&tool_call()));
-        assert!(is_tool_result_message(&Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"),
+        assert!(is_tool_result_message(&Message::tool_result(
+            rig_core::message::CallId::from_wire("call-1"),
+            crate::testing::tool_name("read_file"),
             "contents"
         )));
 
@@ -342,7 +352,11 @@ mod tests {
         let history = vec![
             Message::user("read it"),
             tool_call(),
-            Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "a"),
+            Message::tool_result(
+                rig_core::message::CallId::from_wire("call-1"),
+                crate::testing::tool_name("read_file"),
+                "a",
+            ),
             Message::assistant("done"),
             // A call with nothing after it: a single-step shape, not a round-trip.
             tool_call(),
@@ -368,9 +382,17 @@ mod tests {
             exchange_count(&[
                 Message::user("read it"),
                 tool_call(),
-                Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "a"),
+                Message::tool_result(
+                    rig_core::message::CallId::from_wire("call-1"),
+                    crate::testing::tool_name("read_file"),
+                    "a"
+                ),
                 tool_call(),
-                Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "b"),
+                Message::tool_result(
+                    rig_core::message::CallId::from_wire("call-1"),
+                    crate::testing::tool_name("read_file"),
+                    "b"
+                ),
                 Message::assistant("done"),
             ]),
             1
@@ -396,7 +418,11 @@ mod tests {
         let messages = vec![
             Message::user("read three files"),
             parallel_tool_calls(3),
-            Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "a"),
+            Message::tool_result(
+                rig_core::message::CallId::from_wire("call-1"),
+                crate::testing::tool_name("read_file"),
+                "a",
+            ),
             // call-2 and call-3 never got a result before the turn ended.
         ];
 
@@ -424,7 +450,11 @@ mod tests {
         let messages = vec![
             Message::user("read it"),
             tool_call(),
-            Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "a"),
+            Message::tool_result(
+                rig_core::message::CallId::from_wire("call-1"),
+                crate::testing::tool_name("read_file"),
+                "a",
+            ),
             Message::assistant("done"),
         ];
 
@@ -439,7 +469,11 @@ mod tests {
     fn a_result_answering_no_call_is_dropped() {
         let messages = vec![
             Message::user("[CONTEXT SHAPER: 4 messages snipped]"),
-            Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "a"),
+            Message::tool_result(
+                rig_core::message::CallId::from_wire("call-1"),
+                crate::testing::tool_name("read_file"),
+                "a",
+            ),
             Message::assistant("done"),
         ];
 
@@ -458,7 +492,9 @@ mod tests {
         let messages = vec![Message::User {
             content: vec![
                 UserContent::text("and this too"),
-                UserContent::tool_result(CallId::from_wire("call-1"), crate::testing::tool_name("read_file"),
+                UserContent::tool_result(
+                    CallId::from_wire("call-1"),
+                    crate::testing::tool_name("read_file"),
                     vec![ToolResultContent::text("a")],
                 ),
             ],
@@ -499,7 +535,11 @@ mod tests {
     #[test]
     fn a_result_before_its_call_is_an_orphan() {
         let messages = vec![
-            Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "a"),
+            Message::tool_result(
+                rig_core::message::CallId::from_wire("call-1"),
+                crate::testing::tool_name("read_file"),
+                "a",
+            ),
             tool_call(),
         ];
 

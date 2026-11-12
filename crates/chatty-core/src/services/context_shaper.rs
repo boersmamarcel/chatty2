@@ -161,8 +161,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use chatty_fabric::{CallEvent, CallRequest, CallResult, Transport};
 use futures::StreamExt;
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction,
-    OutcomeEvent, RequestPatch,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction, OutcomeEvent,
+    RequestPatch,
 };
 use rig_core::completion::Message;
 use rig_core::completion::message::{CallId, Text, ToolResult, ToolResultContent};
@@ -1858,9 +1858,13 @@ mod tests {
     }
 
     fn tool_call(id: &str) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name("test_tool"),
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(
+                id,
+                crate::testing::tool_name("test_tool"),
                 serde_json::json!({}),
-            )]))
+            ),
+        ]))
     }
 
     /// `n` tool round-trips after a user message: the shape every step of a
@@ -2220,14 +2224,16 @@ mod turn_start_tests {
         let mut messages = vec![Message::user(user)];
         for r in 0..4 {
             let id = format!("t{n}-{r}");
-            messages.push(Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            messages.push(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![
                     AssistantContent::text(words(300, &format!("plan {id}"))),
                     AssistantContent::tool_call(
                         &id,
                         crate::testing::tool_name("execute_code"),
                         serde_json::json!({ "code": words(1_500, "code") }),
                     ),
-                ])));
+                ]),
+            ));
             messages.push(Message::User {
                 content: vec![UserContent::ToolResult(ToolResult {
                     call: CallId::from_wire(&id),
@@ -2264,10 +2270,12 @@ mod turn_start_tests {
                 UserContent::Text(t) => Some(t.text.clone()),
                 _ => None,
             }),
-            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content.iter().find_map(|item| match item {
-                AssistantContent::Text(t) => Some(t.text.clone()),
-                _ => None,
-            }),
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+                content.iter().find_map(|item| match item {
+                    AssistantContent::Text(t) => Some(t.text.clone()),
+                    _ => None,
+                })
+            }
             Message::System { content } => Some(content.clone()),
         }
     }
@@ -2401,14 +2409,19 @@ mod turn_start_tests {
         let mut stream = agent(&model, &shaper)
             .prompt("continue the task")
             .history(history.clone())
-            .max_turns(2).stream();
+            .max_turns(2)
+            .stream();
         while let Some(item) = stream.next().await {
             item.expect("the turn completes");
         }
 
         let requests = model.requests();
         assert_eq!(requests.len(), 1);
-        let sent: &Vec<Message> = &requests[0].chat_history.iter().map(|m| (**m).clone()).collect();
+        let sent: &Vec<Message> = &requests[0]
+            .chat_history
+            .iter()
+            .map(|m| (**m).clone())
+            .collect();
         assert!(
             BASE + tokens(sent) <= WINDOW - WINDOW / 10 - RESPONSE_RESERVE,
             "{} tokens sent",
@@ -2438,7 +2451,8 @@ mod turn_start_tests {
         let mut stream = agent(&model, &shaper)
             .prompt("continue")
             .history(history)
-            .max_turns(2).stream();
+            .max_turns(2)
+            .stream();
         let mut error = None;
         while let Some(item) = stream.next().await {
             if let Err(e) = item {
@@ -2479,7 +2493,9 @@ mod compaction_tests {
     }
 
     fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name(name), args)]))
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(id, crate::testing::tool_name(name), args),
+        ]))
     }
 
     fn result(id: &str, name: &str, text: String) -> Message {
@@ -2577,7 +2593,8 @@ mod compaction_tests {
     async fn over_the_threshold_the_old_part_becomes_a_grounded_summary() {
         let history = coding_run(24);
         let shaper = shaper_at(&history, 0.95);
-        let model = MockCompletionModel::from_turns([MockTurn::text(format!("<think>x</think>{PROSE}"))]);
+        let model =
+            MockCompletionModel::from_turns([MockTurn::text(format!("<think>x</think>{PROSE}"))]);
         shaper.enable_compaction(Some(summarizer(&model)), None);
 
         let sent = shaper
@@ -2606,10 +2623,7 @@ mod compaction_tests {
         let kept = sent.len() - 1;
         assert!(kept >= 2 && kept < history.len() / 2, "kept {kept}");
         assert_eq!(&sent[1..], &history[history.len() - kept..]);
-        assert!(
-            matches!(sent[1], Message::Assistant(_)),
-            "starts on a call"
-        );
+        assert!(matches!(sent[1], Message::Assistant(_)), "starts on a call");
         assert_round_trips_intact(&sent, &[]);
         assert!(tokens(&sent) < tokens(&history) * 4 / 5);
     }
@@ -2714,14 +2728,19 @@ mod compaction_tests {
         let mut stream = agent
             .prompt(prompt_text)
             .history(history.clone())
-            .max_turns(2).stream();
+            .max_turns(2)
+            .stream();
         while let Some(item) = stream.next().await {
             item.expect("the run succeeds");
         }
 
         let requests = model.requests();
         assert_eq!(requests.len(), 1);
-        let sent: &Vec<Message> = &requests[0].chat_history.iter().map(|m| (**m).clone()).collect();
+        let sent: &Vec<Message> = &requests[0]
+            .chat_history
+            .iter()
+            .map(|m| (**m).clone())
+            .collect();
         assert!(text_of(&sent[0]).starts_with(COMPACTION_HEADER));
         assert!(sent.len() < history.len());
         // rig 0.46 joins adjacent user messages (AGE-1151): the prompt
@@ -2826,9 +2845,13 @@ mod results_ledger_tests {
         } else {
             "reviewer"
         };
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name("invoke_agent"),
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(
+                id,
+                crate::testing::tool_name("invoke_agent"),
                 serde_json::json!({ "agent": agent, "prompt": task }),
-            )]))
+            ),
+        ]))
     }
 
     fn result(id: &str, name: &str, value: serde_json::Value) -> Message {
@@ -2891,11 +2914,13 @@ mod results_ledger_tests {
         let mut history = vec![Message::user(TASK)];
         for n in 0..20 {
             let id = format!("r{n}");
-            history.push(Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
+            history.push(Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
                     &id,
                     crate::testing::tool_name("read_file"),
                     serde_json::json!({ "path": format!("f{n}.rs") }),
-                )])));
+                )]),
+            ));
             history.push(result(
                 &id,
                 "read_file",
@@ -3057,7 +3082,13 @@ mod results_ledger_tests {
 
         let requests = model.requests();
         assert_eq!(requests.len(), 2 * CHAPTERS + 1);
-        let last: Vec<Message> = requests.last().unwrap().chat_history.iter().map(|m| (**m).clone()).collect();
+        let last: Vec<Message> = requests
+            .last()
+            .unwrap()
+            .chat_history
+            .iter()
+            .map(|m| (**m).clone())
+            .collect();
         let text = all_text(&last);
         assert!(
             text.contains("messages snipped"),

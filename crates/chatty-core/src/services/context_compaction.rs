@@ -628,10 +628,7 @@ fn render_transcript(messages: &[Message], max_chars: usize) -> String {
                             out.push_str(&format!(
                                 "CALL {}({})\n",
                                 call.function.name,
-                                head_chars(
-                                    &call.function.arguments_json(),
-                                    RENDER_TOOL_ARGS_CHARS
-                                )
+                                head_chars(&call.function.arguments_json(), RENDER_TOOL_ARGS_CHARS)
                             ));
                         }
                         _ => {}
@@ -680,7 +677,9 @@ mod tests {
     use super::*;
 
     fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name(name), args)]))
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(id, crate::testing::tool_name(name), args),
+        ]))
     }
 
     fn result(id: &str, text: &str) -> Message {

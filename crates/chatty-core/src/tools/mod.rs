@@ -294,7 +294,10 @@ pub(crate) mod gemini_compat_tests {
         let implied = ["properties", "anyOf", "oneOf", "allOf", "enum", "$ref"]
             .iter()
             .any(|key| node.contains_key(*key));
-        assert!(typed || implied, "Gemini schema 'type' is empty at path '{path}'");
+        assert!(
+            typed || implied,
+            "Gemini schema 'type' is empty at path '{path}'"
+        );
         if let Some(items) = node.get("items") {
             assert_no_empty_types(items, &format!("{path}.items"));
         }

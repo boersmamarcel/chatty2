@@ -292,7 +292,9 @@ impl SeenRoundTrips {
         if answers.is_empty() {
             return;
         }
-        self.messages.push(Message::Assistant(rig_core::message::AssistantMessage::new(content)));
+        self.messages.push(Message::Assistant(
+            rig_core::message::AssistantMessage::new(content),
+        ));
         self.messages.push(Message::User { content: answers });
     }
 
@@ -855,14 +857,17 @@ mod tests {
         let calls: Vec<(String, serde_json::Value)> = messages
             .iter()
             .filter_map(|m| match m {
-                Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => Some(content.iter()),
+                Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+                    Some(content.iter())
+                }
                 _ => None,
             })
             .flatten()
             .filter_map(|c| match c {
-                AssistantContent::ToolCall(call) => {
-                    Some((call.function.name.to_string(), call.function.arguments_value()))
-                }
+                AssistantContent::ToolCall(call) => Some((
+                    call.function.name.to_string(),
+                    call.function.arguments_value(),
+                )),
                 _ => None,
             })
             .collect();
@@ -875,7 +880,8 @@ mod tests {
                 ("final_answer".to_string(), serde_json::json!({})),
             ]
         );
-        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &messages[0] else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &messages[0]
+        else {
             panic!("{messages:?}");
         };
         assert!(matches!(&content[0], AssistantContent::Text(t) if t.text == "Looking."));

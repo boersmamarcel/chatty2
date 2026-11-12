@@ -174,7 +174,9 @@ async fn send(
     // The prompt is the conversation's last message, after the history.
     let mut request = CompletionRequest::new(prompt);
     let prompt = request.chat_history.pop();
-    request.chat_history.extend(history.into_iter().map(Into::into));
+    request
+        .chat_history
+        .extend(history.into_iter().map(Into::into));
     request.chat_history.extend(prompt);
     if let Some(tools) = tools {
         ensure_tools_reachable(model_config, provider_config)
@@ -851,11 +853,13 @@ mod tests {
         // 0.42 sent them as a `tool_calls` message and a `tool` message.
         assert_eq!(messages.len(), 3, "{sent}");
         assert_eq!(messages[1]["role"], "assistant", "{sent}");
-        assert_eq!(messages[1]["content"], "[called tool count with {}]", "{sent}");
+        assert_eq!(
+            messages[1]["content"], "[called tool count with {}]",
+            "{sent}"
+        );
         assert_eq!(messages[2]["role"], "user", "{sent}");
         assert_eq!(
-            messages[2]["content"][0]["text"],
-            "[tool count result] 3",
+            messages[2]["content"][0]["text"], "[tool count result] 3",
             "{sent}"
         );
     }

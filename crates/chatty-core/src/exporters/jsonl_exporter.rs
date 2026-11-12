@@ -217,7 +217,9 @@ pub fn conversation_to_dpo_jsonl(
         let chosen = history
             .get(record.message_index)
             .map(|msg| match msg {
-                Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => extract_assistant_text(content),
+                Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+                    extract_assistant_text(content)
+                }
                 Message::User { content } => extract_user_text_lines(content),
                 Message::System { content } => content.clone(),
             })
@@ -449,7 +451,9 @@ mod tests {
     }
 
     fn assistant_message(text: &str) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(text.to_string()))]))
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Text(Text::new(text.to_string())),
+        ]))
     }
 
     // ── SFT tests ─────────────────────────────────────────────────────
@@ -630,15 +634,15 @@ mod tests {
         let history = vec![
             user_message("Read the file"),
             Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                    AssistantContent::ToolCall(ToolCall::new(
-                        CallId::from_wire("call_abc"),
-                        ToolFunction::new(
-                            crate::testing::tool_name("read_file"),
-                            serde_json::json!({"path": "/tmp/file.txt"}),
-                        ),
-                    )),
-                    AssistantContent::Text(Text::new("Here is the file")),
-                ])),
+                AssistantContent::ToolCall(ToolCall::new(
+                    CallId::from_wire("call_abc"),
+                    ToolFunction::new(
+                        crate::testing::tool_name("read_file"),
+                        serde_json::json!({"path": "/tmp/file.txt"}),
+                    ),
+                )),
+                AssistantContent::Text(Text::new("Here is the file")),
+            ])),
         ];
 
         let conv = make_conversation_data(
@@ -676,10 +680,18 @@ mod tests {
         let history = vec![
             user_message("Read the file"),
             Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                    AssistantContent::text("Let me look."),
-                    AssistantContent::tool_call("call-1", crate::testing::tool_name("read_file"), serde_json::json!({})),
-                ])),
-            Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "file contents"),
+                AssistantContent::text("Let me look."),
+                AssistantContent::tool_call(
+                    "call-1",
+                    crate::testing::tool_name("read_file"),
+                    serde_json::json!({}),
+                ),
+            ])),
+            Message::tool_result(
+                rig_core::message::CallId::from_wire("call-1"),
+                crate::testing::tool_name("read_file"),
+                "file contents",
+            ),
             assistant_message("Let me look.\n\nHere is the file"),
         ];
         let conv = make_conversation_data(

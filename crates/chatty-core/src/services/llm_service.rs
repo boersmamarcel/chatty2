@@ -489,9 +489,7 @@ fn map_stream_result(
 fn is_truncated_stream(err: &PromptError) -> bool {
     match err {
         PromptError::Provider(ProviderError::Truncated) => true,
-        PromptError::Report(report) => {
-            report.message == ProviderError::Truncated.to_string()
-        }
+        PromptError::Report(report) => report.message == ProviderError::Truncated.to_string(),
         _ => false,
     }
 }
@@ -1060,11 +1058,11 @@ mod tests {
     }
 
     use rig_agent::agent::CompletionCall;
+    use rig_core::ProviderResponseError;
     use rig_core::completion::message::{
         CallId, ToolCall, ToolFunction, ToolResult, ToolResultContent,
     };
     use rig_core::error::ProviderError;
-    use rig_core::ProviderResponseError;
     use rig_core::streaming::{Item, Part, PartKind, StreamEvent};
     use std::sync::Arc;
 
@@ -1107,7 +1105,9 @@ mod tests {
         crate::factories::agent_factory::completion_model(&model, &provider)
             .unwrap()
             .for_request(false)
-            .call(rig_core::completion::CompletionRequest::new(Message::user("hi")))
+            .call(rig_core::completion::CompletionRequest::new(Message::user(
+                "hi",
+            )))
             .await
             .expect("the fake server answers")
             .usage
@@ -1235,11 +1235,13 @@ mod tests {
     /// (AGE-278).
     #[tokio::test]
     async fn openrouter_cached_tokens_reach_the_normalised_record() {
-        let reported = openrouter_usage(serde_json::from_str(
-            r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120,
+        let reported = openrouter_usage(
+            serde_json::from_str(
+                r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120,
                 "prompt_tokens_details":{"cached_tokens":1200,"cache_write_tokens":300}}"#,
+            )
+            .unwrap(),
         )
-        .unwrap())
         .await;
         let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &reported);
         assert_eq!(call.cache_read_tokens, 1_200);
@@ -1249,10 +1251,12 @@ mod tests {
         assert_eq!(call.input_tokens, 3_500);
         assert_eq!(call.prompt_tokens(), 5_000);
 
-        let uncached = openrouter_usage(serde_json::from_str(
-            r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120}"#,
+        let uncached = openrouter_usage(
+            serde_json::from_str(
+                r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120}"#,
+            )
+            .unwrap(),
         )
-        .unwrap())
         .await;
         let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &uncached);
         assert_eq!(call.cache_read_tokens, 0);
@@ -1264,11 +1268,13 @@ mod tests {
     /// file sums them (they are part of `output_tokens`, not on top of it).
     #[tokio::test]
     async fn reasoning_tokens_reach_the_normalised_record() {
-        let reported = openrouter_usage(serde_json::from_str(
-            r#"{"prompt_tokens":50,"completion_tokens":40,"total_tokens":90,
+        let reported = openrouter_usage(
+            serde_json::from_str(
+                r#"{"prompt_tokens":50,"completion_tokens":40,"total_tokens":90,
                 "completion_tokens_details":{"reasoning_tokens":25}}"#,
+            )
+            .unwrap(),
         )
-        .unwrap())
         .await;
         let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &reported);
         assert_eq!(call.reasoning_tokens, 25);
@@ -1381,7 +1387,10 @@ mod tests {
     fn map_item_tool_call_uses_the_provider_call_id() {
         let tool_call = ToolCall::from_wire(
             "call-99",
-            ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "README.md"})),
+            ToolFunction::new(
+                crate::testing::tool_name("read_file"),
+                serde_json::json!({"path": "README.md"}),
+            ),
         );
         let item = MultiTurnStreamItem::ToolCall { tool_call };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
@@ -1403,7 +1412,10 @@ mod tests {
         let local = rig_core::message::LocalCallId::new();
         let tool_call = ToolCall::new(
             CallId::Local(local),
-            ToolFunction::new(crate::testing::tool_name("search_code"), serde_json::json!({})),
+            ToolFunction::new(
+                crate::testing::tool_name("search_code"),
+                serde_json::json!({}),
+            ),
         );
         let item = MultiTurnStreamItem::ToolCall { tool_call };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
@@ -1581,9 +1593,7 @@ mod tests {
     /// transport failure headless would re-run five times into the same cap.
     #[test]
     fn classifies_a_cut_off_turn_with_no_answer_as_empty() {
-        let err = response_error(
-            &rig_core::completion::FinishReason::Length.no_answer_message(),
-        );
+        let err = response_error(&rig_core::completion::FinishReason::Length.no_answer_message());
         assert_eq!(
             classify_streaming_error(&err),
             StreamErrorKind::EmptyCompletion
@@ -1706,12 +1716,15 @@ mod tests {
     fn a_failed_run_hands_on_what_its_last_call_was_sending() {
         let earlier = Message::user("an earlier turn");
         let prompt = Message::user("the task");
-        let call = Message::Assistant(rig_core::message::AssistantMessage::new(vec![rig_core::message::AssistantContent::ToolCall(
-                ToolCall::new(
-                    CallId::from_wire("call_1"),
-                    ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "a"})),
+        let call = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            rig_core::message::AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_1"),
+                ToolFunction::new(
+                    crate::testing::tool_name("read_file"),
+                    serde_json::json!({"path": "a"}),
                 ),
-            )]));
+            )),
+        ]));
         let result = Message::User {
             content: vec![rig_core::message::UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire("call_1"),
