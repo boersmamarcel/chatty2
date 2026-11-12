@@ -141,7 +141,7 @@ mod schema_docs {
 
         let hive = serde_json::to_value(HiveSettingsModel::default()).unwrap();
         assert_eq!(hive["registry_url"], "http://localhost:8080");
-        assert_eq!(hive["runner_url"], "http://localhost:8081");
+        assert!(hive.get("runner_url").is_none());
         assert!(hive["token"].is_null());
         assert!(hive["username"].is_null());
         assert!(hive["email"].is_null());

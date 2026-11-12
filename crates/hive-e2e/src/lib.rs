@@ -23,8 +23,6 @@
 //!   module (plan §2 D).
 //! - [`Stack::step_up`]: a step-up assertion, approved the way a person does
 //!   on the registry's `/step-up` page (CX-0).
-//! - [`start_gateway`]: chatty's protocol gateway pointed at the stack's
-//!   runner (rows 5.4, 5.10).
 
 pub mod proxy;
 
@@ -35,13 +33,11 @@ use std::time::Duration;
 use chatty_core::install;
 use chatty_core::settings::models::extensions_store::{ExtensionsModel, InstalledExtension};
 use chatty_module_registry::ModuleRegistry;
-use chatty_protocol_gateway::ProtocolGateway;
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, ResourceLimits};
 use hive_client::models::ModuleMetadata;
 use hive_client::{HiveRegistryClient, HiveSession, TokenPair};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use tokio::sync::RwLock;
 
 /// The version `seed-e2e.sh` publishes every fixture at.
 pub const SEEDED_VERSION: &str = "0.1.0";
@@ -424,8 +420,7 @@ pub fn module_dir() -> PathBuf {
 
 /// Install `meta` at `version` the way the desktop's marketplace does
 /// (`chatty-gpui` `extensions_controller::install_extension`), into
-/// [`module_dir`]: a remote module gets a `module.toml` built from its
-/// version manifest; a local one is downloaded by
+/// [`module_dir`]: the module is downloaded by
 /// `chatty_core::install::download_wasm_module` (name and version validated,
 /// body capped at 64 MiB while it streams, hash and signature checked by
 /// hive-client) and written, with its install record, by
@@ -438,43 +433,20 @@ pub async fn install_from_hive(
 ) -> Result<InstalledExtension, String> {
     let module_dir = module_dir();
     let mut extensions = ExtensionsModel::default();
-    if matches!(meta.execution_mode.as_str(), "remote" | "remote_only") {
-        let manifest = client
-            .list_versions(&meta.name)
-            .await
-            .map_err(|e| format!("list versions: {e}"))?
-            .items
-            .into_iter()
-            .find(|v| v.version == version)
-            .map(|v| v.manifest)
-            .unwrap_or_default();
-        install::install_remote_module(
-            &meta.name,
-            version,
-            &meta.display_name,
-            &meta.description,
-            &meta.pricing_model,
-            &manifest,
-            &module_dir,
-            &mut extensions,
-        )
-        .map_err(|e| format!("install: {e}"))
-    } else {
-        let download = install::download_wasm_module(client, &meta.name, version, |_, _| {})
-            .await
-            .map_err(|e| format!("download: {e}"))?;
-        install::install_wasm_module(
-            &download,
-            &meta.name,
-            version,
-            &meta.display_name,
-            &meta.description,
-            &meta.pricing_model,
-            &module_dir,
-            &mut extensions,
-        )
-        .map_err(|e| format!("install: {e}"))
-    }
+    let download = install::download_wasm_module(client, &meta.name, version, |_, _| {})
+        .await
+        .map_err(|e| format!("download: {e}"))?;
+    install::install_wasm_module(
+        &download,
+        &meta.name,
+        version,
+        &meta.display_name,
+        &meta.description,
+        &meta.pricing_model,
+        &module_dir,
+        &mut extensions,
+    )
+    .map_err(|e| format!("install: {e}"))
 }
 
 // ── Step-up ───────────────────────────────────────────────────────────────
@@ -522,8 +494,7 @@ fn manifest_name_version(manifest: &str) -> Option<(String, String)> {
 
 // ── The gateway ───────────────────────────────────────────────────────────
 
-/// A host LLM that is never reached: remote modules run on the runner, whose
-/// `llm::complete` goes to the stack's wiremock upstream.
+/// A host LLM that is never reached.
 struct NoLocalLlm;
 
 impl LlmProvider for NoLocalLlm {
@@ -533,73 +504,13 @@ impl LlmProvider for NoLocalLlm {
         _: Vec<Message>,
         _: Option<String>,
     ) -> Result<CompletionResponse, String> {
-        Err("hive-e2e: no local LLM; remote modules call the runner's upstream".to_string())
+        Err("hive-e2e: no local LLM".to_string())
     }
-}
-
-/// chatty's protocol gateway with no local modules, forwarding remote ones
-/// to `runner` as the user `client` is signed in as. Returns its base URL:
-/// a test-only loopback listener that adds the launch token itself.
-pub async fn start_gateway(client: Arc<HiveRegistryClient>, runner: &str) -> String {
-    let registry = ModuleRegistry::new(Arc::new(NoLocalLlm), ResourceLimits::default())
-        .expect("an empty module registry");
-    let gateway = ProtocolGateway::new(Arc::new(RwLock::new(registry)))
-        .with_hive_client(client)
-        .with_runner_url(runner);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("an ephemeral port");
-    let base = format!("http://{}", listener.local_addr().expect("an address"));
-    // This test listener stands in for a caller holding the gateway's
-    // launch token (EN-0d): it adds it to every request.
-    let bearer: axum::http::HeaderValue = format!("Bearer {}", gateway.token().as_str())
-        .parse()
-        .expect("a token is a valid header value");
-    let router = gateway.build_router().layer(axum::middleware::map_request(
-        move |mut request: axum::extract::Request| {
-            let bearer = bearer.clone();
-            async move {
-                request
-                    .headers_mut()
-                    .insert(axum::http::header::AUTHORIZATION, bearer);
-                request
-            }
-        },
-    ));
-    tokio::spawn(async move {
-        axum::serve(listener, router).await.ok();
-    });
-    base
 }
 
 /// A module registry (the desktop's loader) with no LLM behind it.
 pub fn local_module_registry() -> ModuleRegistry {
     ModuleRegistry::new(Arc::new(NoLocalLlm), ResourceLimits::default()).expect("a module registry")
-}
-
-/// Send one A2A `message/send` for the remote `module` through the gateway,
-/// which forwards it to the runner (the one remote path left until PL-H8b
-/// removes it; the OpenAI route went with `chat`, PL-U3). The status and the
-/// answer's text (or the whole body when there is none).
-pub async fn send_via_gateway(gateway: &str, module: &str, prompt: &str) -> (StatusCode, String) {
-    let (status, body) = send(
-        reqwest::Client::new()
-            .post(format!("{gateway}/a2a/{module}"))
-            .timeout(Duration::from_secs(120))
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "message/send",
-                "params": { "message": { "parts": [{ "kind": "text", "text": prompt }] } },
-            })),
-    )
-    .await;
-    let content = body
-        .pointer("/result/artifacts/0/parts/0/text")
-        .and_then(|text| text.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| body.to_string());
-    (status, content)
 }
 
 #[cfg(test)]

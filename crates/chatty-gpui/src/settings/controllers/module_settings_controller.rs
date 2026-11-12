@@ -494,7 +494,7 @@ pub fn refresh_runtime(cx: &mut App) {
                     let shared = Arc::new(tokio::sync::RwLock::new(registry));
                     let mut gateway = ProtocolGateway::new(shared);
 
-                    // Attach hive client and runner URL for remote execution support
+                    // Attach the module meter (credit guard, usage reporting)
                     let hive_settings_result = cx.update(|cx| {
                         let hive = cx.global::<HiveSettingsModel>();
                         let paid_modules =
@@ -543,10 +543,7 @@ pub fn refresh_runtime(cx: &mut App) {
                         let meter = ModuleMeter::new(paid_modules)
                             .with_credit_guard(credit_guard)
                             .with_usage_collector(usage_collector);
-                        gateway = gateway
-                            .with_hive_client(hive_client)
-                            .with_runner_url(hive_settings.runner_url)
-                            .with_meter(Arc::new(meter));
+                        gateway = gateway.with_meter(Arc::new(meter));
                     }
 
                     // ADR-0011 C2: the gateway is also the fleet broker.

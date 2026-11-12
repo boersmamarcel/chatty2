@@ -15,7 +15,7 @@ use hive_client::{
 };
 use hive_e2e::{
     SEEDED_VERSION, Stack, flat_manifest, install_from_hive, local_module_registry, module_dir,
-    send, send_via_gateway, start_gateway, unique,
+    send, unique,
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -519,56 +519,6 @@ async fn s5_03_expired_access_token_is_refreshed_and_usage_survives() {
     }
 }
 
-// ── 5.4 ───────────────────────────────────────────────────────────────────
-
-/// 5.4: a remote module chatty installed at 1.0.0 runs as 1.0.0 after 2.0.0
-/// is published. v1 is echo ("Echo: …"), v2 is slow-host (the fake
-/// LLM's reply), so the answer says which ran. Red today: the runner always
-/// executes `latest_version` (F12) — PL-H8 (AGE-611) retires the runner's
-/// module routes; the row then moves to the hosted-plugin path (PL-S6).
-#[tokio::test]
-#[ignore = "needs hive stack; run by nightly"]
-async fn s5_04_remote_module_runs_the_installed_version() {
-    let stack = Stack::from_env();
-    let publisher = stack.publisher().await;
-    let name = unique("pin-e2e");
-    let remote = "execution_mode = \"remote\"\n";
-    stack
-        .publish_ok(
-            &publisher,
-            &flat_manifest(&name, "1.0.0", remote),
-            stack.fixture(ECHO),
-        )
-        .await;
-
-    let user = stack.user().await;
-    let client = Arc::new(user.client(&stack.registry));
-    let meta = client
-        .get_module(&name)
-        .await
-        .expect("the module's metadata");
-    install_from_hive(&client, &meta, "1.0.0")
-        .await
-        .expect("the remote install");
-
-    stack
-        .publish_ok(
-            &publisher,
-            &flat_manifest(&name, "2.0.0", remote),
-            stack.fixture("slow-host"),
-        )
-        .await;
-
-    let gateway = start_gateway(Arc::clone(&client), &stack.runner).await;
-    let (status, content) = send_via_gateway(&gateway, &name, "ping").await;
-    assert_eq!(
-        (status, content.as_str()),
-        (StatusCode::OK, "Echo: ping"),
-        "F12 / PL-H8 (AGE-611): chatty installed {name}@1.0.0 (echo), 2.0.0 (slow-host) \
-         was published after; the runner must run 1.0.0"
-    );
-}
-
 // ── 5.5 ───────────────────────────────────────────────────────────────────
 
 /// 5.5: `latest_version` is the highest semver, not the last published.
@@ -852,47 +802,6 @@ async fn s5_09_registry_rejects_a_core_module_upload() {
         status,
         StatusCode::BAD_REQUEST,
         "a core wasm module (not a component) was accepted: {body}"
-    );
-}
-
-// ── 5.10 ──────────────────────────────────────────────────────────────────
-
-/// 5.10: a remote module's chat goes chatty gateway → hive-runner → the
-/// runner's LLM upstream (the stack's wiremock) and back. PL-H8 (AGE-611)
-/// retires this path; the row then moves to the hosted-plugin path (PL-S6).
-#[tokio::test]
-#[ignore = "needs hive stack; run by nightly"]
-async fn s5_10_remote_module_chat_reaches_the_runner_llm_upstream() {
-    let stack = Stack::from_env();
-    let publisher = stack.publisher().await;
-    let name = unique("remote-e2e");
-    stack
-        .publish_ok(
-            &publisher,
-            &flat_manifest(&name, "1.0.0", "execution_mode = \"remote\"\n"),
-            stack.fixture("slow-host"),
-        )
-        .await;
-
-    let user = stack.user().await;
-    let client = Arc::new(user.client(&stack.registry));
-    let meta = client
-        .get_module(&name)
-        .await
-        .expect("the module's metadata");
-    install_from_hive(&client, &meta, "1.0.0")
-        .await
-        .expect("the remote install");
-
-    let gateway = start_gateway(Arc::clone(&client), &stack.runner).await;
-    let (status, content) = send_via_gateway(&gateway, &name, "hello").await;
-    assert_eq!(
-        (status, content.as_str()),
-        (
-            StatusCode::OK,
-            "Hello from the fake LLM upstream (hive e2e stack)."
-        ),
-        "gateway → runner → LLM upstream round trip for {name}"
     );
 }
 

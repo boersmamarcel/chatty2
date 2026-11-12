@@ -1127,7 +1127,19 @@ fn main() {
             );
 
             let mut loaded_hive = hive_result
-                .map_err(|e| warn!(error = ?e, "Failed to load Hive settings, using defaults"))
+                .map_err(|e| {
+                    // The repository now refuses to write the file (and so to
+                    // delete the sign-in it references) until it loads again.
+                    error!(error = %e, "Failed to load Hive settings, using defaults");
+                    let message = format!(
+                        "Hive settings were not loaded and will not be saved: {e}. Remove the offending line from hive_settings.json and restart chatty; your sign-in is kept."
+                    );
+                    cx.update(|cx| {
+                        cx.global_mut::<settings::models::MarketplaceState>()
+                            .set_error(message);
+                    })
+                    .ok();
+                })
                 .ok();
             let mut loaded_ext = ext_result
                 .map_err(|e| warn!(error = ?e, "Failed to load extensions, using defaults"))

@@ -494,7 +494,6 @@ mod tests {
             },
             hive_settings: HiveSettingsModel {
                 registry_url: "https://hive.example.com".to_string(),
-                runner_url: "https://runner.example.com".to_string(),
                 token: Some("jwt-token".to_string()),
                 refresh_token: Some("refresh-token".to_string()),
                 expires_at: Some("2026-09-27T10:00:00Z".parse().unwrap()),
