@@ -24,6 +24,7 @@
 
 mod click;
 pub mod control;
+mod egress_proxy;
 pub mod error;
 pub mod events;
 pub mod input;
