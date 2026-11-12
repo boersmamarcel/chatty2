@@ -24,7 +24,7 @@ pub struct AgentSpecsModel {
 
 impl Global for AgentSpecsModel {}
 
-fn workspace(cx: &App) -> Option<String> {
+pub(crate) fn workspace(cx: &App) -> Option<String> {
     cx.try_global::<ExecutionSettingsModel>()
         .and_then(|settings| settings.workspace_dir.clone())
 }
