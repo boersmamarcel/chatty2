@@ -81,11 +81,34 @@ fn resolve_worker_executable(
                 .and_then(Path::parent)
                 .map(|d| d.join("chatty-tui")),
         )
+        // Some cargo versions instead place a crate's own unit-test binary
+        // under its build-script `out` directory
+        // (`target/<profile>/build/<pkg>/<hash>/out`); walk up through that
+        // shape to the profile directory the real bin sits in.
+        .chain(
+            dir.as_deref()
+                .and_then(build_out_profile_dir)
+                .map(|d| d.join("chatty-tui")),
+        )
         .find(|p| p.exists())
         .unwrap_or_else(|| {
             warn!("chatty-tui not found next to current binary, falling back to PATH");
             PathBuf::from("chatty-tui")
         })
+}
+
+/// `target/<profile>/build/<pkg>/<hash>/out` → `target/<profile>`, else
+/// `None`.
+fn build_out_profile_dir(dir: &Path) -> Option<PathBuf> {
+    if !dir.ends_with("out") {
+        return None;
+    }
+    let pkg_dir = dir.parent()?.parent()?; // build/<pkg>
+    let build_dir = pkg_dir.parent()?; // build
+    if build_dir.file_name()?.to_str()? != "build" {
+        return None;
+    }
+    build_dir.parent().map(Path::to_path_buf) // <profile>
 }
 
 #[cfg(test)]
@@ -104,6 +127,24 @@ mod tests {
             resolve_worker_executable(Some("".into()), exe.clone()),
             resolve_worker_executable(None, exe)
         );
+    }
+
+    #[test]
+    fn worker_executable_found_under_a_build_script_out_dir() {
+        // Some cargo versions place a crate's own unit-test binary at
+        // `target/<profile>/build/<pkg>/<hash>/out/<name>-<hash>` instead of
+        // `target/<profile>/deps/<name>-<hash>` (AGE-632's "deps" case
+        // above doesn't match this shape).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let profile_dir = tmp.path().join("debug");
+        let out_dir = profile_dir.join("build/chatty-tui/abc123/out");
+        std::fs::create_dir_all(&out_dir).expect("mkdir");
+        let real_bin = profile_dir.join("chatty-tui");
+        std::fs::write(&real_bin, b"").expect("write");
+        let test_bin = out_dir.join("chatty_tui-abc123");
+        std::fs::write(&test_bin, b"").expect("write");
+
+        assert_eq!(resolve_worker_executable(None, Some(test_bin)), real_bin);
     }
 
     #[test]
