@@ -109,6 +109,9 @@ pub struct HeadlessRunner {
     /// A `--team` leader's session record (AGE-922): the workspace and the
     /// team id it is kept under, written when the run ends.
     session_record: Option<(PathBuf, String)>,
+    /// A `--team` leader whose team names a `report`: every pass's web
+    /// calls and bill, for the report's cost footer (AGE-910).
+    team_tally: Option<chatty_core::services::team_report::TraceTally>,
     /// The connection a delegated worker's calls travel over (ADR-0020,
     /// BI-4), set before the agent is built.
     fabric_transport: Option<Arc<dyn chatty_fabric::Transport>>,
@@ -160,6 +163,11 @@ impl HeadlessRunner {
         session.set_price_book(config.models.price_book());
         let pending_first_turn = config.team.as_ref().and_then(Team::first_turn_instruction);
         let handoff_ledger = config.team.as_ref().and_then(Team::handoff_ledger);
+        let team_tally = config
+            .team
+            .as_ref()
+            .and_then(|team| team.file.report.as_ref())
+            .map(|_| Default::default());
         let max_agent_turns = config.execution_settings.max_agent_turns;
         // The spec's per-task `cap_usd` (PL-D2), priced on read at the
         // models each line names (AGE-682).
@@ -191,6 +199,7 @@ impl HeadlessRunner {
             save_conversation: None,
             export: None,
             session_record: None,
+            team_tally,
             fabric_transport: None,
             handoff: None,
             handoff_ledger,
@@ -488,6 +497,37 @@ impl HeadlessRunner {
         let record = SessionRecord::ended(outcome, answer, &todos);
         if let Err(error) = store_record(workspace, team, &record).await {
             eprintln!("session record: {error:#}");
+        }
+    }
+
+    /// Finish a `--team` leader's report file, when its team names one
+    /// (AGE-910): the citation check against the researchers' notes in
+    /// the conversation, and the run's cost; `answer` becomes a partial
+    /// report when the team wrote none. Called when the run ends, however
+    /// it ends.
+    pub(super) fn finish_team_report(&self, answer: &str, wall: std::time::Duration) {
+        use chatty_core::services::team_report::{finish_file, notes_in_history};
+        let (Some((workspace, _)), Some(tally)) = (&self.session_record, &self.team_tally) else {
+            return;
+        };
+        let Some(relative) = self
+            .config
+            .team
+            .as_ref()
+            .and_then(|team| team.file.report.as_deref())
+        else {
+            return;
+        };
+        let messages = self
+            .session
+            .conversation()
+            .map(|conversation| conversation.messages())
+            .unwrap_or_default();
+        let notes = notes_in_history(&messages);
+        let tally = tally.tally(Some(self.session.price_book()), wall);
+        match finish_file(workspace, relative, answer, &notes, &tally) {
+            Ok(path) => eprintln!("Report: {}", path.display()),
+            Err(error) => eprintln!("report {relative}: {error:#}"),
         }
     }
 
@@ -967,6 +1007,11 @@ impl HeadlessRunner {
     /// Commit the turn (no trace, no artifacts in headless mode) and reset.
     /// A second call for the same turn is a no-op inside the session.
     fn finish_turn(&mut self) {
+        // The turn's trace goes with it: count what the report's footer
+        // needs first (AGE-910).
+        if let Some(tally) = self.team_tally.as_mut() {
+            tally.add_trace(self.session.swarm_trace());
+        }
         // Headless has no composer to restore a rolled-back message into;
         // it is kept for `take_rolled_back_message` instead.
         match self.session.finish_turn(None, vec![]) {

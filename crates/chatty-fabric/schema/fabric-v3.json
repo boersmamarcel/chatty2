@@ -234,6 +234,52 @@
     "ConversationScope": {
       "type": "string"
     },
+    "HandleError": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "const": "handle_expired",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "caller": {
+              "type": "string"
+            },
+            "code": {
+              "const": "not_owner",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "owner": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "name",
+            "caller",
+            "owner"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "HandoffContract": {
       "additionalProperties": false,
       "properties": {
@@ -1189,6 +1235,27 @@
           "required": [
             "kind",
             "refusal",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/HandleError"
+            },
+            "kind": {
+              "const": "handle",
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "error",
             "message"
           ],
           "type": "object"

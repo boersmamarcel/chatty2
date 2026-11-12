@@ -19,6 +19,7 @@ use crate::models::execution_approval_store::{ApprovalNotification, ApprovalReso
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::budget_stop::{BUDGET_STOP, StopOnBudgetExhausted, endpoint_refusal};
 use crate::services::cut_off_tool_call::{ArgumentTail, CutOffCalls, MAX_CUT_OFF_RECOVERIES};
+use crate::services::round_limit::RoundLimit;
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
 use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
 use crate::services::worker_start::{StopOnWorkerStartFailure, WORKER_START_STOP};
@@ -446,6 +447,7 @@ fn start_run(
     history: Vec<Message>,
     prompt: Message,
     budget: TurnBudget,
+    rounds: RoundLimit,
     cut_offs: &CutOffCalls,
 ) -> rig_agent::agent::StreamingResult {
     // A delegation whose worker never started ends the run (AGE-822), and
@@ -457,6 +459,8 @@ fn start_run(
         .tool_concurrency(concurrency)
         .add_hook(StopOnWorkerStartFailure)
         .add_hook(StopOnBudgetExhausted)
+        // A `[swarm.rounds]` cap (AGE-910); a no-op without one.
+        .add_hook(rounds)
         .add_hook(cut_offs.clone())
         .stream()
 }
@@ -758,6 +762,7 @@ pub async fn stream_prompt(
         delegator.clear_budget_stop();
     }
     let rig_agent = agent.agent.clone();
+    let round_limit = agent.round_limit().clone();
     let concurrency = tool_concurrency(agent);
     let cut_offs = CutOffCalls::default();
     let mut agent_stream = start_run(
@@ -766,6 +771,7 @@ pub async fn stream_prompt(
         history,
         user_message,
         turn_budget,
+        round_limit.clone(),
         &cut_offs,
     );
 
@@ -856,7 +862,7 @@ pub async fn stream_prompt(
                                     history.push(call);
                                     let budget = turn_budget.continued(calls);
                                     agent_stream =
-                                        start_run(&rig_agent, concurrency, history, result, budget, &cut_offs);
+                                        start_run(&rig_agent, concurrency, history, result, budget, round_limit.clone(), &cut_offs);
                                     continue;
                                 }
                                 cut_unanswered = true;

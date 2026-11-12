@@ -69,6 +69,9 @@ fn wire_line(kit: &SwarmKit, line: &str) -> String {
 /// it once more: the envelope is unchanged and only the inner format of the
 /// opaque captured conversation changed, which ADR-0021 §1 as amended on
 /// 2026-11-12 allows (the conversation crosses as an opaque payload).
+/// AGE-653 (RC-4) re-recorded it for the hello's schema hash alone: the
+/// export gained the typed `WireError::Handle` (`handle_expired`,
+/// `not_owner`), which this wire never sends.
 #[tokio::test]
 async fn handoff_absent_is_unchanged() {
     let kit = SwarmKit::start(

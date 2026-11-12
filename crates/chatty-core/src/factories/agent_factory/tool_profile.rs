@@ -94,6 +94,11 @@ const CALCULATE: &[&str] = &["calculate"];
 /// only — `REVIEWER`'s whole design invariant is no writes (AGE-456).
 const MEMORY: &[&str] = &["remember", "save_skill", "search_memory"];
 
+/// Reading the open web: a search, and the pages it finds (AGE-910). Still
+/// gated by the execution settings' internet access: a profile never turns
+/// a group back on.
+const WEB: &[&str] = &["search_web", "fetch"];
+
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
 /// shares one guest image with `math-render` compiled in, so the profile is
 /// what keeps the compiler away from the roles that have no use for it.
@@ -254,8 +259,22 @@ pub static TYPESETTER: ToolProfile = ToolProfile {
     groups: &[READ_SET, FS_WRITE, TYPESET, CALCULATE, MESSAGES],
 };
 
+/// A worker that researches the open web (AGE-910): the read set, web
+/// search and fetch, and `calculate`. It writes nothing, runs no shell or
+/// code, and plans nothing: its leader hands it one bounded sub-question.
+pub static WEB_RESEARCHER: ToolProfile = ToolProfile {
+    name: "web-researcher",
+    groups: &[READ_SET, WEB, CALCULATE, MESSAGES],
+};
+
 /// Every profile, in the order `--tools` documents them.
-pub static TOOL_PROFILES: &[&ToolProfile] = &[&COORDINATOR, &CODER, &REVIEWER, &TYPESETTER];
+pub static TOOL_PROFILES: &[&ToolProfile] = &[
+    &COORDINATOR,
+    &CODER,
+    &REVIEWER,
+    &TYPESETTER,
+    &WEB_RESEARCHER,
+];
 
 /// Joins profile names into their union: `coder+coordinator` allows what
 /// either allows (TD-1, AGE-692). It is how a team's derived single agent
@@ -549,6 +568,44 @@ mod tests {
         for profile in [&COORDINATOR, &CODER, &REVIEWER] {
             assert!(!profile.narrow(&everything()).compile_typst);
         }
+    }
+
+    /// AGE-910: the web researcher is the one profile that reaches the open
+    /// web, and it writes nothing, runs nothing and plans nothing.
+    #[test]
+    fn only_the_web_researcher_searches_and_fetches() {
+        assert_eq!(tool_profile("web-researcher"), Some(&WEB_RESEARCHER));
+        for profile in TOOL_PROFILES {
+            for tool in ["search_web", "fetch"] {
+                assert_eq!(
+                    profile.allows(tool),
+                    profile.name() == "web-researcher",
+                    "{} and {tool}",
+                    profile.name()
+                );
+            }
+        }
+        for tool in ["read_file", "calculate", "ask_user", "send_message"] {
+            assert!(WEB_RESEARCHER.allows(tool), "a web researcher needs {tool}");
+        }
+        for tool in [
+            "write_file",
+            "shell_execute",
+            "execute_code",
+            "git_commit",
+            "write_todos",
+            "remember",
+            "browser_navigate",
+            "compile_typst",
+        ] {
+            assert!(
+                !WEB_RESEARCHER.allows(tool),
+                "a web researcher has no {tool}"
+            );
+        }
+        let narrowed = WEB_RESEARCHER.narrow(&everything());
+        assert!(narrowed.fetch && narrowed.search_web);
+        assert!(!narrowed.fs_write && !narrowed.shell && !narrowed.browser);
     }
 
     /// A profile naming a tool that does not exist would silently allow

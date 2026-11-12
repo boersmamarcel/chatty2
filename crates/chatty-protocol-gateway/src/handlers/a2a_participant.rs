@@ -73,6 +73,11 @@ impl RunningTask {
         &self.guard.participant
     }
 
+    /// The task's A2A id.
+    pub(crate) fn task_id(&self) -> &str {
+        &self.guard.task_id
+    }
+
     /// The tree a spawned worker was given of its own (RC-3); `None` for a
     /// registered participant or a worker in its caller's tree.
     pub(crate) fn tree(&self) -> Option<crate::participant::WorkerTreeInfo> {

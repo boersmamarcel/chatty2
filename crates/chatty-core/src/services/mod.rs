@@ -81,6 +81,8 @@ pub mod resume_brief;
 /// One read model of every agent a caller can reach: five origins, name
 /// precedence with shadowing, cached live cards (PL-S1 RO-1, AGE-658).
 pub mod roster;
+/// A cap on an agent's rounds of one fan-out (`[swarm.rounds]`, AGE-910).
+pub mod round_limit;
 /// What a run has left to hand its callees: turns, time and dollars
 /// (PL-S2 DP-3).
 pub mod run_budget;
@@ -109,6 +111,9 @@ pub mod swarm_trace;
 /// The team directory: roster, leader role, verification, skill and turn
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
 pub mod team;
+/// A team's report file: the citation check and the cost footer the host
+/// appends when the run ends (AGE-910).
+pub mod team_report;
 /// A team's derived single-agent baseline and the benchmark scorecard row,
 /// with its failure tags (TD-1, AGE-692).
 pub mod team_scorecard;

@@ -382,6 +382,11 @@ pub struct InvokeAgentTool {
     /// never reached over loopback HTTP; remote agents still go through
     /// `A2aClient`.
     transport: Option<Arc<dyn Transport>>,
+    /// The root conversation this agent runs in (RC-4): a root's calls name
+    /// it to its broker, whose resumable handles are kept per conversation.
+    /// `None` — a worker, whose broker knows its conversation, or a host
+    /// with one conversation — names none.
+    conversation: Option<chatty_fabric::ConversationScope>,
     /// Where this leader records its roles' handoffs (TD-2, AGE-693): the
     /// invalid count per role and read-rule misreads. Only a `--team`
     /// leader whose team names `handoffs` has one.
@@ -408,6 +413,7 @@ impl InvokeAgentTool {
             run_budget: None,
             lazy_broker: None,
             transport: None,
+            conversation: None,
             handoff_ledger: None,
             budget_stop: Arc::new(tokio::sync::watch::Sender::new(None)),
         }
@@ -458,6 +464,22 @@ impl InvokeAgentTool {
         self
     }
 
+    /// Name `scope` as this root's conversation to its broker (RC-4): its
+    /// resumable handles are this conversation's alone.
+    pub fn with_conversation(mut self, scope: chatty_fabric::ConversationScope) -> Self {
+        self.conversation = Some(scope);
+        self
+    }
+
+    /// `transport` as this agent's conversation's root, when it names one
+    /// and the transport is a root's (RC-4).
+    fn in_conversation(&self, transport: Arc<dyn Transport>) -> Arc<dyn Transport> {
+        self.conversation
+            .as_ref()
+            .and_then(|scope| transport.for_conversation(scope))
+            .unwrap_or(transport)
+    }
+
     /// The fabric local roles are reached through: the one this tool was
     /// given, else the lazy broker's direct handle (starting it), else
     /// none — a local role is then unreachable, there is no fallback.
@@ -466,7 +488,7 @@ impl InvokeAgentTool {
     /// goes to the user, not only to the log (AGE-759).
     async fn fabric_transport(&self, agent: &str) -> Result<Arc<dyn Transport>, InvokeAgentError> {
         if let Some(transport) = &self.transport {
-            return Ok(transport.clone());
+            return Ok(self.in_conversation(transport.clone()));
         }
         let no_broker = || {
             InvokeAgentError::InvocationFailed(format!(
@@ -475,7 +497,9 @@ impl InvokeAgentTool {
         };
         let broker = self.lazy_broker.as_ref().ok_or_else(no_broker)?;
         match broker.transport().await {
-            Ok(transport) => transport.ok_or_else(no_broker),
+            Ok(transport) => transport
+                .map(|transport| self.in_conversation(transport))
+                .ok_or_else(no_broker),
             Err(error) => {
                 warn!(%error, "Failed to start the broker for a delegation");
                 Err(InvokeAgentError::InvocationFailed(format!(

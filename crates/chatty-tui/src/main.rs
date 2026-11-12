@@ -197,7 +197,7 @@ struct Cli {
     /// tool set of a role (ADR-0011 C11) — anything it does not name is
     /// dropped, MCP tools included. It only ever removes tools: a profile
     /// cannot turn a group back on that the settings switched off.
-    /// Valid profiles: coordinator, coder, reviewer, typesetter.
+    /// Valid profiles: coordinator, coder, reviewer, typesetter, web-researcher.
     ///
     /// Applied after --enable/--disable, and it wins over both.
     ///
@@ -1328,7 +1328,16 @@ async fn load_deferred_services(
             match chatty_core::search_settings_repository().load().await {
                 Ok(settings) => Some(settings),
                 Err(e) => {
-                    tracing::warn!(error = ?e, "Failed to load search settings, using None");
+                    // Loud, like the user secrets above: without them a
+                    // configured provider is silently replaced by the
+                    // keyless engines (AGE-1293). A fixed message: a parse
+                    // error can quote a value from the file, such as a key
+                    // pasted into the wrong field.
+                    let _ = e;
+                    eprintln!(
+                        "warning: search_settings.json in the chatty config directory could not be read or parsed; searching keyless"
+                    );
+                    tracing::warn!("Failed to load search settings, using None");
                     None
                 }
             }

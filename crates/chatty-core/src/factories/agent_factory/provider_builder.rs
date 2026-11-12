@@ -132,6 +132,7 @@ pub(super) async fn build_provider_agent(
         plugin_usage: Vec::new(),
         run_inbox: None,
         delegator: None,
+        round_limit: Default::default(),
     })
 }
 

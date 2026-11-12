@@ -285,6 +285,12 @@ impl AgentSession {
         &self.price_book
     }
 
+    /// The swarm trace of the turn in flight: the root and every agent under
+    /// it. `finish_turn` hands it to the turn's message and starts afresh.
+    pub fn swarm_trace(&self) -> &SwarmTrace {
+        &self.swarm
+    }
+
     pub fn config(&self) -> &AgentSessionConfig {
         &self.config
     }

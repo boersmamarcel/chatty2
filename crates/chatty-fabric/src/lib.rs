@@ -41,7 +41,11 @@ pub use directory::{
     ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState, ROOT_NAME,
 };
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES, UsagePricer};
-pub use handle::{Handle, HandleSlot, HandleStore, SavedConversation, WorkerTreeRef};
+pub use handle::{
+    Clock, HANDLE_IDLE_LIMIT, Handle, HandleChanged, HandleError, HandleKey, HandleOwner,
+    HandleParty, HandleStatus, HandleStore, HandleTicket, MAX_HANDLES_PER_CONVERSATION,
+    MAX_SAVED_BYTES_PER_CONVERSATION, RunRoot, SavedConversation, WorkerTreeRef,
+};
 pub use handoff::HandoffContract;
 pub use origin::AgentOrigin;
 pub use pending::{
