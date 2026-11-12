@@ -204,6 +204,37 @@ async fn a2a_agent_card_missing_module_returns_404() {
 }
 
 #[tokio::test]
+async fn a2a_agent_card_serves_a_feature_card_by_name() {
+    let card = serde_json::json!({"name": "reviewer", "skills": []});
+    let gateway = ProtocolGateway::new(empty_registry()).with_feature_cards(
+        [("reviewer".to_string(), card.clone())]
+            .into_iter()
+            .collect(),
+    );
+    let bearer = format!("Bearer {}", gateway.token().as_str());
+    let router = || {
+        let bearer = bearer.clone();
+        gateway
+            .build_router()
+            .layer(tower::util::MapRequestLayer::new(
+                move |mut request: Request<Body>| {
+                    request
+                        .headers_mut()
+                        .insert(header::AUTHORIZATION, bearer.parse().unwrap());
+                    request
+                },
+            ))
+    };
+
+    let (status, body) = get_json(router(), "/a2a/reviewer/.well-known/agent.json").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, card);
+
+    let (status, _) = get_json(router(), "/a2a/other/.well-known/agent.json").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a2a_jsonrpc_missing_module_returns_404() {
     let (status, _) = post_json(
         gateway_router(),

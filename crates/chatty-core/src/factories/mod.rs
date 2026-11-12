@@ -2,4 +2,4 @@ pub mod agent_factory;
 
 pub use agent_factory::AgentClient;
 pub use agent_factory::{AgentBuildContext, AgentRole, AgentServices, SpecBuild};
-pub use agent_factory::{ToolProfile, tool_profile, tool_profile_names};
+pub use agent_factory::{PROFILE_UNION_SEPARATOR, ToolProfile, tool_profile, tool_profile_names};

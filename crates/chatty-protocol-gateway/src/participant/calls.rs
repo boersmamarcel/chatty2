@@ -1030,6 +1030,9 @@ impl BrokerCalls {
             bytes: 0,
             outcome: "refused: fabric: roles are reached over the worker connection".to_string(),
             usd: None,
+            root_task_id: None,
+            names_sibling: None,
+            sibling_names: None,
         };
         let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(error) = log.append(&row) {
@@ -1098,6 +1101,8 @@ impl BrokerCalls {
                     bytes: params.prompt.len() as u64,
                     outcome: None,
                     usd: None,
+                    root_task_id: None,
+                    sibling_names: None,
                 };
                 let (target, stamp) = match decision.outcome {
                     Ok(Grant::Invoke { target, stamp }) => (target, stamp),
@@ -1107,6 +1112,7 @@ impl BrokerCalls {
                         return refusal_stream(refused.to_call_error());
                     }
                 };
+                edge.root_task_id = Some(stamp.chain.root_task_id.clone());
                 // Released now, before the callee queues for a slot that
                 // may be this very one.
                 let child = match &peer {
@@ -1297,6 +1303,8 @@ impl BrokerCalls {
             bytes: 0,
             outcome: None,
             usd: None,
+            root_task_id: None,
+            sibling_names: None,
         }
         .refused(outcome);
     }
@@ -1311,6 +1319,7 @@ impl BrokerCalls {
     ) -> MessageStatus {
         let bytes = params.text.len() as u64;
         let to = params.to.clone();
+        let sibling_names = self.siblings_named(peer, &to, &params.text);
         let status = self.accept_message(peer, caller, params);
         let outcome = match &status {
             MessageStatus::Pending { .. } => "pending".to_string(),
@@ -1325,9 +1334,24 @@ impl BrokerCalls {
             bytes,
             outcome: None,
             usd: None,
+            root_task_id: match caller {
+                Caller::Node(node) => node.runs.first().map(|run| run.chain.root_task_id.clone()),
+                _ => None,
+            },
+            sibling_names: Some(sibling_names),
         }
         .write(EdgeKind::Message, outcome);
         status
+    }
+
+    /// The siblings of `peer` that its message `text` to `to` names, if `to`
+    /// is `peer`'s owner (TM-3): a relay request. Empty for any other
+    /// recipient, for the root, and for a name no node was admitted under.
+    fn siblings_named(&self, peer: &Peer, to: &str, text: &str) -> Vec<String> {
+        let Peer::Node(name) = peer else {
+            return Vec::new();
+        };
+        self.registry.relay_siblings_named(name, to, text)
     }
 
     /// The gate's recipient check, then the pending list's bounds, which
@@ -1451,6 +1475,8 @@ impl BrokerCalls {
                 bytes: message.bytes() as u64,
                 outcome: None,
                 usd: None,
+                root_task_id: None,
+                sibling_names: None,
             }
             .write(EdgeKind::Message, "delivered_mid_run".to_string());
         }
@@ -1479,6 +1505,8 @@ impl BrokerCalls {
                 bytes: message.bytes() as u64,
                 outcome: None,
                 usd: None,
+                root_task_id: None,
+                sibling_names: None,
             }
             .write(EdgeKind::Message, "dropped".to_string());
         }
@@ -1598,6 +1626,10 @@ impl BrokerCalls {
                 Ok(running) => running,
                 Err(reason) => {
                     warn!(agent = %agent, %reason, "Could not start a worker for a call");
+                    // `to` is still the spec here, not a node: a row naming
+                    // no worker must not make the run look multi-worker
+                    // (TM-3).
+                    edge.root_task_id = None;
                     edge.end(TaskState::Failed);
                     yield Ok(CallEvent::Result(outcome(TaskState::Failed, String::new(), Some(reason), None, messages())));
                     return;
@@ -1930,6 +1962,10 @@ struct EdgeGuard {
     outcome: Option<String>,
     /// The callee's reported usage, priced (DP-3).
     usd: Option<String>,
+    /// The run the row belongs to (DP-2).
+    root_task_id: Option<String>,
+    /// A message row's sibling names (TM-3); `None` on any other row.
+    sibling_names: Option<Vec<String>>,
 }
 
 impl EdgeGuard {
@@ -1960,6 +1996,9 @@ impl EdgeGuard {
             bytes: self.bytes,
             outcome,
             usd: self.usd.clone(),
+            root_task_id: self.root_task_id.clone(),
+            names_sibling: self.sibling_names.as_ref().map(|names| !names.is_empty()),
+            sibling_names: self.sibling_names.clone(),
         };
         let mut log = log.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(error) = log.append(&row) {

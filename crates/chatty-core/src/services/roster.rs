@@ -20,8 +20,11 @@
 //! for [`LiveCards::TTL`]. After one failed fetch, every node that needed a
 //! card is [`Reach::Unreachable`] until a later fetch succeeds.
 //!
-//! Nothing reads the roster yet: `list_agents` moves onto it in RO-3
-//! (AGE-660), which also filters it by the caller's delegation policy.
+//! `list_agents` reads it (RO-3, AGE-660) and filters it by the caller's
+//! delegation policy. Where the host does not hold the broker's directory
+//! (the in-process root over its direct handle, a worker over the fabric),
+//! its nodes are the ones the broker's own answer names
+//! ([`BrokerNodeSource`]).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -181,8 +184,9 @@ impl RosterEntry {
     }
 }
 
-/// Who is asking. RO-1 scopes by the caller's root conversation; RO-3 adds
-/// its delegation policy.
+/// Who is asking: the caller's root conversation. `list_agents` (RO-3)
+/// filters the result by the caller's delegation policy, against the specs
+/// it resolves for each entry.
 #[derive(Debug, Clone, Copy)]
 pub struct CallerView<'a> {
     pub scope: &'a ConversationScope,
@@ -481,6 +485,50 @@ impl RosterSource for DirectorySource {
                     .map(RosterCard::from_entry)
                     .unwrap_or_else(|| RosterCard::local(format!("A '{}' node", node.spec())));
                 RosterEntry::new(name, Origin::Node, reach, card)
+            })
+            .collect()
+    }
+}
+
+/// Running nodes as the broker's own directory answer names them, for a
+/// caller that cannot read the broker's [`Directory`]: a worker over the
+/// fabric, or the in-process root over its direct handle.
+///
+/// The broker answers for its caller, and it is the one that knows which
+/// conversation the calling node works for, so the answer is in scope and
+/// `scope` is not checked again here. Every entry that is not one of this
+/// machine's specs is a node; each is `Live`.
+pub struct BrokerNodeSource {
+    specs: std::collections::BTreeSet<String>,
+    cards: Arc<LiveCards>,
+}
+
+impl BrokerNodeSource {
+    pub fn new(specs: impl IntoIterator<Item = String>, cards: Arc<LiveCards>) -> Self {
+        Self {
+            specs: specs.into_iter().collect(),
+            cards,
+        }
+    }
+}
+
+#[async_trait]
+impl RosterSource for BrokerNodeSource {
+    async fn entries(&self, _scope: &ConversationScope) -> Vec<RosterEntry> {
+        let Ok(cards) = self.cards.get().await else {
+            return Vec::new();
+        };
+        cards
+            .iter()
+            // A card with no name cannot be addressed.
+            .filter(|entry| !entry.name.is_empty() && !self.specs.contains(&entry.name))
+            .map(|entry| {
+                RosterEntry::new(
+                    entry.name.clone(),
+                    Origin::Node,
+                    Reach::Live,
+                    RosterCard::from_entry(entry),
+                )
             })
             .collect()
     }

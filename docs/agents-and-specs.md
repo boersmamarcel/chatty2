@@ -55,7 +55,7 @@ running yet is not a disagreement, but a live one built for a different workspac
 
 `/agent <name> <prompt>` resolves `<name>` the same way in both frontends
 (`chatty_core::services::agent_command::resolve_agent_command`): an enabled remote A2A
-agent first (as in `invoke_agent`), then a spec on the local roster; otherwise the whole
+agent after a spec on the local roster (as in `invoke_agent`); otherwise the whole
 text is the prompt for the default sub-agent. A remote agent is called over A2A. On both
 the desktop and chatty-tui, a spec — and the default sub-agent, as `local-agent` — is a
 turn of the conversation handed to that agent through the conversation's own broker
@@ -342,7 +342,7 @@ when `revision()` moves. After the turn the broker's edge log rows
 (`apply_edge`, or `SwarmTrace::from_edges(rows, events)` in one call) place a
 run under the right one of two same-spec siblings and add the calls a worker
 had refused as `Refused` nodes. A run reports its usage once, with its own
-workers' already folded in (AGE-415), so a node's own spend is what it
+workers' lines included (AGE-415; each still names its agent's path, AGE-665), so a node's own spend is what it
 reported less what its children reported, per model: nobody is billed twice,
 and the nodes sum to what the root's conversation records
 (`swarm_tree_spend_sums`).
@@ -424,47 +424,71 @@ conversation.
 
 ### `list_agents`
 
-One flat list of everything addressable, each entry saying whose machine it runs on:
+The roster (below), filtered to what *this* caller may call and scoped to its
+conversation (PL-S1 RO-3, AGE-660). One compact row per agent:
 
 ```json
 {
   "agents": [
-    { "name": "leased-vm", "origin": "fleet", "kind": "worker", "description": "...", "enabled": true },
-    { "name": "local-agent", "origin": "local", "kind": "worker", "description": "...", "enabled": true },
-    { "name": "voucher-agent", "origin": "remote_configured", "kind": "remote", "url": "https://...", "enabled": true, "has_api_key": true, "skills": ["..."] }
+    { "name": "local-coder-0", "origin": "node", "reach": "live", "description": "...", "runs_on": "local" },
+    { "name": "local-reviewer", "origin": "local_spec", "reach": "startable", "description": "...", "runs_on": "local", "model": "qwen3:4b", "profile": "reviewer", "plugins": ["benford"] },
+    { "name": "voucher-agent", "origin": "remote", "reach": "live", "description": "Remote A2A agent at https://...", "runs_on": "remote_configured" }
   ],
   "total": 3,
   "note": "To invoke an agent, use the `invoke_agent` tool..."
 }
 ```
 
-Two sources feed it. **Settings** give the configured remotes and the roster's specs
-(names only, as a stand-in until the broker answers). The **broker's aggregated card** gives whatever registered since — a worker
-spawned a minute ago is addressable, and only the broker knows it exists. A name in both
-keeps the settings label, because what the user configured is the more informative
-answer. A gateway that is off or slow to answer is not an error: the list is then what
-settings know. API key values are **never exposed** to the LLM — only
-`has_api_key: true/false`.
+`origin` is the roster origin; `runs_on` says whose machine it runs on (table below). A
+handle's row adds `owner`, `state`, `pending_messages` and `behind_by` (RO-4 fills them
+in); a shadowed entry carries `shadowed_by`. An unreachable one carries `reason`.
 
-**The roster read model (PL-S1 RO-1).** `chatty_core::services::roster` is the one read
-model `list_agents` moves onto in RO-3 (AGE-660); nothing reads it yet. Five sources feed
-it, one `RosterSource` each:
+- **Policy.** An agent built from a spec (`AgentBuildContext::from_spec`) is offered only
+  the agents DP-1's `may_call` lets it call: listed in its `swarm.delegates_to`, exposed,
+  and allowing it in their `callers`. A node is checked against the spec it runs as
+  (`<spec>-<n>`); a name with no spec on disk is a bare spec, exposed to anyone. A root
+  with a broker is checked as its broker checks it (`LazyBroker::root_spec`, the spec
+  `SpecPolicy::with_root` gets): a `--team` leader or `--agent <spec>` root by that spec,
+  a bare root (no spec) not at all — it sees everyone.
+- **Scope.** Nodes and handles come only from the caller's `ConversationScope`. A host
+  that holds the broker's `Directory` hands the tool a `NodeTable` and nodes are read with
+  `in_scope`. Otherwise — the in-process root over its direct handle, a worker over the
+  fabric — the nodes are the ones the broker's own `ListAgents` answer names
+  (`BrokerNodeSource`): the broker knows which conversation the calling node works for.
+  Today it admits every node into its one scope (`ROOT_SCOPE`), so in production every
+  conversation served by one broker still sees the same nodes; `BrokerNodeSource` trusts
+  the broker's answer until the broker admits nodes per conversation.
+- **Byte-stable.** The tool's name, description and schema are constants; the roster only
+  appears in the result, never in the tool block or the preamble (ADR-0011 C10,
+  `tool_block_is_byte_stable`).
+
+A broker that is off or slow to answer is not an error: the list is then what settings
+and spec files know, and the note says the broker did not answer. API key values are
+**never exposed** to the LLM.
+
+**The roster read model (PL-S1 RO-1).** `chatty_core::services::roster` is the read
+model `list_agents` reads. Five sources feed it, one `RosterSource` each:
 
 | Roster origin | Source | Reach |
 |:--|:--|:--|
 | `handle` | resumable handles in the caller's swarm (none until RC-3) | `live` or `idle` |
-| `node` | running nodes: `Directory::in_scope(caller.scope)`, less ended ones | `live`, `idle`, `unreachable` |
+| `node` | running nodes: `Directory::in_scope(caller.scope)`, less ended ones, or the broker's answer | `live`, `idle`, `unreachable` |
 | `local_spec` | agent specs, from the spec loader (`load_roster_from`) | `startable` |
 | `hosted` | the user's hosted agents (none until PL-S6) | — |
 | `remote` | Settings → A2A Agents | `live`, or `unreachable` when disabled |
 
 A name two origins share goes to the higher one, **`handle > node > local_spec > hosted >
 remote`** (PL-D4); the loser is still listed, with `shadowed_by` naming the origin that
-owns the name. The broker's cards are cached for 30 s (`LiveCards::TTL`), failures
+owns the name. `invoke_agent` and `/agent` resolve a name in the same order: a local spec, then a
+configured remote. A configured remote that shares a spec's name is no longer reached. A
+node (`<spec>-<n>`) cannot be called by its own name, since routing to one node needs broker
+work that does not exist yet: `invoke_agent` refuses it with a hint to call the spec. The one
+place `list_agents` departs from PL-D4 follows from that: a remote that shares a name with
+only a node owns it, because that is what a call by the name reaches. The broker's cards are cached for 30 s (`LiveCards::TTL`), failures
 included: after one failed fetch a node is `unreachable`, with the reason, until a later
 fetch succeeds. A startable spec needs no process to be listed.
 
-#### `origin` — whose machine it runs on (ADR-0011 C5)
+#### `runs_on` — whose machine it runs on (ADR-0011 C5)
 
 | Origin | Means | Inside the fleet? |
 |:-------|:------|:------------------|
@@ -488,10 +512,10 @@ so that one cannot be added without deciding what it means.
 { "agent": "local-agent", "prompt": "Hello, agent!" }
 ```
 
-Resolution order: remote A2A agents first (a remote agent shadows a local spec with
-the same name), then the roster's specs — `local-agent` and the rest, the broker's local
-workers (below). Any other name is `NotFound`, listing what is available; a plugin's name
-is never an agent's. Every path
+Resolution order: the roster's specs — `local-agent` and the rest, the broker's local
+workers (below) — then remote A2A agents. A node name (`<spec>-<n>`) is `NotFound`, with a
+hint to call the spec. Any other name is `NotFound`, listing what is available; a plugin's
+name is never an agent's. Every path
 streams through `A2aClient::send_message_stream()`; progress (`InvokeAgentProgress`) is
 forwarded to the UI so the user sees intermediate output while the tool call is in
 flight.
@@ -595,9 +619,10 @@ a hosted worker's embedder must too — never a root's), and
 the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
 no usage concept; usage belongs to the ledger). It goes as `lines`, one per model, each
 naming its model and carrying tokens and time but no price (AGE-682). The lines already
-include whatever the child itself delegated (merged only with lines on the same model),
-and the parent's `invoke_agent` folds them into its own conversation as usage lines
-marked `delegated_to`, priced in `finish_turn` at the model each names — so a leader's
+include whatever the child itself delegated, one line per agent below it with `agent` the
+path to it (merged only with lines on the same agent and model, AGE-665), and the
+parent's `invoke_agent` folds them into its own conversation as usage lines marked
+`delegated_to` — the path, with the child's name in front (`"reviewer/local-coder"`) — priced in `finish_turn` at the model each names — so a leader's
 `total_cost` carries the whole tree below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
 second, independent key, `trace` (AGE-467): the worker's compacted tool-call trace —
 one `### <tool> (ok|FAILED|no result)` block per call it made, with the call's input and
@@ -807,7 +832,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `agent.model` | Optional. Resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the roster's default. |
 | `agent.preamble` | Optional. The role's standing instructions, appended to the system prompt after the base preamble, before the tool summary. |
 | `agent.max_tokens` | Optional, opt-in, at least 1. The output cap every model call of this agent carries (`max_tokens` on the wire), over the model's own `max_tokens` (AGE-936). Absent with no model `max_tokens` either: no cap is sent, as before; chatty has no default cap (a fixed cap counts a thinking model's reasoning too and cuts ordinary calls short). Fitting a call to a hosted task's budget is the egress's job, which may lower a call's `max_tokens` itself. A call that reaches its cap (`finish_reason: length`) is handled: the first tool-free cut-off turn of a run is retried once with feedback; a second is accepted as the answer with `[Note: this answer was cut off at the output limit and may be incomplete.]` appended, and one with no answer at all ends the run as an empty completion, which no surface retries. |
-| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder`, `reviewer` or `typesetter` — see below. |
+| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder`, `reviewer` or `typesetter` — see below. Profiles joined by `+` (`coder+coordinator`), each named once, are their union, in any order (its name is the parts sorted): how a team's derived single agent (TD-1, `team_scorecard::derive_single`) holds every role's tools. |
 | `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
 | `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
@@ -943,6 +968,7 @@ beside it.
 | `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
 | `max_agent_turns` | Optional. The leader's turn budget for the run, ahead of the leader spec's own; without either a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own spec's. |
 | `handoffs` | Optional. Role → a JSON Schema its handoff must match, as a path relative to the team directory (see *Typed handoffs* below). |
+| `verifier` | Optional. `{ "role": "<roster role>", "verdicts": ["APPROVE", "PASS"] }`: the role whose verdict passes the team's work, and the first words of its answer that do (`verdicts` defaults to `APPROVE` and `PASS`). TD-1's scorecard tags a run `verification_passed_wrong` when that role passed work the runner's check then failed (AGE-1137). A role not in `agents`, or no verdict, fails the load. Absent: every roster role whose tool profile is `reviewer`. |
 
 A `team.json` in the old shape — a `leader` object, agent objects in `agents` — fails to
 load with an error naming the field.
@@ -1012,9 +1038,18 @@ record. A host that tracks a lease's outcome itself can write the record before
 starting the leader, or build the text with
 `chatty_core::services::resume_brief::{snapshot_workspace, render_resume_brief}`.
 
-Two presets ship, both **experimental**: teams are supported, and a team becomes a
+Three presets ship, all **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
-specs name no models. Besides them, five standalone specs ship: `data-analyst`,
+specs name no models. The third, `analyst-swarm` (EV-1, AGE-668), is an eval preset:
+`analyst-swarm-coordinator` (`coordinator`, no plugins) gets a ledger column's numbers
+clean from `analyst-swarm-data-coder` (`coder`), has `analyst-swarm-benford-analyst`
+(`reviewer` without the shell, the `benford` plugin) audit them, and has
+`analyst-swarm-reviewer` (`reviewer`) review the audit; the members are
+`callers`-only. Its fixture (`teams/analyst-swarm/fixture/`: `ledger.csv` and the
+verdict in `expected.json`) and specs are frozen at their merge
+(`the_analyst_swarm_preset_is_frozen` pins their hashes): a prompt change needs a new
+preset name. `participant/analyst_swarm.rs` (`analyst_swarm_smoke`) runs it on the swarm
+kit's fake model with the real plugin. Besides them, five standalone specs ship: `data-analyst`,
 `researcher`, `reviewer`, `typesetter` and `writer`, and the coding and curation teams below. `data-analyst` (AGE-992) answers
 questions from the data files in its workspace with the `coder` profile (DuckDB's
 `query_data` and friends, `calculate`, code execution), capped at 60 tool turns and 15

@@ -33,6 +33,11 @@ pub enum EdgeKind {
 }
 
 /// One edge: a task, a message or a refusal between two parties.
+///
+/// The relay fields (`names_sibling`, `sibling_names`) are on the row a
+/// `send_message` call writes. The follow-up rows for the same message
+/// (`delivered_mid_run`, `dropped`) carry none, by design: they would count
+/// the same message twice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EdgeRow {
     /// Unix time in milliseconds.
@@ -53,6 +58,20 @@ pub struct EdgeRow {
     /// no price and the dollar gate skipped it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usd: Option<String>,
+    /// The `root_task_id` of the run the row belongs to (DP-2): what groups
+    /// rows into a swarm run (TM-3). Absent when the broker had no chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_task_id: Option<String>,
+    /// On a message row only: whether the body names one of the sender's
+    /// siblings, as a whole token, by broker-assigned or role name (TM-3,
+    /// [`RelayCounter`](crate::RelayCounter)). A message to the sender's
+    /// owner that names a sibling is a relay request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub names_sibling: Option<bool>,
+    /// On a message row only: the broker-assigned names of the siblings
+    /// named. Empty when `names_sibling` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sibling_names: Option<Vec<String>>,
 }
 
 /// Prices what a callee reported spending, for its task row's `usd` (DP-3).
@@ -190,6 +209,9 @@ mod tests {
                 bytes: 42,
                 outcome: "completed".into(),
                 usd: None,
+                root_task_id: None,
+                names_sibling: None,
+                sibling_names: None,
             },
             EdgeRow {
                 ts: 1_790_000_000_500,
@@ -202,6 +224,9 @@ mod tests {
                 bytes: 17,
                 outcome: "pending".into(),
                 usd: None,
+                root_task_id: None,
+                names_sibling: None,
+                sibling_names: None,
             },
             EdgeRow {
                 ts: 1_790_000_001_000,
@@ -214,6 +239,9 @@ mod tests {
                 bytes: 0,
                 outcome: "refused: not_on_tree".into(),
                 usd: None,
+                root_task_id: None,
+                names_sibling: None,
+                sibling_names: None,
             },
         ];
         for row in &rows {
@@ -243,6 +271,64 @@ mod tests {
         );
     }
 
+    /// A message row carries the relay fields (TM-3); a task row does not.
+    #[test]
+    fn edge_log_message_row_golden() {
+        let data = tempfile::tempdir().unwrap();
+        let scope = ConversationScope::new("conv-1");
+        let row = |kind, from: &str, to: &str, names: Option<Vec<&str>>| EdgeRow {
+            ts: 1_790_000_000_000,
+            kind,
+            from: from.into(),
+            to: to.into(),
+            scope: Some(scope.clone()),
+            run: None,
+            chain: vec![from.into()],
+            bytes: 31,
+            outcome: "pending".into(),
+            usd: None,
+            root_task_id: Some("t-1".into()),
+            names_sibling: names.as_ref().map(|n| !n.is_empty()),
+            sibling_names: names.map(|n| n.into_iter().map(String::from).collect()),
+        };
+        let rows = [
+            row(
+                EdgeKind::Message,
+                "local-coder-0",
+                "leader-0",
+                Some(vec!["reviewer-0"]),
+            ),
+            row(EdgeKind::Message, "local-coder-1", "leader-0", Some(vec![])),
+            row(EdgeKind::Task, "leader-0", "local-coder-0", None),
+        ];
+        let mut log = EdgeLog::open_for_pid(data.path(), GOLDEN_PID).unwrap();
+        for row in &rows {
+            log.append(row).unwrap();
+        }
+        let written = fs::read_to_string(log.path()).unwrap();
+        for (line, row) in written.lines().zip(&rows) {
+            assert_eq!(&serde_json::from_str::<EdgeRow>(line).unwrap(), row);
+        }
+
+        let golden =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("goldens/edge_log_message_row.jsonl");
+        if std::env::var("UPDATE_GOLDENS").is_ok() {
+            fs::write(&golden, &written).unwrap();
+            return;
+        }
+        let expected = fs::read_to_string(&golden).unwrap_or_else(|_| {
+            panic!(
+                "missing golden {}; re-run with UPDATE_GOLDENS=1",
+                golden.display()
+            )
+        });
+        assert_eq!(
+            expected, written,
+            "the message-row schema changed. scripts/fabric/relay-rate.sh reads these rows; \
+             if the change is deliberate, re-run with UPDATE_GOLDENS=1 and say why in review"
+        );
+    }
+
     #[test]
     fn edge_log_rotates_at_10mb() {
         let data = tempfile::tempdir().unwrap();
@@ -258,6 +344,9 @@ mod tests {
             bytes: 0,
             outcome: "x".repeat(100 * 1024),
             usd: None,
+            root_task_id: None,
+            names_sibling: None,
+            sibling_names: None,
         };
         let row_len = serde_json::to_vec(&row).unwrap().len() as u64 + 1;
         let per_file = MAX_EDGE_LOG_BYTES / row_len;

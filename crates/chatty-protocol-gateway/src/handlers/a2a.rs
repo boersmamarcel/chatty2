@@ -49,6 +49,10 @@ pub(crate) async fn agent_card(
         return refuse_role(&state, &module_name);
     }
 
+    if let Some(card) = state.feature_cards.get(&module_name) {
+        return Json(card.clone()).into_response();
+    }
+
     module_not_found_json(&module_name)
 }
 

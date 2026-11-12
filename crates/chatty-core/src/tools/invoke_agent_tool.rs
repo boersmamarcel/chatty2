@@ -75,8 +75,10 @@ pub enum InvokeAgentProgress {
         success: bool,
         result: Option<String>,
         /// What the agent spent, as reported on its terminal status: one
-        /// line per model, each naming its model, with `delegated_to`
-        /// naming the agent (AGE-415, AGE-682). The session folds them into
+        /// line per agent in its subtree and model, each naming its model,
+        /// with `delegated_to` the path to the agent that spent it —
+        /// `"reviewer"`, `"reviewer/local-coder"` (AGE-415, AGE-682,
+        /// AGE-665). The session folds them into
         /// the conversation's usage as delegated lines, so the leader's
         /// totals include what its workers spent. Empty when the agent
         /// reported nothing — a remote agent that does not say, or a task
@@ -729,31 +731,7 @@ impl InvokeAgentTool {
             return Err(InvokeAgentError::CapExceeded(refused));
         }
 
-        // 1. Check remote A2A agents first (they take precedence)
-        if let Some(config) = self.remote_agents.iter().find(|a| a.name == agent_name) {
-            if !config.enabled {
-                return Err(InvokeAgentError::Disabled(format!(
-                    "Remote agent '{}' is disabled. Enable it in Settings → A2A Agents.",
-                    agent_name
-                )));
-            }
-
-            self.check_budget(&agent_name)?;
-            info!(agent = %agent_name, url = %config.url, "Invoking remote A2A agent");
-            self.warn_if_outside_the_fleet(&agent_name, AgentOrigin::RemoteConfigured, &config.url);
-            self.send_progress(InvokeAgentProgress::Started {
-                agent_name: agent_name.clone(),
-                prompt: prompt.clone(),
-                source: ToolSource::ExternalService {
-                    name: agent_name.clone(),
-                },
-            });
-            return self
-                .call_streaming(config, &prompt, args.include_trace)
-                .await;
-        }
-
-        // 2. The broker's local agents: a spec, run as a chatty child in its
+        // 1. A local spec (PL-D4: outranks a remote).: a spec, run as a chatty child in its
         //    own process. Reached only over the fabric connection (ADR-0020,
         //    BI-7): there is no loopback-HTTP fallback any more, because
         //    that route now refuses every role (`loopback_refuses_roles`).
@@ -777,6 +755,30 @@ impl InvokeAgentTool {
                 .await;
         }
 
+        // 2. A configured remote A2A agent.
+        if let Some(config) = self.remote_agents.iter().find(|a| a.name == agent_name) {
+            if !config.enabled {
+                return Err(InvokeAgentError::Disabled(format!(
+                    "Remote agent '{}' is disabled. Enable it in Settings → A2A Agents.",
+                    agent_name
+                )));
+            }
+
+            self.check_budget(&agent_name)?;
+            info!(agent = %agent_name, url = %config.url, "Invoking remote A2A agent");
+            self.warn_if_outside_the_fleet(&agent_name, AgentOrigin::RemoteConfigured, &config.url);
+            self.send_progress(InvokeAgentProgress::Started {
+                agent_name: agent_name.clone(),
+                prompt: prompt.clone(),
+                source: ToolSource::ExternalService {
+                    name: agent_name.clone(),
+                },
+            });
+            return self
+                .call_streaming(config, &prompt, args.include_trace)
+                .await;
+        }
+
         // 3. Not found
         let available: Vec<String> = self
             .remote_agents
@@ -785,9 +787,28 @@ impl InvokeAgentTool {
             .chain(self.local_agents.iter().cloned())
             .collect();
 
+        // `list_agents` also lists running nodes (`<spec>-<n>`). Routing to
+        // one specific node needs broker work that does not exist yet, so say
+        // so instead of a bare "No agent named".
+        let node_hint = agent_name
+            .rsplit_once('-')
+            .filter(|(spec, n)| {
+                !n.is_empty()
+                    && n.chars().all(|c| c.is_ascii_digit())
+                    && self.local_agents.iter().any(|local| local == spec)
+            })
+            .map(|(spec, _)| {
+                format!(
+                    " '{agent_name}' looks like a running node of '{spec}'; invoke_agent \
+                     cannot address one node, call '{spec}' instead."
+                )
+            })
+            .unwrap_or_default();
+
         Err(InvokeAgentError::NotFound(format!(
-            "No agent named '{}'. Available agents: {}",
+            "No agent named '{}'.{} Available agents: {}",
             agent_name,
+            node_hint,
             if available.is_empty() {
                 "none".to_string()
             } else {
@@ -848,10 +869,7 @@ impl InvokeAgentTool {
                     if !reported.is_empty() {
                         usage = reported
                             .into_iter()
-                            .map(|line| TokenUsage {
-                                delegated_to: Some(config.name.clone()),
-                                ..line
-                            })
+                            .map(|line| line.delegated_by(&config.name))
                             .collect();
                     }
                     if state == "failed" || state == "completed" {
@@ -1104,10 +1122,7 @@ impl InvokeAgentTool {
             .map(usage_from_wire)
             .unwrap_or_default()
             .into_iter()
-            .map(|line| TokenUsage {
-                delegated_to: Some(agent.to_string()),
-                ..line
-            })
+            .map(|line| line.delegated_by(agent))
             .collect();
         let trace = if outcome.success {
             include_trace
@@ -1941,13 +1956,19 @@ mod tests {
         ));
     }
 
+    /// PL-D4: a local spec outranks a remote that shares its name, as
+    /// `list_agents` reports (AGE-1131).
     #[tokio::test]
-    async fn test_remote_agent_takes_precedence() {
-        // When a remote agent and a local spec share a name, remote wins
-        let remote = make_agent("shared-name", "https://example.com/a2a", false);
-        let tool = InvokeAgentTool::new(vec![remote]).with_local_agents(["shared-name"]);
+    async fn test_local_spec_takes_precedence_over_remote() {
+        let refusal = Refusal::NotExposed {
+            callee: "shared-name".to_string(),
+        };
+        let remote = make_agent("shared-name", "https://example.com/a2a", true);
+        let tool = InvokeAgentTool::new(vec![remote])
+            .with_local_agents(["shared-name"])
+            .with_transport(Arc::new(Refusing(refusal.clone())));
 
-        let result = tool
+        let err = tool
             .call(
                 &mut ToolContext::new(),
                 InvokeAgentArgs {
@@ -1956,11 +1977,50 @@ mod tests {
                     include_trace: false,
                 },
             )
-            .await;
+            .await
+            .unwrap_err();
 
-        // Should hit the remote disabled check, not the local path
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), InvokeAgentError::Disabled(_)));
+        // The refusal can only come from the fabric: the local path ran.
+        assert!(matches!(err, InvokeAgentError::Refused(r) if r == refusal));
+    }
+
+    /// A remote named like a node (`<spec>-<n>`) is still reached, and gets
+    /// no node hint: nodes are not callable by name, a remote is.
+    #[tokio::test]
+    async fn a_remote_named_like_a_node_is_reached() {
+        let remote = make_agent("voucher-agent-0", "https://example.com/a2a", false);
+        let tool = InvokeAgentTool::new(vec![remote]).with_local_agents(["voucher-agent"]);
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "voucher-agent-0".to_string(),
+                    prompt: "hi".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, InvokeAgentError::Disabled(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_node_name_gets_a_clear_error() {
+        let tool = InvokeAgentTool::new(vec![]).with_local_agents(["local-coder"]);
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "local-coder-0".to_string(),
+                    prompt: "hi".to_string(),
+                    include_trace: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(matches!(err, InvokeAgentError::NotFound(_)));
+        assert!(text.contains("running node of 'local-coder'"), "{text}");
     }
 
     /// Serve one SSE reply made of `events` (JSON-RPC `result` objects),

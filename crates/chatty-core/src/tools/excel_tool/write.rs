@@ -321,7 +321,8 @@ impl Tool for WriteExcelTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_new_path(&args.path).await?;
-        let is_overwrite = canonical.exists();
+        // `symlink_metadata`: a link is not shown as its target (AGE-1113).
+        let is_overwrite = crate::services::no_follow_write::entry_exists(&canonical);
 
         // Request approval
         let approved = request_write_approval(
@@ -349,8 +350,11 @@ impl Tool for WriteExcelTool {
             total_rows += write_sheet(&mut workbook, spec)?;
         }
 
-        workbook
-            .save(&canonical)
+        // In memory, then never through a symlink at the target (AGE-1113).
+        let bytes = workbook
+            .save_to_buffer()
+            .map_err(|e| ExcelToolError::WriteError(format!("Failed to save: {}", e)))?;
+        crate::services::no_follow_write::write_no_follow(&canonical, &bytes)
             .map_err(|e| ExcelToolError::WriteError(format!("Failed to save: {}", e)))?;
 
         Ok(WriteExcelOutput {

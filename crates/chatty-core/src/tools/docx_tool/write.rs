@@ -126,7 +126,8 @@ impl Tool for WriteDocxTool {
                 mode,
                 WriteOperation::WriteFile {
                     path: canonical.display().to_string(),
-                    is_overwrite: canonical.exists(),
+                    // `symlink_metadata`: a link is not shown as its target (AGE-1113).
+                    is_overwrite: crate::services::no_follow_write::entry_exists(&canonical),
                     content_preview: format!(
                         "Word document from {} bytes of markdown",
                         args.content.len()
@@ -148,8 +149,9 @@ impl Tool for WriteDocxTool {
         let (docx_bytes, paragraphs_written) = build_docx(&args.content)?;
         let bytes_written = docx_bytes.len();
 
-        std::fs::write(&canonical, &docx_bytes)
-            .with_context(|| format!("Failed to write '{}'", canonical.display()))?;
+        // Never through a symlink at the target (AGE-1113).
+        crate::services::no_follow_write::write_no_follow(&canonical, &docx_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to write '{}': {e}", canonical.display()))?;
 
         Ok(WriteDocxOutput {
             path: canonical.display().to_string(),

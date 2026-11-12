@@ -39,6 +39,14 @@ pub trait LazyBroker: Send + Sync {
         Ok(None)
     }
 
+    /// The spec the broker checks the root's own calls against
+    /// (`SpecPolicy::with_root`, AGE-745): a `--team` leader's or an
+    /// `--agent <spec>` root's. `None` — the default — is a bare root, which
+    /// may call anyone. `list_agents` filters by the same spec.
+    fn root_spec(&self) -> Option<crate::agent_spec::AgentSpec> {
+        None
+    }
+
     /// The sockets this broker is serving on right now: empty before the
     /// first successful [`transport`](Self::transport) call. It never opens
     /// a TCP port (ADR-0021 § 4).

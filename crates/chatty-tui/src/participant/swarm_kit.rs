@@ -179,7 +179,10 @@ impl SwarmKit {
         sse: Script,
         ndjson: Script,
     ) -> Self {
-        Self::start_opts(None, roster, sse, ndjson, false, false, budget, None, None).await
+        Self::start_opts(
+            None, roster, sse, ndjson, false, false, budget, None, None, None,
+        )
+        .await
     }
 
     /// As [`start`](Self::start), with the root running as `leader` — a
@@ -215,6 +218,7 @@ impl SwarmKit {
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
             None,
+            None,
         )
         .await
     }
@@ -240,6 +244,7 @@ impl SwarmKit {
             budget,
             Some(verification.to_string()),
             None,
+            None,
         )
         .await
     }
@@ -261,6 +266,34 @@ impl SwarmKit {
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
             None,
+            None,
+        )
+        .await
+    }
+
+    /// As [`start_led`](Self::start_led), with every worker loading its
+    /// spec's plugins from `module_dir` (e.g. the staged
+    /// `target/wasm-fixtures`) and every endpoint's budget raised to
+    /// `budget` (EV-1, AGE-668).
+    pub async fn start_led_with_modules(
+        leader: AgentSpec,
+        module_dir: PathBuf,
+        budget: usize,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_opts(
+            Some(leader),
+            roster,
+            sse,
+            ndjson,
+            false,
+            false,
+            budget,
+            None,
+            None,
+            Some(module_dir),
         )
         .await
     }
@@ -285,6 +318,7 @@ impl SwarmKit {
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
             Some(scale),
+            None,
         )
         .await
     }
@@ -300,6 +334,7 @@ impl SwarmKit {
         endpoint_budget: usize,
         verification: Option<String>,
         stall_scale: Option<u32>,
+        module_dir: Option<PathBuf>,
     ) -> Self {
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
@@ -393,6 +428,10 @@ impl SwarmKit {
         };
         module_settings.team.isolate = repo;
         module_settings.team.verification = verification;
+        // Where every worker loads its spec's plugins from (PL-U2).
+        if let Some(dir) = module_dir {
+            module_settings.module_dir = dir.to_string_lossy().into_owned();
+        }
         let execution = ExecutionSettingsModel {
             enabled: true,
             workspace_dir: Some(workspace.to_string_lossy().into_owned()),

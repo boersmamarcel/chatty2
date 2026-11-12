@@ -67,9 +67,10 @@ impl ReadSkillTool {
     /// Create a new `ReadSkillTool`.
     ///
     /// `workspace_dir` is the workspace root, or `None` when no workspace is
-    /// configured (global skills only).
-    pub fn new(workspace_dir: Option<&Path>) -> Self {
-        Self::with_skill_dirs(SkillService::new(None).skill_dirs(workspace_dir))
+    /// configured (global skills only). `user_home` is the home whose global
+    /// skills are searched, or `None` for none (AGE-590).
+    pub fn new(workspace_dir: Option<&Path>, user_home: Option<&Path>) -> Self {
+        Self::with_skill_dirs(SkillService::with_home(user_home, None).skill_dirs(workspace_dir))
     }
 
     fn with_skill_dirs(skill_dirs: Vec<(PathBuf, MemoryHitSource)>) -> Self {
@@ -207,7 +208,7 @@ mod tests {
             .await
             .unwrap();
 
-        let tool = ReadSkillTool::new(Some(tmp.path()));
+        let tool = ReadSkillTool::new(Some(tmp.path()), None);
         let output = tool
             .call(
                 &mut ToolContext::new(),
@@ -235,7 +236,7 @@ mod tests {
             .await
             .unwrap();
 
-        let tool = ReadSkillTool::new(Some(tmp.path())).with_team_skill(Some(TeamSkill {
+        let tool = ReadSkillTool::new(Some(tmp.path()), None).with_team_skill(Some(TeamSkill {
             name: "coder-reviewer".to_string(),
             content: "# the team's copy".to_string(),
         }));

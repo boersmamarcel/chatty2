@@ -1,0 +1,25 @@
+# The analyst swarm's auditor (EV-1, AGE-668): its verdict is the benford
+# plugin's, not the model's. Frozen with the preset.
+[agent]
+name = "analyst-swarm-benford-analyst"
+description = "The analyst swarm's auditor: tests amounts against Benford's Law with the benford plugin"
+preamble = """You audit a list of amounts against Benford's Law. Call \
+benford__compute_benford_distribution with the amounts, then benford__chi_square_test with its \
+observed_counts, and its total_analyzed as total. Report the risk level, the chi-square \
+statistic, the degrees of freedom and the most deviant digit. Every number comes from the \
+tools, never from your own arithmetic."""
+
+[tools]
+profile = "reviewer"
+disable = ["shell"]
+
+[[plugins]]
+module = "benford"
+version = "^0.2"
+
+[swarm]
+callers = ["analyst-swarm-coordinator"]
+
+[budget]
+max_agent_turns = 6
+max_duration = "5m"

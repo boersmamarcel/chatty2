@@ -257,13 +257,61 @@ pub static TYPESETTER: ToolProfile = ToolProfile {
 /// Every profile, in the order `--tools` documents them.
 pub static TOOL_PROFILES: &[&ToolProfile] = &[&COORDINATOR, &CODER, &REVIEWER, &TYPESETTER];
 
+/// Joins profile names into their union: `coder+coordinator` allows what
+/// either allows (TD-1, AGE-692). It is how a team's derived single agent
+/// holds every role's tools in one spec.
+pub const PROFILE_UNION_SEPARATOR: char = '+';
+
 /// The profile of that name, or `None` — the caller decides whether an unknown
-/// name is a warning or a hard error.
+/// name is a warning or a hard error. Profiles joined by
+/// [`PROFILE_UNION_SEPARATOR`], each named once, are their union.
 pub fn tool_profile(name: &str) -> Option<&'static ToolProfile> {
+    if name.contains(PROFILE_UNION_SEPARATOR) {
+        return union_profile(name);
+    }
     TOOL_PROFILES
         .iter()
         .copied()
         .find(|profile| profile.name == name)
+}
+
+/// The union [`tool_profile`] names, built once per set of parts and kept
+/// for the process, since a role holds a `&'static ToolProfile`. Every part
+/// must be a profile, named once, so there are only a few dozen such sets.
+/// Its name is the canonical one, the parts sorted (`coder+coordinator`
+/// for `coordinator+coder` too; AGE-1137).
+fn union_profile(name: &str) -> Option<&'static ToolProfile> {
+    static UNIONS: std::sync::LazyLock<parking_lot::Mutex<Vec<&'static ToolProfile>>> =
+        std::sync::LazyLock::new(Default::default);
+
+    let mut parts: Vec<&'static ToolProfile> = Vec::new();
+    for part in name.split(PROFILE_UNION_SEPARATOR) {
+        let profile = TOOL_PROFILES.iter().copied().find(|p| p.name == part)?;
+        if parts.contains(&profile) {
+            return None;
+        }
+        parts.push(profile);
+    }
+    parts.sort_by_key(|profile| profile.name);
+    let name = parts
+        .iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>()
+        .join(&PROFILE_UNION_SEPARATOR.to_string());
+    let mut unions = UNIONS.lock();
+    if let Some(known) = unions.iter().find(|union| union.name == name) {
+        return Some(known);
+    }
+    let groups: Vec<&'static [&'static str]> = parts
+        .iter()
+        .flat_map(|profile| profile.groups.iter().copied())
+        .collect();
+    let union: &'static ToolProfile = Box::leak(Box::new(ToolProfile {
+        name: Box::leak(name.into_boxed_str()),
+        groups: Box::leak(groups.into_boxed_slice()),
+    }));
+    unions.push(union);
+    Some(union)
 }
 
 /// The profile names, for a `--tools` error message.
@@ -322,6 +370,42 @@ mod tests {
         assert_eq!(tool_profile("typesetter"), Some(&TYPESETTER));
         assert_eq!(tool_profile("Reviewer"), None, "names are exact");
         assert_eq!(tool_profile("nope"), None);
+    }
+
+    /// `a+b` is the union of profiles `a` and `b` (TD-1, AGE-692): it allows
+    /// exactly what either allows, and every part must be a profile, once.
+    #[test]
+    fn profiles_joined_by_plus_are_their_union() {
+        let union = tool_profile("coordinator+reviewer").expect("a union of two profiles");
+        assert_eq!(union.name(), "coordinator+reviewer");
+        for profile in TOOL_PROFILES {
+            for name in profile.tool_names() {
+                assert_eq!(
+                    union.allows(name),
+                    COORDINATOR.allows(name) || REVIEWER.allows(name),
+                    "{name}"
+                );
+            }
+        }
+        assert!(union.allows("write_todos") && union.allows("shell_execute"));
+        assert!(!union.allows("git_commit") && !union.allows("write_file"));
+        assert!(
+            std::ptr::eq(union, tool_profile("coordinator+reviewer").unwrap()),
+            "one profile per name, built once"
+        );
+        let reversed = tool_profile("reviewer+coordinator").expect("the same union");
+        assert!(
+            std::ptr::eq(union, reversed),
+            "the parts' order does not matter (AGE-1137)"
+        );
+        assert_eq!(
+            reversed.name(),
+            "coordinator+reviewer",
+            "the canonical name"
+        );
+        assert_eq!(tool_profile("coder+nope"), None);
+        assert_eq!(tool_profile("coder+coder"), None, "a part named twice");
+        assert_eq!(tool_profile("coder+"), None);
     }
 
     /// The three profiles the issue specifies, by what they must and must not

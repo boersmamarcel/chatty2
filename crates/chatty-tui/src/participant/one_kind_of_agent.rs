@@ -84,7 +84,7 @@ async fn a_spec_with_a_plugin_is_listed_and_reached_like_any_local_agent() {
         .iter()
         .find(|agent| agent.name == BENFORD)
         .unwrap_or_else(|| panic!("{BENFORD} is listed, got {:?}", output.agents));
-    assert_eq!(benford.origin, AgentOrigin::Local);
+    assert_eq!(benford.runs_on, AgentOrigin::Local);
     assert!(
         benford.description.contains("Tool profile: reviewer."),
         "the broker's card says what it runs: {}",

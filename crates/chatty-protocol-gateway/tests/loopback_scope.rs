@@ -45,6 +45,10 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        Self::start_with_cards(std::collections::BTreeMap::new()).await
+    }
+
+    async fn start_with_cards(cards: std::collections::BTreeMap<String, Value>) -> Self {
         let dir = tempfile::tempdir().expect("a temp dir");
         let socket = dir.path().join("run").join("participants.sock");
 
@@ -56,6 +60,7 @@ impl Harness {
         let edges_path = edge_log.path();
         let gateway = ProtocolGateway::new(modules)
             .with_participant_socket(&socket)
+            .with_feature_cards(cards)
             .with_edge_log(edge_log);
         let participants = gateway.participants();
 
@@ -196,6 +201,34 @@ async fn loopback_refuses_roles() {
             "{row}"
         );
     }
+}
+
+/// A role that also has a feature card is still refused: the role check
+/// comes before the card lookup, so the card is never served for it (BI-7).
+#[tokio::test]
+async fn a_role_with_a_feature_card_is_still_refused() {
+    let cards = [(
+        "stub-worker-0".to_string(),
+        json!({"name": "stub-worker-0", "card": "must not be served"}),
+    )]
+    .into_iter()
+    .collect();
+    let harness = Harness::start_with_cards(cards).await;
+    assert_eq!(harness.role, "stub-worker-0");
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "{}/a2a/{}/.well-known/agent.json",
+            harness.base_url, harness.role
+        ))
+        .send()
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.json::<Value>().await.expect("a JSON body"),
+        refusal_body()
+    );
 }
 
 /// Do: delete the `x-chatty-broker-caller` header handling from #915.

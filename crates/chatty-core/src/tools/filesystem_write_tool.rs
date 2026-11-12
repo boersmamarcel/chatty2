@@ -306,7 +306,8 @@ impl Tool for FinalAnswerTool {
         } else {
             answer.clone()
         };
-        let is_overwrite = self.service.read_file(&path).await.is_ok();
+        // From `symlink_metadata`, so a link is not shown as its target (AGE-1113).
+        let is_overwrite = self.service.write_target_exists(&path).await;
         let operation = WriteOperation::WriteFile {
             path: path.clone(),
             is_overwrite,
@@ -552,7 +553,8 @@ impl Tool for WriteFileTool {
     ) -> Result<Self::Output, Self::Error> {
         // Check if file exists to determine if this is an overwrite; an
         // append to an existing file replaces nothing.
-        let is_overwrite = !args.append && self.service.read_file(&args.path).await.is_ok();
+        // From `symlink_metadata`, so a link is not shown as its target (AGE-1113).
+        let is_overwrite = !args.append && self.service.write_target_exists(&args.path).await;
 
         let operation = WriteOperation::WriteFile {
             path: args.path.clone(),
@@ -1041,6 +1043,82 @@ mod tests {
         assert!(store.resolve(&asked.id, WriteApprovalDecision::Denied));
         assert!(call.await.unwrap().is_err(), "a denied append fails");
         assert_eq!(std::fs::read_to_string(&report).unwrap(), "x");
+    }
+
+    /// AGE-1113: `write_file`, plain or `append`, refuses a symlink at the
+    /// target (out of the workspace, or dangling) and writes nothing where
+    /// it points; the approval card shows the link as an overwrite, not
+    /// as its target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_file_refuses_a_symlink_at_the_target() {
+        use super::{WriteFileArgs, WriteFileTool};
+        use crate::services::filesystem_service::FileSystemService;
+        use rig_agent::tool::{Tool, ToolContext};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        std::fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.path().join("link.txt")).unwrap();
+        let would_be = outside.path().join("created.txt");
+        std::os::unix::fs::symlink(&would_be, dir.path().join("dangling.txt")).unwrap();
+
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = WriteFileTool::new(
+            service.clone(),
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        );
+        let write = |path: &str, append: bool| WriteFileArgs {
+            path: path.into(),
+            content: "pwned".into(),
+            append,
+        };
+        for path in ["link.txt", "dangling.txt"] {
+            for append in [false, true] {
+                let err = tool
+                    .call(&mut ToolContext::new(), write(path, append))
+                    .await
+                    .unwrap_err();
+                assert!(
+                    err.to_string().contains("not a regular file"),
+                    "{path} append={append}: {err}"
+                );
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!would_be.exists());
+
+        let mut store = WriteApprovalStore::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (resolution_tx, _resolution_rx) = tokio::sync::mpsc::unbounded_channel();
+        store.set_notifiers(tx, resolution_tx);
+        let asking = WriteFileTool::new(
+            service,
+            ApprovalMode::AlwaysAsk,
+            store.get_pending_approvals(),
+        );
+        let call = tokio::spawn(async move {
+            asking
+                .call(&mut ToolContext::new(), write("dangling.txt", false))
+                .await
+                .map(|_| ())
+        });
+        let asked = rx.recv().await.expect("the write is asked about");
+        assert!(
+            asked.command.starts_with("Overwrite file:"),
+            "{}",
+            asked.command
+        );
+        assert!(store.resolve(&asked.id, WriteApprovalDecision::Approved));
+        assert!(call.await.unwrap().is_err(), "approved, but still refused");
+        assert!(!would_be.exists());
     }
 
     /// AGE-246 / D7: two agents, each with its own `WriteApprovalStore`, must

@@ -19,6 +19,8 @@
 //! leaves for the turn, filled with the headless runner.
 
 #[cfg(test)]
+mod analyst_swarm;
+#[cfg(test)]
 mod answer_file_usage;
 #[cfg(test)]
 mod approval_relay;
@@ -52,6 +54,8 @@ mod midrun_messages;
 #[cfg(test)]
 mod one_kind_of_agent;
 #[cfg(test)]
+mod per_agent_bill;
+#[cfg(test)]
 mod root_only_approvals;
 #[cfg(test)]
 mod running_agents;
@@ -69,6 +73,8 @@ pub(crate) mod swarm_kit;
 mod swarm_trace;
 #[cfg(test)]
 mod team_preset;
+#[cfg(test)]
+mod team_scorecard;
 #[cfg(test)]
 mod tui_swarm;
 #[cfg(test)]

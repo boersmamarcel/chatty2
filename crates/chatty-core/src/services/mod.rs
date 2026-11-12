@@ -62,6 +62,8 @@ pub mod memory_service;
 #[cfg(feature = "mermaid")]
 pub mod mermaid_renderer_service;
 pub mod message_helpers;
+/// Writes that never follow a symlink at the target (AGE-534, AGE-1113).
+pub(crate) mod no_follow_write;
 pub mod path_validator;
 #[cfg(feature = "pdf")]
 pub mod pdf_thumbnail;
@@ -107,6 +109,9 @@ pub mod swarm_trace;
 /// The team directory: roster, leader role, verification, skill and turn
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
 pub mod team;
+/// A team's derived single-agent baseline and the benchmark scorecard row,
+/// with its failure tags (TD-1, AGE-692).
+pub mod team_scorecard;
 /// A read-only view of the human's terminals (`terminal_read`, AGE-577).
 pub mod terminal;
 pub mod title_generator;

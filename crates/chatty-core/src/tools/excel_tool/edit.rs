@@ -359,13 +359,23 @@ fn apply_preserving_template_edits(
         }
     }
 
-    writer::xlsx::write(&workbook, output_canonical).map_err(|e| {
-        ExcelToolError::WriteError(format!(
-            "Failed to save '{}' with style-preserving editor: {}",
-            output_canonical.display(),
-            e
-        ))
-    })?;
+    // In memory, then never through a symlink at the target (AGE-1113):
+    // `writer::xlsx::write` would `File::create` a `.xlsxtmp` sibling,
+    // following a link planted there.
+    let mut bytes = Vec::new();
+    writer::xlsx::write_writer(&workbook, &mut bytes)
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            crate::services::no_follow_write::write_no_follow(output_canonical, &bytes)
+                .map_err(|e| e.to_string())
+        })
+        .map_err(|e| {
+            ExcelToolError::WriteError(format!(
+                "Failed to save '{}' with style-preserving editor: {}",
+                output_canonical.display(),
+                e
+            ))
+        })?;
 
     Ok(workbook
         .sheet_collection_no_check()
@@ -460,7 +470,8 @@ impl Tool for EditExcelTool {
             &self.approval_mode,
             WriteOperation::WriteFile {
                 path: output_canonical.display().to_string(),
-                is_overwrite: output_canonical.exists(),
+                // `symlink_metadata`: a link is not shown as its target (AGE-1113).
+                is_overwrite: crate::services::no_follow_write::entry_exists(&output_canonical),
                 content_preview: format!(
                     "Edit Excel: {} operation(s) [{}]",
                     args.operations.len(),
@@ -718,7 +729,11 @@ impl Tool for EditExcelTool {
             }
         }
 
-        wb.save(&output_canonical)
+        // In memory, then never through a symlink at the target (AGE-1113).
+        let bytes = wb
+            .save_to_buffer()
+            .map_err(|e| ExcelToolError::WriteError(format!("Failed to save: {}", e)))?;
+        crate::services::no_follow_write::write_no_follow(&output_canonical, &bytes)
             .map_err(|e| ExcelToolError::WriteError(format!("Failed to save: {}", e)))?;
 
         Ok(EditExcelOutput {

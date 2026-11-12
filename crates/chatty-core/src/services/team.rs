@@ -62,6 +62,12 @@ pub struct TeamPreset {
 /// as `--team <id>`.
 pub const PRESETS: &[TeamPreset] = &[
     TeamPreset {
+        id: "analyst-swarm",
+        team_json: include_str!("../../teams/analyst-swarm/team.json"),
+        skill: None,
+        schemas: &[],
+    },
+    TeamPreset {
         id: "crosscheck",
         team_json: include_str!("../../teams/crosscheck/team.json"),
         skill: None,
@@ -82,7 +88,8 @@ pub const PRESETS: &[TeamPreset] = &[
 ];
 
 /// Where an experimental preset's results are summarised for users (AGE-696).
-/// Both experimental presets are Crosscheck variants.
+/// Two of the three experimental presets are Crosscheck variants; the third,
+/// the `analyst-swarm` eval preset (AGE-668), has no results page of its own.
 pub const EXPERIMENTAL_NOTES: &str = "https://boersmamarcel.github.io/chatty2/user/crosscheck.html";
 
 /// The presets shown wherever teams are listed. An `experimental` one is
@@ -158,6 +165,32 @@ pub struct TeamFile {
     /// worker's answer is free text.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub handoffs: BTreeMap<String, String>,
+    /// The roster role whose verdict passes the team's work, and the
+    /// verdicts that do (AGE-1137). TD-1's scorecard tags a run
+    /// `verification_passed_wrong` when it passed work the runner's check
+    /// failed. Absent: see [`Team::verifiers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<TeamVerifier>,
+}
+
+/// `team.json`'s `verifier`: `{ "role": "<roster role>", "verdicts": [...] }`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamVerifier {
+    /// A roster role, by spec name.
+    pub role: String,
+    /// What the first line of its answer opens with when it passes the
+    /// work; [`DEFAULT_VERDICTS`] when absent.
+    #[serde(default = "default_verdicts")]
+    pub verdicts: Vec<String>,
+}
+
+/// A verifier's passing verdicts when its team names none: a reviewer's
+/// `APPROVE`, and the `PASS` of a verification run.
+pub const DEFAULT_VERDICTS: &[&str] = &["APPROVE", "PASS"];
+
+fn default_verdicts() -> Vec<String> {
+    DEFAULT_VERDICTS.iter().map(|v| v.to_string()).collect()
 }
 
 impl TeamFile {
@@ -278,6 +311,23 @@ impl Team {
     /// tag (TD-1's scorecard). `None` for a team without `handoffs`.
     pub fn handoff_ledger(&self) -> Option<handoff::HandoffLedger> {
         (!self.handoffs.is_empty()).then(|| handoff::HandoffLedger::new(self.handoffs.values()))
+    }
+
+    /// Who passes the team's work: the file's `verifier`, else every roster
+    /// role whose tool profile is `reviewer`, with [`DEFAULT_VERDICTS`]. A
+    /// team with neither has no verifier.
+    pub fn verifiers(&self) -> Vec<TeamVerifier> {
+        if let Some(verifier) = &self.file.verifier {
+            return vec![verifier.clone()];
+        }
+        self.agents
+            .iter()
+            .filter(|spec| spec.tools.profile.as_deref() == Some("reviewer"))
+            .map(|spec| TeamVerifier {
+                role: spec.agent.name.clone(),
+                verdicts: default_verdicts(),
+            })
+            .collect()
     }
 
     /// The skill `read_skill` should serve from this team, when the file
@@ -485,6 +535,17 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         .collect::<Result<Vec<_>>>()?;
     let handoffs = load_handoffs(id, &file, &source)
         .with_context(|| format!("team '{id}' names a handoff schema that does not load"))?;
+    if let Some(verifier) = &file.verifier {
+        if !file.agents.contains(&verifier.role) {
+            bail!(
+                "team '{id}': `verifier` names '{}', which is not in `agents`",
+                verifier.role
+            );
+        }
+        if verifier.verdicts.is_empty() || verifier.verdicts.iter().any(|v| v.trim().is_empty()) {
+            bail!("team '{id}': `verifier` has no verdict, or an empty one");
+        }
+    }
     Ok(Team {
         id: id.to_string(),
         source,
@@ -803,6 +864,176 @@ mod tests {
             assert_eq!(roster, team.agents, "{id}: the run serves the team");
         }
     }
+
+    const ANALYST_SWARM: [&str; 3] = [
+        "analyst-swarm-data-coder",
+        "analyst-swarm-benford-analyst",
+        "analyst-swarm-reviewer",
+    ];
+
+    /// EV-1 (AGE-668): the analyst swarm is a coordinator with no plugins
+    /// that delegates to its three members; the data coder runs the coder
+    /// profile, the benford analyst the reviewer profile without a shell
+    /// and with the benford plugin, the reviewer the reviewer profile; no
+    /// member delegates.
+    #[test]
+    fn the_analyst_swarm_preset_is_a_coordinator_and_three_members() {
+        let team = load_team("analyst-swarm", None, None).expect("the preset loads");
+        assert_eq!(team.source, TeamSource::Preset);
+        assert!(team.file.experimental, "an eval preset is listed nowhere");
+        assert_eq!(team.file.leader, "analyst-swarm-coordinator");
+        assert_eq!(team.file.agents, ANALYST_SWARM);
+        assert_eq!(team.leader.tools.profile.as_deref(), Some("coordinator"));
+        assert!(team.leader.plugins.is_empty());
+        assert_eq!(team.leader.swarm.delegates_to, ANALYST_SWARM);
+        let preamble = team.leader.agent.preamble.as_deref().unwrap_or_default();
+        assert!(
+            preamble.contains("get the numbers clean, audit them, have the audit reviewed"),
+            "the playbook is the coordinator's preamble: {preamble}"
+        );
+
+        let member = |name: &str| {
+            team.agents
+                .iter()
+                .find(|spec| spec.agent.name == name)
+                .unwrap_or_else(|| panic!("{name} is on the roster"))
+        };
+        let shape = |name: &str| {
+            let spec = member(name);
+            (
+                spec.tools.profile.clone(),
+                spec.tools.disable.clone(),
+                spec.plugins
+                    .iter()
+                    .map(|plugin| plugin.module.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let profile = |name: &str| Some(name.to_string());
+        assert_eq!(
+            shape("analyst-swarm-data-coder"),
+            (profile("coder"), vec![], vec![])
+        );
+        assert_eq!(
+            shape("analyst-swarm-benford-analyst"),
+            (
+                profile("reviewer"),
+                vec!["shell".to_string()],
+                vec!["benford".to_string()]
+            )
+        );
+        assert_eq!(
+            shape("analyst-swarm-reviewer"),
+            (profile("reviewer"), vec![], vec![])
+        );
+        for name in ANALYST_SWARM {
+            let spec = member(name);
+            assert!(
+                spec.swarm.delegates_to.is_empty(),
+                "{name} delegates to no one"
+            );
+            assert_eq!(
+                spec.swarm.callers,
+                Some(vec!["analyst-swarm-coordinator".to_string()]),
+                "{name} is the coordinator's alone"
+            );
+        }
+    }
+
+    /// EV-1 (AGE-668): the analyst swarm is frozen at its merge, so an eval
+    /// run today compares with one run months ago. A prompt change needs a
+    /// new preset name; this pins every file of the preset and its fixture.
+    #[test]
+    fn the_analyst_swarm_preset_is_frozen() {
+        use sha2::{Digest, Sha256};
+        let spec = |name: &str| {
+            crate::agent_spec::PRESETS
+                .iter()
+                .find(|(preset, _)| *preset == name)
+                .map(|(_, text)| *text)
+                .unwrap_or_else(|| panic!("{name} is a preset"))
+        };
+        let team = PRESETS
+            .iter()
+            .find(|preset| preset.id == "analyst-swarm")
+            .expect("analyst-swarm is a preset");
+        let files = [
+            ("team.json", team.team_json),
+            (
+                "analyst-swarm-coordinator.toml",
+                spec("analyst-swarm-coordinator"),
+            ),
+            (
+                "analyst-swarm-data-coder.toml",
+                spec("analyst-swarm-data-coder"),
+            ),
+            (
+                "analyst-swarm-benford-analyst.toml",
+                spec("analyst-swarm-benford-analyst"),
+            ),
+            (
+                "analyst-swarm-reviewer.toml",
+                spec("analyst-swarm-reviewer"),
+            ),
+            (
+                "fixture/ledger.csv",
+                include_str!("../../teams/analyst-swarm/fixture/ledger.csv"),
+            ),
+            (
+                "fixture/expected.json",
+                include_str!("../../teams/analyst-swarm/fixture/expected.json"),
+            ),
+        ];
+        let digests: Vec<(&str, String)> = files
+            .iter()
+            // A checkout that writes CRLF is the same file.
+            .map(|(file, text)| {
+                let text = text.replace('\r', "");
+                (*file, hex::encode(Sha256::digest(text.as_bytes())))
+            })
+            .collect();
+        let frozen: Vec<(&str, String)> = ANALYST_SWARM_FROZEN
+            .iter()
+            .map(|(file, digest)| (*file, digest.to_string()))
+            .collect();
+        assert_eq!(
+            digests, frozen,
+            "analyst-swarm is frozen (AGE-668): put a changed prompt or fixture under a new \
+             preset name instead"
+        );
+    }
+
+    /// SHA-256 of each analyst-swarm file as it merged (AGE-668).
+    const ANALYST_SWARM_FROZEN: [(&str, &str); 7] = [
+        (
+            "team.json",
+            "a32bcd2c4b19d3fccc09528ef47e286da8ef9d091a8b147e501e12b7259e52c7",
+        ),
+        (
+            "analyst-swarm-coordinator.toml",
+            "99ca68e647ab9ea6b09ccc2f2046f018d83aa7351c345bdd14852529572db95a",
+        ),
+        (
+            "analyst-swarm-data-coder.toml",
+            "158632879d7d8beb8ec7b91443f19c5dd57f2609fb88a2525fe75be1e8abf288",
+        ),
+        (
+            "analyst-swarm-benford-analyst.toml",
+            "7b0b25b1dca343b56bd6196090ecef12e50b6eb8c050d86d6d5bd30d9d959ccc",
+        ),
+        (
+            "analyst-swarm-reviewer.toml",
+            "3b940ddf21201e63f36eec8894ff505724d1cdb8f94b374c63cfb43ee8222653",
+        ),
+        (
+            "fixture/ledger.csv",
+            "2d74e408610f5e460ad9ffbdbe6b0e57da8934c0f296674441cba75c7f1d9530",
+        ),
+        (
+            "fixture/expected.json",
+            "a9eeb9552a871f2bb52c7defc1699703f2a7a0f22aa6fbbff494f8961e024dbf",
+        ),
+    ];
 
     /// AGE-853: the crosscheck leader is offered `best_of` over its three
     /// solvers and its judge, and the judge does not think.
@@ -1368,6 +1599,67 @@ mod tests {
         );
         let plain = load_team("plain", Some(workspace.path()), None).unwrap();
         assert!(plain.handoffs.is_empty() && plain.handoff_ledger().is_none());
+    }
+
+    /// AGE-1137: `verifier` names the role whose verdict passes the work
+    /// and the verdicts that do. It must be a roster role with at least one
+    /// verdict. Absent, the verifiers are the roster's `reviewer`-profile
+    /// roles with `APPROVE` and `PASS`, so the frozen analyst swarm's
+    /// reviewer is one (as is its analyst, on the same profile) and
+    /// Crosscheck, whose judge picks rather than passes, has none.
+    #[test]
+    fn a_team_names_its_verifier_or_defaults_to_its_reviewers() {
+        let workspace = tempfile::tempdir().unwrap();
+        let teams = workspace.path().join(WORKSPACE_TEAMS_DIR);
+        let team_json = |verifier: &str| {
+            format!(
+                r#"{{"leader":"crosscheck-lead","agents":["coder","code-reviewer"],"verifier":{verifier}}}"#
+            )
+        };
+        let verifier = |role: &str, verdicts: &[&str]| TeamVerifier {
+            role: role.to_string(),
+            verdicts: verdicts.iter().map(|v| v.to_string()).collect(),
+        };
+
+        for (bad, says) in [
+            (r#"{"role":"nobody"}"#, "not in `agents`"),
+            (r#"{"role":"coder","verdicts":[]}"#, "no verdict"),
+            (r#"{"role":"coder","verdicts":[" "]}"#, "no verdict"),
+        ] {
+            write_team(&teams, "t", &team_json(bad), None);
+            let err = format!(
+                "{:#}",
+                load_team("t", Some(workspace.path()), None).unwrap_err()
+            );
+            assert!(err.contains("verifier"), "{err}");
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+
+        write_team(&teams, "t", &team_json(r#"{"role":"coder"}"#), None);
+        let named = load_team("t", Some(workspace.path()), None).unwrap();
+        assert_eq!(named.verifiers(), [verifier("coder", &["APPROVE", "PASS"])]);
+        write_team(
+            &teams,
+            "t",
+            &team_json(r#"{"role":"code-reviewer","verdicts":["LGTM"]}"#),
+            None,
+        );
+        let custom = load_team("t", Some(workspace.path()), None).unwrap();
+        assert_eq!(custom.verifiers(), [verifier("code-reviewer", &["LGTM"])]);
+
+        let analysts = load_team("analyst-swarm", None, None).unwrap();
+        assert_eq!(analysts.file.verifier, None, "the frozen file names none");
+        // Its Benford analyst runs on the reviewer profile too; its answer
+        // opens with a risk level, never a passing verdict.
+        assert_eq!(
+            analysts.verifiers(),
+            [
+                verifier("analyst-swarm-benford-analyst", &["APPROVE", "PASS"]),
+                verifier("analyst-swarm-reviewer", &["APPROVE", "PASS"]),
+            ]
+        );
+        let crosscheck = load_team("crosscheck", None, None).unwrap();
+        assert!(crosscheck.verifiers().is_empty());
     }
 
     #[test]

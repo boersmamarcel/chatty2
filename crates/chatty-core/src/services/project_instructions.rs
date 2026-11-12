@@ -150,6 +150,23 @@ mod tests {
         assert!(instructions_section(Some(ws.path()), Some(home.path())).is_none());
     }
 
+    /// AGE-590: no home, no global section — even with global files on
+    /// disk that a home would have found.
+    #[test]
+    fn no_home_means_no_global_section() {
+        let home = tempfile::tempdir().unwrap();
+        write(&home.path().join(".agents/AGENTS.md"), "operator's own");
+        let ws = tempfile::tempdir().unwrap();
+
+        assert!(instructions_section(Some(ws.path()), None).is_none());
+        assert!(instruction_files(Some(ws.path()), None).is_empty());
+        assert!(
+            instructions_section(Some(ws.path()), Some(home.path()))
+                .unwrap()
+                .contains("operator's own")
+        );
+    }
+
     #[test]
     fn agents_md_beats_claude_md_in_the_same_directory() {
         let ws = tempfile::tempdir().unwrap();

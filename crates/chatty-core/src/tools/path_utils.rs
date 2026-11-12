@@ -9,6 +9,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation};
+use crate::services::no_follow_write::{entry_exists, write_no_follow};
 use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::filesystem_write_tool::request_write_approval;
 
@@ -127,7 +128,7 @@ pub(super) async fn approve_output_write(
         mode,
         WriteOperation::WriteFile {
             path: path.display().to_string(),
-            is_overwrite: std::fs::symlink_metadata(path).is_ok(),
+            is_overwrite: entry_exists(path),
             content_preview,
         },
     )
@@ -139,11 +140,12 @@ pub(super) async fn approve_output_write(
 /// following a symlink: a new file is created with `create_new`, and an
 /// existing regular file is replaced by renaming a fresh sibling over it,
 /// which swaps the directory entry rather than writing through it
-/// (AGE-1097's approach). Parent directories are created, then checked to
-/// still resolve inside `root`.
+/// (AGE-1097's approach; shared with the other writers in
+/// [`no_follow_write`], AGE-1113). Parent directories are created, then
+/// checked to still resolve inside `root`.
+///
+/// [`no_follow_write`]: crate::services::no_follow_write
 pub(super) fn write_output_file(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-
     let parent = path
         .parent()
         .ok_or_else(|| format!("Output path '{}' has no parent", path.display()))?;
@@ -162,41 +164,9 @@ pub(super) fn write_output_file(root: &Path, path: &Path, bytes: &[u8]) -> Resul
         .ok_or_else(|| format!("Output path '{}' has no file name", path.display()))?;
     let target = canonical_parent.join(name);
 
-    let create_new = |at: &Path| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(at)?;
-        file.write_all(bytes)
-    };
-
-    match std::fs::symlink_metadata(&target) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            create_new(&target).map_err(|e| format!("Failed to write '{}': {e}", target.display()))
-        }
-        Err(e) => Err(format!("Could not inspect '{}': {e}", target.display())),
-        Ok(meta) if !meta.file_type().is_file() => Err(format!(
-            "'{}' is not a regular file (a symlink?); refusing to write through it",
-            target.display()
-        )),
-        Ok(_) => {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0);
-            let tmp = canonical_parent.join(format!(
-                ".{}.chatty-{}-{nanos}.tmp",
-                name.to_string_lossy(),
-                std::process::id()
-            ));
-            create_new(&tmp)
-                .and_then(|()| std::fs::rename(&tmp, &target))
-                .map_err(|e| {
-                    let _ = std::fs::remove_file(&tmp);
-                    format!("Failed to write '{}': {e}", target.display())
-                })
-        }
-    }
+    write_no_follow(&target, bytes)
+        .map(|_| ())
+        .map_err(|e| format!("Failed to write '{}': {e}", target.display()))
 }
 
 #[cfg(test)]

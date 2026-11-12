@@ -251,8 +251,14 @@ is the local spend gate's, above, not this one.
 A delegation's spend is part of the conversation's total: `invoke_agent` reads the
 worker's `metadata.usage` lines off the terminal status and `AgentSession` records each
 as a `TokenUsage` line marked `delegated_to`, priced at the model the line names
-(AGE-415, AGE-682). Nested leaders forward their workers' lines with their own, merging
-only lines on the same model. `context_tokens` and `last_usage` stay the leader's own.
+(AGE-415, AGE-682). `delegated_to` is the path down the tree to the agent that spent the
+line (AGE-665): `"reviewer"` is the reviewer's own spend, `"reviewer/local-coder"` what
+the reviewer's coder spent. A nested leader forwards each worker's line as it is, not
+folded into its own: its mapper merges only lines on the same agent and model, and each
+caller's `invoke_agent` puts the callee's name in front of the path
+(`TokenUsage::delegated_by`). So the root has one line per agent in the tree (and model),
+and `total_cost` and the totals are those lines priced, exactly AGE-682's priced view of
+them. `context_tokens` and `last_usage` stay the leader's own.
 Details in
 [agents-and-specs.md](agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
 
