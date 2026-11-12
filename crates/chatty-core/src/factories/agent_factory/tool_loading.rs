@@ -440,9 +440,10 @@ impl ToolLoader {
 
     /// Load the group of every tool called in `messages`: a call in the
     /// history is only valid against a request that still advertises it.
-    fn load_groups_called_in(&self, messages: &[Message]) {
+    fn load_groups_called_in<'a>(&self, messages: impl IntoIterator<Item = &'a Message> + Clone) {
         let mut called: Vec<String> = messages
-            .iter()
+            .clone()
+            .into_iter()
             .flat_map(called_tool_names)
             .filter_map(|name| self.group_of(name))
             .collect();
@@ -451,7 +452,7 @@ impl ToolLoader {
         // even before any of the group's tools were called.
         called.extend(
             messages
-                .iter()
+                .into_iter()
                 .flat_map(load_tools_groups)
                 .filter_map(|group| self.resolve_group(group).map(|g| g.name.clone())),
         );
@@ -531,7 +532,7 @@ impl ToolLoader {
 /// The tool names an assistant message calls.
 fn called_tool_names(message: &Message) -> Vec<&str> {
     match message {
-        Message::Assistant { content, .. } => content
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
             .iter()
             .filter_map(|item| match item {
                 AssistantContent::ToolCall(call) => Some(call.function.name.as_str()),
@@ -553,7 +554,7 @@ fn called_tool_names(message: &Message) -> Vec<&str> {
 /// makes.
 fn load_tools_groups(message: &Message) -> Vec<&str> {
     match message {
-        Message::Assistant { content, .. } => content
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
             .iter()
             .filter_map(|item| match item {
                 AssistantContent::ToolCall(call)
@@ -574,8 +575,8 @@ impl AgentHook for ToolLoader {
         _ctx: &HookContext,
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
-        self.load_groups_called_in(event.history);
-        self.load_groups_called_in(std::slice::from_ref(event.prompt));
+        self.load_groups_called_in(event.history.iter().map(|m| &**m));
+        self.load_groups_called_in(std::iter::once(event.prompt));
         match self.active_tools() {
             Some(active) => CompletionCallAction::patch(RequestPatch::new().active_tools(active)),
             None => CompletionCallAction::Continue,
@@ -687,7 +688,7 @@ impl Tool for LoadToolsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::{ToolCall, ToolCallId, ToolFunction};
+    use rig_core::message::{ToolCall, CallId, ToolFunction};
 
     fn loader(preload: &[&str]) -> ToolLoader {
         ToolLoader::new(
@@ -803,13 +804,10 @@ mod tests {
     }
 
     fn call(name: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new("call_1").unwrap(),
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_1"),
                 ToolFunction::new(name.to_string(), serde_json::json!({})),
-            ))],
-        }
+            ))]))
     }
 
     #[test]
@@ -874,13 +872,10 @@ mod tests {
     #[test]
     fn a_load_tools_call_in_the_history_keeps_its_group_loaded() {
         let (loader, _) = calibrated(&[]);
-        let load = Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new("call_1").unwrap(),
+        let load = Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_1"),
                 ToolFunction::new("load_tools".into(), serde_json::json!({"group": "web"})),
-            ))],
-        };
+            ))]));
         loader.load_groups_called_in(&[Message::user("task"), load]);
         assert_eq!(loader.loaded_groups(), ["web"]);
         assert!(
@@ -1062,16 +1057,13 @@ mod tests {
         let (agent, model, loader) = mock_agent(vec![done()]).await;
         let earlier = vec![
             Message::user("earlier task"),
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::ToolCall(ToolCall::new(
-                    ToolCallId::new("call_0").unwrap(),
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+                    CallId::from_wire("call_0"),
                     ToolFunction::new("fetch".into(), serde_json::json!({})),
-                ))],
-            },
+                ))])),
             Message::User {
                 content: vec![UserContent::ToolResult(rig_core::message::ToolResult {
-                    call: ToolCallId::new("call_0").unwrap(),
+                    call: CallId::from_wire("call_0"),
                     name: "fetch".into(),
                     content: vec![rig_core::message::ToolResultContent::text("page")],
                     provider: None,

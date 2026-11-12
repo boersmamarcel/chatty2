@@ -161,11 +161,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use chatty_fabric::{CallEvent, CallRequest, CallResult, Transport};
 use futures::StreamExt;
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch,
-    ToolResultAction, ToolResultEvent,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction,
+    OutcomeEvent, RequestPatch,
 };
 use rig_core::completion::Message;
-use rig_core::completion::message::{Text, ToolCallId, ToolResult, ToolResultContent};
+use rig_core::completion::message::{CallId, Text, ToolResult, ToolResultContent};
 use rig_core::message::UserContent;
 use rig_core::tool::ToolOutput;
 use tracing::{debug, warn};
@@ -737,7 +737,7 @@ impl ContextShaper {
         // rig hands the hook the prompt separately from the history, and
         // mid-tool-loop that prompt is the result answering the history's
         // last call — a call it answers is not a dangling one (AGE-513).
-        let answered_by_prompt: Vec<ToolCallId> = result_ids(prompt).cloned().collect();
+        let answered_by_prompt: Vec<CallId> = result_ids(prompt).cloned().collect();
 
         let history = match self.shape(history, prompt_tokens) {
             Some(shaped) => {
@@ -1203,10 +1203,13 @@ impl AgentHook for ContextShaper {
         } else {
             0
         };
+        // rig 0.46 shares each message of the run's history; the shaper reads
+        // and rewrites owned ones.
+        let history: Vec<Message> = event.history.iter().map(|m| (**m).clone()).collect();
         let shaped = self
-            .prepare_request_reserving(event.history, event.prompt, event.turn, extra_reserve)
+            .prepare_request_reserving(&history, event.prompt, event.turn, extra_reserve)
             .await;
-        let sent = shaped.as_deref().unwrap_or(event.history);
+        let sent = shaped.as_deref().unwrap_or(&history);
         if let Some(reason) = self.window_overflow(sent, event.prompt) {
             warn!(turn = event.turn, %reason, "context shaper: request over the window; not sent");
             return CompletionCallAction::stop(reason);
@@ -1238,32 +1241,37 @@ impl AgentHook for ContextShaper {
         }
     }
 
-    async fn on_tool_result(
-        &self,
-        _ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        let recorded = self.record_round_output(event.presentation);
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        let Some(result) = event.tool_result() else {
+            return OutcomeAction::Proceed;
+        };
+        let tool_name = event.tool_name().unwrap_or_default();
+        let recorded = self.record_round_output(result.output());
         if recorded.is_some() {
             warn!(
-                tool = event.tool_name,
+                tool = tool_name,
                 cap_tokens = self.recording_cap(),
                 "context shaper: tool result larger than the recording cap; recorded truncated"
             );
         }
         let messages = self.take_mid_run_messages().await;
         if messages.is_empty() {
-            return recorded.map_or(ToolResultAction::Keep, ToolResultAction::Rewrite);
+            return recorded.map_or(OutcomeAction::Proceed, |output| {
+                OutcomeAction::rewrite_tool_output(&event, output)
+            });
         }
         debug!(
-            tool = event.tool_name,
+            tool = tool_name,
             messages = messages.len(),
             "Delivering mid-run messages with a tool result"
         );
-        ToolResultAction::Rewrite(with_messages(
-            recorded.unwrap_or_else(|| event.presentation.clone()),
-            &messages,
-        ))
+        OutcomeAction::rewrite_tool_output(
+            &event,
+            with_messages(
+                recorded.unwrap_or_else(|| result.output().clone()),
+                &messages,
+            ),
+        )
     }
 }
 
@@ -1337,7 +1345,7 @@ fn latest_user_message(messages: &[Message]) -> Option<usize> {
 /// when it makes tool calls, the result messages right after it that
 /// answer them.
 fn round_trip_end(messages: &[Message], start: usize) -> usize {
-    let calls: HashSet<&ToolCallId> = call_ids(&messages[start]).collect();
+    let calls: HashSet<&CallId> = call_ids(&messages[start]).collect();
     let mut end = start + 1;
     if calls.is_empty() {
         return end;
@@ -1358,7 +1366,7 @@ fn round_trip_end(messages: &[Message], start: usize) -> usize {
 /// OpenAI-compatible provider, the same one AGE-485 repaired at the other end.
 fn round_trip_safe_head(messages: &[Message], mut head: usize) -> usize {
     while head > 0 {
-        let answered: HashSet<&ToolCallId> = messages[..head].iter().flat_map(result_ids).collect();
+        let answered: HashSet<&CallId> = messages[..head].iter().flat_map(result_ids).collect();
         if messages[..head]
             .iter()
             .flat_map(call_ids)
@@ -1383,7 +1391,7 @@ fn round_trip_safe_head(messages: &[Message], mut head: usize) -> usize {
 fn round_trip_safe_tail_start(messages: &[Message], head: usize, tail_start: usize) -> usize {
     let mut start = tail_start;
     while start > head {
-        let called: HashSet<&ToolCallId> = messages[..head]
+        let called: HashSet<&CallId> = messages[..head]
             .iter()
             .chain(&messages[start..])
             .flat_map(call_ids)
@@ -1467,7 +1475,7 @@ fn map_tool_result_text(message: &mut Message, rewrite: impl Fn(&str) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::completion::message::{AssistantContent, ToolCallId};
+    use rig_core::completion::message::{AssistantContent, CallId};
 
     fn user_text(s: &str) -> Message {
         Message::User {
@@ -1478,7 +1486,7 @@ mod tests {
     fn tool_result(id: &str, content: ToolResultContent) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new(id).unwrap(),
+                call: CallId::from_wire(id),
                 provider: None,
                 name: "test_tool".to_string(),
                 content: vec![content],
@@ -1828,7 +1836,7 @@ mod tests {
     /// Every tool result in `messages` is answered by a call before it, and
     /// every call is answered after it — what the providers check.
     fn assert_round_trips_intact(messages: &[Message]) {
-        let mut called: HashSet<ToolCallId> = HashSet::new();
+        let mut called: HashSet<CallId> = HashSet::new();
         for (index, message) in messages.iter().enumerate() {
             for id in result_ids(message) {
                 assert!(
@@ -1838,7 +1846,7 @@ mod tests {
             }
             called.extend(call_ids(message).cloned());
         }
-        let answered: HashSet<&ToolCallId> = messages.iter().flat_map(result_ids).collect();
+        let answered: HashSet<&CallId> = messages.iter().flat_map(result_ids).collect();
         for (index, message) in messages.iter().enumerate() {
             for id in call_ids(message) {
                 assert!(
@@ -1850,14 +1858,11 @@ mod tests {
     }
 
     fn tool_call(id: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::tool_call(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
                 id,
                 "test_tool",
                 serde_json::json!({}),
-            )],
-        }
+            )]))
     }
 
     /// `n` tool round-trips after a user message: the shape every step of a
@@ -2218,20 +2223,17 @@ mod turn_start_tests {
         let mut messages = vec![Message::user(user)];
         for r in 0..4 {
             let id = format!("t{n}-{r}");
-            messages.push(Message::Assistant {
-                id: None,
-                content: vec![
+            messages.push(Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                     AssistantContent::text(words(300, &format!("plan {id}"))),
                     AssistantContent::tool_call(
                         &id,
                         "execute_code",
                         serde_json::json!({ "code": words(1_500, "code") }),
                     ),
-                ],
-            });
+                ])));
             messages.push(Message::User {
                 content: vec![UserContent::ToolResult(ToolResult {
-                    call: ToolCallId::new(&id).unwrap(),
+                    call: CallId::from_wire(&id),
                     provider: None,
                     name: "execute_code".to_string(),
                     content: vec![ToolResultContent::Text(Text::new("fee 12.34 EUR"))],
@@ -2265,7 +2267,7 @@ mod turn_start_tests {
                 UserContent::Text(t) => Some(t.text.clone()),
                 _ => None,
             }),
-            Message::Assistant { content, .. } => content.iter().find_map(|item| match item {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content.iter().find_map(|item| match item {
                 AssistantContent::Text(t) => Some(t.text.clone()),
                 _ => None,
             }),
@@ -2483,16 +2485,13 @@ mod compaction_tests {
     }
 
     fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::tool_call(id, name, args)],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, name, args)]))
     }
 
     fn result(id: &str, name: &str, text: String) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new(id).unwrap(),
+                call: CallId::from_wire(id),
                 provider: None,
                 name: name.to_string(),
                 content: vec![ToolResultContent::Text(Text::new(text))],
@@ -2547,7 +2546,7 @@ mod compaction_tests {
         }
     }
 
-    fn assert_round_trips_intact(messages: &[Message], answered_outside: &[ToolCallId]) {
+    fn assert_round_trips_intact(messages: &[Message], answered_outside: &[CallId]) {
         assert!(
             tool_round_trips_intact(messages, answered_outside),
             "a tool round-trip was split"
@@ -2614,7 +2613,7 @@ mod compaction_tests {
         assert!(kept >= 2 && kept < history.len() / 2, "kept {kept}");
         assert_eq!(&sent[1..], &history[history.len() - kept..]);
         assert!(
-            matches!(sent[1], Message::Assistant { .. }),
+            matches!(sent[1], Message::Assistant(_)),
             "starts on a call"
         );
         assert_round_trips_intact(&sent, &[]);
@@ -2666,7 +2665,7 @@ mod compaction_tests {
         assert_eq!(model.request_count(), 1, "no second summary call");
         assert_eq!(second[..first.len()], first[..], "same prefix");
         assert_eq!(second.last(), history.last());
-        assert_round_trips_intact(&second, &[ToolCallId::new("next").unwrap()]);
+        assert_round_trips_intact(&second, &[CallId::from_wire("next")]);
     }
 
     #[tokio::test]
@@ -2827,20 +2826,17 @@ mod results_ledger_tests {
         } else {
             "reviewer"
         };
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::tool_call(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
                 id,
                 "invoke_agent",
                 serde_json::json!({ "agent": agent, "prompt": task }),
-            )],
-        }
+            )]))
     }
 
     fn result(id: &str, name: &str, value: serde_json::Value) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new(id).unwrap(),
+                call: CallId::from_wire(id),
                 provider: None,
                 name: name.to_string(),
                 content: vec![ToolResultContent::Json { value }],
@@ -2897,14 +2893,11 @@ mod results_ledger_tests {
         let mut history = vec![Message::user(TASK)];
         for n in 0..20 {
             let id = format!("r{n}");
-            history.push(Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::tool_call(
+            history.push(Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
                     &id,
                     "read_file",
                     serde_json::json!({ "path": format!("f{n}.rs") }),
-                )],
-            });
+                )])));
             history.push(result(
                 &id,
                 "read_file",

@@ -168,7 +168,7 @@ pub fn has_output(content: &[AssistantContent]) -> bool {
     content.iter().any(|item| match item {
         AssistantContent::Text(text) => !text.text.trim().is_empty(),
         AssistantContent::ToolCall(_) | AssistantContent::Image(_) => true,
-        AssistantContent::Reasoning(_) => false,
+        _ => false,
     })
 }
 
@@ -313,7 +313,7 @@ impl EmptyTurnRetry {
             (event.max_tokens.is_none() || pad.contains::<WindowClamped>()) && self.reply_room;
         let step = next_cut_off_step(
             spent,
-            thought(event.content, event.usage.reasoning_tokens),
+            thought(event.content, event.usage.reasoning_tokens.unwrap_or(0)),
             self.thinking_off.is_some(),
             window_bound,
         );
@@ -353,7 +353,7 @@ impl EmptyTurnRetry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::{Reasoning, ToolCall, ToolCallId, ToolFunction};
+    use rig_core::message::{Reasoning, ToolCall, CallId, ToolFunction};
 
     fn text(s: &str) -> AssistantContent {
         AssistantContent::text(s)
@@ -372,7 +372,7 @@ mod tests {
     fn text_or_a_tool_call_is_output() {
         assert!(has_output(&[text("done")]));
         assert!(has_output(&[AssistantContent::ToolCall(ToolCall::new(
-            ToolCallId::try_from("call-1".to_string()).unwrap(),
+            CallId::from_wire("call-1".to_string()),
             ToolFunction::new("read_file".to_string(), serde_json::json!({"path": "x"})),
         ))]));
     }

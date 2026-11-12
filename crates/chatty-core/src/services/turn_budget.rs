@@ -52,9 +52,8 @@
 use std::time::{Duration, Instant};
 
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, InvalidToolCallAction,
-    InvalidToolCallContext, RequestPatch, StreamingPromptRequest, ToolResultAction,
-    ToolResultEvent,
+    AgentHook, AgentRunner, CompletionCallAction, CompletionCallEvent, HookContext,
+    InvalidToolCallAction, InvalidToolCallContext, OutcomeAction, OutcomeEvent, RequestPatch,
 };
 use rig_core::completion::message::ToolResultContent;
 use rig_core::tool::ToolOutput;
@@ -293,7 +292,7 @@ impl TurnBudget {
     }
 
     /// Set rig's call budget on `request` and register this hook on it.
-    pub fn apply(self, request: StreamingPromptRequest) -> StreamingPromptRequest {
+    pub fn apply(self, request: AgentRunner) -> AgentRunner {
         request.max_turns(self.rig_max_turns()).add_hook(self)
     }
 
@@ -421,21 +420,21 @@ impl AgentHook for TurnBudget {
         Some(InvalidToolCallAction::stop(WRAP_UP_TOOL_CALL_STOP))
     }
 
-    async fn on_tool_result(
-        &self,
-        ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
+    /// A tool result: the budget note rides on the first one of each turn.
+    async fn on_outcome(&self, ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        let Some(result) = event.tool_result() else {
+            return OutcomeAction::Proceed;
+        };
         let turn = ctx.turn();
         let Some(note) = self.note(turn, Instant::now()) else {
-            return ToolResultAction::Keep;
+            return OutcomeAction::Proceed;
         };
         // Once per turn: a parallel batch needs one note, not one per result.
         if matches!(ctx.scratchpad().get::<NotedTurn>(), Some(NotedTurn(t)) if t == turn) {
-            return ToolResultAction::Keep;
+            return OutcomeAction::Proceed;
         }
         ctx.scratchpad().insert(NotedTurn(turn));
-        ToolResultAction::Rewrite(with_note(event.presentation, &note))
+        OutcomeAction::rewrite_tool_output(&event, with_note(result.output(), &note))
     }
 }
 
