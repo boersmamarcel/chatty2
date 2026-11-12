@@ -19,6 +19,8 @@
 //! leaves for the turn, filled with the headless runner.
 
 #[cfg(test)]
+mod analyst_swarm;
+#[cfg(test)]
 mod answer_file_usage;
 #[cfg(test)]
 mod approval_relay;

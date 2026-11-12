@@ -84,6 +84,12 @@ async fn my_swarm_feature() {
   never reads your real settings. `cargo test -p chatty-tui` builds the
   binary (`tests/worker_binary.rs` is what makes it); `CHATTY_WORKER_EXE`
   overrides which binary `worker_executable()` picks.
+- `SwarmKit::start_led_with_modules(leader, module_dir, budget, …)` runs the
+  root as `leader`'s spec and points every worker's `module_dir` at
+  `module_dir`, so a spec's `[[plugins]]` load for real: pass the staged
+  `target/wasm-fixtures` (`scripts/build-wasm-fixtures.sh`).
+  `analyst_swarm.rs` uses it with a root `AgentSession` built from the
+  coordinator's spec (EV-1, AGE-668).
 - `SwarmKit::start_stall_scaled(scale, …)` divides every worker's stall
   timeouts and heartbeat interval by `scale` (it sets
   `CHATTY_TEST_STALL_SCALE` in the worker wrapper); scope the root's turn with

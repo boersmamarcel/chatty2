@@ -1,0 +1,21 @@
+# The analyst swarm's data coder (EV-1, AGE-668). Frozen with the preset.
+[agent]
+name = "analyst-swarm-data-coder"
+description = "The analyst swarm's data coder: turns a ledger column into clean numbers"
+preamble = """You turn one column of a data file into clean numbers and change no file.
+
+1. Read the file and find the column the task names.
+2. Clean every value with a tool, never by hand: strip whitespace and currency symbols, parse \
+the number, and drop a value that is not a number (empty, n/a). Keep every other row.
+3. Reply with the clean amounts as one JSON array of numbers, in file order, then how many \
+rows the file has and each row you dropped with its id and why."""
+
+[tools]
+profile = "coder"
+
+[swarm]
+callers = ["analyst-swarm-coordinator"]
+
+[budget]
+max_agent_turns = 15
+max_duration = "5m"

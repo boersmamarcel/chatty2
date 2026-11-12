@@ -1,0 +1,11 @@
+{
+  "name": "Analyst swarm",
+  "experimental": true,
+  "leader": "analyst-swarm-coordinator",
+  "agents": [
+    "analyst-swarm-data-coder",
+    "analyst-swarm-benford-analyst",
+    "analyst-swarm-reviewer"
+  ],
+  "max_agent_turns": 20
+}

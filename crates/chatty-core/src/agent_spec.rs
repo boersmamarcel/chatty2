@@ -67,6 +67,22 @@ pub const WORKSPACE_AGENTS_DIR: &str = ".chatty/agents";
 /// root.
 pub const PRESETS: &[(&str, &str)] = &[
     (
+        "analyst-swarm-coordinator",
+        include_str!("../agents/analyst-swarm-coordinator.toml"),
+    ),
+    (
+        "analyst-swarm-data-coder",
+        include_str!("../agents/analyst-swarm-data-coder.toml"),
+    ),
+    (
+        "analyst-swarm-benford-analyst",
+        include_str!("../agents/analyst-swarm-benford-analyst.toml"),
+    ),
+    (
+        "analyst-swarm-reviewer",
+        include_str!("../agents/analyst-swarm-reviewer.toml"),
+    ),
+    (
         "crosscheck-data-direct",
         include_str!("../agents/crosscheck-data-direct.toml"),
     ),
@@ -2071,6 +2087,7 @@ cap_usd = 2.0
             roster_names_from(&[], None, None),
             [
                 "local-agent",
+                "analyst-swarm-coordinator",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
                 "code-reviewer",
@@ -2108,6 +2125,9 @@ cap_usd = 2.0
             );
         }
         for internal in [
+            "analyst-swarm-data-coder",
+            "analyst-swarm-benford-analyst",
+            "analyst-swarm-reviewer",
             "crosscheck-solver-direct",
             "crosscheck-solver-plan",
             "crosscheck-solver-verify",
@@ -2121,7 +2141,12 @@ cap_usd = 2.0
         ] {
             assert!(!roster.iter().any(|n| n == internal), "{internal}");
         }
-        for leader in ["crosscheck-lead", "crosscheck-data-lead", "coding-lead"] {
+        for leader in [
+            "analyst-swarm-coordinator",
+            "crosscheck-lead",
+            "crosscheck-data-lead",
+            "coding-lead",
+        ] {
             assert!(roster.iter().any(|n| n == leader), "{leader}");
         }
     }
@@ -2145,6 +2170,10 @@ cap_usd = 2.0
                 "local-agent",
                 "boss",
                 "writer",
+                "analyst-swarm-coordinator",
+                "analyst-swarm-data-coder",
+                "analyst-swarm-benford-analyst",
+                "analyst-swarm-reviewer",
                 "crosscheck-data-direct",
                 "crosscheck-data-lead",
                 "crosscheck-data-plan",
@@ -2177,6 +2206,7 @@ cap_usd = 2.0
                 "local-agent",
                 "boss",
                 "writer",
+                "analyst-swarm-coordinator",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
                 "code-reviewer",
@@ -2341,6 +2371,10 @@ cap_usd = 2.0
             [
                 "local-agent",
                 "analyst",
+                "analyst-swarm-coordinator",
+                "analyst-swarm-data-coder",
+                "analyst-swarm-benford-analyst",
+                "analyst-swarm-reviewer",
                 "crosscheck-data-direct",
                 "crosscheck-data-lead",
                 "crosscheck-data-plan",
