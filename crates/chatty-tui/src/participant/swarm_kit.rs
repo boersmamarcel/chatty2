@@ -48,6 +48,7 @@ use chatty_core::settings::models::ModuleSettingsModel;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
+use chatty_core::settings::models::search_settings::SearchSettingsModel;
 use chatty_core::testing::fake_model::{FakeDaemon, RecordedRequest, Reply, Script};
 use chatty_core::tools::invoke_agent_tool::{
     InvokeAgentArgs, InvokeAgentOutput, InvokeAgentProgress, InvokeAgentTool,
@@ -166,6 +167,9 @@ const DEADLINE: Duration = Duration::from_secs(60);
 struct KitExtras {
     module_dir: Option<PathBuf>,
     web: bool,
+    /// The kit's `search_settings.json`; none is written when `None`, so
+    /// workers search keyless.
+    search: Option<SearchSettingsModel>,
 }
 
 impl SwarmKit {
@@ -313,6 +317,7 @@ impl SwarmKit {
             KitExtras {
                 module_dir: Some(module_dir),
                 web: false,
+                search: None,
             },
         )
         .await
@@ -344,6 +349,35 @@ impl SwarmKit {
             KitExtras {
                 module_dir: None,
                 web: true,
+                search: None,
+            },
+        )
+        .await
+    }
+
+    /// As [`start`](Self::start), with every worker's internet tools on and
+    /// `search` as the settings file they all read (AGE-1293): what the
+    /// user's own `search_settings.json` is to a real run.
+    pub async fn start_with_search(
+        search: SearchSettingsModel,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_opts(
+            None,
+            roster,
+            sse,
+            ndjson,
+            false,
+            false,
+            ModuleSettingsModel::default().default_endpoint_budget,
+            None,
+            None,
+            KitExtras {
+                module_dir: None,
+                web: true,
+                search: Some(search),
             },
         )
         .await
@@ -387,7 +421,11 @@ impl SwarmKit {
         stall_scale: Option<u32>,
         extras: KitExtras,
     ) -> Self {
-        let KitExtras { module_dir, web } = extras;
+        let KitExtras {
+            module_dir,
+            web,
+            search,
+        } = extras;
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
         let sse = FakeDaemon::scripted(sse);
@@ -505,6 +543,10 @@ impl SwarmKit {
 
         let config = base.join("config").join("chatty");
         std::fs::create_dir_all(&config).expect("config dir");
+        if let Some(search) = &search {
+            let json = serde_json::to_string_pretty(search).expect("settings serialize");
+            std::fs::write(config.join("search_settings.json"), json).expect("settings file");
+        }
         for (file, value) in [
             ("providers.json", serde_json::to_value(&providers)),
             ("models.json", serde_json::to_value(&models)),
