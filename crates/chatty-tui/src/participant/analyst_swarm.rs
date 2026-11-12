@@ -375,3 +375,240 @@ async fn analyst_swarm_smoke() {
     eprintln!("analyst_swarm_smoke: wall time {wall:?}");
     assert!(wall < WALL_TIME, "{wall:?}");
 }
+
+/// The root's name in the cycle variant: a test-only spec that may call the
+/// preset's coordinator. The call chain starts at `root` (the broker's name
+/// for the session, whatever spec it runs as), so a cycle back to the
+/// coordinator needs the coordinator to be a node on the chain first.
+const CYCLE_ROOT: &str = "analyst-swarm-cycle-root";
+const COORDINATOR: &str = "analyst-swarm-coordinator";
+/// The coordinator as a node, below the cycle variant's root.
+const COORDINATOR_NODE_MODEL: &str = "kit/analyst-coordinator-node";
+
+/// EV-2 (AGE-669): the `analyst-swarm` preset with one change, built here
+/// and nowhere else: the reviewer's `delegates_to` is the coordinator, and
+/// the coordinator is a node (`root → coordinator → reviewer`). The
+/// scripted reviewer calls it. The broker checks, in this order: the callee
+/// exists, the specs allow the call (`delegation_policy::may_call`:
+/// reviewer lists the coordinator, the coordinator is exposed and sets no
+/// `callers`, so this passes), then the chain (`CallChain::extend`: the
+/// coordinator is already on it, so `cycle`). The refusal comes from the
+/// cycle guard, before anything is spawned; the run still completes with
+/// the audit's verdict.
+#[tokio::test]
+async fn analyst_swarm_cycle_guard() {
+    let started = Instant::now();
+    let expected: Value = serde_json::from_str(EXPECTED).expect("expected.json parses");
+    let (rows, amounts) = clean_amounts();
+
+    // The preset's specs, untouched on disk; the variant is made in memory.
+    let team = load_team(TEAM, None, None).expect("the preset loads");
+    let spec = |name: &str| {
+        team.agents
+            .iter()
+            .find(|spec| spec.agent.name == name)
+            .expect("a member of the preset")
+            .clone()
+    };
+    let mut reviewer = spec(REVIEWER);
+    assert_eq!(
+        reviewer.swarm.callers.as_deref(),
+        Some(&[COORDINATOR.to_string()][..])
+    );
+    reviewer.swarm.delegates_to = vec![COORDINATOR.to_string()];
+    let coordinator = team.leader.clone();
+    assert_eq!(coordinator.agent.name, COORDINATOR);
+    assert!(
+        coordinator.swarm.exposed && coordinator.swarm.callers.is_none(),
+        "the policy must let the reviewer's call through, so the cycle guard is what refuses it"
+    );
+    let mut cycle_root = coordinator.clone();
+    cycle_root.agent.name = CYCLE_ROOT.to_string();
+    cycle_root.swarm.delegates_to = vec![COORDINATOR.to_string()];
+
+    let roster = vec![
+        AgentDef::from_spec(coordinator, COORDINATOR_NODE_MODEL, Endpoint::Sse),
+        AgentDef::from_spec(spec(DATA_CODER), DATA_CODER_MODEL, Endpoint::Ndjson),
+        AgentDef::from_spec(spec(BENFORD), BENFORD_MODEL, Endpoint::Sse),
+        AgentDef::from_spec(reviewer, REVIEWER_MODEL, Endpoint::Ndjson),
+    ];
+
+    let cleaned = format!(
+        "Clean amounts: {}. The file has {rows} rows; dropped INV-1012 and INV-1033 (n/a).",
+        json!(amounts)
+    );
+    let verdict = format!(
+        "Risk level: {} (chi-square {}, {} degrees of freedom), most deviant digit {}.",
+        expected["risk_level"].as_str().unwrap(),
+        expected["chi_square"],
+        expected["degrees_of_freedom"],
+        expected["most_deviant_digit"]
+    );
+    let call = |agent: &str, prompt: String| {
+        Reply::tool_call("invoke_agent", json!({ "agent": agent, "prompt": prompt }))
+    };
+    let sse = Script::new()
+        .route(
+            COORDINATOR_MODEL,
+            [
+                call(COORDINATOR, TASK.to_string()),
+                Reply::text(format!("Coordinator's report: {verdict}")),
+            ],
+        )
+        .route(
+            COORDINATOR_NODE_MODEL,
+            [
+                Reply::tool_call("list_agents", json!({})),
+                call(DATA_CODER, "Clean the amount column of ledger.csv.".into()),
+                call(BENFORD, format!("Audit these amounts: {}", json!(amounts))),
+                call(
+                    REVIEWER,
+                    format!("Review this audit. Cleaning: {cleaned} Verdict: {verdict}"),
+                ),
+                Reply::text(format!(
+                    "{verdict} Reviewer: APPROVE. Dropped INV-1012 and INV-1033 (n/a)."
+                )),
+            ],
+        )
+        .route(
+            BENFORD_MODEL,
+            [
+                Reply::tool_call(
+                    "benford__compute_benford_distribution",
+                    json!({ "numbers": amounts }),
+                ),
+                Reply::tool_call(
+                    "benford__chi_square_test",
+                    json!({
+                        "observed_counts": expected["observed_counts"],
+                        "total": expected["total_analyzed"],
+                    }),
+                ),
+                Reply::text(verdict.clone()),
+            ],
+        );
+    let ndjson = Script::new()
+        .route(
+            DATA_CODER_MODEL,
+            [
+                Reply::tool_call("read_file", json!({ "path": "ledger.csv" })),
+                Reply::text(cleaned.clone()),
+            ],
+        )
+        .route(
+            REVIEWER_MODEL,
+            [
+                call(COORDINATOR, "Re-run the whole audit.".into()),
+                Reply::text("APPROVE\n1. The verdict follows from the plugin's chi-square."),
+            ],
+        );
+    let kit =
+        SwarmKit::start_led_with_modules(cycle_root.clone(), module_dir(), 2, roster, sse, ndjson)
+            .await;
+    std::fs::write(kit.workspace().join("ledger.csv"), LEDGER).expect("the ledger is staged");
+
+    let mut session = coordinator_session(&kit, &cycle_root, &[COORDINATOR.to_string()]).await;
+    let events: Rc<RefCell<Vec<SessionEvent>>> = Rc::default();
+    let sink = events.clone();
+    let turn = session
+        .begin_turn(TurnInput::text(TASK), move |event| {
+            sink.borrow_mut().push(event)
+        })
+        .expect("the root's turn starts");
+    tokio::time::timeout(WALL_TIME, turn)
+        .await
+        .expect("the swarm finishes before the wall-time ceiling");
+    let events = Rc::try_unwrap(events).unwrap().into_inner();
+    let edges: Vec<EdgeRow> = std::fs::read_to_string(kit.broker().edge_log_path())
+        .expect("the edge log")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("an edge row"))
+        .collect();
+
+    // The reviewer's call is refused with `cycle`, the chain named, and its
+    // model reads the refusal as the tool result.
+    let chain = "root \u{2192} analyst-swarm-coordinator \u{2192} analyst-swarm-reviewer \u{2192} analyst-swarm-coordinator";
+    let reviewer_requests = kit.ndjson.requests_for(REVIEWER_MODEL);
+    assert_eq!(reviewer_requests.len(), 2, "the call, then the answer");
+    assert!(
+        reviewer_requests[1]
+            .json()
+            .to_string()
+            .contains(&format!("Error: invoke_agent: cycle: {chain}")),
+        "{}",
+        reviewer_requests[1].json()
+    );
+
+    // Nothing was spawned for it: one coordinator node and one of each
+    // member were admitted, and the coordinator's model was asked only by
+    // that one node (list, three calls, the answer).
+    let mut admitted = kit.participants().admitted();
+    admitted.sort();
+    assert_eq!(
+        admitted,
+        [
+            format!("{BENFORD}-0"),
+            format!("{COORDINATOR}-0"),
+            format!("{DATA_CODER}-0"),
+            format!("{REVIEWER}-0"),
+        ]
+    );
+    assert_eq!(kit.sse.requests_for(COORDINATOR_NODE_MODEL).len(), 5);
+
+    // The edge log has the refusal row, and it is the only refusal.
+    let refusals: Vec<&EdgeRow> = edges
+        .iter()
+        .filter(|row| row.kind == EdgeKind::Refusal || row.outcome.starts_with("refused"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "{edges:?}");
+    let refusal = refusals[0];
+    assert_eq!(refusal.kind, EdgeKind::Refusal, "{refusal:?}");
+    assert_eq!(refusal.from, format!("{REVIEWER}-0"));
+    assert_eq!(refusal.to, COORDINATOR);
+    assert_eq!(refusal.outcome, format!("cycle: {chain}"));
+
+    // The run completes with the right verdict: the plugin's own, on the
+    // fixture's numbers, reaching the root through the coordinator.
+    let benford = kit.sse.requests_for(BENFORD_MODEL);
+    assert_eq!(benford.len(), 3, "two tool calls, then the verdict");
+    let results = tool_results(&benford[2]);
+    let chi_square = results
+        .iter()
+        .find(|result| result.get("risk_level").is_some())
+        .unwrap_or_else(|| panic!("no chi-square result in {results:?}"));
+    for field in [
+        "risk_level",
+        "chi_square",
+        "degrees_of_freedom",
+        "most_deviant_digit",
+    ] {
+        assert_eq!(chi_square[field], expected[field], "{field}: {chi_square}");
+    }
+    for member in [COORDINATOR, DATA_CODER, BENFORD, REVIEWER] {
+        assert!(
+            edges.iter().any(|row| row.kind == EdgeKind::Task
+                && row.to == format!("{member}-0")
+                && row.outcome == "completed"),
+            "{member}-0 completed: {edges:?}"
+        );
+    }
+    let calls = root_tool_calls(&events);
+    let (_, _, report) = calls
+        .iter()
+        .find(|(name, _, _)| name == "invoke_agent")
+        .expect("the root called the coordinator");
+    assert!(report.contains(&verdict), "{report}");
+    let said: String = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(said.contains(&verdict), "{said}");
+    assert_eq!(kit.participants().open_runs(), 0, "every run released");
+
+    let wall = started.elapsed();
+    eprintln!("analyst_swarm_cycle_guard: wall time {wall:?}");
+    assert!(wall < WALL_TIME, "{wall:?}");
+}
