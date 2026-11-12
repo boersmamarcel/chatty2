@@ -157,6 +157,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
                 agent: LOCAL_AGENT_NAME.to_string(),
                 prompt: "do the delegated task".to_string(),
                 include_trace: false,
+                handle: None,
             },
         )
         .await;
@@ -523,6 +524,7 @@ mod evidence {
                         branch,
                         evidence,
                         on_exit,
+                        ..
                     } = worker_tree::create_with_commit_hook(
                         &root,
                         &request.worker,
@@ -546,6 +548,8 @@ mod evidence {
                             })
                         })),
                         on_exit,
+                        task_base: None,
+                        behind_by: None,
                     }))
                 })
             }));
@@ -572,6 +576,7 @@ mod evidence {
                     agent: LOCAL_AGENT_NAME.to_string(),
                     prompt: "delegate this".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await;
@@ -841,6 +846,7 @@ pub(super) mod named_virtual_agents {
                 agent: agent.to_string(),
                 prompt: format!("a task for {agent}"),
                 include_trace: false,
+                handle: None,
             },
         )
         .await
@@ -1349,6 +1355,7 @@ mod spend_cap {
                 agent: LOCAL_AGENT_NAME.to_string(),
                 prompt: "do the delegated task".to_string(),
                 include_trace: false,
+                handle: None,
             },
         )
         .await

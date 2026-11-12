@@ -4,4 +4,5 @@
 //! records every request, so a test that spans processes — a leader, real
 //! `chatty-tui` workers, a broker — runs with no network and no real model.
 
+pub mod append_only;
 pub mod fake_model;

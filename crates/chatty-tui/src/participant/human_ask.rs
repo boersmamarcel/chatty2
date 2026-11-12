@@ -248,6 +248,7 @@ async fn stubbed_third_party_peer_question_shows_its_origin() {
                         agent: "voucher".into(),
                         prompt: task.text,
                         include_trace: false,
+                        handle: None,
                     },
                 )
                 .await
@@ -277,6 +278,7 @@ async fn stubbed_third_party_peer_question_shows_its_origin() {
                     agent: name,
                     prompt: "Pay the invoice.".into(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await

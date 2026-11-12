@@ -458,10 +458,12 @@ async fn next_task(
                 handoff,
                 budget,
                 swarm_events,
+                resume,
             } => {
                 return Ok(Some((
                     task_id,
                     DelegatedTask::new(text)
+                        .with_resume(resume)
                         .with_identity(identity)
                         .with_capture_conversation(capture_conversation)
                         .with_spawn_context(spawn_context)

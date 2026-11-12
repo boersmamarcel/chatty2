@@ -152,14 +152,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use chatty_fabric::wire::{AgentEntry, TaskMetadata, WireProgress};
+use chatty_fabric::wire::{AgentEntry, Opaque, TaskMetadata, WireProgress};
 use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, Asker,
     CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallResult,
     CallStream, CapturedConversation, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow,
-    FORWARD_INTERVAL, InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus, NodeId,
-    NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, SendMessageParams, Sender,
-    SwarmBatcher, SwarmItem, Transport, UsagePricer, deadline_grace,
+    FORWARD_INTERVAL, Handle, HandleStore, InvokeAgentOutcome, InvokeAgentParams, Message,
+    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason,
+    SavedConversation, SendMessageParams, Sender, SwarmBatcher, SwarmItem, Transport, UsagePricer,
+    deadline_grace,
 };
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
@@ -250,7 +251,21 @@ pub struct BrokerCalls {
     /// The binding, decision log and answer nonces of a hosted broker
     /// (HS-4a); `None` on a local one.
     hosted: Option<Hosted>,
+    /// The resumable handles callers named (RC-3): their saved
+    /// conversations and trees, and the queue each one's calls wait in.
+    /// In this broker's memory only.
+    handles: Arc<HandleStore>,
+    /// How often a call waiting in a handle's queue tells its caller it is
+    /// still alive (RC-3): the caller's stall watchdog hears nothing else
+    /// while the call ahead of it runs.
+    queued_heartbeat: std::time::Duration,
 }
+
+/// [`BrokerCalls`]' default interval between the heartbeats of a call
+/// waiting in a handle's queue: chatty-core's `HEARTBEAT_INTERVAL`, far
+/// below the caller's tool stall timeout. The embedder passes the scaled
+/// one with [`BrokerCalls::with_queued_heartbeat`].
+pub const QUEUED_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Approvals waiting on the root, by broker id.
 type Approvals = Arc<Mutex<HashMap<String, PendingApproval>>>;
@@ -797,6 +812,8 @@ impl BrokerCalls {
             next_question: AtomicU64::new(0),
             routes: Arc::default(),
             hosted: None,
+            handles: Arc::default(),
+            queued_heartbeat: QUEUED_HEARTBEAT,
         }
     }
 
@@ -1070,6 +1087,15 @@ impl BrokerCalls {
     }
 
     /// Price each callee's reported usage on its task row with `pricer`.
+    /// How often a call queued on a handle sends its caller a heartbeat
+    /// (RC-3); `None` keeps [`QUEUED_HEARTBEAT`].
+    pub fn with_queued_heartbeat(mut self, every: Option<std::time::Duration>) -> Self {
+        if let Some(every) = every.filter(|every| !every.is_zero()) {
+            self.queued_heartbeat = every;
+        }
+        self
+    }
+
     pub fn with_pricer(mut self, pricer: Option<Arc<dyn UsagePricer>>) -> Self {
         self.pricer = pricer;
         self
@@ -1582,7 +1608,7 @@ impl BrokerCalls {
                 .map(|to| (to, chain)),
             Peer::Root => None,
         };
-        let task = DelegatedTask::new(params.prompt)
+        let mut task = DelegatedTask::new(params.prompt)
             .with_call(Some(stamp))
             .with_spawn_context(spawn)
             .with_swarm_events(reports_to.is_some())
@@ -1594,6 +1620,12 @@ impl BrokerCalls {
             // (ADR-0021 § 3).
             .with_identity(self.hosted.as_ref().map(Hosted::identity));
         let agent = params.agent;
+        // A call naming a handle (RC-3) queues on it, owned by its caller.
+        let handle_name = params.handle;
+        let handles = self.handles.clone();
+        let owner = caller.name().to_string();
+        let submits = matches!(effect, Effect::Submit(_));
+        let queued_heartbeat = self.queued_heartbeat;
         // The caller's messages ride on this call's result (delivery point
         // a), taken when the result is made.
         let inbox = self
@@ -1608,6 +1640,74 @@ impl BrokerCalls {
         };
 
         async_stream::stream! {
+            // Calls to one handle run one at a time, in arrival order: the
+            // slot is held until this call's stream is dropped, after its
+            // worker is reaped (RC-3).
+            // A call that has to wait says so once, then heartbeats, so its
+            // caller's stall watchdog does not end the turn under it; one
+            // that gets the slot at once sends nothing.
+            let mut slot = match handle_name.as_deref() {
+                Some(name) => {
+                    let acquire = handles.slot(&owner, name).lock_owned();
+                    tokio::pin!(acquire);
+                    let mut beat = tokio::time::interval(queued_heartbeat);
+                    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                    let mut beats = 0u64;
+                    loop {
+                        tokio::select! {
+                            biased;
+                            held = &mut acquire => break Some(held),
+                            _ = beat.tick() => {
+                                // The first tick is immediate: only a call
+                                // the slot did not let in at once gets here.
+                                beats += 1;
+                                yield Ok(CallEvent::Progress(if beats == 1 {
+                                    WireProgress::Step(format!(
+                                        "waiting for handle '{name}': another call to it is running"
+                                    ))
+                                } else {
+                                    WireProgress::heartbeat()
+                                }));
+                            }
+                        }
+                    }
+                }
+                None => None,
+            };
+            if let (Some(slot), Some(name)) = (slot.as_ref(), handle_name.as_deref()) {
+                let refused = if submits {
+                    Some(format!(
+                        "handle '{name}': only an agent the broker starts can be resumed, not \
+                         the running participant '{agent}'"
+                    ))
+                } else {
+                    match slot.as_ref() {
+                        Some(saved) if saved.agent != agent => Some(format!(
+                            "handle '{name}' holds a conversation with '{}', not '{agent}'",
+                            saved.agent
+                        )),
+                        Some(saved) => match Opaque::from_value(&saved.conversation.data) {
+                            Ok(conversation) => {
+                                task = task
+                                    .with_resume(Some(conversation))
+                                    .with_attach(saved.tree.clone());
+                                None
+                            }
+                            Err(e) => Some(format!("handle '{name}' cannot be resumed: {e}")),
+                        },
+                        None => None,
+                    }
+                };
+                if let Some(reason) = refused {
+                    warn!(agent = %agent, %reason, "Refusing a handle call");
+                    // No worker was started: the row must not count as one
+                    // (TM-3).
+                    edge.root_task_id = None;
+                    edge.refused(&reason);
+                    yield Ok(CallEvent::Result(outcome(TaskState::Failed, String::new(), Some(reason), None, messages())));
+                    return;
+                }
+            }
             let running = match effect {
                 Effect::Submit(node) => a2a_participant::submit(&registry, &node, task).await
                     .ok_or_else(|| format!("participant '{agent}' is no longer connected")),
@@ -1798,6 +1898,8 @@ impl BrokerCalls {
                     metadata: None,
                     messages: messages(),
                     cancelled_by_user: true,
+                    handle: None,
+                    behind_by: None,
                 })));
                 return;
             }
@@ -1839,9 +1941,55 @@ impl BrokerCalls {
                     yield Ok(CallEvent::Swarm(batch));
                 }
             }
+            // The handle keeps what this task said, after what its earlier
+            // tasks said, and the tree it worked in (RC-3).
+            let mut saved_as = None;
+            let mut behind_by = None;
+            if let (Some(slot), Some(name)) = (slot.as_mut(), handle_name.as_ref()) {
+                let tree = running.tree();
+                match metadata.as_ref().and_then(CapturedConversation::from_metadata) {
+                    Some(CapturedConversation::Messages { messages: turns }) => {
+                        let previous = slot.take();
+                        let conversation = match previous.as_ref() {
+                            Some(previous) => previous.conversation.extended(&turns),
+                            None => SavedConversation { data: turns },
+                        };
+                        **slot = Some(Handle {
+                            name: name.clone(),
+                            agent: agent.clone(),
+                            owner: owner.clone(),
+                            scope: ConversationScope::new(ROOT_SCOPE),
+                            conversation,
+                            tree: tree
+                                .as_ref()
+                                .map(|info| info.tree.clone())
+                                .or_else(|| previous.and_then(|previous| previous.tree)),
+                            last_task_base: tree.as_ref().and_then(|info| info.task_base.clone()),
+                            idle_since: std::time::SystemTime::now(),
+                        });
+                        saved_as = Some(name.clone());
+                        behind_by = tree.and_then(|info| info.behind_by);
+                    }
+                    // Nothing to resume from: the handle goes rather than
+                    // resume a conversation that misses this task.
+                    _ => {
+                        warn!(agent = %agent, handle = %name, "The task captured no conversation; the handle is dropped");
+                        **slot = None;
+                    }
+                }
+            }
+            // The worker is reaped before the handle's next call may start:
+            // a tuple drops its fields in order.
+            let _reap_then_release = (running, slot);
             edge.end(state);
-            yield Ok(CallEvent::Result(outcome(state, response, message, metadata, messages())));
-            // `running` is dropped here, which reaps a spawned worker.
+            let mut result = outcome(state, response, message, metadata, messages());
+            if let CallResult::Invoked(invoked) = &mut result {
+                invoked.handle = saved_as;
+                invoked.behind_by = behind_by;
+            }
+            yield Ok(CallEvent::Result(result));
+            // `running` is dropped here, which reaps a spawned worker, and
+            // then the handle's slot.
         }
         .boxed()
     }
@@ -1933,6 +2081,8 @@ fn outcome(
         metadata: metadata.map(Box::new),
         messages,
         cancelled_by_user: false,
+        handle: None,
+        behind_by: None,
     })
 }
 

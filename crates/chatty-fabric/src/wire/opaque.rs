@@ -100,9 +100,11 @@ impl<'de> Deserialize<'de> for Opaque {
 }
 
 /// [`Opaque`] is not the wire's to type: its schema is the unconstrained
-/// `true` ("any value"), inlined at each of the four pointers ADR-0021 § 1
-/// fixes it to, never a `$ref` to a shared definition. The any-value check
-/// (`export_has_no_any_value_outside_four_opaque_payloads`) walks the
+/// `true` ("any value"), inlined at each pointer ADR-0021 § 1 fixes it to
+/// (the four payloads', plus RC-3's `TaskRunParams.resume`, the captured
+/// conversation going back down), never a `$ref` to a shared definition.
+/// The any-value check
+/// (`export_has_no_any_value_outside_the_listed_opaque_payloads`) walks the
 /// export for exactly that literal.
 impl JsonSchema for Opaque {
     fn schema_name() -> std::borrow::Cow<'static, str> {

@@ -156,6 +156,8 @@ pub struct ProtocolGateway {
     call_policy: Option<Arc<dyn CallPolicy>>,
     /// Prices a callee's reported usage on its edge-log row (DP-3).
     usage_pricer: Option<Arc<dyn UsagePricer>>,
+    /// See [`with_queued_heartbeat`](Self::with_queued_heartbeat).
+    queued_heartbeat: Option<std::time::Duration>,
     /// Built on first use, from the virtual agents published by then.
     calls: OnceLock<Arc<BrokerCalls>>,
     routes: RouteCounter,
@@ -183,6 +185,7 @@ impl ProtocolGateway {
             edges: None,
             call_policy: None,
             usage_pricer: None,
+            queued_heartbeat: None,
             calls: OnceLock::new(),
             routes: RouteCounter::default(),
             feature_cards: BTreeMap::new(),
@@ -268,6 +271,14 @@ impl ProtocolGateway {
         self
     }
 
+    /// How often a call queued on a resumable handle heartbeats its caller
+    /// (RC-3): the caller's own heartbeat interval, under its stall scale.
+    /// Set it before [`calls`](Self::calls) is first asked for.
+    pub fn with_queued_heartbeat(mut self, every: std::time::Duration) -> Self {
+        self.queued_heartbeat = Some(every);
+        self
+    }
+
     /// The broker's call path: what runs a worker's calls over its
     /// connection, installed on the participant registry the first time it
     /// is asked for. Publish every virtual agent before this — the call path
@@ -282,7 +293,8 @@ impl ProtocolGateway {
                         self.edges.clone(),
                     )
                     .with_policy(self.call_policy.clone())
-                    .with_pricer(self.usage_pricer.clone()),
+                    .with_pricer(self.usage_pricer.clone())
+                    .with_queued_heartbeat(self.queued_heartbeat),
                 );
                 self.participants.install_calls(&calls);
                 calls

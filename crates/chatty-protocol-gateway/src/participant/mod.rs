@@ -48,7 +48,7 @@ mod registry;
 pub mod spawn_context;
 mod virtual_agent;
 
-pub use calls::{BrokerCalls, DirectTransport, LocalPermissive, Peer};
+pub use calls::{BrokerCalls, DirectTransport, LocalPermissive, Peer, QUEUED_HEARTBEAT};
 pub use codec::{
     BrokerCodec, BrokerSide, FrameCodec, FrameError, PROTOCOL_VERSION, WorkerCodec, WorkerSide,
 };
@@ -63,7 +63,9 @@ pub use protocol::{
 pub use registry::{
     AdmittedNode, ParticipantRegistry, ROOT_SCOPE, RegisteredAgent, TaskStream, TaskUpdate,
 };
-pub use virtual_agent::{EvidenceFuture, TaskEvidence, VirtualAgent, WorkerFuture, WorkerHandle};
+pub use virtual_agent::{
+    EvidenceFuture, TaskEvidence, VirtualAgent, WorkerFuture, WorkerHandle, WorkerTreeInfo,
+};
 
 // The socket itself is Unix-only. Everything above it is not, so the
 // registry and the frames still compile (and are still tested) elsewhere;

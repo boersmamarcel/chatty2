@@ -303,10 +303,24 @@
     "InvokeAgentOutcome": {
       "additionalProperties": false,
       "properties": {
+        "behind_by": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "cancelled_by_user": {
           "type": "boolean"
         },
         "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handle": {
           "type": [
             "string",
             "null"
@@ -990,6 +1004,7 @@
             }
           ]
         },
+        "resume": {},
         "spawnContext": {
           "anyOf": [
             {

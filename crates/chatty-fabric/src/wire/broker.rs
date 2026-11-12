@@ -10,7 +10,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use super::{DecodeError, IdParams, ParticipantCard, TaskIdentity, WireProgress, params};
+use super::{DecodeError, IdParams, Opaque, ParticipantCard, TaskIdentity, WireProgress, params};
 use crate::{
     AgentOrigin, AskRequest, ConversationScope, HandoffContract, NodeName, Remaining, SpawnContext,
 };
@@ -87,6 +87,12 @@ pub struct TaskRunParams<'a> {
     pub budget: Cow<'a, Remaining>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub swarm_events: bool,
+    /// The conversation a resumed handle's worker restores before its
+    /// first turn (RC-3): the captured conversation of the handle's earlier
+    /// tasks, the same payload a terminal status's `conversation` carries.
+    /// Absent for every other task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<Cow<'a, Opaque>>,
 }
 
 fn is_unlimited<B: std::ops::Deref<Target = Remaining>>(budget: &B) -> bool {

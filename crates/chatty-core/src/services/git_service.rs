@@ -356,6 +356,17 @@ impl GitService {
         }
     }
 
+    /// The commit this tree's `HEAD` is at, as a full hash: where a resumed
+    /// handle's task starts, and so what its evidence is measured from
+    /// (RC-3).
+    pub async fn head_commit(&self) -> Result<String> {
+        Ok(self
+            .run_git(&["rev-parse", "HEAD"])
+            .await?
+            .trim()
+            .to_string())
+    }
+
     /// The repository's default branch: `main` or `master`, whichever
     /// exists locally. `None` when neither does.
     ///

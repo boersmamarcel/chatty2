@@ -68,6 +68,28 @@ pub trait WorkerHandle: Send {
     fn evidence(&mut self) -> EvidenceFuture {
         Box::pin(std::future::ready(None))
     }
+
+    /// The tree this worker works in, when its runner gave it one of its
+    /// own: what a handle keeps so a later task's worker can be attached
+    /// to it (RC-3). `None` — the default — for a worker in its caller's
+    /// tree.
+    fn tree(&self) -> Option<WorkerTreeInfo> {
+        None
+    }
+}
+
+/// A worker's own tree, as its runner made or attached it (RC-3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerTreeInfo {
+    /// Where it is and the branch it is on.
+    pub tree: chatty_fabric::WorkerTreeRef,
+    /// The commit this task started from: its evidence is
+    /// `task_base..HEAD`.
+    pub task_base: Option<String>,
+    /// How many commits the tree's branch was behind its base branch when
+    /// the task started; set only for a tree a resumed worker was attached
+    /// to.
+    pub behind_by: Option<u64>,
 }
 
 /// The runner's account of a finished delegation, in the two shapes its

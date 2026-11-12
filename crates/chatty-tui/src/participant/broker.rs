@@ -268,6 +268,9 @@ impl Broker {
         if let Some(prices) = prices {
             gateway = gateway.with_usage_pricer(Arc::new(prices));
         }
+        // A call queued on a handle keeps its caller's watchdog fed at the
+        // caller's own heartbeat interval (RC-3).
+        gateway = gateway.with_queued_heartbeat(chatty_core::services::heartbeat_interval());
 
         let participants = gateway.participants();
         let listener = chatty_protocol_gateway::participant::bind(&socket)
@@ -681,16 +684,20 @@ fn worktree_factory() -> WorkspaceFactory {
             let Some(root) = request.workspace_root else {
                 return Ok(None);
             };
+            // A resumed handle's worker is attached to its tree (RC-3).
             let Some(worker_tree::IsolatedWorker {
                 cwd,
                 branch,
                 evidence,
                 on_exit,
-            }) = worker_tree::create_with_commit_hook(
+                task_base,
+                behind_by,
+            }) = worker_tree::prepare(
                 &root,
                 &request.worker,
                 request.base_branch.as_deref(),
                 request.verification,
+                request.attach.as_ref(),
             )
             .await?
             else {
@@ -708,6 +715,8 @@ fn worktree_factory() -> WorkspaceFactory {
                     })
                 })),
                 on_exit,
+                task_base,
+                behind_by,
             }))
         })
     })
@@ -832,6 +841,7 @@ mod tests {
                         agent: "nobody-registered".to_string(),
                         prompt: "hi".to_string(),
                         include_trace: false,
+                        handle: None,
                     },
                 )
                 .await

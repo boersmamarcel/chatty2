@@ -334,6 +334,7 @@ async fn stop_targets_one_of_two_parallel_same_spec_calls() {
                     agent: STUCK.to_string(),
                     prompt: "Dig a.".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -346,6 +347,7 @@ async fn stop_targets_one_of_two_parallel_same_spec_calls() {
                     agent: STUCK.to_string(),
                     prompt: "Dig b.".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await

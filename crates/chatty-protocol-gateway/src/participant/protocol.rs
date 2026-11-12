@@ -132,11 +132,11 @@
 //! participant → {"v":3,"method":"task.event","params":{"kind":"swarm","id":2,"event":{"kind":"tool_call_started","id":"call-1","name":"read_file"}}}
 //! ```
 
-use chatty_fabric::wire::{TaskIdentity, TaskMetadata, WorkerSwarmItem};
+use chatty_fabric::wire::{Opaque, TaskIdentity, TaskMetadata, WorkerSwarmItem};
 use chatty_fabric::{
     Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, CallChain, CallError,
     CallRequest, CallResult, ConversationScope, HandoffContract, NodeName, Remaining, RunId,
-    SpawnContext,
+    SpawnContext, WorkerTreeRef,
 };
 
 pub use chatty_fabric::wire::{ParticipantCard, ParticipantSkill, TaskState};
@@ -181,6 +181,13 @@ pub struct DelegatedTask {
     /// Ask the worker for its turns and tool events as `event` frames (TB-1):
     /// set by the broker on a nested run whose root is listening.
     pub swarm_events: bool,
+    /// The conversation the worker restores before its first turn: a
+    /// resumed handle's (RC-3). `None` starts a fresh one.
+    pub resume: Option<Opaque>,
+    /// The tree a resumed handle's worker works in again (RC-3). Stays
+    /// with the broker, like `call`: the runner attaches the worker to it
+    /// instead of making a new one. `None` makes one as usual.
+    pub attach: Option<WorkerTreeRef>,
 }
 
 /// What a broker call stamps on the task it starts (DP-2): the gate's
@@ -225,7 +232,21 @@ impl DelegatedTask {
             call: None,
             budget: Remaining::default(),
             swarm_events: false,
+            resume: None,
+            attach: None,
         }
+    }
+
+    /// The conversation the worker restores before its first turn (RC-3).
+    pub fn with_resume(mut self, resume: Option<Opaque>) -> Self {
+        self.resume = resume;
+        self
+    }
+
+    /// The tree a resumed handle's worker is attached to (RC-3).
+    pub fn with_attach(mut self, attach: Option<WorkerTreeRef>) -> Self {
+        self.attach = attach;
+        self
     }
 
     /// Ask the worker for its `event` frames (TB-1).
@@ -400,6 +421,9 @@ pub enum BrokerFrame {
         /// Report turns and tool events as `swarm` task events (TB-1).
         /// Absent on the wire when `false`.
         swarm_events: bool,
+        /// The conversation to restore before the first turn: a resumed
+        /// handle's (RC-3). Absent on the wire for every other task.
+        resume: Option<Opaque>,
     },
     /// The caller went away: `req.cancel` of the task's `task.run`. Stop
     /// working on `taskId`.

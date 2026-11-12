@@ -568,22 +568,26 @@ impl SwarmKit {
         agent: &str,
         prompt: &str,
     ) -> LeaderRun {
-        let mut progress_rx = install_progress_channel(&tool.progress_slot());
-
-        let output = tokio::time::timeout(
-            DEADLINE,
-            tool.call(
-                &mut ToolContext::new(),
-                InvokeAgentArgs {
-                    agent: agent.to_string(),
-                    prompt: prompt.to_string(),
-                    include_trace: false,
-                },
-            ),
+        self.run_leader_args(
+            tool,
+            InvokeAgentArgs {
+                agent: agent.to_string(),
+                prompt: prompt.to_string(),
+                include_trace: false,
+                handle: None,
+            },
         )
         .await
-        .expect("the delegation finishes before the deadline")
-        .map_err(|e| e.to_string());
+    }
+
+    /// The leader's `invoke_agent` call with `args`, through `tool`.
+    pub async fn run_leader_args(&self, tool: InvokeAgentTool, args: InvokeAgentArgs) -> LeaderRun {
+        let mut progress_rx = install_progress_channel(&tool.progress_slot());
+
+        let output = tokio::time::timeout(DEADLINE, tool.call(&mut ToolContext::new(), args))
+            .await
+            .expect("the delegation finishes before the deadline")
+            .map_err(|e| e.to_string());
 
         let mut progress = Vec::new();
         while let Ok(event) = progress_rx.try_recv() {
@@ -1565,7 +1569,7 @@ async fn no_worker_call_uses_loopback() {
 
 /// Every process descended from this test process whose `HOME` is `kit`'s:
 /// the kit's workers and whatever they started.
-fn subtree(kit: &SwarmKit) -> Vec<i32> {
+pub(crate) fn subtree(kit: &SwarmKit) -> Vec<i32> {
     let home = format!("HOME={}", kit.root().join("home").display());
     let mut parents = HashMap::new();
     for entry in std::fs::read_dir("/proc").expect("/proc is readable") {
@@ -1613,7 +1617,7 @@ fn subtree(kit: &SwarmKit) -> Vec<i32> {
 
 /// Whether `pid` still exists — a zombie included, so a process that died
 /// but was never reaped still counts.
-fn alive(pid: i32) -> bool {
+pub(crate) fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
     unsafe { libc::kill(pid, 0) == 0 }
 }
@@ -1633,6 +1637,7 @@ async fn cancel_reaps_the_subtree() {
                 agent: MIDDLE.to_string(),
                 prompt: "ask the grandchild".to_string(),
                 include_trace: false,
+                handle: None,
             },
         )
         .await
@@ -2914,6 +2919,7 @@ async fn messages_dropped_with_recipient_e2e() {
                 agent: MIDDLE.to_string(),
                 prompt: "ask the grandchild to read the readme".to_string(),
                 include_trace: false,
+                handle: None,
             },
         )
         .await
@@ -3213,6 +3219,7 @@ async fn cancelled_permit_wait_makes_no_model_call() {
                     agent: agent.to_string(),
                     prompt: "go".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await

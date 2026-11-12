@@ -128,6 +128,7 @@ impl BestOfTool {
                     agent: agent.to_string(),
                     prompt,
                     include_trace: true,
+                    handle: None,
                 },
             )
             .await

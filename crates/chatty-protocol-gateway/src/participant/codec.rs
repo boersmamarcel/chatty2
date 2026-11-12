@@ -541,6 +541,7 @@ impl FrameCodec<BrokerSide> {
                 handoff,
                 budget,
                 swarm_events,
+                resume,
             } => {
                 let id = state.next_id();
                 state.open_run(id, task_id);
@@ -553,6 +554,7 @@ impl FrameCodec<BrokerSide> {
                     handoff: handoff.as_ref().map(Cow::Borrowed),
                     budget: Cow::Borrowed(&**budget),
                     swarm_events: *swarm_events,
+                    resume: resume.as_ref().map(Cow::Borrowed),
                 };
                 request(m, id, "task.run", Some(params))?
             }
@@ -1007,6 +1009,7 @@ impl FrameCodec<WorkerSide> {
                             handoff,
                             budget,
                             swarm_events,
+                            resume,
                         } = *params;
                         let task_id = task_id.into_owned();
                         state.open_run(id, &task_id);
@@ -1019,6 +1022,7 @@ impl FrameCodec<WorkerSide> {
                             handoff: handoff.map(Cow::into_owned),
                             budget: Box::new(budget.into_owned()),
                             swarm_events,
+                            resume: resume.map(Cow::into_owned),
                         }
                     }
                     BrokerRequest::HumanAsk(params) => {

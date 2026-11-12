@@ -401,6 +401,15 @@ impl HeadlessRunner {
             .with_context(|| format!("--restore: cannot read {}", path.display()))?;
         chatty_core::models::Conversation::deserialize_history(&history)
             .with_context(|| format!("--restore: {} is not a message array", path.display()))?;
+        self.restore_history(history).await
+    }
+
+    /// Rebuild the agent on `history`, a captured conversation's message
+    /// array as JSON: `--restore`'s file, or a resumed handle's task (RC-3).
+    /// The next message is the next turn on that history.
+    pub async fn restore_history(&mut self, history: String) -> Result<()> {
+        chatty_core::models::Conversation::deserialize_history(&history)
+            .context("the conversation to restore is not a message array")?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

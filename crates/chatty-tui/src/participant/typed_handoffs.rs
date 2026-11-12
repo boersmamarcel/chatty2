@@ -242,6 +242,7 @@ async fn handoff_invalid_twice_fails_typed() {
                 agent: CODER.to_string(),
                 prompt: "change the readme".to_string(),
                 include_trace: false,
+                handle: None,
             },
         ),
     )
