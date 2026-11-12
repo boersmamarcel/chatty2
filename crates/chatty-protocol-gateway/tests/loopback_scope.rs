@@ -203,19 +203,77 @@ async fn loopback_refuses_roles() {
     }
 }
 
-/// A role that also has a feature card is still refused: the role check
-/// comes before the card lookup, so the card is never served for it (BI-7).
+/// A role's feature card is the one role route loopback still serves
+/// (AGE-1135): `callers` and `delegates_to` reveal swarm topology, so they
+/// are stripped wherever they live in the card; every other route for the
+/// same role stays refused.
 #[tokio::test]
-async fn a_role_with_a_feature_card_is_still_refused() {
+async fn a_role_feature_card_is_served_without_topology() {
     let cards = [(
         "stub-worker-0".to_string(),
-        json!({"name": "stub-worker-0", "card": "must not be served"}),
+        json!({
+            "name": "stub-worker-0",
+            "callers": ["a"],
+            "capabilities": { "extensions": [{
+                "uri": "https://chatty.dev/a2a/ext/feature-card/v1",
+                "params": {
+                    "model": "m",
+                    "delegates_to": ["b"],
+                    "callers": ["a"],
+                    "skills": ["s"],
+                },
+            }] },
+        }),
     )]
     .into_iter()
     .collect();
     let harness = Harness::start_with_cards(cards).await;
     assert_eq!(harness.role, "stub-worker-0");
+    let client = reqwest::Client::new();
 
+    let response = client
+        .get(format!(
+            "{}/a2a/{}/.well-known/agent.json",
+            harness.base_url, harness.role
+        ))
+        .send()
+        .await
+        .expect("the gateway answers");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let card = response.json::<Value>().await.expect("a JSON body");
+    assert_eq!(
+        card,
+        json!({
+            "name": "stub-worker-0",
+            "capabilities": { "extensions": [{
+                "uri": "https://chatty.dev/a2a/ext/feature-card/v1",
+                "params": { "model": "m", "skills": ["s"] },
+            }] },
+        })
+    );
+    let text = card.to_string();
+    assert!(!text.contains("callers") && !text.contains("delegates_to"));
+
+    // Another route for the same role is still refused.
+    let rpc = client
+        .post(format!("{}/a2a/{}", harness.base_url, harness.role))
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {} }))
+        .send()
+        .await
+        .expect("the gateway answers");
+    assert_eq!(rpc.status(), reqwest::StatusCode::FORBIDDEN);
+    let directory = client
+        .get(format!("{}/.well-known/agent.json", harness.base_url))
+        .send()
+        .await
+        .expect("the gateway answers");
+    assert_eq!(directory.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+/// A role with no feature card is refused on the card route as before.
+#[tokio::test]
+async fn a_role_without_a_feature_card_is_still_refused() {
+    let harness = Harness::start().await;
     let response = reqwest::Client::new()
         .get(format!(
             "{}/a2a/{}/.well-known/agent.json",
@@ -225,10 +283,6 @@ async fn a_role_with_a_feature_card_is_still_refused() {
         .await
         .expect("the gateway answers");
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
-    assert_eq!(
-        response.json::<Value>().await.expect("a JSON body"),
-        refusal_body()
-    );
 }
 
 /// Do: delete the `x-chatty-broker-caller` header handling from #915.

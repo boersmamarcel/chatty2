@@ -38,6 +38,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
+use chatty_core::feature_card::FeatureCard;
 use chatty_core::models::token_usage::PriceBook;
 use chatty_core::services::delegation_policy::SpecPolicy;
 use chatty_core::services::plugin_llm::PluginLlmProvider;
@@ -159,9 +160,14 @@ impl Broker {
                 prices.insert(model.model_ref(), pricing);
             }
         }
+        // The feature cards (AGE-1135). The gateway serves a private socket,
+        // so there is no host to name: the relative A2A route base
+        // (`/a2a/{name}`) is the card's url.
+        let cards = FeatureCard::json_by_name(agents, "", models, &prices);
         Self::serve(
             llm,
             root,
+            cards,
             socket_path()?,
             worker_executable(),
             module_settings.default_endpoint_budget,
@@ -220,6 +226,7 @@ impl Broker {
         Self::serve(
             Arc::new(NoopProvider),
             root,
+            BTreeMap::new(),
             socket,
             executable,
             default_budget,
@@ -227,6 +234,31 @@ impl Broker {
             workspace_dir,
             data_dir,
             prices,
+        )
+        .await
+    }
+
+    /// As [`start_at`](Self::start_at), serving `cards` (AGE-1135).
+    #[cfg(test)]
+    pub(crate) async fn start_with_cards_at(
+        socket: PathBuf,
+        executable: PathBuf,
+        default_budget: usize,
+        specs: Vec<VirtualAgentSpec>,
+        cards: BTreeMap<String, serde_json::Value>,
+    ) -> Result<Self> {
+        let data_dir = socket.parent().map(std::path::Path::to_path_buf);
+        Self::serve(
+            Arc::new(NoopProvider),
+            None,
+            cards,
+            socket,
+            executable,
+            default_budget,
+            specs,
+            None,
+            data_dir,
+            None,
         )
         .await
     }
@@ -250,6 +282,7 @@ impl Broker {
     async fn serve(
         provider: Arc<dyn LlmProvider>,
         root: Option<AgentSpec>,
+        cards: BTreeMap<String, serde_json::Value>,
         socket: PathBuf,
         executable: PathBuf,
         default_budget: usize,
@@ -264,7 +297,8 @@ impl Broker {
         // A call is checked against the roster's specs before anything is
         // spawned (PL-S2), the root's against the spec it runs as (AGE-745).
         let mut gateway = ProtocolGateway::new(shared)
-            .with_call_policy(Arc::new(SpecPolicy::for_agents(&specs).with_root(root)));
+            .with_call_policy(Arc::new(SpecPolicy::for_agents(&specs).with_root(root)))
+            .with_feature_cards(cards);
         if let Some(prices) = prices {
             gateway = gateway.with_usage_pricer(Arc::new(prices));
         }
@@ -1034,6 +1068,43 @@ mod tests {
             !gateway.token_path().exists(),
             "shutdown removes the token file"
         );
+    }
+
+    /// AGE-1135: the broker's gateway serves a spec's feature card for its
+    /// virtual agent (a role) over loopback, without the topology fields.
+    #[tokio::test]
+    async fn the_broker_serves_feature_cards_without_topology() {
+        let module_settings = ModuleSettingsModel::default();
+        let (_dir, socket) = test_socket();
+        let cards = BTreeMap::from([(
+            LOCAL_AGENT_NAME.to_string(),
+            serde_json::json!({ "name": LOCAL_AGENT_NAME, "callers": ["x"], "delegates_to": ["y"] }),
+        )]);
+        let broker = Broker::start_with_cards_at(
+            socket,
+            worker_executable(),
+            module_settings.default_endpoint_budget,
+            default_specs(&[], &[], &module_settings),
+            cards,
+        )
+        .await
+        .expect("the broker starts");
+        let token = broker.token().as_str().to_string();
+
+        let response = broker
+            .http_get(
+                &format!("/a2a/{LOCAL_AGENT_NAME}/.well-known/agent.json"),
+                Some(&token),
+            )
+            .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains(LOCAL_AGENT_NAME), "{response}");
+        assert!(
+            !response.contains("callers") && !response.contains("delegates_to"),
+            "{response}"
+        );
+
+        broker.shutdown();
     }
 
     /// EN-0d: the token reaches nobody through argv — not this process's,

@@ -559,7 +559,7 @@ pub fn refresh_runtime(cx: &mut App) {
                     {
                         let participants = gateway.participants();
                         broker_runner::serve_socket(broker_runner::socket_path());
-                        let (resolved_workspace, specs) = cx
+                        let (resolved_workspace, specs, cards) = cx
                             .update(|cx| {
                                 let exec = cx.global::<ExecutionSettingsModel>();
                                 // A worker inherits the desktop's approval
@@ -613,7 +613,7 @@ pub fn refresh_runtime(cx: &mut App) {
                                     Ok(agents) => agents,
                                     Err(e) => {
                                         error!(error = ?e, "Failed to load the virtual agents' specs");
-                                        return (resolved_workspace, Vec::new());
+                                        return (resolved_workspace, Vec::new(), Default::default());
                                     }
                                 };
                                 let specs = resolve_virtual_agents(
@@ -624,10 +624,22 @@ pub fn refresh_runtime(cx: &mut App) {
                                     &common_args,
                                     resolved_workspace.as_deref(),
                                 );
-                                (resolved_workspace, specs)
+                                // The feature cards (AGE-1135). The gateway
+                                // serves a private socket, so there is no
+                                // host to name: the relative A2A route base
+                                // (`/a2a/{name}`) is the card's url.
+                                let book = cx
+                                    .try_global::<ModelsModel>()
+                                    .map(|m| m.price_book())
+                                    .unwrap_or_default();
+                                let cards = chatty_core::feature_card::FeatureCard::json_by_name(
+                                    &agents, "", models, &book,
+                                );
+                                (resolved_workspace, specs, cards)
                             })
-                            .unwrap_or((None, Vec::new()));
+                            .unwrap_or((None, Vec::new(), Default::default()));
                         gateway_workspace = resolved_workspace.clone();
+                        gateway = gateway.with_feature_cards(cards);
                         // A node's call is checked against the roster's
                         // specs before anything is spawned (PL-S2). The
                         // root is the desktop's conversation, which is not

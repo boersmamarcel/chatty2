@@ -54,7 +54,8 @@ pub struct GatewayState {
     /// How many HTTP requests reached a role or the directory.
     pub(crate) routes: RouteCounter,
     /// Feature cards (RO-2, AGE-659) by agent name, served at
-    /// `/a2a/{name}/.well-known/agent.json` for names that are not roles.
+    /// `/a2a/{name}/.well-known/agent.json`. A role's card is served with
+    /// `callers` and `delegates_to` stripped (BI-7 exception, AGE-1135).
     pub(crate) feature_cards: Arc<BTreeMap<String, serde_json::Value>>,
 }
 
@@ -71,7 +72,8 @@ pub struct RouteCounter {
 }
 
 impl RouteCounter {
-    /// Requests for `/a2a/{role}`, its card included.
+    /// Requests for `/a2a/{role}` that were refused (BI-7). A role's
+    /// feature card that is served is not counted (AGE-1135).
     pub fn role_requests(&self) -> u64 {
         self.roles.load(Ordering::Relaxed)
     }
@@ -194,7 +196,8 @@ impl ProtocolGateway {
 
     /// Serve `cards` (name to A2A card JSON, secret-free by construction:
     /// `chatty_core::feature_card`) at `/a2a/{name}/.well-known/agent.json`.
-    /// A name that is also a role is still refused over loopback (BI-7).
+    /// A name that is also a role is served over loopback without `callers` and
+    /// `delegates_to` (BI-7 exception, AGE-1135).
     pub fn with_feature_cards(mut self, cards: BTreeMap<String, serde_json::Value>) -> Self {
         self.feature_cards = cards;
         self
