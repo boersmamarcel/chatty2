@@ -116,7 +116,13 @@ impl CodeSearchService {
     ) -> Result<SearchResult> {
         // Request one extra match so we can detect truncation without a separate pass.
         let rg_limit = max_results + 1;
+        // The pattern and file type come from the model. Every model-supplied
+        // value is bound to its flag (`--type=`, `-e`) and the path follows
+        // `--`, so no value can be read as a ripgrep option such as
+        // `--pre=sh`, which would run workspace files as programs (AGE-1286).
+        // `--no-config` keeps RIPGREP_CONFIG_PATH from adding options.
         let mut args: Vec<String> = vec![
+            "--no-config".to_string(),
             "--json".to_string(),
             // Older ripgrep builds do not support --max-total-count. Use the
             // widely supported per-file cap and still enforce the global cap
@@ -129,11 +135,12 @@ impl CodeSearchService {
         }
 
         if let Some(ft) = file_type {
-            args.push("--type".to_string());
-            args.push(normalize_ripgrep_file_type(ft));
+            args.push(format!("--type={}", normalize_ripgrep_file_type(ft)));
         }
 
+        args.push("-e".to_string());
         args.push(pattern.to_string());
+        args.push("--".to_string());
         args.push(self.workspace_root.to_string_lossy().to_string());
 
         debug!(
@@ -667,5 +674,41 @@ type UserId = string;
         assert!(result.truncated);
         assert_eq!(result.matches[0].line_number, 1);
         assert!(result.matches[0].line.contains("alpha one"));
+    }
+
+    /// AGE-1286: a pattern that looks like a ripgrep option is searched for as
+    /// text. `--pre=sh` must not run workspace files as shell scripts.
+    #[tokio::test]
+    async fn test_search_code_pattern_is_never_an_option() {
+        if std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join("pwned");
+        fs::write(
+            tmp.path().join("evil.sh"),
+            format!("touch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("notes.md"), "use --pre=sh here\n").unwrap();
+
+        let service = CodeSearchService::new(tmp.path().to_str().unwrap()).unwrap();
+        let result = service
+            .search_code("--pre=sh", false, None, 10)
+            .await
+            .unwrap();
+
+        assert!(!marker.exists(), "ripgrep ran a workspace file as a script");
+        assert_eq!(result.count, 1);
+        assert!(result.matches[0].line.contains("--pre=sh"));
+
+        // A file type that looks like an option is refused, not obeyed.
+        let _ = service.search_code("x", false, Some("--pre=sh"), 10).await;
+        assert!(!marker.exists(), "file_type was read as an option");
     }
 }
