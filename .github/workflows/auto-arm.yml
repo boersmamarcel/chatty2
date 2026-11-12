@@ -17,7 +17,8 @@ name: Auto-arm
 #
 # Closed-system: same-repo head only. The sender must be the repository owner
 # or github-actions[bot], or the branch must be one of the docs bots' `docs/*`
-# branches (they open PRs as the Claude GitHub App).
+# branches (they open PRs as the Claude GitHub App) that changes only
+# CLAUDE.md, AGENTS.md, README.md or docs-site pages (AGE-1261).
 
 on:
   pull_request:
@@ -41,9 +42,26 @@ jobs:
           GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          SENDER: ${{ github.event.sender.login }}
+          ACTOR: ${{ github.actor }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           [ -n "${GH_TOKEN:-}" ] || { echo "::error::AUTO_UPDATE_TOKEN is not set on this repository"; exit 1; }
+
+          # A `docs/*` PR the owner did not open is armed only when it changes
+          # documentation alone (AGE-1261): the docs bots read merged PRs'
+          # text, so they can be steered into a code change, which must then
+          # wait for a human.
+          if [ "$SENDER" != "$OWNER" ] && [ "$ACTOR" != "github-actions[bot]" ]; then
+            files="$(gh pr diff "$PR" --repo "$REPO" --name-only)"
+            outside="$(printf '%s\n' "$files" | grep -Ev '^((.*/)?(CLAUDE|AGENTS|README)\.md|docs-site/src/.*\.md)$' || true)"
+            if [ -z "$files" ] || [ -n "$outside" ]; then
+              echo "::warning::PR #$PR is a docs/* PR that changes files outside the docs allowlist; not arming it. A human reviews and merges it."
+              printf '%s\n' "$outside"
+              exit 0
+            fi
+          fi
 
           armed="$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest.mergeMethod // empty')"
           if [ -n "$armed" ]; then

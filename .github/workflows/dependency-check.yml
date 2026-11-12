@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 1
 
       - name: Run Claude Dependency Triage
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@8a29bc6f0ae11a363721054b6739feba6adabe57 # v1
         env:
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
         with:
