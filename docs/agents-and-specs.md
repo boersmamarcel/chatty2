@@ -342,7 +342,7 @@ when `revision()` moves. After the turn the broker's edge log rows
 (`apply_edge`, or `SwarmTrace::from_edges(rows, events)` in one call) place a
 run under the right one of two same-spec siblings and add the calls a worker
 had refused as `Refused` nodes. A run reports its usage once, with its own
-workers' already folded in (AGE-415), so a node's own spend is what it
+workers' lines included (AGE-415; each still names its agent's path, AGE-665), so a node's own spend is what it
 reported less what its children reported, per model: nobody is billed twice,
 and the nodes sum to what the root's conversation records
 (`swarm_tree_spend_sums`).
@@ -634,9 +634,10 @@ a hosted worker's embedder must too — never a root's), and
 the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
 no usage concept; usage belongs to the ledger). It goes as `lines`, one per model, each
 naming its model and carrying tokens and time but no price (AGE-682). The lines already
-include whatever the child itself delegated (merged only with lines on the same model),
-and the parent's `invoke_agent` folds them into its own conversation as usage lines
-marked `delegated_to`, priced in `finish_turn` at the model each names — so a leader's
+include whatever the child itself delegated, one line per agent below it with `agent` the
+path to it (merged only with lines on the same agent and model, AGE-665), and the
+parent's `invoke_agent` folds them into its own conversation as usage lines marked
+`delegated_to` — the path, with the child's name in front (`"reviewer/local-coder"`) — priced in `finish_turn` at the model each names — so a leader's
 `total_cost` carries the whole tree below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
 second, independent key, `trace` (AGE-467): the worker's compacted tool-call trace —
 one `### <tool> (ok|FAILED|no result)` block per call it made, with the call's input and
@@ -846,7 +847,7 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `agent.model` | Optional. Resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the roster's default. |
 | `agent.preamble` | Optional. The role's standing instructions, appended to the system prompt after the base preamble, before the tool summary. |
 | `agent.max_tokens` | Optional, opt-in, at least 1. The output cap every model call of this agent carries (`max_tokens` on the wire), over the model's own `max_tokens` (AGE-936). Absent with no model `max_tokens` either: no cap is sent, as before; chatty has no default cap (a fixed cap counts a thinking model's reasoning too and cuts ordinary calls short). Fitting a call to a hosted task's budget is the egress's job, which may lower a call's `max_tokens` itself. A call that reaches its cap (`finish_reason: length`) is handled: the first tool-free cut-off turn of a run is retried once with feedback; a second is accepted as the answer with `[Note: this answer was cut off at the output limit and may be incomplete.]` appended, and one with no answer at all ends the run as an empty completion, which no surface retries. |
-| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder`, `reviewer` or `typesetter` — see below. Profiles joined by `+` (`coder+coordinator`), each named once, are their union: how a team's derived single agent (TD-1, `team_scorecard::derive_single`) holds every role's tools. |
+| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder`, `reviewer` or `typesetter` — see below. Profiles joined by `+` (`coder+coordinator`), each named once, are their union, in any order (its name is the parts sorted): how a team's derived single agent (TD-1, `team_scorecard::derive_single`) holds every role's tools. |
 | `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
 | `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
@@ -982,6 +983,7 @@ beside it.
 | `skill` | Optional. The skill the leader is told to follow: its first turn opens with `read_skill <skill> and follow it`, plus the verification command when one is declared, since a `coordinator` leader has no shell and can only delegate the check. `read_skill` serves the `SKILL.md` beside `team.json` ahead of the skill directories. |
 | `max_agent_turns` | Optional. The leader's turn budget for the run, ahead of the leader spec's own; without either a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own spec's. |
 | `handoffs` | Optional. Role → a JSON Schema its handoff must match, as a path relative to the team directory (see *Typed handoffs* below). |
+| `verifier` | Optional. `{ "role": "<roster role>", "verdicts": ["APPROVE", "PASS"] }`: the role whose verdict passes the team's work, and the first words of its answer that do (`verdicts` defaults to `APPROVE` and `PASS`). TD-1's scorecard tags a run `verification_passed_wrong` when that role passed work the runner's check then failed (AGE-1137). A role not in `agents`, or no verdict, fails the load. Absent: every roster role whose tool profile is `reviewer`. |
 
 A `team.json` in the old shape — a `leader` object, agent objects in `agents` — fails to
 load with an error naming the field.

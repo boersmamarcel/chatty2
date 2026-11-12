@@ -92,9 +92,11 @@
 //! `metadata`, which is where ADR-0011's ledger (AGE-307) reads it. It goes
 //! as lines, one per model, each naming its model and carrying tokens and
 //! time but never a price (AGE-682): whoever reads a line prices it. What
-//! this worker's own delegations spent is forwarded with it (AGE-415), and
-//! lines merge only when they share a model, so the root sees one line per
-//! model however deep the tree below it, and its lines carry the whole tree.
+//! this worker's own delegations spent is forwarded with it (AGE-415), each
+//! line still naming the agent below this one that spent it (AGE-665), and
+//! lines merge only when they share both agent and model. So the root sees
+//! one line per agent and model however deep the tree below it, and its
+//! lines carry the whole tree. Nothing is pre-folded into this worker's own.
 //!
 //! # A nested run's events (TB-1, AGE-663)
 //!
@@ -760,7 +762,14 @@ impl TaskMapper {
             // `llm::complete` calls are this task's spend too (PL-U2).
             SessionEvent::TokenUsage(usage) | SessionEvent::PluginUsage(usage) => {
                 if usage.calls.is_empty() {
-                    merge_line(&mut self.usage, usage.clone());
+                    // This worker's own spend names no agent below it.
+                    merge_line(
+                        &mut self.usage,
+                        TokenUsage {
+                            delegated_to: None,
+                            ..usage.clone()
+                        },
+                    );
                 } else {
                     for call in &usage.calls {
                         let mut line = TokenUsage::from_calls(vec![call.clone()]);
@@ -771,7 +780,8 @@ impl TaskMapper {
                 }
                 None
             }
-            // A grandchild's spend is forwarded with this task's.
+            // A grandchild's spend is forwarded with this task's, each line
+            // under the path to the agent that spent it (AGE-665).
             SessionEvent::Delegation(InvokeAgentProgress::Finished { usage, .. })
                 if !usage.is_empty() =>
             {
@@ -980,13 +990,17 @@ fn read_artifacts(paths: &[String]) -> Vec<WireArtifact> {
     artifacts
 }
 
-/// Fold `line` into `lines`: onto the line with the same model when there
-/// is one, as a line of its own otherwise (AGE-682). Which agent spent it is
-/// not kept: a parent is told what was spent on which model.
+/// Fold `line` into `lines`: onto the line with the same agent and model
+/// when there is one, as a line of its own otherwise (AGE-682, AGE-665). A
+/// parent is told what was spent on which model, and by whom below it:
+/// `delegated_to` is the path below this worker (`None`: its own spend,
+/// its plugins' included).
 fn merge_line(lines: &mut Vec<TokenUsage>, line: TokenUsage) {
-    let Some(total) = lines.iter_mut().find(|known| known.model == line.model) else {
+    let Some(total) = lines
+        .iter_mut()
+        .find(|known| known.model == line.model && known.delegated_to == line.delegated_to)
+    else {
         lines.push(TokenUsage {
-            delegated_to: None,
             plugin: None,
             calls: Vec::new(),
             estimated_cost_usd: None,
@@ -1505,6 +1519,65 @@ mod tests {
             "{} vs {expected}",
             cost.usd
         );
+    }
+
+    /// AGE-665: a sub-leader forwards each agent's line below it instead of
+    /// folding them into its own. Lines merge only on the same agent and
+    /// model, so two delegations to the same agent are one line, and the
+    /// sub-leader's own lines name no agent even on a model a worker used.
+    #[test]
+    fn a_sub_leader_forwards_one_line_per_agent() {
+        use chatty_core::services::a2a_client::usage_from_status_metadata;
+
+        // The tester's report, as the coder's `invoke_agent` books it.
+        let mut tester = TaskMapper::new("tester");
+        tester.map(&SessionEvent::TokenUsage(turn_on("t", 40, 4)));
+        let tester: Vec<TokenUsage> = usage_from_status_metadata(Some(&terminal_metadata(&tester)))
+            .into_iter()
+            .map(|line| line.delegated_by("tester"))
+            .collect();
+
+        // The coder asks the tester twice, and spends on the tester's model
+        // itself too.
+        let mut coder = TaskMapper::new("coder");
+        coder.map(&finished(tester.clone()));
+        coder.map(&finished(tester));
+        coder.map(&SessionEvent::TokenUsage(turn_on("c", 30, 3)));
+        coder.map(&SessionEvent::TokenUsage(turn_on("t", 1, 1)));
+        let coder: Vec<TokenUsage> = usage_from_status_metadata(Some(&terminal_metadata(&coder)))
+            .into_iter()
+            .map(|line| line.delegated_by("coder"))
+            .collect();
+
+        // The reviewer asks the coder.
+        let mut reviewer = TaskMapper::new("reviewer");
+        reviewer.map(&finished(coder));
+        reviewer.map(&SessionEvent::TokenUsage(turn_on("r", 20, 2)));
+        let metadata = terminal_metadata(&reviewer);
+        let reported: Vec<(Option<String>, String, u32, u32)> =
+            usage_from_status_metadata(Some(&metadata))
+                .into_iter()
+                .map(|line| {
+                    (
+                        line.delegated_to,
+                        line.model.unwrap().model_id,
+                        line.input_tokens,
+                        line.output_tokens,
+                    )
+                })
+                .collect();
+        assert_eq!(
+            reported,
+            [
+                (Some("coder/tester".into()), "t".into(), 80, 8),
+                (Some("coder".into()), "c".into(), 30, 3),
+                (Some("coder".into()), "t".into(), 1, 1),
+                (None, "r".into(), 20, 2),
+            ]
+        );
+        // The totals are the lines summed: nothing counted twice.
+        assert_eq!(metadata["usage"]["inputTokens"], 80 + 30 + 1 + 20);
+        assert_eq!(metadata["usage"]["outputTokens"], 8 + 3 + 1 + 2);
     }
 
     /// A worker whose own turn reported no usage still passes on what it

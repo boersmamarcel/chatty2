@@ -365,17 +365,28 @@ impl FileSystemService {
 
     /// Write content to a file, creating it if it doesn't exist.
     /// Returns whether the file already existed (was overwritten).
+    ///
+    /// Never follows a symlink at the target (AGE-1113): a symlink or other
+    /// non-regular file there is refused, a new file is created with
+    /// `create_new`, and an existing one is replaced by renaming a fresh
+    /// sibling over it (see [`no_follow_write`]).
+    ///
+    /// [`no_follow_write`]: super::no_follow_write
     pub async fn write_file(&self, path: &str, content: &str) -> Result<bool> {
         let canonical = self.validator.validate_new_path(path).await?;
-        let existed = canonical.exists();
 
-        debug!(path = %canonical.display(), overwrite = existed, "Writing file");
+        debug!(path = %canonical.display(), "Writing file");
 
-        tokio::fs::write(&canonical, content)
-            .await
-            .map_err(|e| anyhow!("Failed to write file '{}': {}", path, e))?;
+        let target = canonical.clone();
+        let bytes = content.as_bytes().to_vec();
+        let existed = tokio::task::spawn_blocking(move || {
+            super::no_follow_write::write_no_follow(&target, &bytes)
+        })
+        .await
+        .map_err(|e| anyhow!("Failed to write file '{}': {}", path, e))?
+        .map_err(|e| anyhow!("Failed to write file '{}': {}", path, e))?;
 
-        info!(path = %canonical.display(), "File written successfully");
+        info!(path = %canonical.display(), overwrite = existed, "File written successfully");
         Ok(existed)
     }
 
@@ -383,29 +394,38 @@ impl FileSystemService {
     /// exist. Returns whether the file already existed. A large file is
     /// written in parts this way, so no one tool call has to carry all of
     /// it (AGE-983).
+    ///
+    /// Never follows a symlink at the target (AGE-1113): a symlink or other
+    /// non-regular file there is refused, and on unix the open uses
+    /// `O_NOFOLLOW` (see [`no_follow_write`]).
+    ///
+    /// [`no_follow_write`]: super::no_follow_write
     pub async fn append_file(&self, path: &str, content: &str) -> Result<bool> {
-        use tokio::io::AsyncWriteExt;
-
         let canonical = self.validator.validate_new_path(path).await?;
-        let existed = canonical.exists();
 
-        debug!(path = %canonical.display(), existed, "Appending to file");
+        debug!(path = %canonical.display(), "Appending to file");
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&canonical)
-            .await
-            .map_err(|e| anyhow!("Failed to open file '{}' for appending: {}", path, e))?;
-        file.write_all(content.as_bytes())
-            .await
-            .map_err(|e| anyhow!("Failed to append to file '{}': {}", path, e))?;
-        file.flush()
-            .await
-            .map_err(|e| anyhow!("Failed to append to file '{}': {}", path, e))?;
+        let target = canonical.clone();
+        let bytes = content.as_bytes().to_vec();
+        let existed = tokio::task::spawn_blocking(move || {
+            super::no_follow_write::append_no_follow(&target, &bytes)
+        })
+        .await
+        .map_err(|e| anyhow!("Failed to append to file '{}': {}", path, e))?
+        .map_err(|e| anyhow!("Failed to append to file '{}': {}", path, e))?;
 
-        info!(path = %canonical.display(), "File appended successfully");
+        info!(path = %canonical.display(), existed, "File appended successfully");
         Ok(existed)
+    }
+
+    /// Whether anything is at `path` (for an approval card's
+    /// `is_overwrite`), without following a symlink there (AGE-1113). A
+    /// path that does not resolve for writing reports `false`.
+    pub async fn write_target_exists(&self, path: &str) -> bool {
+        match self.validator.validate_new_path(path).await {
+            Ok(canonical) => super::no_follow_write::entry_exists(&canonical),
+            Err(_) => false,
+        }
     }
 
     /// Create a directory and all parent directories.
@@ -936,6 +956,33 @@ mod tests {
             .unwrap();
         let result = service.write_file("../../etc/evil.txt", "hack").await;
         assert!(result.is_err());
+    }
+
+    /// AGE-1113: a symlink planted at the target (pointing out of the
+    /// workspace, or dangling) is refused by write and append alike, and
+    /// nothing is written where it points.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_write_and_append_refuse_a_symlink_at_the_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let victim = outside.path().join("victim.txt");
+        fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, tmp.path().join("link.txt")).unwrap();
+        let would_be = outside.path().join("created.txt");
+        std::os::unix::fs::symlink(&would_be, tmp.path().join("dangling.txt")).unwrap();
+
+        let service = FileSystemService::new(tmp.path().to_str().unwrap())
+            .await
+            .unwrap();
+        for path in ["link.txt", "dangling.txt"] {
+            let err = service.write_file(path, "pwned").await.unwrap_err();
+            assert!(err.to_string().contains("not a regular file"), "{err}");
+            let err = service.append_file(path, "pwned").await.unwrap_err();
+            assert!(err.to_string().contains("not a regular file"), "{err}");
+        }
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(!would_be.exists());
     }
 
     #[tokio::test]

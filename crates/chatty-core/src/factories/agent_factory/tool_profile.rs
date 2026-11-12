@@ -275,9 +275,11 @@ pub fn tool_profile(name: &str) -> Option<&'static ToolProfile> {
         .find(|profile| profile.name == name)
 }
 
-/// The union [`tool_profile`] names, built once per name and kept for the
-/// process, since a role holds a `&'static ToolProfile`. Every part must be
-/// a profile, named once, so there are only a few dozen such names.
+/// The union [`tool_profile`] names, built once per set of parts and kept
+/// for the process, since a role holds a `&'static ToolProfile`. Every part
+/// must be a profile, named once, so there are only a few dozen such sets.
+/// Its name is the canonical one, the parts sorted (`coder+coordinator`
+/// for `coordinator+coder` too; AGE-1137).
 fn union_profile(name: &str) -> Option<&'static ToolProfile> {
     static UNIONS: std::sync::LazyLock<parking_lot::Mutex<Vec<&'static ToolProfile>>> =
         std::sync::LazyLock::new(Default::default);
@@ -290,6 +292,12 @@ fn union_profile(name: &str) -> Option<&'static ToolProfile> {
         }
         parts.push(profile);
     }
+    parts.sort_by_key(|profile| profile.name);
+    let name = parts
+        .iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>()
+        .join(&PROFILE_UNION_SEPARATOR.to_string());
     let mut unions = UNIONS.lock();
     if let Some(known) = unions.iter().find(|union| union.name == name) {
         return Some(known);
@@ -299,7 +307,7 @@ fn union_profile(name: &str) -> Option<&'static ToolProfile> {
         .flat_map(|profile| profile.groups.iter().copied())
         .collect();
     let union: &'static ToolProfile = Box::leak(Box::new(ToolProfile {
-        name: Box::leak(name.to_string().into_boxed_str()),
+        name: Box::leak(name.into_boxed_str()),
         groups: Box::leak(groups.into_boxed_slice()),
     }));
     unions.push(union);
@@ -384,6 +392,16 @@ mod tests {
         assert!(
             std::ptr::eq(union, tool_profile("coordinator+reviewer").unwrap()),
             "one profile per name, built once"
+        );
+        let reversed = tool_profile("reviewer+coordinator").expect("the same union");
+        assert!(
+            std::ptr::eq(union, reversed),
+            "the parts' order does not matter (AGE-1137)"
+        );
+        assert_eq!(
+            reversed.name(),
+            "coordinator+reviewer",
+            "the canonical name"
         );
         assert_eq!(tool_profile("coder+nope"), None);
         assert_eq!(tool_profile("coder+coder"), None, "a part named twice");

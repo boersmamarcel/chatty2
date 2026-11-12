@@ -748,7 +748,9 @@ fn invoke(
 ) -> Result<Grant, Refused> {
     let (chain, from_run, node) = match caller {
         Caller::Root | Caller::HostedRoot(_) => {
-            (CallChain::root(snapshot.root_task_id.clone()), None, None)
+            let chain =
+                CallChain::root_as(snapshot.root_task_id.clone(), snapshot.policy.root_spec());
+            (chain, None, None)
         }
         Caller::Node(node) => {
             let run = named_run(node, params.run.as_deref())?;

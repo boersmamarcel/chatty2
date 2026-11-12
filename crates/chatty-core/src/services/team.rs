@@ -165,6 +165,32 @@ pub struct TeamFile {
     /// worker's answer is free text.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub handoffs: BTreeMap<String, String>,
+    /// The roster role whose verdict passes the team's work, and the
+    /// verdicts that do (AGE-1137). TD-1's scorecard tags a run
+    /// `verification_passed_wrong` when it passed work the runner's check
+    /// failed. Absent: see [`Team::verifiers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<TeamVerifier>,
+}
+
+/// `team.json`'s `verifier`: `{ "role": "<roster role>", "verdicts": [...] }`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamVerifier {
+    /// A roster role, by spec name.
+    pub role: String,
+    /// What the first line of its answer opens with when it passes the
+    /// work; [`DEFAULT_VERDICTS`] when absent.
+    #[serde(default = "default_verdicts")]
+    pub verdicts: Vec<String>,
+}
+
+/// A verifier's passing verdicts when its team names none: a reviewer's
+/// `APPROVE`, and the `PASS` of a verification run.
+pub const DEFAULT_VERDICTS: &[&str] = &["APPROVE", "PASS"];
+
+fn default_verdicts() -> Vec<String> {
+    DEFAULT_VERDICTS.iter().map(|v| v.to_string()).collect()
 }
 
 impl TeamFile {
@@ -285,6 +311,23 @@ impl Team {
     /// tag (TD-1's scorecard). `None` for a team without `handoffs`.
     pub fn handoff_ledger(&self) -> Option<handoff::HandoffLedger> {
         (!self.handoffs.is_empty()).then(|| handoff::HandoffLedger::new(self.handoffs.values()))
+    }
+
+    /// Who passes the team's work: the file's `verifier`, else every roster
+    /// role whose tool profile is `reviewer`, with [`DEFAULT_VERDICTS`]. A
+    /// team with neither has no verifier.
+    pub fn verifiers(&self) -> Vec<TeamVerifier> {
+        if let Some(verifier) = &self.file.verifier {
+            return vec![verifier.clone()];
+        }
+        self.agents
+            .iter()
+            .filter(|spec| spec.tools.profile.as_deref() == Some("reviewer"))
+            .map(|spec| TeamVerifier {
+                role: spec.agent.name.clone(),
+                verdicts: default_verdicts(),
+            })
+            .collect()
     }
 
     /// The skill `read_skill` should serve from this team, when the file
@@ -492,6 +535,17 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         .collect::<Result<Vec<_>>>()?;
     let handoffs = load_handoffs(id, &file, &source)
         .with_context(|| format!("team '{id}' names a handoff schema that does not load"))?;
+    if let Some(verifier) = &file.verifier {
+        if !file.agents.contains(&verifier.role) {
+            bail!(
+                "team '{id}': `verifier` names '{}', which is not in `agents`",
+                verifier.role
+            );
+        }
+        if verifier.verdicts.is_empty() || verifier.verdicts.iter().any(|v| v.trim().is_empty()) {
+            bail!("team '{id}': `verifier` has no verdict, or an empty one");
+        }
+    }
     Ok(Team {
         id: id.to_string(),
         source,
@@ -1545,6 +1599,67 @@ mod tests {
         );
         let plain = load_team("plain", Some(workspace.path()), None).unwrap();
         assert!(plain.handoffs.is_empty() && plain.handoff_ledger().is_none());
+    }
+
+    /// AGE-1137: `verifier` names the role whose verdict passes the work
+    /// and the verdicts that do. It must be a roster role with at least one
+    /// verdict. Absent, the verifiers are the roster's `reviewer`-profile
+    /// roles with `APPROVE` and `PASS`, so the frozen analyst swarm's
+    /// reviewer is one (as is its analyst, on the same profile) and
+    /// Crosscheck, whose judge picks rather than passes, has none.
+    #[test]
+    fn a_team_names_its_verifier_or_defaults_to_its_reviewers() {
+        let workspace = tempfile::tempdir().unwrap();
+        let teams = workspace.path().join(WORKSPACE_TEAMS_DIR);
+        let team_json = |verifier: &str| {
+            format!(
+                r#"{{"leader":"crosscheck-lead","agents":["coder","code-reviewer"],"verifier":{verifier}}}"#
+            )
+        };
+        let verifier = |role: &str, verdicts: &[&str]| TeamVerifier {
+            role: role.to_string(),
+            verdicts: verdicts.iter().map(|v| v.to_string()).collect(),
+        };
+
+        for (bad, says) in [
+            (r#"{"role":"nobody"}"#, "not in `agents`"),
+            (r#"{"role":"coder","verdicts":[]}"#, "no verdict"),
+            (r#"{"role":"coder","verdicts":[" "]}"#, "no verdict"),
+        ] {
+            write_team(&teams, "t", &team_json(bad), None);
+            let err = format!(
+                "{:#}",
+                load_team("t", Some(workspace.path()), None).unwrap_err()
+            );
+            assert!(err.contains("verifier"), "{err}");
+            assert!(err.contains(says), "{bad}: {err}");
+        }
+
+        write_team(&teams, "t", &team_json(r#"{"role":"coder"}"#), None);
+        let named = load_team("t", Some(workspace.path()), None).unwrap();
+        assert_eq!(named.verifiers(), [verifier("coder", &["APPROVE", "PASS"])]);
+        write_team(
+            &teams,
+            "t",
+            &team_json(r#"{"role":"code-reviewer","verdicts":["LGTM"]}"#),
+            None,
+        );
+        let custom = load_team("t", Some(workspace.path()), None).unwrap();
+        assert_eq!(custom.verifiers(), [verifier("code-reviewer", &["LGTM"])]);
+
+        let analysts = load_team("analyst-swarm", None, None).unwrap();
+        assert_eq!(analysts.file.verifier, None, "the frozen file names none");
+        // Its Benford analyst runs on the reviewer profile too; its answer
+        // opens with a risk level, never a passing verdict.
+        assert_eq!(
+            analysts.verifiers(),
+            [
+                verifier("analyst-swarm-benford-analyst", &["APPROVE", "PASS"]),
+                verifier("analyst-swarm-reviewer", &["APPROVE", "PASS"]),
+            ]
+        );
+        let crosscheck = load_team("crosscheck", None, None).unwrap();
+        assert!(crosscheck.verifiers().is_empty());
     }
 
     #[test]

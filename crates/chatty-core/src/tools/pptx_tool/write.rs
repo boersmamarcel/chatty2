@@ -271,7 +271,8 @@ impl Tool for WritePptxTool {
                 mode,
                 WriteOperation::WriteFile {
                     path: canonical.display().to_string(),
-                    is_overwrite: canonical.exists(),
+                    // `symlink_metadata`: a link is not shown as its target (AGE-1113).
+                    is_overwrite: crate::services::no_follow_write::entry_exists(&canonical),
                     content_preview: format!("PowerPoint deck with {} slide(s)", args.slides.len()),
                 },
             )
@@ -288,8 +289,9 @@ impl Tool for WritePptxTool {
         let (pptx_bytes, shapes_written) = build_presentation(&args.slides)?;
         let bytes_written = pptx_bytes.len();
 
-        fs::write(&canonical, &pptx_bytes)
-            .with_context(|| format!("Failed to write '{}'", canonical.display()))?;
+        // Never through a symlink at the target (AGE-1113).
+        crate::services::no_follow_write::write_no_follow(&canonical, &pptx_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to write '{}': {e}", canonical.display()))?;
 
         Ok(WritePptxOutput {
             path: canonical.display().to_string(),

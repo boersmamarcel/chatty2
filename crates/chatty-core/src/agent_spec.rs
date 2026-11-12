@@ -51,7 +51,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::factories::agent_factory::{tool_profile, tool_profile_names};
+use crate::factories::agent_factory::{PROFILE_UNION_SEPARATOR, tool_profile, tool_profile_names};
 use crate::services::turn_budget::parse_duration;
 use crate::settings::models::execution_settings::{
     TOOL_GROUPS, VALID_TOOL_GROUPS, canonical_tool_group,
@@ -526,11 +526,23 @@ impl std::fmt::Display for SpecError {
                 f,
                 "agent.name '{name}' is reserved: only the broker's root goes by it"
             ),
-            Self::UnknownProfile(profile) => write!(
-                f,
-                "tools.profile '{profile}' is not a tool profile (valid: {})",
-                tool_profile_names().join(", ")
-            ),
+            Self::UnknownProfile(profile) => {
+                let valid = tool_profile_names().join(", ");
+                match bad_union_part(profile) {
+                    Some(why) => write!(
+                        f,
+                        "tools.profile '{profile}' is not a tool profile: in a \
+                         '{PROFILE_UNION_SEPARATOR}' union each part must be a tool profile, \
+                         named once, and {why} (valid: {valid})"
+                    ),
+                    None => write!(
+                        f,
+                        "tools.profile '{profile}' is not a tool profile (valid: {valid}, or \
+                         several joined by '{PROFILE_UNION_SEPARATOR}' for their union, such as \
+                         'coder{PROFILE_UNION_SEPARATOR}reviewer')"
+                    ),
+                }
+            }
             Self::UnknownToolGroup(group) => write!(
                 f,
                 "tools.disable names '{group}', which is not a tool group (valid: {VALID_TOOL_GROUPS})"
@@ -547,6 +559,29 @@ impl std::fmt::Display for SpecError {
             Self::BadBestOf(why) => write!(f, "swarm.best_of: {why}"),
         }
     }
+}
+
+/// What is wrong with a `+` union of profiles (AGE-1137): its first part
+/// that is empty, not a profile, or named twice. `None` for a name that is
+/// not a union.
+fn bad_union_part(profile: &str) -> Option<String> {
+    if !profile.contains(PROFILE_UNION_SEPARATOR) {
+        return None;
+    }
+    let mut seen = Vec::new();
+    for part in profile.split(PROFILE_UNION_SEPARATOR) {
+        if part.is_empty() {
+            return Some("it has an empty part".to_string());
+        }
+        if tool_profile(part).is_none() {
+            return Some(format!("'{part}' is not one"));
+        }
+        if seen.contains(&part) {
+            return Some(format!("'{part}' is named twice"));
+        }
+        seen.push(part);
+    }
+    None
 }
 
 /// Every problem with a spec, reported together.
@@ -1368,6 +1403,28 @@ cap_usd = 2.0
         ] {
             assert!(text.contains(field), "{field} missing from: {text}");
         }
+    }
+
+    /// AGE-1137: an unknown profile's error teaches the `+` union form, and
+    /// for a union names the part that is wrong.
+    #[test]
+    fn an_unknown_profile_error_names_the_bad_union_part() {
+        let message = |profile: &str| SpecError::UnknownProfile(profile.to_string()).to_string();
+
+        let plain = message("wizard");
+        assert!(plain.contains("'wizard'"), "{plain}");
+        assert!(plain.contains("joined by '+'"), "{plain}");
+
+        let union = message("coder+nope");
+        assert!(union.contains("'coder+nope'"), "{union}");
+        assert!(union.contains("'nope' is not one"), "{union}");
+        assert!(union.contains("'+'"), "{union}");
+        assert!(!union.contains("'coder' is"), "{union}");
+
+        let twice = message("coder+coder");
+        assert!(twice.contains("'coder' is named twice"), "{twice}");
+        let empty = message("coder+");
+        assert!(empty.contains("an empty part"), "{empty}");
     }
 
     #[test]

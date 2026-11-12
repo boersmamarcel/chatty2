@@ -109,6 +109,9 @@ impl GoldenRun {
     /// build's `serde_json` happens to preserve insertion order (it does
     /// under some feature combinations and not others — a plain struct
     /// field's declared order either way, never a property of the data).
+    /// A tool call's `input`/`output` strings that hold a JSON object or
+    /// array are canonicalized the same way (AGE-1139); other strings are
+    /// left as they are.
     pub fn masked(mut self, workspace: &Path) -> Self {
         let workspace = workspace.to_string_lossy().into_owned();
         if let Some(trace) = &mut self.trace {
@@ -136,6 +139,13 @@ fn mask_value(value: &mut serde_json::Value, workspace: &str) {
             for v in map.values_mut() {
                 mask_value(v, workspace);
             }
+            if map.contains_key("tool_name") {
+                for key in ["input", "output"] {
+                    if let Some(serde_json::Value::String(text)) = map.get_mut(key) {
+                        canonical_json_string(text);
+                    }
+                }
+            }
         }
         serde_json::Value::Array(items) => {
             for item in items {
@@ -146,6 +156,17 @@ fn mask_value(value: &mut serde_json::Value, workspace: &str) {
             *text = text.replace(workspace, "<workspace>");
         }
         _ => {}
+    }
+}
+
+/// Re-serialize `text` with sorted keys when it is a JSON object or array,
+/// the form a tool call's pre-serialized `input`/`output` takes; any other
+/// string (plain text, a bare scalar, malformed JSON) is left as it is.
+fn canonical_json_string(text: &mut String) {
+    if let Ok(parsed @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
+        serde_json::from_str::<serde_json::Value>(text)
+    {
+        *text = canonical(parsed).to_string();
     }
 }
 
@@ -302,6 +323,28 @@ mod tests {
             "the golden's script always runs one tool call"
         );
         assert_golden(&actual);
+    }
+
+    /// A tool call's pre-serialized JSON `input`/`output` strings get their
+    /// keys sorted too (their order otherwise follows the build's
+    /// `serde_json` features); a string that is not JSON stays as it is.
+    #[test]
+    fn spec_golden_mask_sorts_json_strings() {
+        let run = GoldenRun {
+            answer: String::new(),
+            trace: Some(serde_json::json!({
+                "tool_name": "t",
+                "input": "{\"b\":1,\"a\":{\"d\":[{\"z\":1,\"y\":2}],\"c\":2}}",
+                "output": "plain text, not {\"json\"",
+            })),
+        }
+        .masked(Path::new("/ws"));
+        let trace = run.trace.unwrap();
+        assert_eq!(
+            trace["input"],
+            "{\"a\":{\"c\":2,\"d\":[{\"y\":2,\"z\":1}]},\"b\":1}"
+        );
+        assert_eq!(trace["output"], "plain text, not {\"json\"");
     }
 
     /// Two runs in different temp dirs give byte-identical masked traces:

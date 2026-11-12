@@ -25,6 +25,12 @@ impl Watching {
         }
     }
 
+    /// The root runs as `root`.
+    fn rooted(mut self, root: AgentSpec) -> Self {
+        self.inner = self.inner.with_root(Some(root));
+        self
+    }
+
     fn consulted(&self) -> Vec<String> {
         self.consulted.lock().unwrap().clone()
     }
@@ -45,6 +51,10 @@ impl CallPolicy for Watching {
             .unwrap()
             .push(format!("root -> {callee}"));
         self.inner.root_may_call(callee)
+    }
+
+    fn root_spec(&self) -> Option<&str> {
+        self.inner.root_spec()
     }
 
     fn budget(&self, callee: &str) -> Remaining {
@@ -623,4 +633,57 @@ fn mid_run_message_rows() {
         policy.consulted().is_empty(),
         "no spec rule decides a message"
     );
+}
+
+/// AGE-1138: a root that runs as spec `lead` has `lead` on its chain, so a
+/// member allowed to call `lead` is refused as a cycle, not given a second
+/// leader. A plain root has no such spec and the call is granted.
+#[test]
+fn the_roots_own_spec_is_a_cycle_for_a_member() {
+    let member = |root_spec: Option<&str>| {
+        Caller::Node(NodeCaller {
+            name: "a-0".to_string(),
+            spec: "a".to_string(),
+            runs: vec![OpenRun {
+                name: "task-1".to_string(),
+                id: run_id(7),
+                chain: CallChain::root_as("t-node", root_spec).extend("a").unwrap(),
+            }],
+        })
+    };
+    let params = invoke("lead", Some("task-1"));
+
+    let policy = Watching::new([delegating("a")]).rooted(delegating("lead"));
+    let decision = decide(
+        &member(Some("lead")),
+        &Request::Invoke(&params),
+        &reaching(&policy, "lead"),
+    );
+    assert_eq!(
+        decision.outcome,
+        Err(Refused::Delegation(Refusal::Cycle {
+            chain: vec!["root".to_string(), "a".to_string()],
+            callee: "lead".to_string(),
+        }))
+    );
+
+    // The root itself asks for its own spec: the same refusal.
+    let decision = decide(
+        &Caller::Root,
+        &Request::Invoke(&invoke("lead", None)),
+        &reaching(&policy, "lead"),
+    );
+    assert!(matches!(
+        decision.outcome,
+        Err(Refused::Delegation(Refusal::Cycle { .. }))
+    ));
+
+    // A plain root: nothing is on the chain but the root and the member.
+    let plain = Watching::new([delegating("a"), delegating("lead")]);
+    let decision = decide(
+        &member(None),
+        &Request::Invoke(&params),
+        &reaching(&plain, "lead"),
+    );
+    assert!(matches!(decision.outcome, Ok(Grant::Invoke { .. })));
 }

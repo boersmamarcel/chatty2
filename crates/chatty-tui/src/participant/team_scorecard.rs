@@ -10,12 +10,13 @@
 //! `UPDATE_GOLDENS=1` rewrites the derived specs' goldens.
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use chatty_core::models::token_usage::{ModelRef, PriceBook, TokenPricing, TokenUsage, price};
 use chatty_core::services::handoff::{HandoffContract, HandoffLedger};
 use chatty_core::services::swarm_trace::SwarmTrace;
-use chatty_core::services::team::load_team;
+use chatty_core::services::team::{TeamVerifier, load_team};
 use chatty_core::services::team_scorecard::{
     Arm, HANDOFF_MISREAD, NEVER_DELEGATED, RunRecord, ScorecardRow, VERIFICATION_PASSED_WRONG,
     WRONG_ROLE_CALLED, derive_single,
@@ -37,16 +38,24 @@ const REVIEWER_MODEL: &str = "kit/reviewer";
 const SCOUT: &str = "kit-scout";
 const SCOUT_MODEL: &str = "kit/scout";
 
-/// The kit team's skill: it names the coder and the reviewer, not the scout.
-const PLAYBOOK: &str = "1. Delegate the change to kit-coder.\n\
-                        2. Have kit-reviewer check it; its first line is APPROVE or \
-                        REQUEST_CHANGES.";
+/// The kit team's leader delegates to the coder and the reviewer, not the
+/// scout.
+static KIT_DELEGATES_TO: LazyLock<Vec<String>> =
+    LazyLock::new(|| vec![CODER.to_string(), REVIEWER.to_string()]);
 
-const KIT_TEAM: Arm<'static> = Arm::Team {
-    id: "kit-team",
-    leader: LEADER,
-    playbook: Some(PLAYBOOK),
-};
+/// The kit team: its leader calls the coder and the reviewer, and the
+/// reviewer is its verifier, passing work with `APPROVE` or `PASS`.
+fn kit_team() -> Arm<'static> {
+    Arm::Team {
+        id: "kit-team",
+        leader: LEADER,
+        delegates_to: &KIT_DELEGATES_TO,
+        verifiers: vec![TeamVerifier {
+            role: REVIEWER.to_string(),
+            verdicts: vec!["APPROVE".to_string(), "PASS".to_string()],
+        }],
+    }
+}
 
 fn golden_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -240,7 +249,7 @@ async fn scorecard_cost_matches_bill() {
     let kit = coder_reviewer_kit("APPROVE").await;
     let played = play(&kit, None, &CALLS).await;
     let book = price_book(&kit);
-    let row = row(KIT_TEAM, &played, None, true);
+    let row = row(kit_team(), &played, None, true);
 
     let bill = price(&played.bill, &book);
     let cost = row.priced(&book);
@@ -303,7 +312,7 @@ async fn failure_tags_are_grounded() {
     let kit = coder_reviewer_kit("APPROVE").await;
     let alone = play(&kit, None, &[]).await;
     assert_eq!(
-        row(KIT_TEAM, &alone, None, false).failure_tags,
+        row(kit_team(), &alone, None, false).failure_tags,
         [NEVER_DELEGATED]
     );
     let single = Arm::Single {
@@ -320,14 +329,48 @@ async fn failure_tags_are_grounded() {
     // verification_passed_wrong: the reviewer approves, the check fails.
     let approved = play(&kit, None, &CALLS).await;
     assert_eq!(
-        row(KIT_TEAM, &approved, None, false).failure_tags,
+        row(kit_team(), &approved, None, false).failure_tags,
         [VERIFICATION_PASSED_WRONG]
     );
-    assert!(row(KIT_TEAM, &approved, None, true).failure_tags.is_empty());
+    assert!(
+        row(kit_team(), &approved, None, true)
+            .failure_tags
+            .is_empty()
+    );
     drop(kit);
 
-    // wrong_role_called: the leader asks the scout, whom its skill never
-    // names.
+    // AGE-1137: only the verifier's verdict counts. A coder that opens with
+    // APPROVE is no verification, and neither is a team with no verifier.
+    let kit = coder_reviewer_kit("APPROVE").await;
+    let unverified = play(&kit, None, &CALLS).await;
+    let no_verifier = Arm::Team {
+        id: "kit-team",
+        leader: LEADER,
+        delegates_to: &KIT_DELEGATES_TO,
+        verifiers: Vec::new(),
+    };
+    assert!(
+        row(no_verifier, &unverified, None, false)
+            .failure_tags
+            .is_empty()
+    );
+    drop(kit);
+    let kit = SwarmKit::start(
+        vec![AgentDef::new(CODER, CODER_MODEL, Endpoint::Sse)],
+        Script::new().route(CODER_MODEL, [Reply::text("APPROVE: my change is right.")]),
+        Script::new(),
+    )
+    .await;
+    let self_approved = play(&kit, None, &[(CODER, "change the readme")]).await;
+    assert!(
+        row(kit_team(), &self_approved, None, false)
+            .failure_tags
+            .is_empty()
+    );
+    drop(kit);
+
+    // wrong_role_called: the leader asks the scout, whom its delegates_to
+    // does not list.
     let kit = SwarmKit::start(
         vec![
             AgentDef::new(CODER, CODER_MODEL, Endpoint::Sse),
@@ -339,8 +382,22 @@ async fn failure_tags_are_grounded() {
     .await;
     let scouted = play(&kit, None, &[(SCOUT, "look around")]).await;
     assert_eq!(
-        row(KIT_TEAM, &scouted, None, false).failure_tags,
+        row(kit_team(), &scouted, None, false).failure_tags,
         [WRONG_ROLE_CALLED]
+    );
+    // AGE-1137: a leader whose delegates_to lists the scout, by glob, called
+    // the right role.
+    let globbed = ["kit-*".to_string()];
+    let scout_team = Arm::Team {
+        id: "kit-team",
+        leader: LEADER,
+        delegates_to: &globbed,
+        verifiers: Vec::new(),
+    };
+    assert!(
+        row(scout_team, &scouted, None, false)
+            .failure_tags
+            .is_empty()
     );
     drop(kit);
 
@@ -370,7 +427,7 @@ async fn failure_tags_are_grounded() {
     .await;
     let ledger = HandoffLedger::new([&coder_contract, &reviewer_contract]);
     let misread = play(&kit, Some(&ledger), &CALLS).await;
-    let misread_row = row(KIT_TEAM, &misread, Some(&ledger), false);
+    let misread_row = row(kit_team(), &misread, Some(&ledger), false);
     assert_eq!(misread_row.failure_tags, [HANDOFF_MISREAD]);
     assert!(misread_row.handoff_invalid_by_role.is_empty());
 }

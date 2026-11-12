@@ -148,11 +148,11 @@ fn skill_dirs_in(dir: &Path) -> impl Iterator<Item = PathBuf> + '_ {
         .map(move |root| dir.join(root).join("skills"))
 }
 
-/// Global skill directories, in precedence order: `~/.agents/skills/`, then
-/// `~/.claude/skills/`. The same paths on every platform.
-pub fn global_skill_dirs() -> Vec<PathBuf> {
-    dirs::home_dir()
-        .map(|home| skill_dirs_in(&home).collect())
+/// Global skill directories under `home`, in precedence order:
+/// `~/.agents/skills/`, then `~/.claude/skills/`. The same paths on every
+/// platform; none without a home (AGE-590).
+pub fn global_skill_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    home.map(|home| skill_dirs_in(home).collect())
         .unwrap_or_default()
 }
 
@@ -259,8 +259,14 @@ impl SkillService {
     ///
     /// `embedding_service` is optional; pass `None` to use keyword-only scoring.
     pub fn new(embedding_service: Option<EmbeddingService>) -> Self {
+        Self::with_home(dirs::home_dir().as_deref(), embedding_service)
+    }
+
+    /// A `SkillService` whose global skills are those under `home`, or none
+    /// when `home` is `None` (AGE-590).
+    pub fn with_home(home: Option<&Path>, embedding_service: Option<EmbeddingService>) -> Self {
         Self {
-            global_skill_dirs: global_skill_dirs(),
+            global_skill_dirs: global_skill_dirs(home),
             embedding_service,
         }
     }
@@ -706,6 +712,36 @@ mod tests {
             ]
         );
         assert_eq!(skills[0].1, "From .agents.");
+    }
+
+    /// AGE-590: without a home there are no global skill directories, so a
+    /// host that passes none (a multi-tenant server) offers only the
+    /// workspace's skills; with one, its `.agents` and `.claude` dirs.
+    #[test]
+    fn no_home_means_no_global_skill_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        write_skill(&home.path().join(".agents/skills"), "x", "Global.");
+
+        assert!(global_skill_dirs(None).is_empty());
+        let without = SkillService::with_home(None, None);
+        assert!(without.skill_dirs(None).is_empty());
+        assert!(without.list_all_skills_sync(None).is_empty());
+
+        let with = SkillService::with_home(Some(home.path()), None);
+        assert_eq!(
+            with.skill_dirs(None),
+            [
+                (
+                    home.path().join(".agents/skills"),
+                    MemoryHitSource::GlobalSkillFile
+                ),
+                (
+                    home.path().join(".claude/skills"),
+                    MemoryHitSource::GlobalSkillFile
+                ),
+            ]
+        );
+        assert_eq!(with.list_all_skills_sync(None)[0].0, "x");
     }
 
     /// A workspace in a subfolder of a repository still sees the skills at

@@ -10,7 +10,7 @@
           "execution_engine": null,
           "id": "<call-id>",
           "input": "{\"path\":\".\"}",
-          "output": "{\"entries\":[{\"name\":\"README.md\",\"entry_type\":\"file\",\"size\":9}],\"path\":\".\",\"count\":1}",
+          "output": "{\"count\":1,\"entries\":[{\"entry_type\":\"file\",\"name\":\"README.md\",\"size\":9}],\"path\":\".\"}",
           "output_preview": null,
           "source": "Local",
           "state": "Success",

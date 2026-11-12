@@ -106,6 +106,11 @@ pub struct CallChain {
     pub chain: Vec<String>,
     /// `chain.len() - 1`: the root is depth 0, its callee depth 1.
     pub depth: u8,
+    /// The spec the root itself runs as (`--agent S`, a hosted root with a
+    /// spec), if any. Not part of `chain`, so `depth` and [`MAX_DEPTH`] are
+    /// unchanged, but [`extend`](Self::extend) refuses it as a cycle (AGE-1138).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_spec: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<SystemTime>,
     #[serde(default)]
@@ -115,10 +120,18 @@ pub struct CallChain {
 impl CallChain {
     /// The root's own chain, at depth 0.
     pub fn root(root_task_id: impl Into<String>) -> Self {
+        Self::root_as(root_task_id, None)
+    }
+
+    /// The root's own chain when it runs as spec `root_spec` (`None` is a
+    /// plain root, as [`root`](Self::root)): that spec may not be called
+    /// again under it.
+    pub fn root_as(root_task_id: impl Into<String>, root_spec: Option<&str>) -> Self {
         Self {
             root_task_id: root_task_id.into(),
             chain: vec![ROOT_NAME.to_string()],
             depth: 0,
+            root_spec: root_spec.map(str::to_string),
             deadline: None,
             remaining: Remaining::default(),
         }
@@ -129,7 +142,8 @@ impl CallChain {
     /// call would be deeper than [`MAX_DEPTH`]. The cycle is checked first,
     /// so a loop reads as a loop whatever its depth.
     pub fn extend(&self, callee: &str) -> Result<CallChain, Refusal> {
-        if self.chain.iter().any(|name| name == callee) {
+        if self.chain.iter().any(|name| name == callee) || self.root_spec.as_deref() == Some(callee)
+        {
             return Err(Refusal::Cycle {
                 chain: self.chain.clone(),
                 callee: callee.to_string(),
@@ -148,6 +162,7 @@ impl CallChain {
             root_task_id: self.root_task_id.clone(),
             chain,
             depth,
+            root_spec: self.root_spec.clone(),
             deadline: self.deadline,
             remaining: self.remaining.clone(),
         })
@@ -232,6 +247,12 @@ pub trait CallPolicy: Send + Sync {
     /// delegate at all, may call anyone (AGE-745).
     fn root_may_call(&self, callee: &str) -> Result<(), Refusal>;
 
+    /// The spec the broker's root runs as, if any: it joins the root's call
+    /// chain so a member calling it back is refused as a cycle (AGE-1138).
+    fn root_spec(&self) -> Option<&str> {
+        None
+    }
+
     /// Spec `callee`'s own budget (DP-3): its `max_agent_turns`,
     /// `max_duration` in seconds and `cap_usd`. Unlimited by default.
     fn budget(&self, _callee: &str) -> Remaining {
@@ -242,6 +263,30 @@ pub trait CallPolicy: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_roots_own_spec_is_a_cycle_but_not_a_hop() {
+        let chain = CallChain::root_as("t", Some("lead")).extend("a").unwrap();
+        assert_eq!(chain.chain, ["root", "a"]);
+        assert_eq!(chain.depth, 1);
+        assert_eq!(
+            chain.extend("lead"),
+            Err(Refusal::Cycle {
+                chain: vec!["root".into(), "a".into()],
+                callee: "lead".into()
+            })
+        );
+        // The field survives the wire; a plain root omits it.
+        let back: CallChain =
+            serde_json::from_str(&serde_json::to_string(&chain).unwrap()).unwrap();
+        assert_eq!(back, chain);
+        assert!(
+            !serde_json::to_string(&CallChain::root("t"))
+                .unwrap()
+                .contains("root_spec")
+        );
+        assert!(CallChain::root("t").extend("lead").is_ok());
+    }
 
     #[test]
     fn a_chain_grows_by_one_spec_per_call_to_max_depth() {

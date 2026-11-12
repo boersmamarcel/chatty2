@@ -376,25 +376,22 @@ async fn analyst_swarm_smoke() {
     assert!(wall < WALL_TIME, "{wall:?}");
 }
 
-/// The root's name in the cycle variant: a test-only spec that may call the
-/// preset's coordinator. The call chain starts at `root` (the broker's name
-/// for the session, whatever spec it runs as), so a cycle back to the
-/// coordinator needs the coordinator to be a node on the chain first.
-const CYCLE_ROOT: &str = "analyst-swarm-cycle-root";
 const COORDINATOR: &str = "analyst-swarm-coordinator";
-/// The coordinator as a node, below the cycle variant's root.
+/// The coordinator as a node: spawnable on the roster, so the guard (not a
+/// missing callee) is what refuses the reviewer. Scripted to answer at once,
+/// so a broken guard fails the test's assertions instead of timing out.
 const COORDINATOR_NODE_MODEL: &str = "kit/analyst-coordinator-node";
 
-/// EV-2 (AGE-669): the `analyst-swarm` preset with one change, built here
-/// and nowhere else: the reviewer's `delegates_to` is the coordinator, and
-/// the coordinator is a node (`root → coordinator → reviewer`). The
-/// scripted reviewer calls it. The broker checks, in this order: the callee
-/// exists, the specs allow the call (`delegation_policy::may_call`:
-/// reviewer lists the coordinator, the coordinator is exposed and sets no
-/// `callers`, so this passes), then the chain (`CallChain::extend`: the
-/// coordinator is already on it, so `cycle`). The refusal comes from the
-/// cycle guard, before anything is spawned; the run still completes with
-/// the audit's verdict.
+/// EV-2 (AGE-669, AGE-1138): the `analyst-swarm` preset with one change,
+/// built here and nowhere else: the reviewer's `delegates_to` is the
+/// coordinator. The root itself runs as the coordinator (`root → reviewer`),
+/// and the coordinator is also spawnable on the roster. The scripted
+/// reviewer calls it. The broker checks, in this order: the callee exists,
+/// the specs allow the call (`delegation_policy::may_call`: reviewer lists
+/// the coordinator, the coordinator is exposed and sets no `callers`, so
+/// this passes), then the chain (`CallChain::extend`: the root's own spec is
+/// on it, so `cycle`). The refusal comes from the cycle guard, before
+/// anything is spawned; the run still completes with the audit's verdict.
 #[tokio::test]
 async fn analyst_swarm_cycle_guard() {
     let started = Instant::now();
@@ -422,9 +419,8 @@ async fn analyst_swarm_cycle_guard() {
         coordinator.swarm.exposed && coordinator.swarm.callers.is_none(),
         "the policy must let the reviewer's call through, so the cycle guard is what refuses it"
     );
-    let mut cycle_root = coordinator.clone();
-    cycle_root.agent.name = CYCLE_ROOT.to_string();
-    cycle_root.swarm.delegates_to = vec![COORDINATOR.to_string()];
+    let root = coordinator.clone();
+    let members = team.agent_names();
 
     let roster = vec![
         AgentDef::from_spec(coordinator, COORDINATOR_NODE_MODEL, Endpoint::Sse),
@@ -451,13 +447,6 @@ async fn analyst_swarm_cycle_guard() {
         .route(
             COORDINATOR_MODEL,
             [
-                call(COORDINATOR, TASK.to_string()),
-                Reply::text(format!("Coordinator's report: {verdict}")),
-            ],
-        )
-        .route(
-            COORDINATOR_NODE_MODEL,
-            [
                 Reply::tool_call("list_agents", json!({})),
                 call(DATA_CODER, "Clean the amount column of ledger.csv.".into()),
                 call(BENFORD, format!("Audit these amounts: {}", json!(amounts))),
@@ -469,6 +458,10 @@ async fn analyst_swarm_cycle_guard() {
                     "{verdict} Reviewer: APPROVE. Dropped INV-1012 and INV-1033 (n/a)."
                 )),
             ],
+        )
+        .route(
+            COORDINATOR_NODE_MODEL,
+            [Reply::text("A second coordinator ran.")],
         )
         .route(
             BENFORD_MODEL,
@@ -503,11 +496,10 @@ async fn analyst_swarm_cycle_guard() {
             ],
         );
     let kit =
-        SwarmKit::start_led_with_modules(cycle_root.clone(), module_dir(), 2, roster, sse, ndjson)
-            .await;
+        SwarmKit::start_led_with_modules(root.clone(), module_dir(), 2, roster, sse, ndjson).await;
     std::fs::write(kit.workspace().join("ledger.csv"), LEDGER).expect("the ledger is staged");
 
-    let mut session = coordinator_session(&kit, &cycle_root, &[COORDINATOR.to_string()]).await;
+    let mut session = coordinator_session(&kit, &root, &members).await;
     let events: Rc<RefCell<Vec<SessionEvent>>> = Rc::default();
     let sink = events.clone();
     let turn = session
@@ -527,7 +519,7 @@ async fn analyst_swarm_cycle_guard() {
 
     // The reviewer's call is refused with `cycle`, the chain named, and its
     // model reads the refusal as the tool result.
-    let chain = "root \u{2192} analyst-swarm-coordinator \u{2192} analyst-swarm-reviewer \u{2192} analyst-swarm-coordinator";
+    let chain = "root \u{2192} analyst-swarm-reviewer \u{2192} analyst-swarm-coordinator";
     let reviewer_requests = kit.ndjson.requests_for(REVIEWER_MODEL);
     assert_eq!(reviewer_requests.len(), 2, "the call, then the answer");
     assert!(
@@ -539,21 +531,19 @@ async fn analyst_swarm_cycle_guard() {
         reviewer_requests[1].json()
     );
 
-    // Nothing was spawned for it: one coordinator node and one of each
-    // member were admitted, and the coordinator's model was asked only by
-    // that one node (list, three calls, the answer).
+    // Nothing was spawned for it: one of each member was admitted and no
+    // second coordinator, whose model was never asked.
     let mut admitted = kit.participants().admitted();
     admitted.sort();
     assert_eq!(
         admitted,
         [
             format!("{BENFORD}-0"),
-            format!("{COORDINATOR}-0"),
             format!("{DATA_CODER}-0"),
             format!("{REVIEWER}-0"),
         ]
     );
-    assert_eq!(kit.sse.requests_for(COORDINATOR_NODE_MODEL).len(), 5);
+    assert_eq!(kit.sse.requests_for(COORDINATOR_NODE_MODEL).len(), 0);
 
     // The edge log has the refusal row, and it is the only refusal.
     let refusals: Vec<&EdgeRow> = edges
@@ -568,7 +558,7 @@ async fn analyst_swarm_cycle_guard() {
     assert_eq!(refusal.outcome, format!("cycle: {chain}"));
 
     // The run completes with the right verdict: the plugin's own, on the
-    // fixture's numbers, reaching the root through the coordinator.
+    // fixture's numbers, reaching the root, which runs as the coordinator.
     let benford = kit.sse.requests_for(BENFORD_MODEL);
     assert_eq!(benford.len(), 3, "two tool calls, then the verdict");
     let results = tool_results(&benford[2]);
@@ -584,7 +574,7 @@ async fn analyst_swarm_cycle_guard() {
     ] {
         assert_eq!(chi_square[field], expected[field], "{field}: {chi_square}");
     }
-    for member in [COORDINATOR, DATA_CODER, BENFORD, REVIEWER] {
+    for member in [DATA_CODER, BENFORD, REVIEWER] {
         assert!(
             edges.iter().any(|row| row.kind == EdgeKind::Task
                 && row.to == format!("{member}-0")
@@ -595,8 +585,8 @@ async fn analyst_swarm_cycle_guard() {
     let calls = root_tool_calls(&events);
     let (_, _, report) = calls
         .iter()
-        .find(|(name, _, _)| name == "invoke_agent")
-        .expect("the root called the coordinator");
+        .find(|(name, args, _)| name == "invoke_agent" && args["agent"] == BENFORD)
+        .expect("the root called the analyst");
     assert!(report.contains(&verdict), "{report}");
     let said: String = events
         .iter()
