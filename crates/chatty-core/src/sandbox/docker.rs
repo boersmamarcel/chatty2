@@ -118,10 +118,23 @@ impl DockerSandbox {
 
         let container_name = format!("chatty-sandbox-{}", Uuid::new_v4());
 
-        let binds = config
-            .workspace_path
-            .as_ref()
-            .map(|p| vec![format!("{}:/workspace", p)]);
+        let binds = config.workspace_path.as_ref().map(|p| {
+            let mut binds = vec![format!("{}:/workspace", p)];
+            // A plain repository's git config and hooks are host code:
+            // read-only inside the container (AGE-1288).
+            for path in
+                crate::services::shell_service::plain_repo_host_code(std::path::Path::new(p))
+            {
+                if let Ok(rel) = path.strip_prefix(p) {
+                    binds.push(format!(
+                        "{}:/workspace/{}:ro",
+                        path.display(),
+                        rel.display()
+                    ));
+                }
+            }
+            binds
+        });
 
         let (working_dir, home) = if config.workspace_path.is_some() {
             ("/workspace".to_string(), "/tmp".to_string())

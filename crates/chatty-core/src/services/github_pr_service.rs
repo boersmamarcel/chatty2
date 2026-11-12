@@ -197,6 +197,7 @@ async fn is_git_repository(workspace_root: &Path) -> bool {
 /// Run a read-only git command in the workspace, returning trimmed stdout.
 async fn run_git(workspace_root: &Path, args: &[&str]) -> Option<String> {
     let output = tokio::process::Command::new("git")
+        .args(crate::services::git_service::HOST_GIT_HARDENING)
         .args(args)
         .current_dir(workspace_root)
         .output()

@@ -474,6 +474,7 @@ fn result_text(content: &[ToolResultContent]) -> String {
 /// (or git is missing, or slow).
 pub async fn git_status_short(dir: &PathBuf) -> Option<String> {
     let run = tokio::process::Command::new("git")
+        .args(crate::services::git_service::HOST_GIT_HARDENING)
         .arg("-C")
         .arg(dir)
         .args(["status", "--short"])

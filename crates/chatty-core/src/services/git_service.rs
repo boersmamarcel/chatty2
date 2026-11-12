@@ -108,6 +108,33 @@ impl std::fmt::Debug for GitService {
     }
 }
 
+/// `-c` options for every git command chatty runs on the host in an
+/// agent-writable repository. A sandboxed command can write `.git/config`
+/// or a hook where the sandbox allows it, and the user's checkout may
+/// predate the read-only binds; these keep host git from running what was
+/// planted there (AGE-1288). Git config given with `-c` wins over the
+/// repository's own.
+pub(crate) const HOST_GIT_HARDENING: &[&str] = &[
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "protocol.ext.allow=never",
+];
+
+/// Insert `--no-ext-diff --no-textconv` after a subcommand that can run a
+/// diff driver named by the repository's config.
+fn harden_subcommand<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = args.to_vec();
+    if matches!(args.first(), Some(&("diff" | "log" | "show"))) {
+        out.splice(1..1, ["--no-ext-diff", "--no-textconv"]);
+    }
+    out
+}
+
 impl GitService {
     /// Create a new GitService with the given workspace root.
     ///
@@ -151,11 +178,18 @@ impl GitService {
     }
 
     /// Run a git command in the workspace directory.
+    ///
+    /// The workspace is writable by the agent's (sandboxed) shell, so its
+    /// repository config and hooks are not trusted: every call turns off
+    /// hooks, fsmonitor, the pager and external diff/textconv drivers
+    /// (AGE-1288). See [`HOST_GIT_HARDENING`].
     async fn run_git(&self, args: &[&str]) -> Result<String> {
         debug!(args = ?args, "Running git command");
 
         let output = tokio::process::Command::new("git")
-            .args(args)
+            .args(HOST_GIT_HARDENING)
+            .args(harden_subcommand(args))
+            .env("GIT_TERMINAL_PROMPT", "0")
             .current_dir(&self.workspace_root)
             .output()
             .await
@@ -939,6 +973,45 @@ impl GitService {
 
 #[cfg(test)]
 mod tests {
+    /// AGE-1288: a `core.fsmonitor` or hook planted in the repository is
+    /// not run by host git.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn host_git_ignores_planted_fsmonitor_and_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{:?}", out);
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@example.test"]);
+        run(&["config", "user.name", "t"]);
+        let marker = root.join("escaped");
+        run(&[
+            "config",
+            "core.fsmonitor",
+            &format!("touch '{}'; false", marker.display()),
+        ]);
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+
+        let git = GitService::new(root.to_str().unwrap()).await.unwrap();
+        git.run_git(&["status", "--porcelain=v1"]).await.unwrap();
+        git.run_git(&["add", "-A"]).await.unwrap();
+        git.run_git(&["commit", "-m", "x"]).await.unwrap();
+        git.run_git(&["diff", "HEAD"]).await.unwrap();
+
+        assert!(!marker.exists(), "host git ran a planted command");
+    }
+
     use super::*;
     use std::fs;
 

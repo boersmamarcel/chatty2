@@ -53,6 +53,30 @@ pub(super) struct WorktreeGit {
     pub pinned: Vec<PathBuf>,
 }
 
+/// In a plain repository (`<workspace>/.git` is a directory), the git
+/// files that are code the host's git runs: `config` (fsmonitor, pager,
+/// filter and diff drivers, include paths), `config.worktree` and `hooks`.
+/// The sandbox binds these read-only over the read-write workspace, so a
+/// sandboxed command cannot plant a command that host git, or the user's
+/// own git later, would run outside the sandbox (AGE-1288).
+///
+/// Only existing paths are returned: bubblewrap refuses to bind a missing
+/// one. Empty for a linked worktree (see [`worktree_git`]) or no repository.
+pub(crate) fn plain_repo_host_code(workspace: &Path) -> Vec<PathBuf> {
+    let dot_git = workspace.join(".git");
+    let is_dir = std::fs::symlink_metadata(&dot_git)
+        .map(|meta| meta.file_type().is_dir())
+        .unwrap_or(false);
+    if !is_dir {
+        return Vec::new();
+    }
+    ["config", "config.worktree", "hooks"]
+        .into_iter()
+        .map(|name| dot_git.join(name))
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .collect()
+}
+
 /// The binds `workspace`'s git needs when it is a linked worktree whose
 /// git directory lies outside it; `None` for anything else (a plain
 /// repository, a submodule, not a repository at all), which keeps the
@@ -177,6 +201,21 @@ command git "$@"
 
 #[cfg(test)]
 pub(super) mod tests {
+    #[test]
+    fn plain_repo_host_code_lists_existing_config_and_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::plain_repo_host_code(dir.path()).is_empty());
+        std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "").unwrap();
+        assert_eq!(
+            super::plain_repo_host_code(dir.path()),
+            vec![
+                dir.path().join(".git/config"),
+                dir.path().join(".git/hooks")
+            ]
+        );
+    }
+
     use super::*;
 
     fn git(dir: &Path, args: &[&str]) {
