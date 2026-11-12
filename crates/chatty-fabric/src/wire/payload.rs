@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use super::Opaque;
 
-/// A task's token usage: the four totals and one line per model (AGE-682).
+/// A task's token usage: the four totals and one line per agent and model
+/// (AGE-682, AGE-665).
 /// The totals are the lines summed, for a reader that only wants the
 /// number; nothing on it is a price.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -48,6 +49,13 @@ impl WireUsage {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WireUsageLine {
+    /// Who in the reporter's subtree spent the line, as a `/`-separated
+    /// path of the names each caller asked for (`"coder"`,
+    /// `"coder/tester"`; TB-3, AGE-665). Absent for the reporter's own
+    /// requests. The caller puts the reporter's name in front, so the root
+    /// has one line per agent in the tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<WireModelRef>,
     #[serde(default)]
@@ -183,6 +191,7 @@ mod tests {
     fn usage_has_the_shape_the_worker_writes() {
         let usage = WireUsage::from_lines(vec![
             WireUsageLine {
+                agent: Some("reviewer/coder".into()),
                 model: Some(WireModelRef {
                     provider: "open_router".into(),
                     model_id: "kit/coder".into(),
@@ -203,7 +212,8 @@ mod tests {
             json!({
                 "inputTokens": 25, "outputTokens": 3, "cacheReadTokens": 0, "cacheWriteTokens": 0,
                 "lines": [
-                    {"model": {"provider": "open_router", "model_id": "kit/coder"},
+                    {"agent": "reviewer/coder",
+                     "model": {"provider": "open_router", "model_id": "kit/coder"},
                      "inputTokens": 20, "outputTokens": 3, "cacheReadTokens": 0,
                      "cacheWriteTokens": 0, "at": 1_700_000_000_000u64, "durationMs": 12},
                     {"inputTokens": 5, "outputTokens": 0, "cacheReadTokens": 0,

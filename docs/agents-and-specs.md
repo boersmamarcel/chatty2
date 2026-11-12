@@ -342,7 +342,7 @@ when `revision()` moves. After the turn the broker's edge log rows
 (`apply_edge`, or `SwarmTrace::from_edges(rows, events)` in one call) place a
 run under the right one of two same-spec siblings and add the calls a worker
 had refused as `Refused` nodes. A run reports its usage once, with its own
-workers' already folded in (AGE-415), so a node's own spend is what it
+workers' lines included (AGE-415; each still names its agent's path, AGE-665), so a node's own spend is what it
 reported less what its children reported, per model: nobody is billed twice,
 and the nodes sum to what the root's conversation records
 (`swarm_tree_spend_sums`).
@@ -619,9 +619,10 @@ a hosted worker's embedder must too — never a root's), and
 the turn's token usage rides in the terminal status's `metadata` under `usage` (A2A has
 no usage concept; usage belongs to the ledger). It goes as `lines`, one per model, each
 naming its model and carrying tokens and time but no price (AGE-682). The lines already
-include whatever the child itself delegated (merged only with lines on the same model),
-and the parent's `invoke_agent` folds them into its own conversation as usage lines
-marked `delegated_to`, priced in `finish_turn` at the model each names — so a leader's
+include whatever the child itself delegated, one line per agent below it with `agent` the
+path to it (merged only with lines on the same agent and model, AGE-665), and the
+parent's `invoke_agent` folds them into its own conversation as usage lines marked
+`delegated_to` — the path, with the child's name in front (`"reviewer/local-coder"`) — priced in `finish_turn` at the model each names — so a leader's
 `total_cost` carries the whole tree below it, and the bill follows the bearer (AGE-415). The same terminal status carries a
 second, independent key, `trace` (AGE-467): the worker's compacted tool-call trace —
 one `### <tool> (ok|FAILED|no result)` block per call it made, with the call's input and
