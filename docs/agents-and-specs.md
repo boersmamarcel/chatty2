@@ -55,7 +55,7 @@ running yet is not a disagreement, but a live one built for a different workspac
 
 `/agent <name> <prompt>` resolves `<name>` the same way in both frontends
 (`chatty_core::services::agent_command::resolve_agent_command`): an enabled remote A2A
-agent first (as in `invoke_agent`), then a spec on the local roster; otherwise the whole
+agent after a spec on the local roster (as in `invoke_agent`); otherwise the whole
 text is the prompt for the default sub-agent. A remote agent is called over A2A. On both
 the desktop and chatty-tui, a spec — and the default sub-agent, as `local-agent` — is a
 turn of the conversation handed to that agent through the conversation's own broker
@@ -479,10 +479,12 @@ model `list_agents` reads. Five sources feed it, one `RosterSource` each:
 
 A name two origins share goes to the higher one, **`handle > node > local_spec > hosted >
 remote`** (PL-D4); the loser is still listed, with `shadowed_by` naming the origin that
-owns the name. One exception in `list_agents`: `invoke_agent` still reaches a configured
-remote first, so there a remote owns any name it shares and the other rows are listed as
-shadowed by `remote` — the listing says what a call reaches today. AGE-1131 aligns
-`invoke_agent` with PL-D4. The broker's cards are cached for 30 s (`LiveCards::TTL`), failures
+owns the name. `invoke_agent` and `/agent` resolve a name in the same order: a local spec, then a
+configured remote. A configured remote that shares a spec's name is no longer reached. A
+node (`<spec>-<n>`) cannot be called by its own name, since routing to one node needs broker
+work that does not exist yet: `invoke_agent` refuses it with a hint to call the spec. The one
+place `list_agents` departs from PL-D4 follows from that: a remote that shares a name with
+only a node owns it, because that is what a call by the name reaches. The broker's cards are cached for 30 s (`LiveCards::TTL`), failures
 included: after one failed fetch a node is `unreachable`, with the reason, until a later
 fetch succeeds. A startable spec needs no process to be listed.
 
@@ -510,10 +512,10 @@ so that one cannot be added without deciding what it means.
 { "agent": "local-agent", "prompt": "Hello, agent!" }
 ```
 
-Resolution order: remote A2A agents first (a remote agent shadows a local spec with
-the same name), then the roster's specs — `local-agent` and the rest, the broker's local
-workers (below). Any other name is `NotFound`, listing what is available; a plugin's name
-is never an agent's. Every path
+Resolution order: the roster's specs — `local-agent` and the rest, the broker's local
+workers (below) — then remote A2A agents. A node name (`<spec>-<n>`) is `NotFound`, with a
+hint to call the spec. Any other name is `NotFound`, listing what is available; a plugin's
+name is never an agent's. Every path
 streams through `A2aClient::send_message_stream()`; progress (`InvokeAgentProgress`) is
 forwarded to the UI so the user sees intermediate output while the tool call is in
 flight.

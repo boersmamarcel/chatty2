@@ -36,8 +36,8 @@ pub enum AgentCommandTarget {
 }
 
 /// Resolve `/agent`'s argument against the remote agents and the local
-/// roster. A remote agent wins a name both have, as it does in
-/// `invoke_agent`. A name with no prompt after it is not a target: the
+/// roster. A local spec wins a name a remote agent also has, as it does in
+/// `invoke_agent` (PL-D4). A name with no prompt after it is not a target: the
 /// text is the default sub-agent's prompt. `local-agent` is the default
 /// sub-agent by its roster name.
 pub fn resolve_agent_command(
@@ -53,15 +53,6 @@ pub fn resolve_agent_command(
     if rest.is_empty() {
         return AgentCommandTarget::Default {
             prompt: text.to_string(),
-        };
-    }
-    if let Some(config) = remote_agents
-        .iter()
-        .find(|agent| agent.enabled && agent.name == first)
-    {
-        return AgentCommandTarget::Remote {
-            config: config.clone(),
-            prompt: rest.to_string(),
         };
     }
     if first == LOCAL_AGENT_NAME {
@@ -81,6 +72,15 @@ pub fn resolve_agent_command(
         }
         return AgentCommandTarget::Spec {
             spec: Box::new(spec.clone()),
+            prompt: rest.to_string(),
+        };
+    }
+    if let Some(config) = remote_agents
+        .iter()
+        .find(|agent| agent.enabled && agent.name == first)
+    {
+        return AgentCommandTarget::Remote {
+            config: config.clone(),
             prompt: rest.to_string(),
         };
     }
@@ -265,10 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_agent_wins_a_name_a_spec_also_has() {
+    fn a_local_spec_wins_a_name_a_remote_agent_also_has() {
         let roster = load_roster_from(&[], None, None).unwrap();
         assert!(matches!(
-            resolve_agent_command("local-coder go", &[remote("local-coder", true)], &roster),
+            resolve_agent_command("researcher go", &[remote("researcher", true)], &roster),
+            AgentCommandTarget::Spec { .. }
+        ));
+        assert!(matches!(
+            resolve_agent_command("only-remote go", &[remote("only-remote", true)], &roster),
             AgentCommandTarget::Remote { .. }
         ));
     }

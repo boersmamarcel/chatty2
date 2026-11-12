@@ -313,21 +313,28 @@ pub fn caller_policy(
     }
 }
 
-/// Settles a shared name the way `invoke_agent` dispatches it today: a
-/// configured remote is reached first, whatever else has the name, so the
-/// remote row owns it and the others are listed as shadowed by it. PL-D4's
-/// order (`handle > node > local_spec > hosted > remote`) holds for every
-/// other collision. AGE-1131 aligns `invoke_agent` with PL-D4; this goes
-/// then.
-fn as_dispatched(entries: Vec<RosterEntry>) -> Vec<RosterEntry> {
+/// Settles one collision away from PL-D4 (`handle > node > local_spec >
+/// hosted > remote`): a configured remote owns a name only a running node
+/// shares, because `invoke_agent` cannot address a node by name (routing to
+/// one needs broker work that does not exist yet), so a call by that name
+/// reaches the remote. A local spec with the name still outranks the
+/// remote, as `invoke_agent` dispatches it (AGE-1131). A handle outranks it
+/// here too, but `invoke_agent` cannot address handles yet: RO-4 must route
+/// handle names before handles are wired in, or the two tools disagree again.
+fn remote_over_uncallable_node(entries: Vec<RosterEntry>) -> Vec<RosterEntry> {
     let mut settled: Vec<RosterEntry> = Vec::with_capacity(entries.len());
     let mut group: Vec<RosterEntry> = Vec::new();
     let flush = |group: &mut Vec<RosterEntry>, settled: &mut Vec<RosterEntry>| {
-        if let Some(at) = group
-            .iter()
-            .position(|entry| entry.origin == Origin::Remote)
-            && group.len() > 1
+        let has = |origin| group.iter().any(|entry| entry.origin == origin);
+        if has(Origin::Remote)
+            && has(Origin::Node)
+            && !has(Origin::LocalSpec)
+            && !has(Origin::Handle)
         {
+            let at = group
+                .iter()
+                .position(|entry| entry.origin == Origin::Remote)
+                .expect("a remote is in the group");
             let mut remote = group.remove(at);
             remote.shadowed_by = None;
             for other in group.iter_mut() {
@@ -418,7 +425,7 @@ impl Tool for ListAgentsTool {
         _args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let specs = self.local_specs();
-        let entries = as_dispatched(
+        let entries = remote_over_uncallable_node(
             self.roster(&specs)
                 .for_caller(&roster::CallerView { scope: &self.scope })
                 .await,
@@ -455,7 +462,9 @@ impl Tool for ListAgentsTool {
              `startable` is started by the call, `unreachable` fails and says why. `runs_on` \
              says whose machine it runs on: `local` is this machine, `fleet` is a machine this \
              user leased, `remote_configured` is a third-party URL the user configured, \
-             `discovered` is a third party nobody chose."
+             `discovered` is a third party nobody chose. A running node \
+             (origin `node`, named `<spec>-<n>`) cannot be called by its own name: call its spec \
+             instead."
                 .to_string()
         };
         // AGE-746: a broker that is configured but failed to start (its
@@ -908,12 +917,11 @@ mod tests {
         assert_eq!(find(&output, "local-reviewer").reach, Reach::Startable);
     }
 
-    /// A name the broker also serves keeps the configured remote as its
-    /// owner, because `invoke_agent` reaches the remote first; the broker's
-    /// entry is listed as shadowed by it, so the listing and the dispatcher
-    /// agree (until AGE-1131).
+    /// A name the broker also serves is owned by the local spec (PL-D4);
+    /// the configured remote is listed as shadowed by it, as `invoke_agent`
+    /// dispatches (AGE-1131).
     #[tokio::test]
-    async fn a_configured_agent_keeps_its_label_when_the_broker_also_serves_it() {
+    async fn a_local_spec_owns_a_name_a_configured_remote_shares() {
         let directory = directory(vec![entry("voucher-agent", "", AgentOrigin::Local)]);
         let tool = ListAgentsTool::new(vec![make_agent(
             "voucher-agent",
@@ -925,14 +933,15 @@ mod tests {
 
         let output = list(&tool).await;
         assert_eq!(output.total, 2, "{:?}", output.agents);
-        assert_eq!(output.agents[0].origin, Origin::Remote);
-        assert_eq!(output.agents[0].runs_on, AgentOrigin::RemoteConfigured);
+        assert_eq!(output.agents[0].origin, Origin::LocalSpec);
         assert_eq!(output.agents[0].shadowed_by, None);
-        assert_eq!(output.agents[1].origin, Origin::LocalSpec);
-        assert_eq!(output.agents[1].shadowed_by, Some(Origin::Remote));
+        assert_eq!(output.agents[1].origin, Origin::Remote);
+        assert_eq!(output.agents[1].runs_on, AgentOrigin::RemoteConfigured);
+        assert_eq!(output.agents[1].shadowed_by, Some(Origin::LocalSpec));
     }
 
-    /// A configured remote also owns a name a running node has.
+    /// A node cannot be called by name, so a configured remote that shares
+    /// its name owns it: that is what `invoke_agent` reaches (AGE-1131).
     #[tokio::test]
     async fn a_configured_remote_owns_a_name_a_node_shares() {
         let directory = directory(vec![entry("voucher-agent-0", "", AgentOrigin::Local)]);
