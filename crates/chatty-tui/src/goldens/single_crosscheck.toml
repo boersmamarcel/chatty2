@@ -1,0 +1,10 @@
+[agent]
+name = "crosscheck-single"
+description = "One agent with team crosscheck's tools, model and budget: its derived baseline"
+
+[tools]
+profile = "coder+coordinator"
+
+[budget]
+max_agent_turns = 143
+max_duration = "6000s"

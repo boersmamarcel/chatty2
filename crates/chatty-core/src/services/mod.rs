@@ -107,6 +107,9 @@ pub mod swarm_trace;
 /// The team directory: roster, leader role, verification, skill and turn
 /// budget in one place, with the presets compiled in (ADR-0011 C13 / AGE-407).
 pub mod team;
+/// A team's derived single-agent baseline and the benchmark scorecard row,
+/// with its failure tags (TD-1, AGE-692).
+pub mod team_scorecard;
 /// A read-only view of the human's terminals (`terminal_read`, AGE-577).
 pub mod terminal;
 pub mod title_generator;
