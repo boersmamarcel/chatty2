@@ -1,0 +1,14 @@
+[agent]
+name = "analyst-swarm-single"
+description = "One agent with team analyst-swarm's tools, model and budget: its derived baseline"
+
+[tools]
+profile = "coder+coordinator+reviewer"
+
+[[plugins]]
+module = "benford"
+version = "^0.2"
+
+[budget]
+max_agent_turns = 56
+max_duration = "2100s"
