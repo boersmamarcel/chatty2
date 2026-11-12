@@ -417,7 +417,24 @@ fn build_module_toml(
     // sees exactly what the plugin expects them to fill in before it loads;
     // an author who declared no `[config]` keys gets no `[config]` table.
     if let Some(keys) = manifest.get("config_keys").and_then(|v| v.as_array()) {
-        let names: Vec<&str> = keys.iter().filter_map(|k| k.as_str()).collect();
+        // Key names come from the unsigned version record: only bare TOML
+        // keys are written, so a name with quotes or newlines cannot inject
+        // lines (a value, a `[files]` or `[protocols]` table) into the
+        // installed `module.toml` (AGE-1266).
+        let names: Vec<&str> = keys
+            .iter()
+            .filter_map(|k| k.as_str())
+            .filter(|key| {
+                let bare = !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+                if !bare {
+                    tracing::warn!(key = %key.escape_debug(), "Skipping a config key that is not a bare TOML key");
+                }
+                bare
+            })
+            .collect();
         if !names.is_empty() {
             toml.push_str("\n[config]\n");
             for key in names {
@@ -678,6 +695,27 @@ mod tests {
             parsed.config.get("endpoint_url").map(String::as_str),
             Some("")
         );
+    }
+
+    /// AGE-1266: a config key name cannot inject lines into module.toml.
+    #[test]
+    fn build_module_toml_skips_config_keys_that_are_not_bare() {
+        let manifest = serde_json::json!({
+            "config_keys": ["ok_key", "a = \"x\"\n[protocols]\nmcp = true\n#"]
+        });
+        let toml = build_module_toml(
+            "configurable-mod",
+            "1.0.0",
+            "Needs config",
+            Some("m.wasm"),
+            "local",
+            &manifest,
+        );
+        assert!(toml.contains("ok_key = \"\""));
+        assert!(!toml.contains("[protocols]"), "{toml}");
+        assert!(!toml.contains("a = \"x\""), "{toml}");
+        chatty_module_registry::ModuleManifest::from_str(&toml, Path::new("/m/module.toml"))
+            .expect("the written module.toml parses");
     }
 
     #[test]
