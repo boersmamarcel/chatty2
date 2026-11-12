@@ -249,6 +249,133 @@ mod tests {
         );
     }
 
+    /// A conversation as rig 0.42 serialized it (AGE-1151), written by rig
+    /// 0.42 itself: a user turn with an image and a PDF; an assistant turn
+    /// with signed reasoning, text and a call the provider named (`call_abc`,
+    /// with a Responses item id); its result; a turn with encrypted and
+    /// summary reasoning and a call rig minted an id for; its JSON and image
+    /// result; a turn of redacted reasoning alone; the answer; a system note.
+    const RIG_042_FIXTURE: &str = include_str!("snapshots/rig042_history.json");
+
+    fn calls(history: &[Message]) -> Vec<(String, String)> {
+        history
+            .iter()
+            .filter_map(|message| match message {
+                Message::Assistant(turn) => Some(turn.tool_calls()),
+                _ => None,
+            })
+            .flatten()
+            .map(|call| (call.id.to_string(), call.function.name.to_string()))
+            .collect()
+    }
+
+    fn results(history: &[Message]) -> Vec<(String, String)> {
+        history
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { content } => Some(content.iter()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                rig_core::message::UserContent::ToolResult(result) => {
+                    Some((result.call.to_string(), result.name.to_string()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// AGE-1151: rig 0.46 cannot read rig 0.42's call ids or reasoning.
+    #[test]
+    fn rig_046_alone_cannot_read_a_rig_042_history() {
+        assert!(serde_json::from_str::<Vec<Message>>(RIG_042_FIXTURE).is_err());
+    }
+
+    /// AGE-1151: a rig 0.42 history loads. Tool calls keep their ids (the
+    /// provider's where it gave one, rig 0.42's minted id where not) and
+    /// still pair with their results; reasoning is dropped, and the turn that
+    /// held only reasoning with it; answers, attachments and the system note
+    /// stay.
+    #[test]
+    fn a_rig_042_history_loads_without_its_reasoning() {
+        let original: Vec<Value> = serde_json::from_str(RIG_042_FIXTURE).unwrap();
+        let minted = original[3]["content"][1]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let history = parse_history(RIG_042_FIXTURE).expect("a rig 0.42 history restores");
+
+        assert_eq!(
+            history.len(),
+            original.len() - 1,
+            "the reasoning-only turn goes"
+        );
+        assert_eq!(
+            calls(&history),
+            vec![
+                ("call_abc".to_string(), "read_file".to_string()),
+                (minted.clone(), "list_dir".to_string()),
+            ]
+        );
+        assert_eq!(results(&history), calls(&history));
+        assert!(crate::services::message_helpers::tool_round_trips_intact(
+            &history,
+            &[]
+        ));
+        for message in &history {
+            if let Message::Assistant(turn) = message {
+                assert!(
+                    !turn
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, AssistantContent::Reasoning(_))),
+                    "no reasoning survives: {turn:?}"
+                );
+                assert!(!turn.content.is_empty());
+            }
+        }
+        assert_eq!(assistant_text(&history[5]), "The file says hello.");
+        let Message::Assistant(turn) = &history[1] else {
+            panic!("the first assistant turn")
+        };
+        assert_eq!(turn.text(), "Let me read the file.");
+        let Message::User { content } = &history[0] else {
+            panic!("the user turn")
+        };
+        assert_eq!(content.len(), 3, "text, image and PDF stay");
+        assert!(matches!(history[6], Message::System { .. }));
+    }
+
+    /// AGE-1151: the upgrade is one way. Saved again, the history is rig
+    /// 0.46's shape and loads on the direct path.
+    #[test]
+    fn a_rig_042_history_is_written_back_in_rig_046_shape() {
+        let history = parse_history(RIG_042_FIXTURE).expect("restores");
+
+        let rewritten = serde_json::to_string(&history).expect("serializes");
+
+        let reread: Vec<Message> =
+            serde_json::from_str(&rewritten).expect("rig 0.46 reads it directly");
+        assert_eq!(reread, history);
+        assert!(
+            rewritten.contains(r#""id":{"provider":"call_abc"}"#),
+            "{rewritten}"
+        );
+        assert!(!rewritten.contains(r#""signature""#), "{rewritten}");
+        assert!(!rewritten.contains("I should read it"), "{rewritten}");
+    }
+
+    /// AGE-1151: a swarm trace's recorded conversation goes through the same
+    /// upgrade.
+    #[test]
+    fn a_rig_042_trace_conversation_loads_through_the_value_path() {
+        let value: Value = serde_json::from_str(RIG_042_FIXTURE).unwrap();
+        let history = parse_history_value(value).expect("restores");
+        assert_eq!(history, parse_history(RIG_042_FIXTURE).unwrap());
+    }
+
     #[test]
     fn a_tagged_and_an_untagged_block_in_one_history_both_load() {
         let mixed = r#"[

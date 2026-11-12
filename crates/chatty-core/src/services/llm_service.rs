@@ -1281,6 +1281,41 @@ mod tests {
         assert_eq!(call.output_tokens, 40);
     }
 
+    /// AGE-1151: rig 0.46 reports a counter the provider left out as
+    /// `None`, where rig 0.42 reported zero; chatty's record still counts it
+    /// as zero.
+    #[test]
+    fn an_unreported_counter_counts_as_zero() {
+        let mut partial = rig_core::completion::Usage::new();
+        partial.input_tokens = Some(120);
+        assert_eq!(partial.output_tokens, None);
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &partial);
+        assert_eq!(
+            (
+                call.input_tokens,
+                call.output_tokens,
+                call.cache_read_tokens,
+                call.cache_write_tokens,
+                call.reasoning_tokens
+            ),
+            (120, 0, 0, 0, 0)
+        );
+        let none = normalize_usage(
+            UsageSemantics::InputExcludesCache,
+            0,
+            &rig_core::completion::Usage::new(),
+        );
+        assert_eq!(
+            none,
+            normalize_usage(UsageSemantics::InputExcludesCache, 0, &{
+                let mut zero = rig_core::completion::Usage::new();
+                zero.input_tokens = Some(0);
+                zero.output_tokens = Some(0);
+                zero
+            })
+        );
+    }
+
     #[test]
     fn usage_normalisation_never_underflows_on_inconsistent_counts() {
         let mut odd = rig_core::completion::Usage::new();
@@ -1793,5 +1828,130 @@ mod tests {
             "the model call keeps only its own ~50ms: {}",
             call.duration_ms
         );
+    }
+
+    /// rig 0.46's stream semantics chatty depends on (AGE-1151), against rig's
+    /// scripted model.
+    #[cfg(test)]
+    mod rig_046_stream_pins {
+        use futures::StreamExt;
+        use rig_agent::agent::{
+            AgentBuilder, AgentHook, HookContext, InvalidToolCallAction, InvalidToolCallContext,
+        };
+        use rig_agent::test_utils::MockAddTool;
+        use rig_core::completion::Message;
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        use super::{StreamChunk, UsageSemantics, map_item};
+
+        /// Skips every call to a tool the agent lacks.
+        struct SkipUnknown;
+
+        impl AgentHook for SkipUnknown {
+            async fn on_invalid_tool_call(
+                &self,
+                _ctx: &HookContext,
+                _event: &InvalidToolCallContext,
+            ) -> Option<InvalidToolCallAction> {
+                Some(InvalidToolCallAction::skip("no such tool"))
+            }
+        }
+
+        async fn run(model: MockCompletionModel) -> Vec<StreamChunk> {
+            let agent = AgentBuilder::new(model)
+                .tool(MockAddTool)
+                .add_hook(SkipUnknown)
+                .build();
+            let mut stream = agent.prompt("add").max_turns(4).stream();
+            let mut chunks = Vec::new();
+            while let Some(item) = stream.next().await {
+                chunks.extend(map_item(
+                    item.expect("the run ends without an error"),
+                    UsageSemantics::InputIncludesCache,
+                ));
+            }
+            chunks
+        }
+
+        /// Tool items are a projection of committed history: a call a hook
+        /// answered without running it (here a skipped unknown tool) is reported
+        /// with its result too. rig 0.42 reported only the calls it routed to
+        /// execution, so the transcript now shows such a call.
+        #[tokio::test]
+        async fn a_skipped_call_is_reported_with_its_result() {
+            let model = MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call("t1", "lookup", serde_json::json!({}))
+                        .with_call_id("call_1"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+                vec![
+                    MockStreamEvent::text("done"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+            ]);
+
+            let chunks = run(model).await;
+
+            assert!(
+                chunks.iter().any(|chunk| matches!(chunk,
+                StreamChunk::ToolCallStarted { id, name } if id == "call_1" && name == "lookup")),
+                "{chunks:?}"
+            );
+            assert!(
+            chunks.iter().any(|chunk| matches!(chunk,
+                StreamChunk::ToolCallError { id, error } if id == "call_1" && error.contains("no such tool"))),
+            "{chunks:?}"
+        );
+        }
+
+        /// A call is reported before its tool runs, and its result after, in
+        /// call order; the run's record is item-shaped (assistant turns carry
+        /// their origin) and survives chatty's persistence round trip.
+        #[tokio::test]
+        async fn the_turn_record_is_item_shaped_and_persists() {
+            let model = MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call("t1", "add", serde_json::json!({"x": 1, "y": 2}))
+                        .with_call_id("call_1"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+                vec![
+                    MockStreamEvent::text("3"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+            ]);
+
+            let chunks = run(model).await;
+
+            let position = |want: fn(&StreamChunk) -> bool| chunks.iter().position(want).unwrap();
+            let started = position(|c| matches!(c, StreamChunk::ToolCallStarted { .. }));
+            let result = position(
+                |c| matches!(c, StreamChunk::ToolCallResult { result, .. } if result == "3"),
+            );
+            let answer = position(|c| matches!(c, StreamChunk::Text(t) if t == "3"));
+            assert!(started < result && result < answer, "{chunks:?}");
+
+            let Some(StreamChunk::TurnMessages(messages)) = chunks
+                .iter()
+                .find(|c| matches!(c, StreamChunk::TurnMessages(_)))
+            else {
+                panic!("the run hands back its record: {chunks:?}")
+            };
+            assert_eq!(
+                messages.len(),
+                4,
+                "prompt, call, result, answer: {messages:?}"
+            );
+            let Message::Assistant(call) = &messages[1] else {
+                panic!("the call turn")
+            };
+            assert!(call.origin.is_some(), "a generated turn names its origin");
+            let saved = serde_json::to_string(messages).unwrap();
+            assert_eq!(
+                &crate::models::history_compat::parse_history(&saved).unwrap(),
+                messages
+            );
+        }
     }
 }

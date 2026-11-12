@@ -930,4 +930,105 @@ mod tests {
             if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))));
         assert!(tool_round_trips_intact(&history, &[]));
     }
+
+    // ── rig 0.46 pins (AGE-1151) ───────────────────────────────────────
+
+    fn tool_call_turn() -> Vec<rig_core::test_utils::MockStreamEvent> {
+        use rig_core::test_utils::MockStreamEvent;
+        vec![
+            MockStreamEvent::tool_call("t1", "add", serde_json::json!({"x": 1, "y": 2}))
+                .with_call_id("call_1"),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]
+    }
+
+    fn text_turn(text: &str) -> Vec<rig_core::test_utils::MockStreamEvent> {
+        use rig_core::test_utils::MockStreamEvent;
+        vec![
+            MockStreamEvent::text(text),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]
+    }
+
+    /// The route that replaced rig 0.42's `ToolsOnResponses` model: a call
+    /// with tools goes to Responses, and the turn budget's tool-free wrap-up
+    /// call (its tools narrowed to none, which the selection hook sees only
+    /// as the merged request patch) goes to chat completions.
+    #[tokio::test]
+    async fn the_tool_free_wrap_up_call_goes_to_chat_completions() {
+        use rig_core::test_utils::MockCompletionModel;
+        let chat = MockCompletionModel::from_stream_turns([text_turn("best answer: 3")]);
+        let responses = MockCompletionModel::from_stream_turns([tool_call_turn()]);
+        let agent = ChatModels::tools_on_responses(chat.clone().erase(), responses.clone().erase())
+            .agent_builder()
+            .tool(MockAddTool)
+            .build();
+
+        let mut stream = crate::services::turn_budget::TurnBudget::new(1)
+            .apply(agent.prompt("add"))
+            .stream();
+        while let Some(item) = stream.next().await {
+            item.expect("the run ends without an error");
+        }
+
+        let (calls, wrap_up) = (responses.requests(), chat.requests());
+        assert_eq!(calls.len(), 1, "the tool turn went to Responses");
+        assert!(!calls[0].tools.is_empty());
+        assert_eq!(
+            wrap_up.len(),
+            1,
+            "the wrap-up call went to chat completions"
+        );
+        assert!(wrap_up[0].tools.is_empty());
+    }
+
+    /// The utility agent (titles, summaries) has no tools and no route: its
+    /// calls stay on chat completions.
+    #[tokio::test]
+    async fn the_utility_agent_stays_on_chat_completions() {
+        use rig_core::test_utils::{MockCompletionModel, MockTurn};
+        let chat = MockCompletionModel::from_turns([MockTurn::text("A title")]);
+        let responses = MockCompletionModel::from_turns([]);
+        let utility =
+            ChatModels::tools_on_responses(chat.clone().erase(), responses.clone().erase())
+                .utility_builder()
+                .build();
+
+        let reply = utility.prompt("name this").await.expect("answers");
+
+        assert_eq!(reply.output(), "A title");
+        assert_eq!((chat.request_count(), responses.request_count()), (1, 0));
+    }
+
+    /// rig 0.44 made a finish reason outside rig's vocabulary a failure by
+    /// default; chatty's agents keep rig 0.42's normal stop.
+    #[tokio::test]
+    async fn an_unknown_finish_reason_ends_the_turn_normally() {
+        use rig_core::completion::FinishReason;
+        use rig_core::test_utils::{MockCompletionModel, MockTurn};
+        let model =
+            MockCompletionModel::from_turns([MockTurn::text("halted")
+                .with_finish_reason(FinishReason::Other("guardrail".into()))]);
+
+        let reply = ChatModels::chat(model.clone().erase())
+            .agent_builder()
+            .build()
+            .prompt("go")
+            .await
+            .expect("an unknown finish reason is a normal stop");
+
+        assert_eq!(reply.output(), "halted");
+
+        let strict =
+            rig_core::test_utils::MockCompletionModel::from_turns([MockTurn::text("halted")
+                .with_finish_reason(FinishReason::Other("guardrail".into()))]);
+        assert!(
+            rig_agent::agent::AgentBuilder::new(strict)
+                .build()
+                .prompt("go")
+                .await
+                .is_err(),
+            "rig 0.46's own default fails it"
+        );
+    }
 }
