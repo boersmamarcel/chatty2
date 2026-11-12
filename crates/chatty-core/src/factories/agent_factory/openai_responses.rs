@@ -4,8 +4,8 @@
 //! (`/responses`): `/chat/completions` rejects a request that carries both
 //! reasoning and tools. So on OpenAI's own API and on Azure OpenAI resources
 //! a request with tools goes to Responses, through rig's OpenAI Responses
-//! client ([`ToolsOnResponses`]); a request without tools keeps chat
-//! completions, so an older Azure deployment without Responses still chats.
+//! client ([`ChatModels`], routed by [`ToolsOnResponses`]); a request without
+//! tools keeps chat completions, so an older Azure deployment without Responses still chats.
 //! OpenAI-compatible servers (vLLM, OpenRouter, Ollama compat) and Azure's
 //! model-inference surface keep chat completions for everything; their base
 //! URL decides, and nothing about them changes.
@@ -23,15 +23,13 @@ use std::future::Future;
 use anyhow::anyhow;
 use bytes::Bytes;
 use reqwest::Url;
-use rig_agent::ModelHandle;
-use rig_core::completion::{
-    CompletionError, CompletionModel, CompletionRequest, CompletionResponse, ProviderCapabilities,
+use rig_agent::agent::{
+    AgentBuilder, AgentHook, HookContext, ModelSelection, ModelSelectionAction,
 };
 use rig_core::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, Response,
     StreamingResponse, Uri,
 };
-use rig_core::streaming::StreamingCompletionResponse;
 use rig_core::wasm_compat::WasmCompatSend;
 
 use crate::settings::models::models_store::ModelConfig;
@@ -155,45 +153,106 @@ pub(crate) fn ensure_tools_reachable(
     }
 }
 
-/// A model that sends each request on the wire it needs: a request with
-/// tools to the Responses API, one without (titles, summaries, a plain
-/// chat) to chat completions.
+/// A completion model with its wire and transport erased.
+pub(crate) type CompletionModel = rig_core::DynModel<rig_core::operation::Completion>;
+
+/// The label the chat-completions model is registered under on an agent.
+const CHAT_ROUTE: &str = "chat";
+
+/// The label the Responses model is registered under on an agent.
+const RESPONSES_ROUTE: &str = "responses";
+
+/// The models a chat request can go to: chat completions, and, where the
+/// endpoint is OpenAI's own API or an Azure OpenAI resource, the Responses
+/// API for a request with tools.
 #[derive(Clone, Debug)]
-pub(crate) struct ToolsOnResponses {
-    pub(crate) chat: ModelHandle,
-    pub(crate) responses: ModelHandle,
+pub(crate) struct ChatModels {
+    chat: CompletionModel,
+    responses: Option<CompletionModel>,
 }
 
-impl ToolsOnResponses {
-    fn pick(&self, request: &CompletionRequest) -> &ModelHandle {
-        if request.tools.is_empty() {
-            &self.chat
-        } else {
-            &self.responses
+impl ChatModels {
+    /// Every request on `chat`.
+    pub(crate) fn chat(chat: CompletionModel) -> Self {
+        Self {
+            chat,
+            responses: None,
         }
     }
+
+    /// A request with tools on `responses`, one without on `chat`.
+    pub(crate) fn tools_on_responses(chat: CompletionModel, responses: CompletionModel) -> Self {
+        Self {
+            chat,
+            responses: Some(responses),
+        }
+    }
+
+    /// The model a single request goes to, by whether it carries tools.
+    pub(crate) fn for_request(&self, has_tools: bool) -> &CompletionModel {
+        match &self.responses {
+            Some(responses) if has_tools => responses,
+            _ => &self.chat,
+        }
+    }
+
+    /// An agent builder over these models: chat completions as the default,
+    /// and the Responses model with the [`ToolsOnResponses`] route that
+    /// sends a model call there whenever it carries tools.
+    pub(crate) fn agent_builder(&self) -> AgentBuilder {
+        let builder = Self::defaults(AgentBuilder::named_model(CHAT_ROUTE, self.chat.clone()));
+        match &self.responses {
+            Some(responses) => builder
+                .model_route(RESPONSES_ROUTE, responses.clone())
+                .add_hook(ToolsOnResponses),
+            None => builder,
+        }
+    }
+
+    /// An agent builder for an agent without tools (titles, summaries):
+    /// every call goes to chat completions, as a request without tools did
+    /// before.
+    pub(crate) fn utility_builder(&self) -> AgentBuilder {
+        Self::defaults(AgentBuilder::named_model(CHAT_ROUTE, self.chat.clone()))
+    }
+
+    /// What every chatty agent keeps of rig 0.42's run behaviour: a finish
+    /// reason outside rig's vocabulary (a gateway's own, `guardrail`, …)
+    /// ends the turn as a normal stop, as it did before rig 0.44 made it a
+    /// failure by default (AGE-1151).
+    fn defaults(builder: AgentBuilder) -> AgentBuilder {
+        builder.accept_unknown_finish_reasons(true)
+    }
 }
 
-impl CompletionModel for ToolsOnResponses {
-    fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> impl Future<Output = Result<CompletionResponse, CompletionError>> + WasmCompatSend {
-        self.pick(&request).completion(request)
-    }
+/// The route that sends each model call on the wire it needs: a call with
+/// tools to the Responses API, one without (the tool-free wrap-up call a
+/// spent turn budget makes) to chat completions. Registered only on an agent
+/// whose [`ChatModels`] have a Responses model.
+///
+/// A chat agent always carries tools, so a call goes without them only when
+/// a completion-call hook narrowed this call's tools to none
+/// ([`RequestPatch::active_tools`](rig_agent::agent::RequestPatch)), which
+/// the selection sees as the merged patch. An agent built without tools (the
+/// utility agent) never has any.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ToolsOnResponses;
 
-    fn stream(
+impl AgentHook for ToolsOnResponses {
+    fn on_model_select(
         &self,
-        request: CompletionRequest,
-    ) -> impl Future<Output = Result<StreamingCompletionResponse, CompletionError>> + WasmCompatSend
-    {
-        self.pick(&request).stream(request)
-    }
-
-    /// The tool-carrying wire's: capabilities describe how tools and
-    /// structured output compose, which only the Responses side sees.
-    fn capabilities(&self) -> ProviderCapabilities {
-        self.responses.capabilities()
+        _ctx: &HookContext,
+        event: ModelSelection<'_>,
+    ) -> ModelSelectionAction {
+        let tool_free = event
+            .request_patch
+            .and_then(|patch| patch.active_tools.as_ref())
+            .is_some_and(Vec::is_empty);
+        ModelSelectionAction::select(if tool_free {
+            CHAT_ROUTE
+        } else {
+            RESPONSES_ROUTE
+        })
     }
 }
 
@@ -201,7 +260,7 @@ impl CompletionModel for ToolsOnResponses {
 /// the API key from the bearer header rig writes to Azure's `api-key`
 /// header, and adds the dated preview's `api-version` query parameter.
 #[derive(Clone, Default)]
-pub(crate) struct AzureResponsesHttpClient<I = reqwest::Client> {
+pub(crate) struct AzureResponsesHttpClient<I = rig_reqwest::ReqwestClient> {
     inner: I,
     api_key: Option<String>,
     api_version: Option<String>,
@@ -217,6 +276,9 @@ impl<I> AzureResponsesHttpClient<I> {
         }
     }
 
+    // rig-http 0.46's error keeps a failed reply's headers inline; the
+    // result type is the transport trait's (AGE-1151).
+    #[allow(clippy::result_large_err)]
     fn prepare<B>(&self, req: Request<B>) -> http_client::Result<Request<B>> {
         let (mut parts, body) = req.into_parts();
         if let Some(key) = &self.api_key {
@@ -294,10 +356,8 @@ where
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
-    use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
-    use rig_core::completion::{CompletionRequestBuilder, ToolDefinition};
+    use rig_core::completion::{CompletionRequest, ToolDefinition};
     use rig_core::message::{AssistantContent, Message, UserContent};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request as WireRequest, ResponseTemplate};
@@ -326,15 +386,15 @@ mod tests {
     }
 
     fn add_tool() -> ToolDefinition {
-        ToolDefinition {
-            name: "add".to_string(),
-            description: "add two numbers".to_string(),
-            parameters: serde_json::json!({
+        ToolDefinition::new(
+            crate::testing::tool_name("add"),
+            "add two numbers",
+            serde_json::json!({
                 "type": "object",
                 "properties": {"x": {"type": "number"}, "y": {"type": "number"}},
                 "required": ["x", "y"],
             }),
-        }
+        )
     }
 
     fn usage() -> serde_json::Value {
@@ -386,10 +446,9 @@ mod tests {
     }
 
     /// One non-streaming request with the `add` tool through `model`.
-    async fn send_with_tools(model: rig_agent::ModelHandle) -> rig_core::completion::Usage {
-        CompletionRequestBuilder::new(model, Message::user("hi"))
-            .tools(vec![add_tool()])
-            .send()
+    async fn send_with_tools(model: &CompletionModel) -> rig_core::completion::Usage {
+        model
+            .call(CompletionRequest::new(Message::user("hi")).tools(vec![add_tool()]))
             .await
             .expect("the fake server answers")
             .usage
@@ -436,17 +495,20 @@ mod tests {
             "sk-openai",
             "gpt-6.1-sol",
             super::super::connect_retry_http::ConnectRetryHttpClient::new(
-                crate::services::http_client::llm_client().clone(),
+                crate::services::http_client::llm_client().clone().into(),
             ),
-        )
-        .unwrap();
-        let usage = send_with_tools(model).await;
-        assert_eq!(usage.cached_input_tokens, 4);
-        assert_eq!(usage.reasoning_tokens, 2);
+        );
+        let usage = send_with_tools(&model).await;
+        assert_eq!(usage.cached_input_tokens, Some(4));
+        assert_eq!(usage.reasoning_tokens, Some(2));
 
         let body = only_body(&server).await;
         assert_eq!(body["tools"][0]["name"], "add");
         assert_eq!(body["tools"][0]["type"], "function");
+        // AGE-1151 (Marcel, 2026-11-12: accepted): rig 0.46 always sends
+        // `strict: false` on a Responses function tool; rig 0.42 left the
+        // field out.
+        assert_eq!(body["tools"][0]["strict"], false, "{body}");
     }
 
     /// OpenAI-compatible servers (vLLM, OpenRouter) keep chat completions,
@@ -477,7 +539,12 @@ mod tests {
             &format!("{}/v1", server.uri()),
         );
         ensure_tools_reachable(&model_config, &provider_config).unwrap();
-        send_with_tools(completion_model(&model_config, &provider_config).unwrap()).await;
+        send_with_tools(
+            completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
         assert_eq!(
             only_body(&server).await["tools"][0]["function"]["name"],
             "add"
@@ -505,23 +572,25 @@ mod tests {
             "sk-compat",
             &format!("{}/v1", server.uri()),
         );
-        let mut request = CompletionRequestBuilder::new(
-            completion_model(&compat, &compat_provider).unwrap(),
-            "hi",
-        )
-        .tools(vec![add_tool()]);
+        let compat_models = completion_model(&compat, &compat_provider).unwrap();
+        let mut request = CompletionRequest::new(Message::user("hi")).tools(vec![add_tool()]);
         if let Some(params) =
             crate::factories::agent_factory::request_params(&compat, &ProviderType::OpenRouter)
         {
             request = request.additional_params(params);
         }
-        request.send().await.unwrap();
+        compat_models.for_request(true).call(request).await.unwrap();
 
         let inference = format!("{}/models", server.uri());
         let azure_provider = provider(ProviderType::AzureOpenAI, "sk-azure", &inference);
         let azure = model(ProviderType::AzureOpenAI, false);
         assert_eq!(azure_wire(&inference), AzureWire::ChatCompletionsOnly);
-        send_with_tools(completion_model(&azure, &azure_provider).unwrap()).await;
+        send_with_tools(
+            completion_model(&azure, &azure_provider)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
@@ -561,9 +630,13 @@ mod tests {
             &format!("{}/openai/v1/responses", server.uri()),
         );
         ensure_tools_reachable(&model_config, &provider_config).unwrap();
-        let usage =
-            send_with_tools(completion_model(&model_config, &provider_config).unwrap()).await;
-        assert_eq!(usage.cached_input_tokens, 4);
+        let usage = send_with_tools(
+            completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
+        assert_eq!(usage.cached_input_tokens, Some(4));
 
         let requests = server.received_requests().await.unwrap();
         assert!(
@@ -600,13 +673,12 @@ mod tests {
                 "sk-azure",
                 &format!("{}{pasted}", server.uri()),
             );
-            let reply = CompletionRequestBuilder::new(
-                completion_model(&model_config, &provider_config).unwrap(),
-                Message::user("hi"),
-            )
-            .send()
-            .await
-            .expect("chat completions answers");
+            let reply = completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(false)
+                .call(CompletionRequest::new(Message::user("hi")))
+                .await
+                .expect("chat completions answers");
             assert!(
                 reply
                     .choice
@@ -648,7 +720,12 @@ mod tests {
                 server.uri()
             ),
         );
-        send_with_tools(completion_model(&model_config, &provider_config).unwrap()).await;
+        send_with_tools(
+            completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(true),
+        )
+        .await;
     }
 
     /// Every Azure URL a portal shows is read for its resource: the v1 base,
@@ -815,19 +892,19 @@ mod tests {
 
         let model_config = model(ProviderType::AzureOpenAI, true);
         let provider_config = provider(ProviderType::AzureOpenAI, "sk-azure", &server.uri());
-        let agent = AgentBuilder::from_model_handle(
-            completion_model(&model_config, &provider_config).unwrap(),
-        )
-        .tool(MockAddTool)
-        .build();
+        let agent = completion_model(&model_config, &provider_config)
+            .unwrap()
+            .agent_builder()
+            .tool(MockAddTool)
+            .build();
 
-        let mut stream = agent.stream_prompt("add 2 and 3").max_turns(3).await;
+        let mut stream = agent.prompt("add 2 and 3").max_turns(3).stream();
         let mut history = None;
         while let Some(item) = stream.next().await {
             if let rig_agent::agent::MultiTurnStreamItem::FinalResponse(done) =
                 item.expect("the run succeeds")
             {
-                history = done.messages;
+                history = Some(done.messages);
             }
         }
 
@@ -849,14 +926,113 @@ mod tests {
         assert_eq!(input[output_at]["output"], "5");
 
         let history = history.expect("the run hands back its messages");
-        assert!(
-            history
-                .iter()
-                .any(|m| matches!(m, Message::Assistant { content, .. }
-            if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)))))
-        );
+        assert!(history.iter().any(
+            |m| matches!(m, Message::Assistant(rig_core::message::AssistantMessage { content, .. })
+            if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_))))
+        ));
         assert!(history.iter().any(|m| matches!(m, Message::User { content }
             if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))));
         assert!(tool_round_trips_intact(&history, &[]));
+    }
+
+    // ── rig 0.46 pins (AGE-1151) ───────────────────────────────────────
+
+    fn tool_call_turn() -> Vec<rig_core::test_utils::MockStreamEvent> {
+        use rig_core::test_utils::MockStreamEvent;
+        vec![
+            MockStreamEvent::tool_call("t1", "add", serde_json::json!({"x": 1, "y": 2}))
+                .with_call_id("call_1"),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]
+    }
+
+    fn text_turn(text: &str) -> Vec<rig_core::test_utils::MockStreamEvent> {
+        use rig_core::test_utils::MockStreamEvent;
+        vec![
+            MockStreamEvent::text(text),
+            MockStreamEvent::final_response_with_total_tokens(4),
+        ]
+    }
+
+    /// The route that replaced rig 0.42's `ToolsOnResponses` model: a call
+    /// with tools goes to Responses, and the turn budget's tool-free wrap-up
+    /// call (its tools narrowed to none, which the selection hook sees only
+    /// as the merged request patch) goes to chat completions.
+    #[tokio::test]
+    async fn the_tool_free_wrap_up_call_goes_to_chat_completions() {
+        use rig_core::test_utils::MockCompletionModel;
+        let chat = MockCompletionModel::from_stream_turns([text_turn("best answer: 3")]);
+        let responses = MockCompletionModel::from_stream_turns([tool_call_turn()]);
+        let agent = ChatModels::tools_on_responses(chat.clone().erase(), responses.clone().erase())
+            .agent_builder()
+            .tool(MockAddTool)
+            .build();
+
+        let mut stream = crate::services::turn_budget::TurnBudget::new(1)
+            .apply(agent.prompt("add"))
+            .stream();
+        while let Some(item) = stream.next().await {
+            item.expect("the run ends without an error");
+        }
+
+        let (calls, wrap_up) = (responses.requests(), chat.requests());
+        assert_eq!(calls.len(), 1, "the tool turn went to Responses");
+        assert!(!calls[0].tools.is_empty());
+        assert_eq!(
+            wrap_up.len(),
+            1,
+            "the wrap-up call went to chat completions"
+        );
+        assert!(wrap_up[0].tools.is_empty());
+    }
+
+    /// The utility agent (titles, summaries) has no tools and no route: its
+    /// calls stay on chat completions.
+    #[tokio::test]
+    async fn the_utility_agent_stays_on_chat_completions() {
+        use rig_core::test_utils::{MockCompletionModel, MockTurn};
+        let chat = MockCompletionModel::from_turns([MockTurn::text("A title")]);
+        let responses = MockCompletionModel::from_turns([]);
+        let utility =
+            ChatModels::tools_on_responses(chat.clone().erase(), responses.clone().erase())
+                .utility_builder()
+                .build();
+
+        let reply = utility.prompt("name this").await.expect("answers");
+
+        assert_eq!(reply.output(), "A title");
+        assert_eq!((chat.request_count(), responses.request_count()), (1, 0));
+    }
+
+    /// rig 0.44 made a finish reason outside rig's vocabulary a failure by
+    /// default; chatty's agents keep rig 0.42's normal stop.
+    #[tokio::test]
+    async fn an_unknown_finish_reason_ends_the_turn_normally() {
+        use rig_core::completion::FinishReason;
+        use rig_core::test_utils::{MockCompletionModel, MockTurn};
+        let model =
+            MockCompletionModel::from_turns([MockTurn::text("halted")
+                .with_finish_reason(FinishReason::Other("guardrail".into()))]);
+
+        let reply = ChatModels::chat(model.clone().erase())
+            .agent_builder()
+            .build()
+            .prompt("go")
+            .await
+            .expect("an unknown finish reason is a normal stop");
+
+        assert_eq!(reply.output(), "halted");
+
+        let strict =
+            rig_core::test_utils::MockCompletionModel::from_turns([MockTurn::text("halted")
+                .with_finish_reason(FinishReason::Other("guardrail".into()))]);
+        assert!(
+            rig_agent::agent::AgentBuilder::new(strict)
+                .build()
+                .prompt("go")
+                .await
+                .is_err(),
+            "rig 0.46's own default fails it"
+        );
     }
 }

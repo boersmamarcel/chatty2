@@ -1,13 +1,15 @@
-//! HTTP layer that adds the moving prompt-cache breakpoint (AGE-205).
+//! HTTP layer that adds the prompt-cache breakpoints (AGE-205).
 //!
-//! rig's `with_prompt_caching()` marks the system message with
-//! `cache_control`, which caches the preamble and tool definitions. The
-//! conversation history only caches if the *latest* message carries a
-//! breakpoint too, so each request re-uses the prefix the previous one
-//! wrote. rig has no hook for that: its per-turn `RequestPatch` merges
-//! `additional_params` at the top level of the body and cannot annotate an
-//! element of `messages`. This wrapper sits under rig's client instead and
-//! rewrites the serialized chat-completions body on its way out.
+//! The system message carries `cache_control` on its last content block,
+//! which caches the preamble and tool definitions ([`mark_system_message`]:
+//! the shape rig 0.42's `with_prompt_caching()` wrote; rig 0.46 only offers
+//! a top-level `cache_control`, AGE-1151). The conversation history only
+//! caches if the *latest* message carries a breakpoint too, so each request
+//! re-uses the prefix the previous one wrote. rig has no hook for that: its
+//! per-turn `RequestPatch` merges `additional_params` at the top level of
+//! the body and cannot annotate an element of `messages`. This wrapper sits
+//! under rig's client instead and rewrites the serialized chat-completions
+//! body on its way out.
 //!
 //! A streamed request also gets `stream_options.include_usage`, so an
 //! OpenAI-compatible server behind this client reports its token usage
@@ -27,21 +29,83 @@ use rig_core::wasm_compat::WasmCompatSend;
 
 use super::connect_retry_http::ConnectRetryHttpClient;
 
-/// `reqwest::Client` that marks the latest user/assistant message of every
-/// chat-completions request as a prompt-cache breakpoint, and sends a
-/// request again when the connection failed before any response
+/// HTTP client that marks the system message and the latest user/assistant
+/// message of every chat-completions request as prompt-cache breakpoints,
+/// and sends a request again when the connection failed before any response
 /// ([`ConnectRetryHttpClient`]).
-///
-/// `Default` is required by rig's completion-model bounds on the HTTP client
-/// type, not used by chatty itself.
 #[derive(Clone, Debug, Default)]
 pub struct PromptCachingHttpClient {
     inner: ConnectRetryHttpClient,
+    /// Whether the latest message gets the moving breakpoint; off only for
+    /// the cache probe's control arm, which keeps the system one alone.
+    moving: bool,
 }
 
 impl PromptCachingHttpClient {
     pub fn new(inner: ConnectRetryHttpClient) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            moving: true,
+        }
+    }
+
+    /// The system breakpoint alone, for the cache probe's control arm.
+    #[cfg(test)]
+    pub(crate) fn system_breakpoint_only(inner: ConnectRetryHttpClient) -> Self {
+        Self {
+            inner,
+            moving: false,
+        }
+    }
+}
+
+/// Mark the first system message as a prompt-cache breakpoint: its `content`
+/// becomes text blocks, the last one carrying `cache_control: {"type":
+/// "ephemeral"}`. This is the marker rig 0.42's OpenRouter client wrote
+/// (`with_prompt_caching()`), and a top-level `cache_control` (rig 0.46's
+/// spelling of the same opt-in) moves there. Returns whether anything
+/// changed.
+pub(crate) fn mark_system_message(body: &mut serde_json::Value) -> bool {
+    let Some(obj) = body.as_object_mut() else {
+        return false;
+    };
+    let top_level = obj.remove("cache_control").is_some();
+    let Some(system) = obj
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())
+        .and_then(|messages| {
+            messages
+                .iter_mut()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"))
+        })
+        .and_then(|m| m.as_object_mut())
+    else {
+        return top_level;
+    };
+    match system.get_mut("content") {
+        Some(serde_json::Value::String(text)) => {
+            let text = std::mem::take(text);
+            system.insert(
+                "content".to_string(),
+                serde_json::json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" }
+                }]),
+            );
+            true
+        }
+        Some(serde_json::Value::Array(blocks)) => match blocks.last_mut() {
+            Some(serde_json::Value::Object(last)) => {
+                last.insert(
+                    "cache_control".to_string(),
+                    serde_json::json!({ "type": "ephemeral" }),
+                );
+                true
+            }
+            _ => top_level,
+        },
+        _ => top_level,
     }
 }
 
@@ -123,14 +187,16 @@ pub(crate) fn request_stream_usage(body: &mut serde_json::Value) -> bool {
 }
 
 /// Rewrite a chat-completions request body; pass any other request through.
-fn rewrite<T: Into<Bytes>>(req: Request<T>) -> Request<Bytes> {
+fn rewrite<T: Into<Bytes>>(req: Request<T>, moving: bool) -> Request<Bytes> {
     let (mut parts, body) = req.into_parts();
     let body: Bytes = body.into();
     let is_chat_completion =
         parts.method == Method::POST && parts.uri.path().ends_with("/chat/completions");
     if is_chat_completion
         && let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body)
-        && (mark_latest_message(&mut json) | request_stream_usage(&mut json))
+        && (mark_system_message(&mut json)
+            | (moving && mark_latest_message(&mut json))
+            | request_stream_usage(&mut json))
         && let Ok(rewritten) = serde_json::to_vec(&json)
     {
         // reqwest derives the length from the body it is given.
@@ -149,7 +215,7 @@ impl HttpClientExt for PromptCachingHttpClient {
         T: Into<Bytes> + WasmCompatSend,
         U: From<Bytes> + WasmCompatSend + 'static,
     {
-        self.inner.send(rewrite(req))
+        self.inner.send(rewrite(req, self.moving))
     }
 
     fn send_multipart<U>(
@@ -169,7 +235,7 @@ impl HttpClientExt for PromptCachingHttpClient {
     where
         T: Into<Bytes> + WasmCompatSend,
     {
-        self.inner.send_streaming(rewrite(req))
+        self.inner.send_streaming(rewrite(req, self.moving))
     }
 }
 
@@ -195,6 +261,46 @@ mod tests {
         );
         // The system message is rig's breakpoint; this layer leaves it alone.
         assert_eq!(body["messages"][0]["content"], json!("sys"));
+    }
+
+    /// AGE-1151: rig 0.42's `with_prompt_caching()` marker, restored on
+    /// rig 0.46's body: a string system prompt becomes one marked text block.
+    #[test]
+    fn a_string_system_prompt_becomes_a_marked_text_block() {
+        let mut body = json!({ "messages": [
+            { "role": "system", "content": "sys" },
+            { "role": "user", "content": "hello" }
+        ]});
+        assert!(mark_system_message(&mut body));
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{ "type": "text", "text": "sys", "cache_control": { "type": "ephemeral" } }])
+        );
+        assert_eq!(body["messages"][1]["content"], json!("hello"));
+    }
+
+    /// AGE-1151: rig 0.46 sends the system prompt as text blocks and, when
+    /// asked to cache, a top-level `cache_control`; the marker goes on the
+    /// last system block instead, where rig 0.42 put it.
+    #[test]
+    fn a_top_level_cache_marker_moves_onto_the_system_block() {
+        let mut body = json!({
+            "cache_control": { "type": "ephemeral" },
+            "messages": [
+                { "role": "system", "content": [{ "type": "text", "text": "sys" }] },
+                { "role": "user", "content": "hello" }
+            ]
+        });
+        assert!(mark_system_message(&mut body));
+        assert_eq!(
+            body,
+            json!({ "messages": [
+                { "role": "system", "content": [
+                    { "type": "text", "text": "sys", "cache_control": { "type": "ephemeral" } }
+                ]},
+                { "role": "user", "content": "hello" }
+            ]})
+        );
     }
 
     #[test]
@@ -274,7 +380,7 @@ mod tests {
             .header("content-length", body.len().to_string())
             .body(Bytes::from(body.clone()))
             .unwrap();
-        let out = rewrite(chat);
+        let out = rewrite(chat, true);
         let json: serde_json::Value = serde_json::from_slice(out.body()).unwrap();
         assert_eq!(
             json["messages"][0]["content"][0]["cache_control"],
@@ -287,7 +393,7 @@ mod tests {
             .uri("https://openrouter.ai/api/v1/models")
             .body(Bytes::from(body.clone()))
             .unwrap();
-        assert_eq!(rewrite(listing).body(), &Bytes::from(body));
+        assert_eq!(rewrite(listing, true).body(), &Bytes::from(body));
     }
 
     /// Counts `cache_control` markers across every message's content blocks.
@@ -306,21 +412,15 @@ mod tests {
     }
 
     /// Pins the two-breakpoint shape this wrapper exists for (AGE-205,
-    /// AGE-239): rig's own `apply_prompt_caching` already marks the system
-    /// message before this wrapper ever sees the body (simulated here, since
-    /// that step happens upstream in rig-core, not in this file), and this
-    /// wrapper marks the latest user/assistant message. A follow-up
-    /// tool-loop turn resends the growing, already-marked history through
-    /// `rewrite()` again — that must not add a third breakpoint or touch the
-    /// existing one, so this wrapper's fallback can be dropped outright once
-    /// rig grows the upstream equivalent (AGE-239) without re-checking this
-    /// invariant by hand.
+    /// AGE-239): the system message (the body as rig 0.46 sends it, its
+    /// system content a text-block array without a marker) and the latest
+    /// user/assistant message. A follow-up tool-loop turn resends the
+    /// growing, already-marked history through `rewrite()` again — that must
+    /// not add a third breakpoint or touch the existing ones.
     #[test]
-    fn rewrite_combined_with_rigs_system_breakpoint_yields_exactly_two_and_is_idempotent() {
+    fn rewrite_yields_exactly_two_breakpoints_and_is_idempotent() {
         let body = json!({ "messages": [
-            { "role": "system", "content": [
-                { "type": "text", "text": "sys", "cache_control": { "type": "ephemeral" } }
-            ]},
+            { "role": "system", "content": [{ "type": "text", "text": "sys" }] },
             { "role": "user", "content": "first turn" },
             { "role": "assistant", "content": "reply" },
             { "role": "user", "content": "second turn" }
@@ -335,13 +435,13 @@ mod tests {
                 .unwrap()
         };
 
-        let out = rewrite(request(body));
+        let out = rewrite(request(body), true);
         let rewritten: serde_json::Value = serde_json::from_slice(out.body()).unwrap();
         assert_eq!(count_cache_control_breakpoints(&rewritten), 2);
 
         // Re-send the already-marked body, as the next provider request in
         // the same tool loop would.
-        let out_again = rewrite(request(rewritten.to_string()));
+        let out_again = rewrite(request(rewritten.to_string()), true);
         let rewritten_again: serde_json::Value = serde_json::from_slice(out_again.body()).unwrap();
         assert_eq!(
             count_cache_control_breakpoints(&rewritten_again),

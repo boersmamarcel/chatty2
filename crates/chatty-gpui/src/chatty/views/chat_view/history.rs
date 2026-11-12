@@ -101,7 +101,7 @@ impl ChatView {
                         });
                     }
                 }
-                Message::Assistant { content, .. } => {
+                Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                     let assistant_msg =
                         super::super::message_types::AssistantMessage::from_rig_content(content);
 

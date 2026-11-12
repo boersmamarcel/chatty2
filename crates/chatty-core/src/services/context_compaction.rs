@@ -171,16 +171,15 @@ async fn summarize_with(
     semantics: UsageSemantics,
     model: Option<ModelRef>,
 ) -> anyhow::Result<(String, ApiCallUsage)> {
-    use rig_agent::completion::Prompt;
     let started = std::time::Instant::now();
-    let response = agent.prompt(prompt.to_string()).extended_details().await?;
+    let response = agent.prompt(prompt.to_string()).await?;
     let usage = ApiCallUsage {
         model,
         at: Some(std::time::SystemTime::now()),
         duration_ms: started.elapsed().as_millis() as u64,
         ..normalize_usage(semantics, 0, &response.usage)
     };
-    Ok((response.output, usage))
+    Ok((response.output(), usage))
 }
 
 // ── Building the summary ──────────────────────────────────────────────────────
@@ -396,9 +395,11 @@ pub fn file_writes(messages: &[Message]) -> FileWrites {
     writes
 }
 
-fn tool_calls(messages: &[Message]) -> impl Iterator<Item = (&str, &serde_json::Value)> {
+fn tool_calls(
+    messages: &[Message],
+) -> impl Iterator<Item = (&str, &serde_json::Map<String, serde_json::Value>)> {
     messages.iter().flat_map(|message| match message {
-        Message::Assistant { content, .. } => content
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
             .iter()
             .filter_map(|item| match item {
                 AssistantContent::ToolCall(call) => {
@@ -418,7 +419,7 @@ pub fn last_command_result(messages: &[Message]) -> Option<(String, String)> {
     let mut last = None;
     for message in messages {
         match message {
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 for item in content {
                     if let AssistantContent::ToolCall(call) = item
                         && COMMAND_TOOLS.contains(&call.function.name.as_str())
@@ -429,7 +430,7 @@ pub fn last_command_result(messages: &[Message]) -> Option<(String, String)> {
                             .or_else(|| args.get("code"))
                             .and_then(|v| v.as_str())
                             .map(str::to_string)
-                            .unwrap_or_else(|| args.to_string());
+                            .unwrap_or_else(|| call.function.arguments_json());
                         commands.insert(call.id.clone(), command);
                     }
                 }
@@ -548,7 +549,7 @@ fn deterministic_prose(covered: &[Message], previous: Option<&str>) -> String {
         out.push_str(&format!("Done so far: tool calls {}.\n", used.join(", ")));
     }
     let last_note = covered.iter().rev().find_map(|message| match message {
-        Message::Assistant { content, .. } => {
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
             let text: Vec<&str> = content
                 .iter()
                 .filter_map(|item| match item {
@@ -613,7 +614,7 @@ fn render_transcript(messages: &[Message], max_chars: usize) -> String {
                     }
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 for item in content {
                     match item {
                         AssistantContent::Text(text) if !text.text.trim().is_empty() => {
@@ -627,10 +628,7 @@ fn render_transcript(messages: &[Message], max_chars: usize) -> String {
                             out.push_str(&format!(
                                 "CALL {}({})\n",
                                 call.function.name,
-                                head_chars(
-                                    &call.function.arguments.to_string(),
-                                    RENDER_TOOL_ARGS_CHARS
-                                )
+                                head_chars(&call.function.arguments_json(), RENDER_TOOL_ARGS_CHARS)
                             ));
                         }
                         _ => {}
@@ -679,19 +677,18 @@ mod tests {
     use super::*;
 
     fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::tool_call(id, name, args)],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(id, crate::testing::tool_name(name), args),
+        ]))
     }
 
     fn result(id: &str, text: &str) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(rig_core::message::ToolResult {
-                call: rig_core::message::ToolCallId::new(id).unwrap(),
-                provider: None,
-                name: "t".into(),
+                call: rig_core::message::CallId::from_wire(id),
+                name: crate::testing::tool_name("t"),
                 content: vec![ToolResultContent::Text(Text::new(text.to_string()))],
+                is_error: false,
             })],
         }
     }

@@ -20,7 +20,6 @@ use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::providers_store::{ProviderConfig, ProviderType};
 use chatty_core::settings::models::{ExecutionSettingsModel, ModuleSettingsModel};
 use clap::Parser;
-use rig_agent::completion::Prompt;
 use serde_json::{Value, json};
 
 use crate::{Cli, apply_run_limits, run_spec};

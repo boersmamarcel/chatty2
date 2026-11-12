@@ -65,7 +65,10 @@ fn wire_line(kit: &SwarmKit, line: &str) -> String {
 /// golden pins the whole wire (canonical key order, clocks and the version
 /// scrubbed); it was recorded on `main` before TD-2 and re-recorded only by
 /// ADR-0021's envelope changes (EN-1, and step 3), each change explained by
-/// a row of that ADR's frame-to-method map.
+/// a row of that ADR's frame-to-method map. AGE-1151 (rig 0.46) re-recorded
+/// it once more: the envelope is unchanged and only the inner format of the
+/// opaque captured conversation changed, which ADR-0021 §1 as amended on
+/// 2026-11-12 allows (the conversation crosses as an opaque payload).
 #[tokio::test]
 async fn handoff_absent_is_unchanged() {
     let kit = SwarmKit::start(

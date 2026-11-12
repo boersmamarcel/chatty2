@@ -310,8 +310,6 @@ impl crate::services::lazy_broker::LazyBroker for NeverStarted {
 /// agents sends: its tool definitions and its preamble, byte for byte, as
 /// the provider receives them.
 async fn first_request_with_roster(size: usize) -> Vec<u8> {
-    use rig_agent::completion::Prompt;
-
     let _ = crate::init_repositories();
     let daemon = crate::testing::fake_model::FakeDaemon::ollama(vec![
         serde_json::json!({

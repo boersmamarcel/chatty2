@@ -89,7 +89,7 @@ pub struct Delegation {
     pub ok: bool,
     /// The worker's answer, or the error the call failed with.
     pub result: String,
-    call: rig_core::completion::message::ToolCallId,
+    call: rig_core::completion::message::CallId,
     content: Vec<ToolResultContent>,
 }
 
@@ -99,7 +99,7 @@ pub fn delegations(history: &[Message]) -> Vec<Delegation> {
     let mut out = Vec::new();
     for message in history {
         match message {
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 for item in content.iter() {
                     if let AssistantContent::ToolCall(call) = item
                         && call.function.name == DELEGATION_TOOL
@@ -466,26 +466,25 @@ fn figures(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::completion::message::{ToolCallId, ToolResult};
+    use rig_core::completion::message::{CallId, ToolResult};
 
     fn call(id: &str, agent: &str, prompt: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::tool_call(
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::tool_call(
                 id,
-                DELEGATION_TOOL,
+                crate::testing::tool_name(DELEGATION_TOOL),
                 serde_json::json!({ "agent": agent, "prompt": prompt }),
-            )],
-        }
+            ),
+        ]))
     }
 
     fn tool_result(id: &str, content: ToolResultContent) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new(id).unwrap(),
-                provider: None,
-                name: DELEGATION_TOOL.to_string(),
+                call: CallId::from_wire(id),
+                name: crate::testing::tool_name(DELEGATION_TOOL),
                 content: vec![content],
+                is_error: false,
             })],
         }
     }

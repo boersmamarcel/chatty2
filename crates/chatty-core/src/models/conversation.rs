@@ -1102,7 +1102,7 @@ fn is_user_text_message(message: &Message) -> bool {
 fn turn_tool_messages(messages: Vec<Message>) -> Vec<Message> {
     let start = messages
         .iter()
-        .position(|m| matches!(m, Message::Assistant { .. }))
+        .position(|m| matches!(m, Message::Assistant(_)))
         .unwrap_or(messages.len());
     let end = messages
         .iter()
@@ -1141,10 +1141,9 @@ fn finalize_response_state(
     }));
 
     entries.push(MessageEntry {
-        message: Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Text(Text::new(response_text))],
-        },
+        message: Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Text(Text::new(response_text)),
+        ])),
         system_trace: trace,
         attachment_paths: attachments,
         timestamp: Some(timestamp),
@@ -1161,7 +1160,8 @@ fn remove_last_turn_state(entries: &mut Vec<MessageEntry>) -> Option<(String, Op
         return None;
     }
     let last = entries.last()?;
-    let Message::Assistant { content, .. } = &last.message else {
+    let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &last.message
+    else {
         return None;
     };
     let text = content
@@ -1189,7 +1189,7 @@ fn append_trace_item_state(entries: &mut [MessageEntry], item: TraceItem) -> boo
     let Some(entry) = entries
         .iter_mut()
         .rev()
-        .find(|e| matches!(e.message, Message::Assistant { .. }))
+        .find(|e| matches!(e.message, Message::Assistant(_)))
     else {
         return false;
     };
@@ -1750,10 +1750,12 @@ mod tests {
         assert_eq!(outcome, TurnOutcome::Persisted);
         assert_eq!(entries.len(), 2);
         match &entries[1].message {
-            Message::Assistant { content, .. } => match &content[0] {
-                AssistantContent::Text(t) => assert_eq!(t.text, "hello there"),
-                other => panic!("expected Text, got {other:?}"),
-            },
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+                match &content[0] {
+                    AssistantContent::Text(t) => assert_eq!(t.text, "hello there"),
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
             other => panic!("expected Assistant message, got {other:?}"),
         }
     }
@@ -1834,14 +1836,18 @@ mod tests {
         }
         content.push(AssistantContent::tool_call(
             id,
-            "read_file",
+            crate::testing::tool_name("read_file"),
             serde_json::json!({ "path": format!("{id}.md") }),
         ));
-        Message::Assistant { id: None, content }
+        Message::Assistant(rig_core::message::AssistantMessage::new(content))
     }
 
     fn tool_result(id: &str) -> Message {
-        Message::tool_result(id, "read_file", format!("contents of {id}"))
+        Message::tool_result(
+            rig_core::message::CallId::from_wire(id),
+            crate::testing::tool_name("read_file"),
+            format!("contents of {id}"),
+        )
     }
 
     /// rig's record of a turn with two tool calls: the prompt, two
@@ -1888,16 +1894,18 @@ mod tests {
                     .checked_sub(1)
                     .map(|p| &entries[p].message)
                     .unwrap_or_else(|| panic!("tool result at index {i} has nothing before it"));
-                let Message::Assistant { content, .. } = previous else {
+                let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) =
+                    previous
+                else {
                     panic!("tool result at index {i} does not follow an assistant message");
                 };
                 assert!(
                     content.iter().any(|ac| matches!(
                         ac,
-                        AssistantContent::ToolCall(tc) if tc.id.as_str() == result.call.as_str()
+                        AssistantContent::ToolCall(tc) if tc.id == result.call
                     )),
                     "tool result {} at index {i} does not follow its call",
-                    result.call.as_str()
+                    result.call
                 );
             }
         }
@@ -1915,8 +1923,8 @@ mod tests {
             .map(|m| match m {
                 Message::User { .. } if is_tool_result_message(m) => "result",
                 Message::User { .. } => "user",
-                Message::Assistant { .. } if crate::services::is_tool_call_message(m) => "call",
-                Message::Assistant { .. } => "text",
+                Message::Assistant(_) if crate::services::is_tool_call_message(m) => "call",
+                Message::Assistant(_) => "text",
                 Message::System { .. } => "system",
             })
             .collect();
@@ -1969,8 +1977,8 @@ mod tests {
             .map(|m| match m {
                 Message::User { .. } if is_tool_result_message(m) => "result",
                 Message::User { .. } => "user",
-                Message::Assistant { .. } if crate::services::is_tool_call_message(m) => "call",
-                Message::Assistant { .. } => "text",
+                Message::Assistant(_) if crate::services::is_tool_call_message(m) => "call",
+                Message::Assistant(_) => "text",
                 Message::System { .. } => "system",
             })
             .collect();
@@ -2051,7 +2059,7 @@ mod tests {
         let mut entries = vec![entry(Message::user("hi"), None)];
         finalize(&mut entries, None);
         assert_eq!(entries.len(), 2);
-        assert!(matches!(entries[1].message, Message::Assistant { .. }));
+        assert!(matches!(entries[1].message, Message::Assistant(_)));
 
         // A record with no tool activity adds nothing either.
         let mut entries = vec![entry(Message::user("hi"), None)];
@@ -2078,7 +2086,7 @@ mod tests {
         // Back to the user message that started the turn, ready to re-stream.
         assert_eq!(entries.len(), 3);
         assert!(is_user_text_message(&entries[2].message));
-        assert!(matches!(entries[1].message, Message::Assistant { .. }));
+        assert!(matches!(entries[1].message, Message::Assistant(_)));
     }
 
     #[test]

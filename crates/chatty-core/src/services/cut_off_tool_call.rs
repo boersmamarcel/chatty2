@@ -2,11 +2,13 @@
 //! (AGE-983).
 //!
 //! A local model writing a whole 43-section report as the one `content`
-//! argument of a `write_file` call stopped partway through that string. rig's
-//! stream reports it as `tool call `write_file` arrived with malformed JSON
-//! input: EOF while parsing a string at line 1 column 13114` and ends the
+//! argument of a `write_file` call stopped partway through that string. rig
+//! 0.42 reported it as `tool call `write_file` arrived with malformed JSON
+//! input: EOF while parsing a string at line 1 column 13114` and ended the
 //! run, and the delegated worker's whole invocation with it. Sending the
-//! same request again produced the same cut-off.
+//! same request again produced the same cut-off. rig 0.46 offers such a call
+//! to the invalid-call hooks instead; [`CutOffCalls`] keeps it and ends the
+//! run as 0.42 did, so the answer below stays the same (AGE-1151).
 //!
 //! `stream_prompt` answers such a call itself instead: it hands the model an
 //! error tool result for the call ([`CutOffToolCall::tool_result`]), naming
@@ -19,7 +21,7 @@
 //!
 //! # Why the arguments stop
 //!
-//! rig raises this error only for a call the provider said was complete:
+//! rig 0.42 raised this error only for a call the provider said was complete:
 //! `finish_reason` `tool_calls`, `stop` or an unknown reason, or a bare
 //! `[DONE]` (rig-core 0.42 `openai_chat_completions_compatible.rs`). A call
 //! cut off at the output cap (`finish_reason: length`) is dropped silently
@@ -31,17 +33,23 @@
 //! The log line at the recovery point gives the argument length and its last
 //! characters. That helps tell the two apart.
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+use rig_agent::agent::{
+    AgentHook, HookContext, InvalidToolCallAction, InvalidToolCallContext, InvalidToolCallReason,
+};
 use rig_core::completion::Message;
-use rig_core::message::{AssistantContent, ToolResultContent, UserContent};
+use rig_core::message::{AssistantContent, CallId, ToolName, ToolResultContent, UserContent};
+
+/// `tool` as a rig tool name; a call always names its tool.
+fn tool_name(tool: &str) -> ToolName {
+    ToolName::new(tool).unwrap_or_else(|_| ToolName::new("unnamed_tool").expect("a non-empty name"))
+}
 
 /// How many cut-off tool calls one turn answers with an error tool result
 /// before the next one ends the turn.
 pub const MAX_CUT_OFF_RECOVERIES: usize = 3;
-
-/// rig-core 0.42's wording (`streaming/parts.rs`), between the backquoted
-/// tool name and serde's parse error. rig has no typed variant for it, so
-/// this must be checked on every rig bump; `parses_rigs_error` pins it.
-const RIG_MALFORMED_INPUT: &str = " arrived with malformed JSON input: ";
 
 /// How many trailing characters of a call's arguments the log line keeps.
 const TAIL_CHARS: usize = 160;
@@ -57,16 +65,6 @@ pub struct CutOffToolCall {
 }
 
 impl CutOffToolCall {
-    /// The cut-off call rig's error `message` describes, if it is one.
-    pub fn parse(message: &str) -> Option<Self> {
-        let (head, reason) = message.split_once(RIG_MALFORMED_INPUT)?;
-        let tool = head.rsplit_once("tool call `")?.1.strip_suffix('`')?;
-        Some(Self {
-            tool: tool.to_string(),
-            reason: reason.trim().to_string(),
-        })
-    }
-
     /// The error tool result the model gets for the call. It starts with
     /// `Error:`, which is what marks a tool result as a failure
     /// (`tool_result_looks_like_error`).
@@ -90,20 +88,53 @@ impl CutOffToolCall {
         if !said.trim().is_empty() {
             content.push(AssistantContent::text(said));
         }
+        let name = tool_name(&self.tool);
         content.push(AssistantContent::tool_call(
             call_id,
-            &self.tool,
+            name.clone(),
             serde_json::json!({}),
         ));
-        let call = Message::Assistant { id: None, content };
+        let call = Message::Assistant(rig_core::message::AssistantMessage::new(content));
         let result = Message::User {
-            content: vec![UserContent::tool_result_from_wire(
-                call_id,
-                &self.tool,
+            content: vec![UserContent::tool_result(
+                CallId::from_wire(call_id),
+                name,
                 vec![ToolResultContent::text(self.tool_result())],
             )],
         };
         (call, result)
+    }
+}
+
+/// Ends a run on a tool call whose arguments never parsed, keeping the call
+/// for `stream_prompt`, which answers it ([`CutOffToolCall::messages`]) and
+/// continues the turn. A run hook, so the agent's own invalid-call hooks
+/// (name repair, tool loading, the turn budget's wrap-up) answer first.
+/// Clones share the kept call.
+#[derive(Clone, Debug, Default)]
+pub struct CutOffCalls(Arc<Mutex<Option<CutOffToolCall>>>);
+
+impl CutOffCalls {
+    /// The call the run that just failed ended on, if it ended on one.
+    pub fn take(&self) -> Option<CutOffToolCall> {
+        self.0.lock().take()
+    }
+}
+
+impl AgentHook for CutOffCalls {
+    async fn on_invalid_tool_call(
+        &self,
+        _ctx: &HookContext,
+        event: &InvalidToolCallContext,
+    ) -> Option<InvalidToolCallAction> {
+        let InvalidToolCallReason::MalformedArguments { error } = &event.reason else {
+            return None;
+        };
+        *self.0.lock() = Some(CutOffToolCall {
+            tool: event.tool_name.clone(),
+            reason: error.clone(),
+        });
+        Some(InvalidToolCallAction::fail())
     }
 }
 
@@ -152,23 +183,6 @@ impl ArgumentTail {
 mod tests {
     use super::*;
 
-    /// rig's error text as rig-core 0.42 writes it.
-    #[test]
-    fn parses_rigs_error() {
-        let cut = CutOffToolCall::parse(
-            "CompletionError: ResponseError: tool call `write_file` arrived with malformed \
-             JSON input: EOF while parsing a string at line 1 column 13114",
-        )
-        .expect("a cut-off call");
-        assert_eq!(cut.tool, "write_file");
-        assert_eq!(
-            cut.reason,
-            "EOF while parsing a string at line 1 column 13114"
-        );
-        assert!(CutOffToolCall::parse("error sending request for url").is_none());
-        assert!(CutOffToolCall::parse("tool call arrived with malformed JSON input: x").is_none());
-    }
-
     /// The result names the tool and the column, says how to write in
     /// parts, and reads as a failed tool result.
     #[test]
@@ -195,7 +209,7 @@ mod tests {
             reason: "EOF while parsing a string at line 1 column 8143".into(),
         };
         let (call, result) = cut.messages("call_cut_off_1", "Writing the report.");
-        let Message::Assistant { content, .. } = call else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = call else {
             panic!("an assistant message")
         };
         assert_eq!(content.len(), 2, "the text, then the call");
@@ -203,7 +217,7 @@ mod tests {
             panic!("a tool call")
         };
         assert_eq!(tool_call.function.name, "write_file");
-        assert_eq!(tool_call.function.arguments, serde_json::json!({}));
+        assert!(tool_call.function.arguments.is_empty());
         let Message::User { content } = result else {
             panic!("a user message")
         };
@@ -214,7 +228,7 @@ mod tests {
         assert_eq!(tool_result.name, "write_file");
 
         let (call, _) = cut.messages("call_cut_off_2", "  ");
-        let Message::Assistant { content, .. } = call else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = call else {
             panic!("an assistant message")
         };
         assert_eq!(content.len(), 1, "no empty text block");
@@ -412,7 +426,7 @@ mod tests {
 
     /// AGE-983, criterion 2: the recovery is bounded. After
     /// [`MAX_CUT_OFF_RECOVERIES`] answered cut-offs, the next one ends the
-    /// turn with rig's error, as a malformed tool call (the protocol nudge
+    /// turn with rig's error (rig 0.46's wording), as a malformed tool call (the protocol nudge
     /// follows), not a transport failure to re-send.
     #[tokio::test]
     async fn repeated_cut_offs_end_the_turn_after_the_limit() {
@@ -439,7 +453,7 @@ mod tests {
         assert!(
             errors[0]
                 .message
-                .contains("arrived with malformed JSON input"),
+                .contains("was called with arguments that are not a JSON object"),
             "{}",
             errors[0].message
         );

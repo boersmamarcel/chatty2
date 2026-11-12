@@ -192,10 +192,8 @@ pub(super) fn call_refs(content: &[AssistantContent]) -> Vec<CallRef> {
         .iter()
         .filter_map(|ac| match ac {
             AssistantContent::ToolCall(tc) => Some(CallRef {
-                ids: std::iter::once(tc.id.to_string())
-                    .chain(tc.provider.as_ref().map(|p| p.call_id.clone()))
-                    .collect(),
-                name: tc.function.name.clone(),
+                ids: std::iter::once(tc.id.to_string()).collect(),
+                name: tc.function.name.to_string(),
                 agent: tc
                     .function
                     .arguments
@@ -260,11 +258,11 @@ impl Agent {
             Some(steps) => steps,
             None => match &self.conversation {
                 Some(CapturedConversation::Messages { messages }) => {
-                    match serde_json::from_value::<Vec<Message>>(messages.clone()) {
+                    match crate::models::history_compat::parse_history_value(messages.clone()) {
                         Ok(messages) => conversation_steps(&messages),
                         Err(e) => {
                             incomplete.push(format!(
-                                "{}: its conversation could not be read ({e}); tool calls only",
+                                "{}: its conversation could not be read ({e:#}); tool calls only",
                                 self.roster.path
                             ));
                             self.tool_steps()
@@ -575,7 +573,7 @@ fn conversation_steps(messages: &[Message]) -> Vec<Built> {
                     built.push(Built::new(step, Vec::new()));
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 let text: String = content
                     .iter()
                     .filter_map(|ac| match ac {
@@ -586,7 +584,7 @@ fn conversation_steps(messages: &[Message]) -> Vec<Built> {
                 let reasoning: Vec<String> = content
                     .iter()
                     .filter_map(|ac| match ac {
-                        AssistantContent::Reasoning(r) => Some(r.display_text()),
+                        AssistantContent::Reasoning(r) => Some(r.text.clone()),
                         _ => None,
                     })
                     .filter(|r| !r.is_empty())
@@ -595,13 +593,9 @@ fn conversation_steps(messages: &[Message]) -> Vec<Built> {
                     .iter()
                     .filter_map(|ac| match ac {
                         AssistantContent::ToolCall(tc) => Some(AtifToolCall {
-                            tool_call_id: tc
-                                .provider
-                                .as_ref()
-                                .map(|p| p.call_id.clone())
-                                .unwrap_or_else(|| tc.id.to_string()),
-                            function_name: tc.function.name.clone(),
-                            arguments: tc.function.arguments.clone(),
+                            tool_call_id: tc.id.to_string(),
+                            function_name: tc.function.name.to_string(),
+                            arguments: tc.function.arguments_value(),
                             extra: plugin_extra(&tc.function.name),
                         }),
                         _ => None,
@@ -631,7 +625,7 @@ pub(super) fn attach_tool_result(built: &mut [Built], result: &ToolResult) {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    attach_result(built, &result.call, content);
+    attach_result(built, &result.call.to_string(), content);
 }
 
 /// Put a tool's result on the latest step whose call it answers.

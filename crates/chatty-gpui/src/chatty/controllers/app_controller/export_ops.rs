@@ -155,7 +155,10 @@ impl ChattyApp {
                         markdown.push_str(&format!("---\n\n**User**\n\n{text}\n\n"));
                     }
                 }
-                rig_core::completion::Message::Assistant { content, .. } => {
+                rig_core::completion::Message::Assistant(rig_core::message::AssistantMessage {
+                    content,
+                    ..
+                }) => {
                     let text = content
                         .iter()
                         .filter_map(|c| match c {

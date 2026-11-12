@@ -19,7 +19,7 @@
 use std::sync::{Arc, Mutex};
 
 use chatty_wasm_runtime::{CompletionResponse, LlmProvider, Message, Role, TokenUsage, ToolCall};
-use rig_core::completion::{AssistantContent, CompletionRequestBuilder, ToolDefinition};
+use rig_core::completion::{AssistantContent, CompletionRequest, ToolDefinition};
 use tokio::runtime::Handle;
 use tracing::debug;
 
@@ -163,7 +163,7 @@ async fn send(
     messages: Vec<Message>,
     tools: Option<&str>,
 ) -> Result<(CompletionResponse, ApiCallUsage), String> {
-    let model = completion_model(model_config, provider_config)
+    let models = completion_model(model_config, provider_config)
         .map_err(|e| format!("llm::complete: {e:#}"))?;
 
     let mut history = to_rig_messages(messages);
@@ -171,7 +171,13 @@ async fn send(
         .pop()
         .ok_or_else(|| "llm::complete: no messages".to_string())?;
 
-    let mut request = CompletionRequestBuilder::new(model, prompt).messages(history);
+    // The prompt is the conversation's last message, after the history.
+    let mut request = CompletionRequest::new(prompt);
+    let prompt = request.chat_history.pop();
+    request
+        .chat_history
+        .extend(history.into_iter().map(Into::into));
+    request.chat_history.extend(prompt);
     if let Some(tools) = tools {
         ensure_tools_reachable(model_config, provider_config)
             .map_err(|e| format!("llm::complete: {e:#}"))?;
@@ -187,8 +193,9 @@ async fn send(
         request = request.additional_params(params);
     }
 
-    let reply = request
-        .send()
+    let reply = models
+        .for_request(!request.tools.is_empty())
+        .call(request)
         .await
         .map_err(|e| format!("llm::complete: {e}"))?;
 
@@ -203,18 +210,11 @@ async fn send(
         match part {
             AssistantContent::Text(text) => content.push_str(&text.text),
             AssistantContent::ToolCall(call) => tool_calls.push(ToolCall {
-                id: call
-                    .provider
-                    .as_ref()
-                    .map(|p| p.call_id.clone())
-                    .unwrap_or_else(|| call.id.to_string()),
-                name: call.function.name,
-                arguments: match call.function.arguments {
-                    serde_json::Value::String(raw) => raw,
-                    other => other.to_string(),
-                },
+                id: call.id.to_string(),
+                name: call.function.name.to_string(),
+                arguments: call.function.raw_arguments(),
             }),
-            AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {}
+            _ => {}
         }
     }
     let response = CompletionResponse {
@@ -235,7 +235,7 @@ async fn send(
 /// `tool-call-id` names, under the tool name that call used.
 fn to_rig_messages(messages: Vec<Message>) -> Vec<rig_core::completion::Message> {
     use rig_core::completion::Message as RigMessage;
-    use rig_core::message::{ToolResultContent, UserContent};
+    use rig_core::message::{AssistantMessage, CallId, ToolResultContent, UserContent};
 
     let mut tool_names = std::collections::HashMap::new();
     messages
@@ -255,23 +255,38 @@ fn to_rig_messages(messages: Vec<Message>) -> Vec<rig_core::completion::Message>
                     tool_names.insert(call.id.clone(), call.name.clone());
                     let arguments = serde_json::from_str(&call.arguments)
                         .unwrap_or(serde_json::Value::String(call.arguments));
-                    content.push(AssistantContent::tool_call(call.id, call.name, arguments));
+                    content.push(AssistantContent::tool_call(
+                        call.id,
+                        tool_name(call.name),
+                        arguments,
+                    ));
                 }
-                RigMessage::Assistant { id: None, content }
+                RigMessage::Assistant(AssistantMessage::new(content))
             }
             Role::Tool => {
                 let call_id = message.tool_call_id.unwrap_or_default();
                 let name = tool_names.get(&call_id).cloned().unwrap_or_default();
                 RigMessage::User {
-                    content: vec![UserContent::tool_result_from_wire(
-                        call_id,
-                        name,
+                    content: vec![UserContent::tool_result(
+                        CallId::from_wire(call_id),
+                        tool_name(name),
                         vec![ToolResultContent::text(message.content)],
                     )],
                 }
             }
         })
         .collect()
+}
+
+/// What a guest's empty tool name becomes: rig 0.46 names every call and
+/// result, and an empty name is not one.
+const UNNAMED_TOOL: &str = "unnamed_tool";
+
+/// `name` as a rig tool name, [`UNNAMED_TOOL`] when the guest gave none.
+fn tool_name(name: String) -> rig_core::message::ToolName {
+    rig_core::message::ToolName::new(name).unwrap_or_else(|_| {
+        rig_core::message::ToolName::new(UNNAMED_TOOL).expect("a non-empty name")
+    })
 }
 
 /// Normalize a JSON tools blob from a WASM module into tool definitions.
@@ -296,7 +311,7 @@ fn normalize_tools(tools_json: &str) -> Vec<ToolDefinition> {
     arr.into_iter()
         .filter_map(|t| {
             let inner = t.get("function").cloned().unwrap_or(t);
-            let name = inner.get("name")?.as_str()?.to_string();
+            let name = rig_core::message::ToolName::new(inner.get("name")?.as_str()?).ok()?;
             let description = inner
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -308,11 +323,7 @@ fn normalize_tools(tools_json: &str) -> Vec<ToolDefinition> {
                 .or_else(|| inner.get("input_schema"))
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({"type": "object"}));
-            Some(ToolDefinition {
-                name,
-                description,
-                parameters,
-            })
+            Some(ToolDefinition::new(name, description, parameters))
         })
         .collect()
 }
@@ -793,7 +804,7 @@ mod tests {
     /// result of the call it names, after the assistant message that made
     /// the call — not as a user message.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_tool_message_reaches_the_provider_as_a_tool_result() {
+    async fn a_tool_message_reaches_the_provider_without_tools_as_text() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/chat/completions"))
@@ -837,13 +848,21 @@ mod tests {
             .body_json()
             .unwrap();
         let messages = sent["messages"].as_array().expect("messages");
+        // AGE-1151 (Marcel, 2026-11-12: accepted): a request that declares
+        // no tools gets its history's calls and results as text under rig
+        // 0.46; rig 0.42 sent them as a `tool_calls` message and a `tool`
+        // message.
         assert_eq!(messages.len(), 3, "{sent}");
         assert_eq!(messages[1]["role"], "assistant", "{sent}");
-        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_7", "{sent}");
-        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "count");
-        assert_eq!(messages[2]["role"], "tool", "{sent}");
-        assert_eq!(messages[2]["tool_call_id"], "call_7", "{sent}");
-        assert_eq!(messages[2]["content"], "3", "{sent}");
+        assert_eq!(
+            messages[1]["content"], "[called tool count with {}]",
+            "{sent}"
+        );
+        assert_eq!(messages[2]["role"], "user", "{sent}");
+        assert_eq!(
+            messages[2]["content"][0]["text"], "[tool count result] 3",
+            "{sent}"
+        );
     }
 
     /// The call's deadline still bounds a provider that answers late: the

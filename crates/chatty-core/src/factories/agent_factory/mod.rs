@@ -21,7 +21,6 @@ mod tool_registry;
 
 use anyhow::Result;
 use rig_agent::Agent;
-use rig_agent::completion::Prompt;
 
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::context_shaper::ContextShaper;
@@ -251,7 +250,7 @@ impl AgentClient {
     /// (tracing, policy, retries, Rig hooks) that should apply consistently
     /// across title generation, summarization, and other non-streaming calls.
     pub async fn prompt(&self, prompt: &str) -> Result<String> {
-        Ok(self.utility.prompt(prompt).await?)
+        Ok(self.utility.prompt(prompt).await?.output())
     }
 
     pub fn task_controller(&self) -> crate::services::AgentTaskController {
@@ -1750,7 +1749,7 @@ async fn calibrate_context_shaper(
             .iter()
             .map(|definition| {
                 (
-                    definition.name.clone(),
+                    definition.name.to_string(),
                     counter.count(&definition.name)
                         + counter.count(&definition.description)
                         + counter.count(&definition.parameters.to_string()),
@@ -1919,7 +1918,7 @@ mod tests {
             .await
             .expect("tool definitions resolve")
             .into_iter()
-            .map(|definition| definition.name)
+            .map(|definition| definition.name.to_string())
             .collect()
     }
 
@@ -1979,7 +1978,6 @@ mod tests {
         use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
         use crate::testing::fake_model::{FakeDaemon, Reply, Script};
         use futures::StreamExt;
-        use rig_agent::streaming::StreamingPrompt;
 
         const MODEL: &str = "age-590-model";
         let _ = crate::init_repositories();
@@ -2006,7 +2004,7 @@ mod tests {
         let built = AgentClient::from_model_config_with_tools(&model, &provider, ctx)
             .await
             .expect("the agent builds");
-        let mut stream = built.client.agent.stream_prompt("go").max_turns(3).await;
+        let mut stream = built.client.agent.prompt("go").max_turns(3).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run streams");
         }
@@ -2065,7 +2063,6 @@ mod tests {
         use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
         use crate::testing::fake_model::{FakeDaemon, Reply, Script};
         use futures::StreamExt;
-        use rig_agent::streaming::StreamingPrompt;
 
         const MODEL: &str = "age-1134-model";
         let _ = crate::init_repositories();
@@ -2094,7 +2091,7 @@ mod tests {
         let built = AgentClient::from_model_config_with_tools(&model, &provider, ctx)
             .await
             .expect("the agent builds");
-        let mut stream = built.client.agent.stream_prompt("go").max_turns(3).await;
+        let mut stream = built.client.agent.prompt("go").max_turns(3).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run streams");
         }
@@ -2176,7 +2173,7 @@ mod tests {
             .await
             .expect("tool definitions resolve")
             .into_iter()
-            .map(|definition| definition.name)
+            .map(|definition| definition.name.to_string())
             .collect()
     }
 

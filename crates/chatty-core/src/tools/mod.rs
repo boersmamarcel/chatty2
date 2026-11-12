@@ -269,45 +269,55 @@ pub use terminal_run_tool::TerminalRunTool;
 pub use typst_tool::CompileTypstTool;
 pub use worker_progress::{progress_text_for_event, worker_executable};
 
-/// Guard tests: every built-in tool's parameter schema must convert to a valid
-/// Gemini `Schema` without any empty `type` strings.
+/// Guard tests: no node of a built-in tool's parameter schema leaves Gemini
+/// without a type.
 ///
-/// Gemini rejects requests containing `type: ""` (produced by rig's `infer_type`
-/// when a schema object has no `type`, no `properties`, and no composition
-/// keywords).  These tests catch regressions if the rig-core vendor patch is
-/// ever removed or if a new tool introduces a schema gap.
+/// Gemini rejects requests containing `type: ""`, which rig 0.42's `infer_type`
+/// produced for a schema object with no `type`, no `properties` and no
+/// composition keyword. rig 0.46 keeps its Gemini schema types private
+/// (AGE-1151), so the guard reads the JSON schema for the same condition.
 #[cfg(test)]
-mod gemini_compat_tests {
+pub(crate) mod gemini_compat_tests {
     use rig_core::completion::ToolDefinition;
-    use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
+    use serde_json::Value;
 
-    /// Recursively assert that every [`Schema`] node has a non-empty `type`.
-    fn assert_no_empty_types(schema: &Schema, path: &str) {
+    /// Recursively assert that every schema node states or implies a type.
+    pub(crate) fn assert_no_empty_types(schema: &Value, path: &str) {
+        let Some(node) = schema.as_object() else {
+            return;
+        };
+        let typed = node.get("type").is_some_and(|t| match t {
+            Value::String(t) => !t.is_empty(),
+            Value::Array(types) => !types.is_empty(),
+            _ => false,
+        });
+        let implied = ["properties", "anyOf", "oneOf", "allOf", "enum", "$ref"]
+            .iter()
+            .any(|key| node.contains_key(*key));
         assert!(
-            !schema.r#type.is_empty(),
+            typed || implied,
             "Gemini schema 'type' is empty at path '{path}'"
         );
-        if let Some(items) = &schema.items {
+        if let Some(items) = node.get("items") {
             assert_no_empty_types(items, &format!("{path}.items"));
         }
-        if let Some(props) = &schema.properties {
+        if let Some(Value::Object(props)) = node.get("properties") {
             for (key, val) in props {
                 assert_no_empty_types(val, &format!("{path}.{key}"));
             }
         }
-    }
-
-    /// Convert a [`ToolDefinition`] to a Gemini `Tool` and assert all types
-    /// are non-empty.
-    fn check_gemini_compat(def: ToolDefinition) {
-        let name = def.name.clone();
-        let tool = Tool::try_from(def)
-            .unwrap_or_else(|e| panic!("Tool '{name}' failed Gemini conversion: {e}"));
-        for decl in &tool.function_declarations {
-            if let Some(params) = &decl.parameters {
-                assert_no_empty_types(params, &name);
+        for key in ["anyOf", "oneOf", "allOf"] {
+            if let Some(Value::Array(variants)) = node.get(key) {
+                for (i, variant) in variants.iter().enumerate() {
+                    assert_no_empty_types(variant, &format!("{path}.{key}[{i}]"));
+                }
             }
         }
+    }
+
+    /// Assert a [`ToolDefinition`]'s parameters leave no node untyped.
+    fn check_gemini_compat(def: ToolDefinition) {
+        assert_no_empty_types(&def.parameters, def.name.as_str());
     }
 
     #[tokio::test]

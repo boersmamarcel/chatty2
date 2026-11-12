@@ -1,12 +1,13 @@
 use anyhow::Result;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
+use rig_agent::agent::MultiTurnStreamItem;
 use rig_agent::completion::PromptError;
-use rig_agent::streaming::StreamingPrompt;
-use rig_core::completion::{CompletionError, Message};
+use rig_core::ErrorKind;
+use rig_core::completion::Message;
+use rig_core::error::ProviderError;
 use rig_core::message::{Text, ToolResultContent, UserContent};
-use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent, ToolCallDeltaContent};
+use rig_core::streaming::{Item, PartKind, StreamEvent};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -17,7 +18,7 @@ use crate::models::clarification_store::{ClarificationNotification, ClarifyingQu
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::budget_stop::{BUDGET_STOP, StopOnBudgetExhausted, endpoint_refusal};
-use crate::services::cut_off_tool_call::{ArgumentTail, CutOffToolCall, MAX_CUT_OFF_RECOVERIES};
+use crate::services::cut_off_tool_call::{ArgumentTail, CutOffCalls, MAX_CUT_OFF_RECOVERIES};
 use crate::services::round_limit::RoundLimit;
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
 use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
@@ -121,17 +122,19 @@ pub enum UsageSemantics {
 /// Convert rig's per-provider usage into chatty's normalised per-call record.
 ///
 /// `turn` is one-based; the aggregate built from a final response passes 0.
+/// A counter the provider did not report (rig 0.46's `None`) counts as zero,
+/// as rig 0.42's zero did.
 pub fn normalize_usage(
     semantics: UsageSemantics,
     turn: u32,
     usage: &rig_core::completion::Usage,
 ) -> ApiCallUsage {
-    let cache_read = usage.cached_input_tokens;
-    let cache_write = usage.cache_creation_input_tokens;
+    let cache_read = usage.cached_input_tokens.unwrap_or(0);
+    let cache_write = usage.cache_creation_input_tokens.unwrap_or(0);
+    let reported_input = usage.input_tokens.unwrap_or(0);
     let input = match semantics {
-        UsageSemantics::InputExcludesCache => usage.input_tokens,
-        UsageSemantics::InputIncludesCache => usage
-            .input_tokens
+        UsageSemantics::InputExcludesCache => reported_input,
+        UsageSemantics::InputIncludesCache => reported_input
             .saturating_sub(cache_read)
             .saturating_sub(cache_write),
     };
@@ -141,8 +144,8 @@ pub fn normalize_usage(
         input_tokens: clamp(input),
         cache_read_tokens: clamp(cache_read),
         cache_write_tokens: clamp(cache_write),
-        output_tokens: clamp(usage.output_tokens),
-        reasoning_tokens: clamp(usage.reasoning_tokens),
+        output_tokens: clamp(usage.output_tokens.unwrap_or(0)),
+        reasoning_tokens: clamp(usage.reasoning_tokens.unwrap_or(0)),
         ..Default::default()
     }
 }
@@ -211,11 +214,11 @@ fn log_call_usage(call: &ApiCallUsage) {
 /// Type alias for response streams
 pub type ResponseStream = BoxStream<'static, Result<StreamChunk>>;
 
-/// Whether a streamed tool result is reporting a failure.
+/// Whether a streamed tool result's text is reporting a failure.
 ///
-/// The stream carries no error flag — `rig_core`'s streamed `ToolResult` has
-/// only the content, and the typed `is_error()` lives on `rig_agent`'s
-/// `ToolExecutionResult`, which never reaches here — so the text is the signal.
+/// rig 0.46's streamed `ToolResult` carries `is_error` for a tool that
+/// failed, was refused or never ran; a tool that reports its own failure as
+/// text does not set it, so the text stays a signal too.
 /// [`crate::tools::map_tool_error`] writes the `Error:` prefix this reads.
 pub(crate) fn tool_result_looks_like_error(content_text: &str) -> bool {
     let trimmed = content_text.trim_start();
@@ -248,20 +251,6 @@ fn streamed_tool_result_to_text(tool_result: &rig_core::completion::message::Too
         .join("\n")
 }
 
-/// Resolve a unique tool call id: the provider's `call_id` when it issued a
-/// non-empty one, rig's internal correlation id otherwise. Shared by the
-/// `ToolCall` and `ToolResult` arms of [`map_item`], which resolve the id the
-/// same way so a call and its result carry the same chunk id.
-fn resolve_call_id(
-    provider: Option<&rig_core::completion::message::ProviderCallId>,
-    internal_call_id: String,
-) -> String {
-    provider
-        .map(|p| p.call_id.clone())
-        .filter(|id| !id.is_empty())
-        .unwrap_or(internal_call_id)
-}
-
 /// Map one item from the agent's multi-turn stream into the [`StreamChunk`]s
 /// it produces.
 ///
@@ -279,45 +268,39 @@ fn resolve_call_id(
 /// `Reasoning` block that repeats its deltas) yields none.
 fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamChunk> {
     match item {
-        MultiTurnStreamItem::StreamAssistantItem(content) => match content {
-            StreamedAssistantContent::Text(text) => vec![StreamChunk::Text(text.text)],
-            StreamedAssistantContent::ToolCall {
-                tool_call,
-                internal_call_id,
-            } => {
-                let tool_id = resolve_call_id(tool_call.provider.as_ref(), internal_call_id);
-                info!(
-                    tool_id = %tool_id,
-                    tool_name = %tool_call.function.name,
-                    "ToolCall detected in stream"
-                );
-                vec![
-                    StreamChunk::ToolCallStarted {
-                        id: tool_id.clone(),
-                        name: tool_call.function.name.clone(),
-                    },
-                    StreamChunk::ToolCallInput {
-                        id: tool_id,
-                        arguments: serde_json::to_string(&tool_call.function.arguments)
-                            .unwrap_or_else(|_| "{}".to_string()),
-                    },
-                ]
+        MultiTurnStreamItem::StreamAssistantItem(Item::Event(event)) => match event {
+            StreamEvent::Text { text, .. } => vec![StreamChunk::Text(text)],
+            StreamEvent::Reasoning { text, .. } => vec![StreamChunk::Reasoning(text)],
+            StreamEvent::Start {
+                kind: PartKind::ToolCall,
+                ..
             }
-            StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
-                vec![StreamChunk::Reasoning(reasoning)]
-            }
-            StreamedAssistantContent::ToolCallDelta { .. } => vec![StreamChunk::ToolCallDelta],
+            | StreamEvent::Arguments { .. } => vec![StreamChunk::ToolCallDelta],
             _ => Vec::new(),
         },
-        MultiTurnStreamItem::StreamUserItem(user_content) => {
-            let StreamedUserContent::ToolResult {
-                tool_result,
-                internal_call_id,
-            } = user_content;
+        MultiTurnStreamItem::ToolCall { tool_call } => {
+            let tool_id = tool_call.id.to_string();
+            info!(
+                tool_id = %tool_id,
+                tool_name = %tool_call.function.name,
+                "ToolCall detected in stream"
+            );
+            vec![
+                StreamChunk::ToolCallStarted {
+                    id: tool_id.clone(),
+                    name: tool_call.function.name.to_string(),
+                },
+                StreamChunk::ToolCallInput {
+                    id: tool_id,
+                    arguments: tool_call.function.arguments_json(),
+                },
+            ]
+        }
+        MultiTurnStreamItem::ToolResult { tool_result } => {
             let content_text = streamed_tool_result_to_text(&tool_result);
-            let call_id = resolve_call_id(tool_result.provider.as_ref(), internal_call_id);
+            let call_id = tool_result.call.to_string();
 
-            if tool_result_looks_like_error(&content_text) {
+            if tool_result.is_error || tool_result_looks_like_error(&content_text) {
                 warn!(
                     tool_id = %call_id,
                     error = %content_text,
@@ -347,14 +330,14 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
         MultiTurnStreamItem::FinalResponse(final_response) => {
             let usage = normalize_usage(semantics, 0, &final_response.usage());
             let mut chunks = vec![StreamChunk::TurnUsage(usage)];
-            // rig's record of the turn, when the run supplied one: the prompt,
-            // each assistant tool-call message, each tool-result message, the
-            // final text. The frontends persist its tool round-trips behind the
-            // final text entry (AGE-247). After the usage aggregate, before
-            // `Done`. `map_item` is the single mapping path, so this one arm
-            // replaces the two duplicated macro sites AGE-247 originally had.
-            if let Some(messages) = final_response.messages {
-                chunks.push(StreamChunk::TurnMessages(messages));
+            // rig's record of the turn: the prompt, each assistant tool-call
+            // message, each tool-result message, the final text. The
+            // frontends persist its tool round-trips behind the final text
+            // entry (AGE-247). After the usage aggregate, before `Done`.
+            // `map_item` is the single mapping path, so this one arm replaces
+            // the two duplicated macro sites AGE-247 originally had.
+            if !final_response.messages.is_empty() {
+                chunks.push(StreamChunk::TurnMessages(final_response.messages));
             }
             chunks
         }
@@ -362,47 +345,29 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
     }
 }
 
-/// Classify one of rig's typed completion errors into a [`StreamErrorKind`]
-/// (AGE-244 / D5), using the HTTP status the provider returned when there is
-/// one.
-fn classify_completion_error(err: &CompletionError) -> StreamErrorKind {
-    if budget_refusal(err).is_some() {
-        return StreamErrorKind::BudgetExhausted;
-    }
-    if let Some(status) = err.provider_response_status() {
-        return match status.as_u16() {
-            401 | 403 => StreamErrorKind::Auth,
-            429 => StreamErrorKind::RateLimited,
-            code => StreamErrorKind::ProviderStatus(code),
-        };
-    }
-    match err {
+/// Classify a provider's failure: a malformed reply, a turn cut off with no
+/// answer, or a transport failure. The HTTP status and a budget refusal are
+/// read first, by [`classify_streaming_error`].
+fn classify_provider_failure(kind: ErrorKind, message: &str) -> StreamErrorKind {
+    match kind {
         // A malformed tool call surfaces from rig as a JSON parse failure on
         // the provider's response, not an HTTP status.
-        CompletionError::JsonError(_) => StreamErrorKind::MalformedToolCall,
-        // A streamed tool call whose arguments never parsed, past the
-        // turn's in-run recoveries (AGE-983): a malformed call, worth the
-        // protocol nudge. Re-sending the same request, as a transport
-        // retry does, only cuts the same call off again.
-        CompletionError::ResponseError(message) if CutOffToolCall::parse(message).is_some() => {
-            StreamErrorKind::MalformedToolCall
-        }
+        ErrorKind::Json => StreamErrorKind::MalformedToolCall,
         // rig ends a run whose last turn answered nothing *and* was cut off
         // (at the output cap, or by a content filter) with this error. It is
         // an empty completion, not a transport failure: re-running the turn
         // hits the same cap, so headless must stop rather than retry it five
         // times (AGE-936). The in-turn retry (`EmptyTurnRetry`) had its go.
-        CompletionError::ResponseError(message) if message.contains(NO_ANSWER_CUT_OFF) => {
-            StreamErrorKind::EmptyCompletion
-        }
+        _ if message.contains(NO_ANSWER_CUT_OFF) => StreamErrorKind::EmptyCompletion,
+        ErrorKind::Cancelled => StreamErrorKind::Other,
         _ => StreamErrorKind::Transport,
     }
 }
 
 /// What rig's error says when a run's last turn produced no answer and its
-/// provider cut it off. This matches rig-agent 0.42's error text
-/// (`AgentRun::next_step`) verbatim and must be revisited on every rig bump:
-/// rig has no typed variant for it. The session test
+/// provider cut it off. This matches rig-core 0.46's error text
+/// (`FinishReason::no_answer_message`) verbatim and must be revisited on
+/// every rig bump: rig has no typed variant for it. The session test
 /// `a_capped_turn_with_no_answer_stops_without_a_loop` drives the real error
 /// through this, so a rig that rewords it fails there.
 const NO_ANSWER_CUT_OFF: &str = "produced no answer and stopped with finish_reason=";
@@ -438,80 +403,73 @@ pub const TRUNCATION_NOTE: &str =
 
 /// The typed `budget_exhausted` text for a provider's `402` refusal on a
 /// spent budget (AGE-903), read from its status and body.
-fn budget_refusal(err: &CompletionError) -> Option<String> {
+fn budget_refusal(err: &PromptError) -> Option<String> {
     endpoint_refusal(
         err.provider_response_status()?.as_u16(),
         err.provider_response_body()?,
     )
 }
 
-/// The provider's completion error inside rig's `StreamingError`, if any.
-fn completion_error(err: &StreamingError) -> Option<&CompletionError> {
-    match err {
-        StreamingError::Completion(e) => Some(e),
-        StreamingError::Prompt(e) => match e.as_ref() {
-            PromptError::CompletionError(e) => Some(e),
-            _ => None,
-        },
+/// Classify the error that ends rig's stream (AGE-244 / D5) into a
+/// [`StreamErrorKind`], using the HTTP status the provider returned when
+/// there is one.
+fn classify_streaming_error(err: &PromptError) -> StreamErrorKind {
+    if budget_refusal(err).is_some() {
+        return StreamErrorKind::BudgetExhausted;
     }
-}
-
-/// Classify rig's `StreamingError` (the only typed error `stream_prompt`
-/// ever sees) into a [`StreamErrorKind`] (AGE-244 / D5).
-fn classify_streaming_error(err: &StreamingError) -> StreamErrorKind {
-    match err {
-        StreamingError::Completion(e) => classify_completion_error(e),
-        StreamingError::Prompt(e) => match e.as_ref() {
-            PromptError::CompletionError(e) => classify_completion_error(e),
-            // A one-token tool-name mistake (AGE-497): worth a nudge, not an
-            // outright stop, since rig's own error text already lists the
-            // available/allowed tools the model can retry with.
-            PromptError::UnknownToolCall { .. } => StreamErrorKind::UnknownToolCall,
-            // Exhausted its turn budget, or was cancelled: neither is a
-            // provider transport failure, and neither is worth a nudge.
-            PromptError::MaxTurnsError { .. }
-            | PromptError::PromptCancelled { .. }
-            | PromptError::MemoryError(_) => StreamErrorKind::Other,
-        },
+    if let Some(status) = err.provider_response_status() {
+        return match status.as_u16() {
+            401 | 403 => StreamErrorKind::Auth,
+            429 => StreamErrorKind::RateLimited,
+            code => StreamErrorKind::ProviderStatus(code),
+        };
     }
-}
-
-/// The tool call rig rejected because its streamed arguments never parsed
-/// (AGE-983), when `err` is that error.
-fn cut_off_tool_call(err: &StreamingError) -> Option<CutOffToolCall> {
-    match completion_error(err)? {
-        CompletionError::ResponseError(message) => CutOffToolCall::parse(message),
-        _ => None,
+    match err {
+        PromptError::Provider(error) => {
+            classify_provider_failure(rig_core::ErrorReport::from(error).kind, &error.to_string())
+        }
+        PromptError::Report(report) => classify_provider_failure(report.kind, &report.message),
+        // A one-token tool-name mistake (AGE-497): worth a nudge, not an
+        // outright stop, since rig's own error text already lists the
+        // available/allowed tools the model can retry with.
+        PromptError::UnknownToolCall { .. } => StreamErrorKind::UnknownToolCall,
+        // Exhausted its turn budget, or was cancelled: neither is a
+        // provider transport failure, and neither is worth a nudge.
+        _ => StreamErrorKind::Other,
     }
 }
 
 /// Start one rig run of `agent` on `history` and `prompt` under `budget`,
 /// with the hooks every run of `stream_prompt` carries.
-async fn start_run(
+fn start_run(
     agent: &rig_agent::agent::Agent,
     concurrency: usize,
     history: Vec<Message>,
     prompt: Message,
     budget: TurnBudget,
     rounds: RoundLimit,
+    cut_offs: &CutOffCalls,
 ) -> rig_agent::agent::StreamingResult {
     // A delegation whose worker never started ends the run (AGE-822), and
-    // so does one that came back with a spent budget (AGE-903).
+    // so does one that came back with a spent budget (AGE-903). A tool call
+    // whose arguments never parsed ends it too, for `stream_prompt` to
+    // answer (AGE-983).
     budget
-        .apply(agent.stream_prompt(prompt).history(history))
+        .apply(agent.prompt(prompt).history(history))
         .tool_concurrency(concurrency)
         .add_hook(StopOnWorkerStartFailure)
         .add_hook(StopOnBudgetExhausted)
         // A `[swarm.rounds]` cap (AGE-910); a no-op without one.
         .add_hook(rounds)
-        .await
+        .add_hook(cut_offs.clone())
+        .stream()
 }
 
 /// Map one line of the agent's stream — an item, or the transport `Err` that
 /// ends it — into the chunks it produces, and whether the caller should stop
 /// reading further items.
 fn map_stream_result(
-    item: Result<MultiTurnStreamItem, StreamingError>,
+    item: Result<MultiTurnStreamItem, PromptError>,
     semantics: UsageSemantics,
 ) -> (Vec<StreamChunk>, bool) {
     match item {
@@ -529,18 +487,25 @@ fn map_stream_result(
     }
 }
 
-/// rig's wording when a provider's response stream closed before its
-/// end-of-stream marker (`[DONE]`, a `finish_reason`, Ollama's `done: true`).
-const TRUNCATED_STREAM_MARKER: &str = "provider stream ended without a terminal record";
+/// Whether rig ended the run because a provider's response stream closed
+/// before its end-of-stream marker (`[DONE]`, a `finish_reason`, Ollama's
+/// `done: true`).
+fn is_truncated_stream(err: &PromptError) -> bool {
+    match err {
+        PromptError::Provider(ProviderError::Truncated) => true,
+        PromptError::Report(report) => report.message == ProviderError::Truncated.to_string(),
+        _ => false,
+    }
+}
 
 /// The error text shown to the user: rig's own, except for a stream cut
 /// short, whose wording names rig internals rather than what happened.
-fn describe_streaming_error(err: &StreamingError) -> String {
-    if let Some(refusal) = completion_error(err).and_then(budget_refusal) {
+fn describe_streaming_error(err: &PromptError) -> String {
+    if let Some(refusal) = budget_refusal(err) {
         return refusal;
     }
     let raw = err.to_string();
-    if raw.contains(TRUNCATED_STREAM_MARKER) {
+    if is_truncated_stream(err) {
         format!(
             "The connection to the model provider closed before the reply finished. \
              This is usually a network, VPN/proxy or provider-side interruption; try again. \
@@ -559,7 +524,7 @@ pub const BUDGET_SPENT_NOTE: &str = "[Stopped: this response's turn or time budg
 
 /// The normal end of a run whose tool-free wrap-up call asked for a tool
 /// anyway (see [`crate::services::turn_budget`]): rig reports it as
-/// `MaxTurnsError` (a tool call left in the reasoning channel trips
+/// `MaxTurns` (a tool call left in the reasoning channel trips
 /// `EmptyTurnRetry` into one call past the budget; "reached max turns
 /// limit: 51" under `--max-agent-turns 50`) or as the budget hook's own
 /// stop. Either way the model had its last word, so the run ends with it:
@@ -567,22 +532,19 @@ pub const BUDGET_SPENT_NOTE: &str = "[Stopped: this response's turn or time budg
 /// with), a note when the last call gave no text, then `Done`. `None` for
 /// every other error.
 fn budget_spent_end(
-    err: &StreamingError,
+    err: &PromptError,
     history_len: usize,
     text_in_last_call: bool,
 ) -> Option<Vec<StreamChunk>> {
-    let StreamingError::Prompt(e) = err else {
-        return None;
-    };
-    let history: &[Message] = match e.as_ref() {
-        PromptError::MaxTurnsError { chat_history, .. } => chat_history,
-        PromptError::PromptCancelled {
+    let history: &[Message] = match err {
+        PromptError::MaxTurns { chat_history, .. } => chat_history,
+        PromptError::Cancelled {
             chat_history,
             reason,
         } if reason == WRAP_UP_TOOL_CALL_STOP => chat_history,
         _ => return None,
     };
-    warn!(error = %e, "Budget spent on a call that asked for a tool; ending the run normally");
+    warn!(error = %err, "Budget spent on a call that asked for a tool; ending the run normally");
     let mut chunks = Vec::new();
     if let Some(messages) = history.get(history_len..).filter(|m| !m.is_empty()) {
         chunks.push(StreamChunk::TurnMessages(messages.to_vec()));
@@ -601,17 +563,14 @@ fn budget_spent_end(
 /// error: the card is the answer, which the user reads and a sub-leader's
 /// caller is handed. `None` for every other error.
 fn worker_start_end(
-    err: &StreamingError,
+    err: &PromptError,
     history_len: usize,
     text_in_last_call: bool,
 ) -> Option<Vec<StreamChunk>> {
-    let StreamingError::Prompt(e) = err else {
-        return None;
-    };
-    let PromptError::PromptCancelled {
+    let PromptError::Cancelled {
         chat_history,
         reason,
-    } = e.as_ref()
+    } = err
     else {
         return None;
     };
@@ -630,17 +589,14 @@ fn worker_start_end(
 /// (see [`crate::services::budget_stop`]): as [`worker_start_end`], with the
 /// final message the hook wrote — no model call — as the run's text.
 fn budget_stop_end(
-    err: &StreamingError,
+    err: &PromptError,
     history_len: usize,
     text_in_last_call: bool,
 ) -> Option<Vec<StreamChunk>> {
-    let StreamingError::Prompt(e) = err else {
-        return None;
-    };
-    let PromptError::PromptCancelled {
+    let PromptError::Cancelled {
         chat_history,
         reason,
-    } = e.as_ref()
+    } = err
     else {
         return None;
     };
@@ -665,7 +621,7 @@ fn budget_stop_end(
 /// their own record or end the run on purpose (`Other`: max turns,
 /// cancellation), and when no call went out.
 fn failed_run_messages(
-    err: &StreamingError,
+    err: &PromptError,
     recorder: &RequestRecorder,
     history_len: usize,
 ) -> Option<StreamChunk> {
@@ -808,6 +764,7 @@ pub async fn stream_prompt(
     let rig_agent = agent.agent.clone();
     let round_limit = agent.round_limit().clone();
     let concurrency = tool_concurrency(agent);
+    let cut_offs = CutOffCalls::default();
     let mut agent_stream = start_run(
         &rig_agent,
         concurrency,
@@ -815,8 +772,8 @@ pub async fn stream_prompt(
         user_message,
         turn_budget,
         round_limit.clone(),
-    )
-    .await;
+        &cut_offs,
+    );
 
     // A caller that does not wire a channel is treated the same as one whose
     // sender already dropped: `recv()` resolves to `None` immediately, which
@@ -860,13 +817,14 @@ pub async fn stream_prompt(
                     }
                     match item {
                         Some(result) => {
-                            if let Err(e) = &result
-                                && let Some(cut) = cut_off_tool_call(e)
+                            // A cut-off call this turn can no longer answer
+                            // ends it as a malformed tool call.
+                            let mut cut_unanswered = false;
+                            if result.is_err()
+                                && let Some(cut) = cut_offs.take()
                             {
-                                // What rig leaves of the call: no arguments,
-                                // no finish_reason. rig raises this only for a
-                                // call the provider declared complete, never
-                                // for one cut at `length`, which it drops.
+                                // A call whose arguments never parsed, which
+                                // `CutOffCalls` failed the run on.
                                 warn!(
                                     tool = %cut.tool,
                                     reason = %cut.reason,
@@ -904,9 +862,10 @@ pub async fn stream_prompt(
                                     history.push(call);
                                     let budget = turn_budget.continued(calls);
                                     agent_stream =
-                                        start_run(&rig_agent, concurrency, history, result, budget, round_limit.clone()).await;
+                                        start_run(&rig_agent, concurrency, history, result, budget, round_limit.clone(), &cut_offs);
                                     continue;
                                 }
+                                cut_unanswered = true;
                             }
                             if let Err(e) = &result
                                 && let Some(chunks) = budget_spent_end(e, history_len, text_in_last_call)
@@ -933,12 +892,12 @@ pub async fn stream_prompt(
                                 }
                                 // The arguments of the call in flight, for
                                 // the log line should it be cut off.
-                                Ok(MultiTurnStreamItem::StreamAssistantItem(
-                                    StreamedAssistantContent::ToolCallDelta { content, .. },
-                                )) => match content {
-                                    ToolCallDeltaContent::Name(_) => arguments.clear(),
-                                    ToolCallDeltaContent::Delta(delta) => arguments.push(delta),
-                                },
+                                Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(
+                                    StreamEvent::Start { kind: PartKind::ToolCall, .. },
+                                ))) => arguments.clear(),
+                                Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(
+                                    StreamEvent::Arguments { json, .. },
+                                ))) => arguments.push(json),
                                 Ok(MultiTurnStreamItem::FinalResponse(_))
                                     if last_call_cut_off && text_in_last_call =>
                                 {
@@ -956,6 +915,11 @@ pub async fn stream_prompt(
                                     && !earlier_runs.is_empty()
                                 {
                                     messages.splice(0..0, earlier_runs.iter().cloned());
+                                }
+                                if let StreamChunk::Error(error) = &mut chunk
+                                    && cut_unanswered
+                                {
+                                    error.kind = StreamErrorKind::MalformedToolCall;
                                 }
                                 if let StreamChunk::Error(error) = &mut chunk
                                     && is_cut_off_without_answer(error)
@@ -1100,20 +1064,71 @@ mod tests {
     }
 
     use rig_agent::agent::CompletionCall;
-    use rig_core::completion::CompletionError;
+    use rig_core::ProviderResponseError;
     use rig_core::completion::message::{
-        ProviderCallId, Text, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
+        CallId, ToolCall, ToolFunction, ToolResult, ToolResultContent,
     };
-    use rig_core::streaming::ToolCallDeltaContent;
+    use rig_core::error::ProviderError;
+    use rig_core::streaming::{Item, Part, PartKind, StreamEvent};
+    use std::sync::Arc;
 
     use super::{
         BUDGET_SPENT_NOTE, IMAGE_UNSUPPORTED_NOTE, Message, MultiTurnStreamItem, PromptError,
-        RequestRecorder, StreamChunk, StreamErrorKind, StreamedAssistantContent,
-        StreamedUserContent, StreamingError, UsageClock, UsageSemantics, WRAP_UP_TOOL_CALL_STOP,
-        budget_spent_end, classify_completion_error, classify_streaming_error, cut_off_tool_call,
-        failed_run_messages, map_item, map_stream_result, normalize_usage,
-        streamed_tool_result_to_text, strip_unsupported_images, tool_result_looks_like_error,
+        RequestRecorder, StreamChunk, StreamErrorKind, UsageClock, UsageSemantics,
+        WRAP_UP_TOOL_CALL_STOP, budget_spent_end, classify_streaming_error, failed_run_messages,
+        map_item, map_stream_result, normalize_usage, streamed_tool_result_to_text,
+        strip_unsupported_images, tool_result_looks_like_error,
     };
+
+    /// The usage rig 0.46 reads off an OpenRouter chat completion whose
+    /// `usage` block is `usage`, through chatty's own OpenRouter client.
+    async fn openrouter_usage(usage: serde_json::Value) -> rig_core::completion::Usage {
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "gen-1",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop",
+                }],
+                "usage": usage,
+            })))
+            .mount(&server)
+            .await;
+        let model = ModelConfig::new("m".into(), "m".into(), ProviderType::OpenRouter, "m".into());
+        let provider = ProviderConfig::new("or".into(), ProviderType::OpenRouter)
+            .with_api_key("k".into())
+            .with_base_url(format!("{}/v1", server.uri()));
+        crate::factories::agent_factory::completion_model(&model, &provider)
+            .unwrap()
+            .for_request(false)
+            .call(rig_core::completion::CompletionRequest::new(Message::user(
+                "hi",
+            )))
+            .await
+            .expect("the fake server answers")
+            .usage
+    }
+
+    fn status_error(code: u16) -> PromptError {
+        PromptError::Provider(ProviderError::ProviderResponse(ProviderResponseError::new(
+            reqwest::StatusCode::from_u16(code).unwrap(),
+            "{}",
+        )))
+    }
+
+    fn response_error(message: &str) -> PromptError {
+        PromptError::Provider(ProviderError::Response(message.to_string()))
+    }
     use rig_core::message::{Image, UserContent};
 
     // ── AGE image-input-on-text-only-model guard ─────────────────────────────
@@ -1166,10 +1181,10 @@ mod tests {
     #[test]
     fn unsupported_model_replaces_a_tool_result_image_with_a_note() {
         let tool_result = ToolResult {
-            call: ToolCallId::new("call-1").unwrap(),
-            provider: None,
-            name: "pdf_to_image".to_string(),
+            call: CallId::from_wire("call-1"),
+            name: crate::testing::tool_name("pdf_to_image"),
             content: vec![ToolResultContent::Image(Image::default())],
+            is_error: false,
         };
         let history = vec![Message::User {
             content: vec![UserContent::ToolResult(tool_result)],
@@ -1196,16 +1211,16 @@ mod tests {
     #[test]
     fn usage_normalisation_agrees_across_provider_conventions() {
         let mut anthropic = rig_core::completion::Usage::new();
-        anthropic.input_tokens = 200;
-        anthropic.cached_input_tokens = 9_000;
-        anthropic.cache_creation_input_tokens = 800;
-        anthropic.output_tokens = 30;
+        anthropic.input_tokens = Some(200);
+        anthropic.cached_input_tokens = Some(9_000);
+        anthropic.cache_creation_input_tokens = Some(800);
+        anthropic.output_tokens = Some(30);
 
         let mut openai_style = rig_core::completion::Usage::new();
-        openai_style.input_tokens = 200 + 9_000 + 800;
-        openai_style.cached_input_tokens = 9_000;
-        openai_style.cache_creation_input_tokens = 800;
-        openai_style.output_tokens = 30;
+        openai_style.input_tokens = Some(200 + 9_000 + 800);
+        openai_style.cached_input_tokens = Some(9_000);
+        openai_style.cache_creation_input_tokens = Some(800);
+        openai_style.output_tokens = Some(30);
 
         let a = normalize_usage(UsageSemantics::InputExcludesCache, 2, &anthropic);
         let o = normalize_usage(UsageSemantics::InputIncludesCache, 2, &openai_style);
@@ -1224,18 +1239,17 @@ mod tests {
     /// silently-zero cache read is indistinguishable from a cache that is not
     /// working, which is the thing ADR-0010's threshold is measured against
     /// (AGE-278).
-    #[test]
-    fn openrouter_cached_tokens_reach_the_normalised_record() {
-        let reported: rig_core::providers::openrouter::Usage = serde_json::from_str(
-            r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120,
+    #[tokio::test]
+    async fn openrouter_cached_tokens_reach_the_normalised_record() {
+        let reported = openrouter_usage(
+            serde_json::from_str(
+                r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120,
                 "prompt_tokens_details":{"cached_tokens":1200,"cache_write_tokens":300}}"#,
+            )
+            .unwrap(),
         )
-        .expect("an OpenRouter usage block deserializes");
-        let call = normalize_usage(
-            UsageSemantics::InputIncludesCache,
-            1,
-            &rig_core::completion::Usage::from(&reported),
-        );
+        .await;
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &reported);
         assert_eq!(call.cache_read_tokens, 1_200);
         assert_eq!(call.cache_write_tokens, 300);
         // OpenRouter counts both inside `prompt_tokens`; chatty stores the
@@ -1243,15 +1257,14 @@ mod tests {
         assert_eq!(call.input_tokens, 3_500);
         assert_eq!(call.prompt_tokens(), 5_000);
 
-        let uncached: rig_core::providers::openrouter::Usage = serde_json::from_str(
-            r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120}"#,
+        let uncached = openrouter_usage(
+            serde_json::from_str(
+                r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120}"#,
+            )
+            .unwrap(),
         )
-        .expect("usage without a details block deserializes");
-        let call = normalize_usage(
-            UsageSemantics::InputIncludesCache,
-            1,
-            &rig_core::completion::Usage::from(&uncached),
-        );
+        .await;
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &uncached);
         assert_eq!(call.cache_read_tokens, 0);
         assert_eq!(call.input_tokens, 5_000);
         assert_eq!(call.cache_hit_rate(), Some(0.0));
@@ -1259,27 +1272,61 @@ mod tests {
 
     /// Reasoning tokens reach the per-call record, where the headless usage
     /// file sums them (they are part of `output_tokens`, not on top of it).
-    #[test]
-    fn reasoning_tokens_reach_the_normalised_record() {
-        let reported: rig_core::providers::openrouter::Usage = serde_json::from_str(
-            r#"{"prompt_tokens":50,"completion_tokens":40,"total_tokens":90,
+    #[tokio::test]
+    async fn reasoning_tokens_reach_the_normalised_record() {
+        let reported = openrouter_usage(
+            serde_json::from_str(
+                r#"{"prompt_tokens":50,"completion_tokens":40,"total_tokens":90,
                 "completion_tokens_details":{"reasoning_tokens":25}}"#,
+            )
+            .unwrap(),
         )
-        .expect("an OpenRouter usage block deserializes");
-        let call = normalize_usage(
-            UsageSemantics::InputIncludesCache,
-            1,
-            &rig_core::completion::Usage::from(&reported),
-        );
+        .await;
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &reported);
         assert_eq!(call.reasoning_tokens, 25);
         assert_eq!(call.output_tokens, 40);
+    }
+
+    /// AGE-1151: rig 0.46 reports a counter the provider left out as
+    /// `None`, where rig 0.42 reported zero; chatty's record still counts it
+    /// as zero.
+    #[test]
+    fn an_unreported_counter_counts_as_zero() {
+        let mut partial = rig_core::completion::Usage::new();
+        partial.input_tokens = Some(120);
+        assert_eq!(partial.output_tokens, None);
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &partial);
+        assert_eq!(
+            (
+                call.input_tokens,
+                call.output_tokens,
+                call.cache_read_tokens,
+                call.cache_write_tokens,
+                call.reasoning_tokens
+            ),
+            (120, 0, 0, 0, 0)
+        );
+        let none = normalize_usage(
+            UsageSemantics::InputExcludesCache,
+            0,
+            &rig_core::completion::Usage::new(),
+        );
+        assert_eq!(
+            none,
+            normalize_usage(UsageSemantics::InputExcludesCache, 0, &{
+                let mut zero = rig_core::completion::Usage::new();
+                zero.input_tokens = Some(0);
+                zero.output_tokens = Some(0);
+                zero
+            })
+        );
     }
 
     #[test]
     fn usage_normalisation_never_underflows_on_inconsistent_counts() {
         let mut odd = rig_core::completion::Usage::new();
-        odd.input_tokens = 10;
-        odd.cached_input_tokens = 50;
+        odd.input_tokens = Some(10);
+        odd.cached_input_tokens = Some(50);
         let n = normalize_usage(UsageSemantics::InputIncludesCache, 1, &odd);
         assert_eq!(n.input_tokens, 0);
         assert_eq!(n.cache_read_tokens, 50);
@@ -1299,8 +1346,8 @@ mod tests {
     #[test]
     fn streamed_tool_result_serializes_json_payload_for_ui() {
         let tool_result = ToolResult {
-            call: ToolCallId::new("call-1").unwrap(),
-            name: "query_data".into(),
+            call: CallId::from_wire("call-1"),
+            name: crate::testing::tool_name("query_data"),
             content: vec![ToolResultContent::json(serde_json::json!({
                 "markdown_table": "| a |\n| --- |\n| 1 |",
                 "preview": {
@@ -1312,7 +1359,7 @@ mod tests {
                     "source": {"kind": "query", "sql": "SELECT 1"}
                 }
             }))],
-            provider: None,
+            is_error: false,
         };
 
         let text = streamed_tool_result_to_text(&tool_result);
@@ -1327,9 +1374,10 @@ mod tests {
 
     #[test]
     fn map_item_maps_text() {
-        let item = MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-            Text::new("hello"),
-        ));
+        let item = MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+            part: Part::new(0),
+            text: "hello".into(),
+        }));
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], StreamChunk::Text(t) if t == "hello"));
@@ -1341,12 +1389,10 @@ mod tests {
     /// responding" while the provider is busy the whole time.
     #[test]
     fn map_item_maps_reasoning_delta_to_a_chunk() {
-        let item =
-            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ReasoningDelta {
-                id: "r-1".into(),
-                provider_id: None,
-                reasoning: "Let me think".into(),
-            });
+        let item = MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Reasoning {
+            part: Part::new(0),
+            text: "Let me think".into(),
+        }));
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], StreamChunk::Reasoning(t) if t == "Let me think"));
@@ -1358,31 +1404,36 @@ mod tests {
     /// count as activity in the meantime.
     #[test]
     fn map_item_maps_tool_call_delta_to_a_chunk() {
-        for content in [
-            ToolCallDeltaContent::Name("write_file".into()),
-            ToolCallDeltaContent::Delta("{\"path\": \"src/".into()),
+        for event in [
+            StreamEvent::Start {
+                part: Part::new(0),
+                kind: PartKind::ToolCall,
+                name: Some(crate::testing::tool_name("write_file")),
+            },
+            StreamEvent::Arguments {
+                part: Part::new(0),
+                json: "{\"path\": \"src/".into(),
+            },
         ] {
-            let item =
-                MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCallDelta {
-                    internal_call_id: "internal-1".into(),
-                    content,
-                });
+            let item = MultiTurnStreamItem::StreamAssistantItem(Item::Event(event));
             let chunks = map_item(item, UsageSemantics::InputIncludesCache);
             assert_eq!(chunks.len(), 1);
             assert!(matches!(&chunks[0], StreamChunk::ToolCallDelta));
         }
     }
 
+    /// rig 0.46 reports a call once history holds it (a projection of
+    /// committed history, AGE-1151); its one id is the provider's.
     #[test]
-    fn map_item_tool_call_prefers_provider_call_id() {
+    fn map_item_tool_call_uses_the_provider_call_id() {
         let tool_call = ToolCall::from_wire(
             "call-99",
-            ToolFunction::new("read_file".into(), serde_json::json!({"path": "README.md"})),
+            ToolFunction::new(
+                crate::testing::tool_name("read_file"),
+                serde_json::json!({"path": "README.md"}),
+            ),
         );
-        let item = MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-            tool_call,
-            internal_call_id: "internal-1".into(),
-        });
+        let item = MultiTurnStreamItem::ToolCall { tool_call };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 2);
         assert!(matches!(
@@ -1398,34 +1449,32 @@ mod tests {
     }
 
     #[test]
-    fn map_item_tool_call_falls_back_to_internal_call_id_without_a_provider_id() {
+    fn map_item_tool_call_without_a_provider_id_uses_rigs_own() {
+        let local = rig_core::message::LocalCallId::new();
         let tool_call = ToolCall::new(
-            ToolCallId::mint(),
-            ToolFunction::new("search_code".into(), serde_json::json!({})),
+            CallId::Local(local),
+            ToolFunction::new(
+                crate::testing::tool_name("search_code"),
+                serde_json::json!({}),
+            ),
         );
-        let item = MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-            tool_call,
-            internal_call_id: "internal-42".into(),
-        });
+        let item = MultiTurnStreamItem::ToolCall { tool_call };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert!(matches!(
             &chunks[0],
-            StreamChunk::ToolCallStarted { id, .. } if id == "internal-42"
+            StreamChunk::ToolCallStarted { id, .. } if *id == local.to_string()
         ));
     }
 
     #[test]
     fn map_item_tool_result_text_is_success() {
         let tool_result = ToolResult {
-            call: ToolCallId::new("call-1").unwrap(),
-            name: "read_file".into(),
+            call: CallId::from_wire("call-1"),
+            name: crate::testing::tool_name("read_file"),
             content: vec![ToolResultContent::text("# Chatty")],
-            provider: ProviderCallId::new("call-1"),
+            is_error: false,
         };
-        let item = MultiTurnStreamItem::StreamUserItem(StreamedUserContent::tool_result(
-            tool_result,
-            "internal-1".into(),
-        ));
+        let item = MultiTurnStreamItem::ToolResult { tool_result };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
@@ -1438,38 +1487,32 @@ mod tests {
     #[test]
     fn map_item_tool_result_error_prefix_becomes_tool_call_error() {
         let tool_result = ToolResult {
-            call: ToolCallId::new("call-1").unwrap(),
-            name: "run_shell".into(),
+            call: CallId::from_wire("call-1"),
+            name: crate::testing::tool_name("run_shell"),
             content: vec![ToolResultContent::text(
                 "Error: run_shell: exited with status 1",
             )],
-            provider: None,
+            is_error: false,
         };
-        let item = MultiTurnStreamItem::StreamUserItem(StreamedUserContent::tool_result(
-            tool_result,
-            "internal-1".into(),
-        ));
+        let item = MultiTurnStreamItem::ToolResult { tool_result };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
             &chunks[0],
             StreamChunk::ToolCallError { id, error }
-                if id == "internal-1" && error.starts_with("Error:")
+                if id == "call-1" && error.starts_with("Error:")
         ));
     }
 
     #[test]
     fn map_item_tool_result_json_is_serialised_to_text() {
         let tool_result = ToolResult {
-            call: ToolCallId::new("call-1").unwrap(),
-            name: "query_data".into(),
+            call: CallId::from_wire("call-1"),
+            name: crate::testing::tool_name("query_data"),
             content: vec![ToolResultContent::json(serde_json::json!({"rows": 1}))],
-            provider: None,
+            is_error: false,
         };
-        let item = MultiTurnStreamItem::StreamUserItem(StreamedUserContent::tool_result(
-            tool_result,
-            "internal-1".into(),
-        ));
+        let item = MultiTurnStreamItem::ToolResult { tool_result };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert!(matches!(
             &chunks[0],
@@ -1482,6 +1525,7 @@ mod tests {
         let item = MultiTurnStreamItem::CompletionCall(CompletionCall::new(
             1,
             rig_core::completion::Usage::new(),
+            serde_json::Value::Null,
         ));
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
@@ -1494,8 +1538,8 @@ mod tests {
     #[test]
     fn map_item_final_response_yields_turn_usage() {
         let mut usage = rig_core::completion::Usage::new();
-        usage.input_tokens = 100;
-        usage.output_tokens = 20;
+        usage.input_tokens = Some(100);
+        usage.output_tokens = Some(20);
         let item = MultiTurnStreamItem::final_response(Vec::new(), usage);
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
@@ -1507,7 +1551,7 @@ mod tests {
 
     #[test]
     fn map_stream_result_err_yields_error_and_ends_the_stream() {
-        let err = StreamingError::Completion(CompletionError::ResponseError("boom".into()));
+        let err = response_error("boom");
         let (chunks, stop) = map_stream_result(Err(err), UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
@@ -1519,16 +1563,13 @@ mod tests {
 
     #[test]
     fn a_truncated_stream_says_the_connection_closed() {
-        let err = StreamingError::Completion(CompletionError::ResponseError(
-            "provider stream ended without a terminal record; treating the turn as truncated"
-                .into(),
-        ));
+        let err = PromptError::Provider(ProviderError::Truncated);
         let (chunks, _) = map_stream_result(Err(err), UsageSemantics::InputIncludesCache);
         assert!(matches!(
             &chunks[0],
             StreamChunk::Error(e) if e.kind == StreamErrorKind::Transport
                 && e.message.starts_with("The connection to the model provider closed")
-                && e.message.contains("without a terminal record")
+                && e.message.contains("the reply ended before the provider ended it")
         ));
     }
 
@@ -1537,17 +1578,10 @@ mod tests {
     // correctly to a StreamErrorKind.
     // -------------------------------------------------------------------
 
-    fn status_error(code: u16) -> CompletionError {
-        use rig_core::http_client;
-        CompletionError::HttpError(http_client::Error::InvalidStatusCode(
-            reqwest::StatusCode::from_u16(code).unwrap(),
-        ))
-    }
-
     #[test]
     fn classifies_401_as_auth() {
         assert_eq!(
-            classify_completion_error(&status_error(401)),
+            classify_streaming_error(&status_error(401)),
             StreamErrorKind::Auth
         );
     }
@@ -1555,7 +1589,7 @@ mod tests {
     #[test]
     fn classifies_403_as_auth() {
         assert_eq!(
-            classify_completion_error(&status_error(403)),
+            classify_streaming_error(&status_error(403)),
             StreamErrorKind::Auth
         );
     }
@@ -1563,7 +1597,7 @@ mod tests {
     #[test]
     fn classifies_429_as_rate_limited() {
         assert_eq!(
-            classify_completion_error(&status_error(429)),
+            classify_streaming_error(&status_error(429)),
             StreamErrorKind::RateLimited
         );
     }
@@ -1571,7 +1605,7 @@ mod tests {
     #[test]
     fn classifies_5xx_as_provider_status() {
         assert_eq!(
-            classify_completion_error(&status_error(503)),
+            classify_streaming_error(&status_error(503)),
             StreamErrorKind::ProviderStatus(503)
         );
     }
@@ -1580,7 +1614,9 @@ mod tests {
     fn classifies_json_error_as_malformed_tool_call() {
         let json_err = serde_json::from_str::<serde_json::Value>("{not json").unwrap_err();
         assert_eq!(
-            classify_completion_error(&CompletionError::JsonError(json_err)),
+            classify_streaming_error(&PromptError::Provider(ProviderError::Json(Arc::new(
+                json_err
+            )))),
             StreamErrorKind::MalformedToolCall
         );
     }
@@ -1588,32 +1624,9 @@ mod tests {
     #[test]
     fn classifies_response_error_with_no_status_as_transport() {
         assert_eq!(
-            classify_completion_error(&CompletionError::ResponseError("boom".into())),
+            classify_streaming_error(&response_error("boom")),
             StreamErrorKind::Transport
         );
-    }
-
-    /// AGE-983: rig's error for a streamed tool call whose arguments never
-    /// parsed is a malformed tool call (nudged), not a transport failure
-    /// (re-sent, and cut off again).
-    #[test]
-    fn classifies_a_cut_off_tool_call_as_malformed() {
-        let cut_off = CompletionError::ResponseError(
-            "tool call `write_file` arrived with malformed JSON input: EOF while parsing a \
-             string at line 1 column 13114"
-                .into(),
-        );
-        assert_eq!(
-            classify_completion_error(&cut_off),
-            StreamErrorKind::MalformedToolCall
-        );
-        let err = StreamingError::Completion(cut_off);
-        assert_eq!(
-            cut_off_tool_call(&err).map(|cut| cut.tool),
-            Some("write_file".to_string())
-        );
-        let transport = StreamingError::Completion(CompletionError::ResponseError("boom".into()));
-        assert!(cut_off_tool_call(&transport).is_none());
     }
 
     /// AGE-936: a run rig ended because its last turn was cut off with no
@@ -1621,13 +1634,9 @@ mod tests {
     /// transport failure headless would re-run five times into the same cap.
     #[test]
     fn classifies_a_cut_off_turn_with_no_answer_as_empty() {
-        let err = CompletionError::ResponseError(
-            "the model produced no answer and stopped with finish_reason=Length; the turn ran \
-             out of output budget before producing one — raise max_tokens for this request"
-                .into(),
-        );
+        let err = response_error(&rig_core::completion::FinishReason::Length.no_answer_message());
         assert_eq!(
-            classify_completion_error(&err),
+            classify_streaming_error(&err),
             StreamErrorKind::EmptyCompletion
         );
         assert_eq!(
@@ -1642,11 +1651,11 @@ mod tests {
 
     #[test]
     fn classifies_max_turns_as_other() {
-        let err = StreamingError::Prompt(Box::new(PromptError::MaxTurnsError {
+        let err = PromptError::MaxTurns {
             max_turns: 10,
-            chat_history: Box::new(Vec::new()),
-            prompt: Box::new(Message::user("hi")),
-        }));
+            chat_history: Vec::new(),
+            prompt: Message::user("hi"),
+        };
         assert_eq!(classify_streaming_error(&err), StreamErrorKind::Other);
     }
 
@@ -1654,21 +1663,25 @@ mod tests {
     /// outright `Stop` as max-turns/cancellation/memory errors.
     #[test]
     fn classifies_unknown_tool_call_distinctly_from_other() {
-        let err = StreamingError::Prompt(Box::new(PromptError::UnknownToolCall {
+        let err = PromptError::UnknownToolCall {
             tool_name: "web_search".to_string(),
             available_tools: vec!["search_web".to_string()],
             allowed_tools: vec!["search_web".to_string()],
-            chat_history: Box::new(Vec::new()),
-        }));
+            chat_history: Vec::new(),
+        };
         assert_eq!(
             classify_streaming_error(&err),
             StreamErrorKind::UnknownToolCall
         );
     }
 
+    /// A provider failure relayed as an effect report keeps its status.
     #[test]
-    fn classifies_prompt_completion_error_by_delegating() {
-        let err = StreamingError::Prompt(Box::new(PromptError::CompletionError(status_error(401))));
+    fn classifies_a_relayed_report_by_its_status() {
+        let report = rig_core::ErrorReport::from(ProviderError::ProviderResponse(
+            ProviderResponseError::new(reqwest::StatusCode::UNAUTHORIZED, "{}"),
+        ));
+        let err = PromptError::Report(report);
         assert_eq!(classify_streaming_error(&err), StreamErrorKind::Auth);
     }
 
@@ -1697,11 +1710,11 @@ mod tests {
             Message::user("the task"),
             Message::assistant("partial work"),
         ];
-        let max_turns = StreamingError::Prompt(Box::new(PromptError::MaxTurnsError {
+        let max_turns = PromptError::MaxTurns {
             max_turns: 51,
-            chat_history: Box::new(history.clone()),
-            prompt: Box::new(Message::user("tool results")),
-        }));
+            chat_history: history.clone(),
+            prompt: Message::user("tool results"),
+        };
         assert_eq!(
             chunk_names(&budget_spent_end(&max_turns, 2, true).unwrap()),
             vec!["TurnMessages(2)", "Done"]
@@ -1715,10 +1728,10 @@ mod tests {
             ]
         );
 
-        let stopped = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+        let stopped = PromptError::Cancelled {
             chat_history: history,
             reason: WRAP_UP_TOOL_CALL_STOP.to_string(),
-        }));
+        };
         assert_eq!(
             chunk_names(&budget_spent_end(&stopped, 4, true).unwrap()),
             vec!["Done"]
@@ -1728,12 +1741,12 @@ mod tests {
     /// Any other error, a user's cancel included, is still an error.
     #[test]
     fn other_errors_are_not_budget_ends() {
-        let cancelled = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+        let cancelled = PromptError::Cancelled {
             chat_history: Vec::new(),
             reason: "user stop".to_string(),
-        }));
+        };
         assert!(budget_spent_end(&cancelled, 0, true).is_none());
-        let transport = StreamingError::Completion(CompletionError::ProviderError("boom".into()));
+        let transport = PromptError::Provider(ProviderError::Provider("boom".into()));
         assert!(budget_spent_end(&transport, 0, true).is_none());
     }
 
@@ -1744,34 +1757,33 @@ mod tests {
     fn a_failed_run_hands_on_what_its_last_call_was_sending() {
         let earlier = Message::user("an earlier turn");
         let prompt = Message::user("the task");
-        let call = Message::Assistant {
-            id: None,
-            content: vec![rig_core::message::AssistantContent::ToolCall(
-                ToolCall::new(
-                    ToolCallId::new("call_1").unwrap(),
-                    ToolFunction::new("read_file".into(), serde_json::json!({"path": "a"})),
+        let call = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            rig_core::message::AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_1"),
+                ToolFunction::new(
+                    crate::testing::tool_name("read_file"),
+                    serde_json::json!({"path": "a"}),
                 ),
-            )],
-        };
+            )),
+        ]));
         let result = Message::User {
             content: vec![rig_core::message::UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new("call_1").unwrap(),
-                name: "read_file".into(),
+                call: CallId::from_wire("call_1"),
+                name: crate::testing::tool_name("read_file"),
                 content: vec![ToolResultContent::text("contents")],
-                provider: None,
+                is_error: false,
             })],
         };
         let recorder = RequestRecorder::default();
-        let transport = StreamingError::Completion(CompletionError::ProviderError(
+        let transport = PromptError::Provider(ProviderError::Provider(
             "Http client error: error sending request for url".into(),
         ));
 
-        recorder.record(vec![
-            earlier.clone(),
-            prompt.clone(),
-            call.clone(),
-            result.clone(),
-        ]);
+        recorder.record(
+            [&earlier, &prompt, &call, &result]
+                .map(|m| Arc::new(m.clone()))
+                .to_vec(),
+        );
         match failed_run_messages(&transport, &recorder, 1) {
             Some(StreamChunk::TurnMessages(messages)) => {
                 assert_eq!(messages, vec![prompt.clone(), call.clone(), result.clone()]);
@@ -1783,11 +1795,11 @@ mod tests {
             "the record is handed on once"
         );
 
-        recorder.record(vec![earlier, prompt, call, result]);
-        let cancelled = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+        recorder.record([earlier, prompt, call, result].map(Arc::new).to_vec());
+        let cancelled = PromptError::Cancelled {
             chat_history: Vec::new(),
             reason: "stop".into(),
-        }));
+        };
         assert!(failed_run_messages(&cancelled, &recorder, 1).is_none());
     }
 
@@ -1822,5 +1834,130 @@ mod tests {
             "the model call keeps only its own ~50ms: {}",
             call.duration_ms
         );
+    }
+
+    /// rig 0.46's stream semantics chatty depends on (AGE-1151), against rig's
+    /// scripted model.
+    #[cfg(test)]
+    mod rig_046_stream_pins {
+        use futures::StreamExt;
+        use rig_agent::agent::{
+            AgentBuilder, AgentHook, HookContext, InvalidToolCallAction, InvalidToolCallContext,
+        };
+        use rig_agent::test_utils::MockAddTool;
+        use rig_core::completion::Message;
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        use super::{StreamChunk, UsageSemantics, map_item};
+
+        /// Skips every call to a tool the agent lacks.
+        struct SkipUnknown;
+
+        impl AgentHook for SkipUnknown {
+            async fn on_invalid_tool_call(
+                &self,
+                _ctx: &HookContext,
+                _event: &InvalidToolCallContext,
+            ) -> Option<InvalidToolCallAction> {
+                Some(InvalidToolCallAction::skip("no such tool"))
+            }
+        }
+
+        async fn run(model: MockCompletionModel) -> Vec<StreamChunk> {
+            let agent = AgentBuilder::new(model)
+                .tool(MockAddTool)
+                .add_hook(SkipUnknown)
+                .build();
+            let mut stream = agent.prompt("add").max_turns(4).stream();
+            let mut chunks = Vec::new();
+            while let Some(item) = stream.next().await {
+                chunks.extend(map_item(
+                    item.expect("the run ends without an error"),
+                    UsageSemantics::InputIncludesCache,
+                ));
+            }
+            chunks
+        }
+
+        /// Tool items are a projection of committed history: a call a hook
+        /// answered without running it (here a skipped unknown tool) is reported
+        /// with its result too. rig 0.42 reported only the calls it routed to
+        /// execution, so the transcript now shows such a call.
+        #[tokio::test]
+        async fn a_skipped_call_is_reported_with_its_result() {
+            let model = MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call("t1", "lookup", serde_json::json!({}))
+                        .with_call_id("call_1"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+                vec![
+                    MockStreamEvent::text("done"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+            ]);
+
+            let chunks = run(model).await;
+
+            assert!(
+                chunks.iter().any(|chunk| matches!(chunk,
+                StreamChunk::ToolCallStarted { id, name } if id == "call_1" && name == "lookup")),
+                "{chunks:?}"
+            );
+            assert!(
+            chunks.iter().any(|chunk| matches!(chunk,
+                StreamChunk::ToolCallError { id, error } if id == "call_1" && error.contains("no such tool"))),
+            "{chunks:?}"
+        );
+        }
+
+        /// A call is reported before its tool runs, and its result after, in
+        /// call order; the run's record is item-shaped (assistant turns carry
+        /// their origin) and survives chatty's persistence round trip.
+        #[tokio::test]
+        async fn the_turn_record_is_item_shaped_and_persists() {
+            let model = MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call("t1", "add", serde_json::json!({"x": 1, "y": 2}))
+                        .with_call_id("call_1"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+                vec![
+                    MockStreamEvent::text("3"),
+                    MockStreamEvent::final_response_with_total_tokens(4),
+                ],
+            ]);
+
+            let chunks = run(model).await;
+
+            let position = |want: fn(&StreamChunk) -> bool| chunks.iter().position(want).unwrap();
+            let started = position(|c| matches!(c, StreamChunk::ToolCallStarted { .. }));
+            let result = position(
+                |c| matches!(c, StreamChunk::ToolCallResult { result, .. } if result == "3"),
+            );
+            let answer = position(|c| matches!(c, StreamChunk::Text(t) if t == "3"));
+            assert!(started < result && result < answer, "{chunks:?}");
+
+            let Some(StreamChunk::TurnMessages(messages)) = chunks
+                .iter()
+                .find(|c| matches!(c, StreamChunk::TurnMessages(_)))
+            else {
+                panic!("the run hands back its record: {chunks:?}")
+            };
+            assert_eq!(
+                messages.len(),
+                4,
+                "prompt, call, result, answer: {messages:?}"
+            );
+            let Message::Assistant(call) = &messages[1] else {
+                panic!("the call turn")
+            };
+            assert!(call.origin.is_some(), "a generated turn names its origin");
+            let saved = serde_json::to_string(messages).unwrap();
+            assert_eq!(
+                &crate::models::history_compat::parse_history(&saved).unwrap(),
+                messages
+            );
+        }
     }
 }

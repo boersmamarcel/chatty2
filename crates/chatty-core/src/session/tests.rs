@@ -172,7 +172,7 @@ async fn a_scripted_turn_runs_end_to_end_and_persists_its_reply() {
     let history = session.conversation().unwrap().messages();
     assert_eq!(history.len(), 2);
     assert_eq!(user_text(&history[0]).as_deref(), Some("what is this?"));
-    assert!(matches!(history[1], Message::Assistant { .. }));
+    assert!(matches!(history[1], Message::Assistant(_)));
     assert!(session.should_generate_title());
 }
 
@@ -1092,7 +1092,7 @@ async fn a_hosted_turn_is_recorded_by_the_local_session() {
     let messages = session.conversation().unwrap().messages();
     assert_eq!(messages.len(), 2, "user message and reply: {messages:?}");
     assert!(matches!(messages[0], Message::User { .. }));
-    assert!(matches!(messages[1], Message::Assistant { .. }));
+    assert!(matches!(messages[1], Message::Assistant(_)));
 }
 
 // ── Conversation totals and pricing at the turn barrier (AGE-351) ────────────

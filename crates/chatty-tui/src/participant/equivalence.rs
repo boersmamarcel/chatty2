@@ -1015,7 +1015,7 @@ pub(super) mod named_virtual_agents {
             .await
             .expect("tool definitions resolve")
             .into_iter()
-            .map(|definition| definition.name)
+            .map(|definition| definition.name.to_string())
             .collect()
     }
 
@@ -1073,7 +1073,6 @@ mod declared_roles {
     use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
     use clap::Parser;
     use parking_lot::Mutex;
-    use rig_agent::completion::Prompt;
     use rig_agent::tool::Tool;
 
     use crate::participant::broker::Broker;
@@ -1195,7 +1194,7 @@ mod declared_roles {
             .await
             .expect("tool definitions resolve")
             .into_iter()
-            .map(|definition| definition.name)
+            .map(|definition| definition.name.to_string())
             .collect();
         assert!(
             !names.iter().any(|name| name == "write_file"),

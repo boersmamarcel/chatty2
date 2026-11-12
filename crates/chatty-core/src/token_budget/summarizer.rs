@@ -172,7 +172,7 @@ fn build_transcript(messages: &[Message]) -> String {
                     parts.push("User: [non-text content]".to_string());
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 let text = extract_assistant_text(content);
                 if !text.is_empty() {
                     parts.push(format!("Assistant: {}", truncate(&text, 4_000)));
@@ -207,7 +207,9 @@ fn extract_assistant_text(content: &[AssistantContent]) -> String {
 fn message_char_len(message: &Message) -> usize {
     match message {
         Message::User { content } => extract_user_text(content).len(),
-        Message::Assistant { content, .. } => extract_assistant_text(content).len(),
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
+            extract_assistant_text(content).len()
+        }
         Message::System { content } => content.len(),
     }
 }
@@ -240,10 +242,9 @@ mod tests {
     }
 
     fn assistant_msg(text: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Text(Text::new(text.to_string()))],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Text(Text::new(text.to_string())),
+        ]))
     }
 
     #[test]

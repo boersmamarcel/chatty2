@@ -2002,14 +2002,11 @@ mod tests {
         engine.handle_event(AppEvent::TextChunk("done".to_string()));
         engine.handle_event(AppEvent::StreamCompleted);
         let messages = engine.session.conversation().unwrap().messages();
-        assert!(
-            messages.contains(&rig_core::completion::Message::Assistant {
-                id: None,
-                content: vec![rig_core::completion::message::AssistantContent::text(
-                    "done"
-                )],
-            })
-        );
+        assert!(messages.contains(&rig_core::completion::Message::Assistant(
+            rig_core::message::AssistantMessage::new(vec![
+                rig_core::completion::message::AssistantContent::text("done")
+            ])
+        )));
         assert_eq!(user_texts(&engine), ["first", "X", "Y"]);
         assert_eq!(engine.queued_count(), 0);
     }
@@ -2028,12 +2025,11 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(
             messages.last(),
-            Some(&rig_core::completion::Message::Assistant {
-                id: None,
-                content: vec![rig_core::completion::message::AssistantContent::text(
-                    "Hello, world"
-                )],
-            })
+            Some(&rig_core::completion::Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![
+                    rig_core::completion::message::AssistantContent::text("Hello, world")
+                ])
+            ))
         );
         let last = engine.transcript.messages.last().expect("assistant bubble");
         assert!(matches!(last.role, MessageRole::Assistant));
@@ -2090,12 +2086,11 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(
             messages.last(),
-            Some(&rig_core::completion::Message::Assistant {
-                id: None,
-                content: vec![rig_core::completion::message::AssistantContent::text(
-                    "Partial "
-                )],
-            })
+            Some(&rig_core::completion::Message::Assistant(
+                rig_core::message::AssistantMessage::new(vec![
+                    rig_core::completion::message::AssistantContent::text("Partial ")
+                ])
+            ))
         );
         assert!(matches!(
             engine.transcript.messages.last().unwrap().blocks.last(),
