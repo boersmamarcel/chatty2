@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use rig_agent::tool::{DynamicTool, ToolContext, ToolExecutionError, ToolOutput};
 use rig_core::message::{ImageMediaType, MimeType, ToolResultContent};
+use rig_core::tool::ContextValue;
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResult, ClientRequest, ContentBlock,
     JsonObject, RequestMetaObject, ResourceContents, ServerResult,
@@ -44,11 +45,45 @@ fn mcp_dynamic_tool_with_timeout(
     let description = definition.description.as_deref().unwrap_or("").to_string();
     let parameters = definition.schema_as_json_value();
     let tool_name = name.clone();
-    DynamicTool::new(name, description, parameters, move |context, args| {
-        let name = tool_name.clone();
-        let sink = sink.clone();
-        Box::pin(async move { execute(&name, &sink, timeout, context, args).await })
-    })
+    // An MCP tool always has a name; rig 0.46 refuses an empty one.
+    let name = rig_core::message::ToolName::new(name).unwrap_or_else(|_| {
+        rig_core::message::ToolName::new("unnamed_mcp_tool").expect("a non-empty name")
+    });
+    DynamicTool::new_with_context(
+        name,
+        description,
+        parameters,
+        move |context: &mut ToolContext, args| {
+            let name = tool_name.clone();
+            let sink = sink.clone();
+            Box::pin(async move { execute(&name, &sink, timeout, context, args).await })
+        },
+    )
+}
+
+/// The `_meta` an MCP call carries, when the host put one in the tool
+/// context.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpRequestMeta(pub RequestMetaObject);
+
+impl ContextValue for McpRequestMeta {
+    const KEY: &'static str = "mcp.request_meta";
+}
+
+/// An MCP call's `structuredContent`, host-only in the tool context.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpStructuredContent(pub serde_json::Value);
+
+impl ContextValue for McpStructuredContent {
+    const KEY: &'static str = "mcp.structured_content";
+}
+
+/// An MCP call's untouched response, host-only in the tool context.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct McpCallToolResult(pub CallToolResult);
+
+impl ContextValue for McpCallToolResult {
+    const KEY: &'static str = "mcp.call_tool_result";
 }
 
 async fn execute(
@@ -66,7 +101,11 @@ async fn execute(
     })?;
     let mut request = CallToolRequestParams::new(name.to_string());
     request.arguments = arguments;
-    request.meta = context.get::<RequestMetaObject>().cloned();
+    request.meta = context
+        .get::<McpRequestMeta>()
+        .ok()
+        .flatten()
+        .map(|meta| meta.0);
 
     let result = match call_tool(sink, request, timeout).await {
         Ok(result) => result,
@@ -85,10 +124,14 @@ async fn execute(
     };
 
     // Host-only: result hooks can read the untouched response.
-    if let Some(structured) = result.structured_content.clone() {
-        context.insert_result(structured);
+    if let Some(structured) = result.structured_content.clone()
+        && let Err(error) = context.insert_result(McpStructuredContent(structured))
+    {
+        tracing::warn!(tool = name, %error, "MCP structured content not kept in the tool context");
     }
-    context.insert_result(result.clone());
+    if let Err(error) = context.insert_result(McpCallToolResult(result.clone())) {
+        tracing::warn!(tool = name, %error, "MCP response not kept in the tool context");
+    }
 
     let output = mcp_result_output(&result)?;
     if result.is_error == Some(true) {

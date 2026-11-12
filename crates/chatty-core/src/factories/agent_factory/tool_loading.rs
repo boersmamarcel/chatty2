@@ -440,9 +440,10 @@ impl ToolLoader {
 
     /// Load the group of every tool called in `messages`: a call in the
     /// history is only valid against a request that still advertises it.
-    fn load_groups_called_in(&self, messages: &[Message]) {
+    fn load_groups_called_in<'a>(&self, messages: impl IntoIterator<Item = &'a Message> + Clone) {
         let mut called: Vec<String> = messages
-            .iter()
+            .clone()
+            .into_iter()
             .flat_map(called_tool_names)
             .filter_map(|name| self.group_of(name))
             .collect();
@@ -451,7 +452,7 @@ impl ToolLoader {
         // even before any of the group's tools were called.
         called.extend(
             messages
-                .iter()
+                .into_iter()
                 .flat_map(load_tools_groups)
                 .filter_map(|group| self.resolve_group(group).map(|g| g.name.clone())),
         );
@@ -531,7 +532,7 @@ impl ToolLoader {
 /// The tool names an assistant message calls.
 fn called_tool_names(message: &Message) -> Vec<&str> {
     match message {
-        Message::Assistant { content, .. } => content
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
             .iter()
             .filter_map(|item| match item {
                 AssistantContent::ToolCall(call) => Some(call.function.name.as_str()),
@@ -553,7 +554,7 @@ fn called_tool_names(message: &Message) -> Vec<&str> {
 /// makes.
 fn load_tools_groups(message: &Message) -> Vec<&str> {
     match message {
-        Message::Assistant { content, .. } => content
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
             .iter()
             .filter_map(|item| match item {
                 AssistantContent::ToolCall(call)
@@ -568,14 +569,25 @@ fn load_tools_groups(message: &Message) -> Vec<&str> {
     }
 }
 
+/// Whether `event` is a call whose tool name is the problem (unknown, or not
+/// allowed this turn), not one whose arguments did not parse, which rig 0.46
+/// offers to the same hooks (AGE-1151).
+pub(super) fn is_name_problem(event: &InvalidToolCallContext) -> bool {
+    matches!(
+        event.reason,
+        rig_agent::agent::InvalidToolCallReason::UnknownTool
+            | rig_agent::agent::InvalidToolCallReason::DisallowedByToolChoice
+    )
+}
+
 impl AgentHook for ToolLoader {
     async fn on_completion_call(
         &self,
         _ctx: &HookContext,
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
-        self.load_groups_called_in(event.history);
-        self.load_groups_called_in(std::slice::from_ref(event.prompt));
+        self.load_groups_called_in(event.history.iter().map(|m| &**m));
+        self.load_groups_called_in(std::iter::once(event.prompt));
         match self.active_tools() {
             Some(active) => CompletionCallAction::patch(RequestPatch::new().active_tools(active)),
             None => CompletionCallAction::Continue,
@@ -591,7 +603,7 @@ impl AgentHook for ToolLoader {
         _ctx: &HookContext,
         event: &InvalidToolCallContext,
     ) -> Option<InvalidToolCallAction> {
-        if event.available_tools.is_empty() {
+        if event.available_tools.is_empty() || !is_name_problem(event) {
             return None;
         }
         let group = self.unloaded_group_of(&event.tool_name)?;
@@ -687,7 +699,7 @@ impl Tool for LoadToolsTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::message::{ToolCall, ToolCallId, ToolFunction};
+    use rig_core::message::{CallId, ToolCall, ToolFunction};
 
     fn loader(preload: &[&str]) -> ToolLoader {
         ToolLoader::new(
@@ -803,13 +815,12 @@ mod tests {
     }
 
     fn call(name: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new("call_1").unwrap(),
-                ToolFunction::new(name.to_string(), serde_json::json!({})),
-            ))],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_1"),
+                ToolFunction::new(crate::testing::tool_name(name), serde_json::json!({})),
+            )),
+        ]))
     }
 
     #[test]
@@ -874,13 +885,15 @@ mod tests {
     #[test]
     fn a_load_tools_call_in_the_history_keeps_its_group_loaded() {
         let (loader, _) = calibrated(&[]);
-        let load = Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new("call_1").unwrap(),
-                ToolFunction::new("load_tools".into(), serde_json::json!({"group": "web"})),
-            ))],
-        };
+        let load = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_1"),
+                ToolFunction::new(
+                    crate::testing::tool_name("load_tools"),
+                    serde_json::json!({"group": "web"}),
+                ),
+            )),
+        ]));
         loader.load_groups_called_in(&[Message::user("task"), load]);
         assert_eq!(loader.loaded_groups(), ["web"]);
         assert!(
@@ -943,7 +956,6 @@ mod tests {
 
     use futures::StreamExt;
     use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
     use rig_core::completion::CompletionRequest;
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -1008,7 +1020,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|definition| (definition.name, 10))
+            .map(|definition| (definition.name.to_string(), 10))
             .collect();
         let shaper = ContextShaper::new(
             Default::default(),
@@ -1020,17 +1032,13 @@ mod tests {
     }
 
     fn advertised(request: &CompletionRequest) -> Vec<String> {
-        let mut names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+        let mut names: Vec<String> = request.tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();
         names
     }
 
     async fn run(agent: &rig_agent::Agent, history: Vec<Message>) {
-        let mut stream = agent
-            .stream_prompt("go")
-            .history(history)
-            .max_turns(5)
-            .await;
+        let mut stream = agent.prompt("go").history(history).max_turns(5).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run succeeds");
         }
@@ -1062,19 +1070,18 @@ mod tests {
         let (agent, model, loader) = mock_agent(vec![done()]).await;
         let earlier = vec![
             Message::user("earlier task"),
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::ToolCall(ToolCall::new(
-                    ToolCallId::new("call_0").unwrap(),
-                    ToolFunction::new("fetch".into(), serde_json::json!({})),
-                ))],
-            },
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::ToolCall(ToolCall::new(
+                    CallId::from_wire("call_0"),
+                    ToolFunction::new(crate::testing::tool_name("fetch"), serde_json::json!({})),
+                )),
+            ])),
             Message::User {
                 content: vec![UserContent::ToolResult(rig_core::message::ToolResult {
-                    call: ToolCallId::new("call_0").unwrap(),
-                    name: "fetch".into(),
+                    call: CallId::from_wire("call_0"),
+                    name: crate::testing::tool_name("fetch"),
                     content: vec![rig_core::message::ToolResultContent::text("page")],
-                    provider: None,
+                    is_error: false,
                 })],
             },
             Message::assistant("fetched"),

@@ -172,8 +172,12 @@ impl AgentHook for ToolNameRepair {
         event: &InvalidToolCallContext,
     ) -> Option<InvalidToolCallAction> {
         // A call that advertised no tools (the turn budget's wrap-up) is the
-        // budget's to end.
-        if event.available_tools.is_empty() || event.allowed_tools.is_empty() {
+        // budget's to end. rig 0.46 offers a call whose arguments did not
+        // parse here too; its name is fine, so it is not this hook's.
+        if event.available_tools.is_empty()
+            || event.allowed_tools.is_empty()
+            || !super::tool_loading::is_name_problem(event)
+        {
             return None;
         }
         match resolve(
@@ -304,7 +308,6 @@ mod tests {
     use crate::tools::ToolError;
     use futures::StreamExt;
     use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::tool::{Tool, ToolContext};
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
     use std::sync::Arc;
@@ -358,7 +361,7 @@ mod tests {
             .tool(search.clone())
             .add_hook(ToolNameRepair)
             .build();
-        let mut stream = agent.stream_prompt("go").max_turns(5).await;
+        let mut stream = agent.prompt("go").max_turns(5).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run goes on past the unknown name");
         }

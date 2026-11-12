@@ -1391,25 +1391,24 @@ mod runner {
     fn transport_error_turn() -> Scenario {
         use rig_core::completion::Message;
         use rig_core::completion::message::{
-            AssistantContent, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
+            AssistantContent, CallId, ToolCall, ToolFunction, ToolResult, ToolResultContent,
             UserContent,
         };
-        let call = Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::new("call_1").unwrap(),
+        let call = Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::ToolCall(ToolCall::new(
+                CallId::from_wire("call_1"),
                 ToolFunction::new(
-                    "read_file".into(),
+                    chatty_core::testing::tool_name("read_file"),
                     serde_json::json!({"path": "codegen.py"}),
                 ),
-            ))],
-        };
+            )),
+        ]));
         let result = Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new("call_1").unwrap(),
-                name: "read_file".into(),
+                call: CallId::from_wire("call_1"),
+                name: chatty_core::testing::tool_name("read_file"),
                 content: vec![ToolResultContent::text("UNIQUE-TOOL-OUTPUT")],
-                provider: None,
+                is_error: false,
             })],
         };
         Scenario {

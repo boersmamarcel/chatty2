@@ -135,8 +135,6 @@ mod tests {
         spec: &AgentSpec,
         model_max_tokens: Option<i32>,
     ) -> (serde_json::Value, usize) {
-        use rig_agent::completion::Prompt;
-
         let _ = crate::init_repositories();
         let daemon = FakeDaemon::scripted(Script::new().route(CHEAP_MODEL, [Reply::text("done")]));
         let (model, provider) = hosted(&daemon, model_max_tokens);
@@ -591,7 +589,6 @@ mod tests {
     #[tokio::test]
     async fn a_cap_larger_than_the_window_has_room_for_is_clamped() {
         use crate::services::context_shaper::MIN_CLAMPED_REPLY_TOKENS;
-        use rig_agent::completion::Prompt;
 
         let _ = crate::init_repositories();
         for (window, cap, clamped) in [(32_768, 30_000, true), (32_768, 2_048, false)] {

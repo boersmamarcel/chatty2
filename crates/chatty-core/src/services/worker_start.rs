@@ -21,8 +21,7 @@
 
 use chatty_fabric::find_worker_start_failure;
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, ToolResultAction,
-    ToolResultEvent,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction, OutcomeEvent,
 };
 use rig_agent::tool::Tool;
 
@@ -119,13 +118,10 @@ pub struct StopOnWorkerStartFailure;
 struct PendingStop(String);
 
 impl AgentHook for StopOnWorkerStartFailure {
-    async fn on_tool_result(
-        &self,
-        ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if event.tool_name == InvokeAgentTool::NAME
-            && let Some(failure) = WorkerStartFailure::find(&event.presentation.render())
+    async fn on_outcome(&self, ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if event.tool_name() == Some(InvokeAgentTool::NAME)
+            && let Some(result) = event.tool_result()
+            && let Some(failure) = WorkerStartFailure::find(&result.output().render())
         {
             tracing::warn!(
                 agent = %failure.agent,
@@ -134,7 +130,7 @@ impl AgentHook for StopOnWorkerStartFailure {
             );
             ctx.scratchpad().insert(PendingStop(failure.card()));
         }
-        ToolResultAction::Keep
+        OutcomeAction::Proceed
     }
 
     async fn on_completion_call(

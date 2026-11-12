@@ -16,10 +16,11 @@ use rig_agent::agent::{AgentHook, CompletionCallAction, CompletionCallEvent, Hoo
 use rig_core::completion::Message;
 
 /// Records the messages of each model call (history, then the prompt) as it
-/// goes out. One agent runs one turn at a time, so one slot is enough.
+/// goes out. One agent runs one turn at a time, so one slot is enough. The
+/// messages are rig's shared ones, so recording a call copies pointers.
 #[derive(Clone, Debug, Default)]
 pub struct RequestRecorder {
-    last: Arc<Mutex<Option<Vec<Message>>>>,
+    last: Arc<Mutex<Option<Vec<Arc<Message>>>>>,
 }
 
 impl RequestRecorder {
@@ -29,13 +30,14 @@ impl RequestRecorder {
     }
 
     /// Keep `messages` as the request that just went out.
-    pub fn record(&self, messages: Vec<Message>) {
+    pub fn record(&self, messages: Vec<Arc<Message>>) {
         *self.last.lock() = Some(messages);
     }
 
     /// The messages of the last model call of the run, if one went out.
     pub fn take(&self) -> Option<Vec<Message>> {
-        self.last.lock().take()
+        let messages = self.last.lock().take()?;
+        Some(messages.into_iter().map(Arc::unwrap_or_clone).collect())
     }
 }
 
@@ -49,7 +51,7 @@ impl AgentHook for RequestRecorder {
         // what is persisted is the run, not one request's view of it.
         let mut messages = Vec::with_capacity(event.history.len() + 1);
         messages.extend_from_slice(event.history);
-        messages.push(event.prompt.clone());
+        messages.push(Arc::new(event.prompt.clone()));
         self.record(messages);
         CompletionCallAction::Continue
     }
@@ -60,7 +62,6 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
@@ -86,7 +87,7 @@ mod tests {
             .add_hook(recorder.clone())
             .build();
 
-        let mut stream = agent.stream_prompt("add one and two").max_turns(3).await;
+        let mut stream = agent.prompt("add one and two").max_turns(3).stream();
         let mut failed = false;
         while let Some(item) = stream.next().await {
             failed |= item.is_err();
@@ -96,7 +97,7 @@ mod tests {
         let recorded = recorder.take().expect("two calls went out");
         assert_eq!(recorded.len(), 3, "{recorded:?}");
         assert!(format!("{:?}", recorded[0]).contains("add one and two"));
-        assert!(matches!(recorded[1], Message::Assistant { .. }));
+        assert!(matches!(recorded[1], Message::Assistant(_)));
         assert!(format!("{:?}", recorded[2]).contains("ToolResult"));
         assert!(recorder.take().is_none(), "take empties the slot");
     }

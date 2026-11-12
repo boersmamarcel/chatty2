@@ -202,21 +202,27 @@ fn a_shaped_leaders_final_request_carries_every_workers_figures() {
     let last: serde_json::Value =
         serde_json::from_slice(&lead_requests.last().unwrap().body).expect("a JSON request");
     let messages = last["messages"].as_array().expect("messages");
-    let is_ledger = |m: &serde_json::Value| {
-        m["content"]
-            .as_str()
-            .is_some_and(|c| c.starts_with(LEDGER_HEADER))
+    // rig 0.46 joins adjacent user messages (AGE-1151; accepted, Marcel
+    // 2026-11-12): the ledger, unchanged, follows the compaction summary in
+    // the same user message, which this wire (Ollama's `/api/chat`) sends as
+    // one string, its parts joined by a newline. The ledger runs from its
+    // header to the end of that message.
+    let ledger_text = |m: &serde_json::Value| -> Option<String> {
+        let content = m["content"].as_str()?;
+        let at = content.find(LEDGER_HEADER)?;
+        (at == 0 || content[..at].ends_with('\n')).then(|| content[at..].to_owned())
     };
+    let is_ledger = |m: &serde_json::Value| ledger_text(m).is_some();
     let ledger: Vec<&serde_json::Value> = messages.iter().filter(|m| is_ledger(m)).collect();
     assert_eq!(ledger.len(), 1, "the final request carries one ledger");
-    let ledger = ledger[0]["content"].as_str().unwrap();
-    let rest = serde_json::to_string(
-        &messages
-            .iter()
-            .filter(|m| !is_ledger(m))
-            .collect::<Vec<_>>(),
-    )
-    .unwrap();
+    let ledger = ledger_text(ledger[0]).unwrap();
+    let ledger = ledger.as_str();
+    // Everything the request carries but the ledger's own text, which may
+    // share its message with other parts.
+    let escaped = serde_json::to_string(ledger).unwrap();
+    let rest = serde_json::to_string(messages)
+        .unwrap()
+        .replace(&escaped[1..escaped.len() - 1], "");
 
     // The headless lead compacted, and the older results really were taken
     // out of the request…

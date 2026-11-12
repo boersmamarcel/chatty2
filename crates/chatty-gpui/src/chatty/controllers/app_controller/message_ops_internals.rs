@@ -480,12 +480,11 @@ pub(super) fn select_recent_assistant_attachments(
     if !supports_images && !supports_pdf {
         return Vec::new();
     }
-    let Some(last_assistant_entry) = entries.iter().rev().find(|entry| {
-        matches!(
-            entry.message,
-            rig_core::completion::Message::Assistant { .. }
-        )
-    }) else {
+    let Some(last_assistant_entry) = entries
+        .iter()
+        .rev()
+        .find(|entry| matches!(entry.message, rig_core::completion::Message::Assistant(_)))
+    else {
         return Vec::new();
     };
     last_assistant_entry
@@ -542,7 +541,7 @@ pub(super) async fn attachment_to_user_content(
         )),
         "pdf" => Ok(rig_core::message::UserContent::Document(
             rig_core::completion::message::Document {
-                data: rig_core::completion::message::DocumentSourceKind::Base64(b64),
+                data: rig_core::completion::message::DocumentSourceKind::Base64(b64).into(),
                 media_type: Some(rig_core::completion::message::DocumentMediaType::PDF),
                 additional_params: None,
             },
@@ -610,10 +609,9 @@ mod tests {
     }
 
     fn assistant_msg(text: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Text(Text::new(text.to_string()))],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+            AssistantContent::Text(Text::new(text.to_string())),
+        ]))
     }
 
     fn entry(message: Message, attachments: Vec<PathBuf>) -> MessageEntry {
@@ -1103,7 +1101,10 @@ mod tests {
             .iter()
             .rev()
             .find_map(|entry| match &entry.message {
-                rig_core::message::Message::Assistant { content, .. } => Some(
+                rig_core::message::Message::Assistant(rig_core::message::AssistantMessage {
+                    content,
+                    ..
+                }) => Some(
                     content
                         .iter()
                         .filter_map(|c| match c {

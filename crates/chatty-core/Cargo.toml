@@ -7,6 +7,7 @@ edition.workspace = true
 # Core agent dependencies
 rig-core.workspace = true
 rig-agent.workspace = true
+rig-reqwest.workspace = true
 rmcp.workspace = true
 
 # Persistence layer
@@ -29,7 +30,8 @@ anyhow.workspace = true
 regex.workspace = true
 base64.workspace = true
 async-stream.workspace = true
-reqwest.workspace = true
+# `multipart` for the Daytona upload; rig-core 0.42 used to switch it on.
+reqwest = { workspace = true, features = ["multipart"] }
 # Decode a capped text body in its declared charset, as reqwest's `text()`
 # does (AGE-1094). Already in Cargo.lock through reqwest.
 encoding_rs = "0.8"

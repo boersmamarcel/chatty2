@@ -1,6 +1,10 @@
 use anyhow::{Result, anyhow};
-use rig_core::client::EmbeddingsClient;
-use rig_core::embeddings::EmbeddingModel;
+use rig_core::DynModel;
+use rig_core::operation::Embedding;
+use rig_core::providers::ollama::OllamaConfig;
+use rig_core::providers::openai::OpenAIConfig;
+use rig_core::providers::openai::wire::{self as openai, Auth};
+use rig_reqwest::ReqwestClient;
 use tracing::{info, warn};
 
 use crate::settings::models::providers_store::ProviderType;
@@ -14,17 +18,9 @@ use crate::settings::models::providers_store::ProviderType;
 /// e.g. an Anthropic user can use OpenAI for embeddings.
 #[derive(Clone)]
 pub struct EmbeddingService {
-    inner: EmbeddingServiceInner,
+    model: DynModel<Embedding>,
     provider_type: ProviderType,
     model_name: String,
-}
-
-/// Concrete embedding model, one variant per supported provider.
-#[derive(Clone)]
-enum EmbeddingServiceInner {
-    OpenRouter(rig_core::providers::openrouter::EmbeddingModel),
-    Ollama(rig_core::providers::ollama::EmbeddingModel),
-    AzureOpenAI(rig_core::providers::azure::EmbeddingModel),
 }
 
 impl EmbeddingService {
@@ -43,35 +39,30 @@ impl EmbeddingService {
         base_url: Option<&str>,
         azure_token: Option<String>,
     ) -> Result<Self> {
-        let inner = match provider_type {
+        let http = ReqwestClient::default();
+        let model = match provider_type {
             ProviderType::OpenRouter => {
                 let key =
                     api_key.ok_or_else(|| anyhow!("API key required for OpenRouter embeddings"))?;
-                let client = if let Some(url) = base_url {
-                    rig_core::providers::openrouter::Client::builder()
-                        .api_key(key)
-                        .base_url(url)
-                        .build()?
-                } else {
-                    rig_core::providers::openrouter::Client::new(key)?
-                };
-                let model = client.embedding_model(model_name);
-                EmbeddingServiceInner::OpenRouter(model)
+                let mut config = OpenAIConfig::with_key(&openai::OPENROUTER, key.to_string());
+                if let Some(url) = base_url {
+                    config = config.with_base_url(url);
+                }
+                config.connect(http).embedding(model_name, None).erase()
             }
             ProviderType::Ollama => {
                 let url = base_url.unwrap_or("http://localhost:11434");
-                let client = rig_core::providers::ollama::Client::builder()
-                    .api_key(rig_core::client::Nothing)
-                    .base_url(url)
-                    .build()?;
-                let model = client.embedding_model(model_name);
-                EmbeddingServiceInner::Ollama(model)
+                OllamaConfig::new()
+                    .with_base_url(url)
+                    .connect(http)
+                    .embedding(model_name, None)
+                    .erase()
             }
             ProviderType::AzureOpenAI => {
-                let auth = if let Some(token) = azure_token {
-                    rig_core::providers::azure::AzureOpenAIAuth::Token(token)
+                let (credential, auth) = if let Some(token) = azure_token {
+                    (token, Auth::Bearer)
                 } else if let Some(key) = api_key {
-                    rig_core::providers::azure::AzureOpenAIAuth::ApiKey(key.to_string())
+                    (key.to_string(), Auth::ApiKeyHeader)
                 } else {
                     return Err(anyhow!(
                         "API key or Entra ID token required for Azure OpenAI embeddings"
@@ -79,13 +70,10 @@ impl EmbeddingService {
                 };
                 let endpoint = base_url
                     .ok_or_else(|| anyhow!("Endpoint URL required for Azure OpenAI embeddings"))?;
-                let client = rig_core::providers::azure::Client::builder()
-                    .api_key(auth)
-                    .azure_endpoint(endpoint.to_string())
-                    .build()
-                    .map_err(|e| anyhow!("Failed to build Azure OpenAI client: {e}"))?;
-                let model = client.embedding_model(model_name);
-                EmbeddingServiceInner::AzureOpenAI(model)
+                let mut config =
+                    OpenAIConfig::with_key(&openai::AZURE, credential).with_base_url(endpoint);
+                config.auth = auth;
+                config.connect(http).embedding(model_name, None).erase()
             }
         };
 
@@ -96,7 +84,7 @@ impl EmbeddingService {
         );
 
         Ok(Self {
-            inner,
+            model,
             provider_type: provider_type.clone(),
             model_name: model_name.to_string(),
         })
@@ -104,20 +92,12 @@ impl EmbeddingService {
 
     /// Compute a single text embedding, returning `Vec<f32>` for memvid-core.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let embedding = match &self.inner {
-            EmbeddingServiceInner::OpenRouter(m) => m
-                .embed_text(text)
-                .await
-                .map_err(|e| anyhow!("OpenRouter embedding failed: {e}"))?,
-            EmbeddingServiceInner::Ollama(m) => m
-                .embed_text(text)
-                .await
-                .map_err(|e| anyhow!("Ollama embedding failed: {e}"))?,
-            EmbeddingServiceInner::AzureOpenAI(m) => m
-                .embed_text(text)
-                .await
-                .map_err(|e| anyhow!("Azure OpenAI embedding failed: {e}"))?,
-        };
+        let embedding = self.model.embed_text(text).await.map_err(|e| {
+            anyhow!(
+                "{} embedding failed: {e}",
+                self.provider_type.display_name()
+            )
+        })?;
 
         // Convert Vec<f64> (rig-core) → Vec<f32> (memvid-core)
         Ok(embedding.vec.iter().map(|&v| v as f32).collect())

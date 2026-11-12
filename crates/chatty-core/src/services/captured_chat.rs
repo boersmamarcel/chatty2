@@ -43,7 +43,7 @@ pub fn chat_entries(
 ) -> Result<Vec<ChatEntry>, ChatUnavailable> {
     let messages = match conversation {
         CapturedConversation::Messages { messages } => {
-            serde_json::from_value::<Vec<Message>>(messages.clone())
+            crate::models::history_compat::parse_history_value(messages.clone())
                 .map_err(|_| ChatUnavailable::Unreadable)?
         }
         CapturedConversation::TooLarge { bytes } => {
@@ -88,11 +88,11 @@ pub fn chat_entries(
                     entries.push(ChatEntry::Prompt(text.join("\n")));
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 for part in content.iter() {
                     match part {
                         AssistantContent::Reasoning(r) => {
-                            let text = r.display_text();
+                            let text = r.text.clone();
                             if !text.is_empty() {
                                 entries.push(ChatEntry::Thinking(text));
                             }
@@ -104,13 +104,12 @@ pub fn chat_entries(
                         }
                         AssistantContent::ToolCall(tc) => {
                             let output = std::iter::once(tc.id.to_string())
-                                .chain(tc.provider.as_ref().map(|p| p.call_id.clone()))
                                 .find_map(|id| results.get(&id).cloned());
                             let block = ToolCallBlock {
                                 id: tc.id.to_string(),
-                                tool_name: tc.function.name.clone(),
-                                display_name: tc.function.name.clone(),
-                                input: tc.function.arguments.to_string(),
+                                tool_name: tc.function.name.to_string(),
+                                display_name: tc.function.name.to_string(),
+                                input: tc.function.arguments_json(),
                                 output,
                                 output_preview: None,
                                 state: ToolCallState::Success,
@@ -159,22 +158,31 @@ mod tests {
     fn a_run_reads_as_prompt_text_and_tools_with_results() {
         let messages: Vec<Message> = vec![
             Message::user("find the answer"),
-            Message::Assistant {
-                id: None,
-                content: vec![
-                    AssistantContent::text("looking"),
-                    AssistantContent::tool_call("c1", "read_file", json!({"path": "a.md"})),
-                    AssistantContent::tool_call("c2", "shell", json!({"cmd": "ls"})),
-                ],
-            },
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
+                AssistantContent::text("looking"),
+                AssistantContent::tool_call(
+                    "c1",
+                    crate::testing::tool_name("read_file"),
+                    json!({"path": "a.md"}),
+                ),
+                AssistantContent::tool_call(
+                    "c2",
+                    crate::testing::tool_name("shell"),
+                    json!({"cmd": "ls"}),
+                ),
+            ])),
             Message::User {
                 content: vec![
                     UserContent::tool_result(
-                        "c1",
-                        "read_file",
+                        rig_core::message::CallId::from_wire("c1"),
+                        crate::testing::tool_name("read_file"),
                         vec![ToolResultContent::text("file body")],
                     ),
-                    UserContent::tool_result("c2", "shell", vec![ToolResultContent::text("a.md")]),
+                    UserContent::tool_result(
+                        rig_core::message::CallId::from_wire("c2"),
+                        crate::testing::tool_name("shell"),
+                        vec![ToolResultContent::text("a.md")],
+                    ),
                 ],
             },
             Message::assistant("done"),

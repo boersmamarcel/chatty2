@@ -23,8 +23,7 @@
 //!   its own caller stops too, and the root shows the final message.
 
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, ToolResultAction,
-    ToolResultEvent,
+    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, OutcomeAction, OutcomeEvent,
 };
 use rig_agent::tool::Tool;
 
@@ -193,17 +192,16 @@ pub fn partial_output(agent: &str, partial: &str) -> String {
 }
 
 impl AgentHook for StopOnBudgetExhausted {
-    async fn on_tool_result(
-        &self,
-        ctx: &HookContext,
-        event: ToolResultEvent<'_>,
-    ) -> ToolResultAction {
-        if event.tool_name != InvokeAgentTool::NAME {
-            return ToolResultAction::Keep;
+    async fn on_outcome(&self, ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        let Some(result) = event.tool_result() else {
+            return OutcomeAction::Proceed;
+        };
+        if event.tool_name() != Some(InvokeAgentTool::NAME) {
+            return OutcomeAction::Proceed;
         }
-        let rendered = event.presentation.render();
+        let rendered = result.output().render();
         ctx.scratchpad().update(|stop: &mut BudgetStop| {
-            if event.raw_result.is_success() {
+            if result.is_success() {
                 stop.finished.extend(finished_work(&rendered));
             } else if let Some(headline) = find_budget_exhausted(&rendered) {
                 tracing::warn!(%headline, "A delegation ran out of budget; ending the run");
@@ -211,7 +209,7 @@ impl AgentHook for StopOnBudgetExhausted {
                 stop.headline.get_or_insert(headline);
             }
         });
-        ToolResultAction::Keep
+        OutcomeAction::Proceed
     }
 
     async fn on_completion_call(

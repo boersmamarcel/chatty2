@@ -937,7 +937,16 @@ pub(crate) fn kit_scenarios() -> Vec<KitScenario> {
         // `equivalence.rs`'s `provider_error_mid_stream`, as an HTTP error: a
         // headless worker retries any other status after 10 s, 20 s, …, and a
         // 401 once at once, so two 401s end the worker's turn quickly.
-        one_worker("provider_error", vec![Reply::Error(401), Reply::Error(401)]),
+        //
+        // Its pre-BI-3 golden `provider_error` was deleted: it held rig 0.42's
+        // provider-error wording, which rig 0.46 changed (AGE-1151; rig 0.46
+        // provider-error wording, Marcel 2026-11-12). `provider_error_rig_046`
+        // was recorded in its place on that change and is held to the same
+        // rule: never re-recorded.
+        one_worker(
+            "provider_error_rig_046",
+            vec![Reply::Error(401), Reply::Error(401)],
+        ),
         one_worker(
             "tool_results_without_plan",
             vec![

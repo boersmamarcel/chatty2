@@ -21,8 +21,7 @@
 //! `AGE_291_MODEL` picks the model (default `anthropic/claude-haiku-4.5`).
 //! Two arms, each a fresh conversation with its own nonce so they cannot hit
 //! each other's cache: the production client with the moving breakpoint, and
-//! a control built on the plain `reqwest` client, whose only breakpoint is
-//! rig's on the system message. Each arm runs two turns and reports the
+//! a control whose only breakpoint is the one on the system message. Each arm runs two turns and reports the
 //! per-request usage the `LLM completion call usage` log line carries
 //! (AGE-207). The number that answers the question is turn 2's
 //! `cache_read` in the moving arm: at the control's level it covers the
@@ -31,9 +30,10 @@
 
 use futures::StreamExt;
 use rig_agent::agent::AgentBuilder;
-use rig_core::client::CompletionClient;
 use rig_core::completion::Message;
 use rig_core::message::UserContent;
+use rig_core::providers::openai::OpenAIConfig;
+use rig_core::providers::openai::wire as openai;
 
 use super::AgentClient;
 use super::prompt_cache_http::PromptCachingHttpClient;
@@ -58,7 +58,7 @@ const FILLER_WORDS: usize = 6_000;
 enum Arm {
     /// The production client: rig's system breakpoint plus the moving one.
     MovingBreakpoint,
-    /// Plain `reqwest` under rig: the system breakpoint only.
+    /// The system breakpoint only.
     SystemBreakpointOnly,
 }
 
@@ -95,28 +95,16 @@ fn filler(words: usize, seed: u64) -> String {
 }
 
 fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
-    let agent = match arm {
-        Arm::MovingBreakpoint => {
-            let client = rig_core::providers::openrouter::Client::builder()
-                .api_key(key)
-                .http_client(PromptCachingHttpClient::new(
-                    super::connect_retry_http::ConnectRetryHttpClient::new(llm_client().clone()),
-                ))
-                .build()
-                .expect("the OpenRouter client builds");
-            let model = client.completion_model(model).with_prompt_caching();
-            AgentBuilder::new(model).preamble(preamble).build()
-        }
-        Arm::SystemBreakpointOnly => {
-            let client = rig_core::providers::openrouter::Client::builder()
-                .api_key(key)
-                .http_client(llm_client().clone())
-                .build()
-                .expect("the OpenRouter client builds");
-            let model = client.completion_model(model).with_prompt_caching();
-            AgentBuilder::new(model).preamble(preamble).build()
-        }
+    let retrying =
+        || super::connect_retry_http::ConnectRetryHttpClient::new(llm_client().clone().into());
+    let http = match arm {
+        Arm::MovingBreakpoint => PromptCachingHttpClient::new(retrying()),
+        Arm::SystemBreakpointOnly => PromptCachingHttpClient::system_breakpoint_only(retrying()),
     };
+    let model_handle = OpenAIConfig::with_key(&openai::OPENROUTER, key)
+        .connect(http)
+        .chat(model);
+    let agent = AgentBuilder::new(model_handle).preamble(preamble).build();
     // The probe's agents carry no hooks: the guard here is inert bookkeeping
     // so the client can be constructed, not a registered hook.
     let model_config = ModelConfig::new(
