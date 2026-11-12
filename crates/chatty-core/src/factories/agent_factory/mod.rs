@@ -332,6 +332,7 @@ impl AgentClient {
             answer_file,
             ask_user_enabled,
             instructions_dir,
+            user_home,
             embedded_terminals,
             fabric_transport,
             fabric_owner,
@@ -1061,6 +1062,7 @@ impl AgentClient {
                 .as_ref()
                 .and_then(|s| s.workspace_dir.as_deref())
                 .map(std::path::Path::new),
+            user_home.as_deref(),
         )
         .with_team_skill(team_skill);
 
@@ -1560,7 +1562,7 @@ impl AgentClient {
         });
         let preamble = match crate::services::project_instructions::instructions_section(
             workspace_dir,
-            dirs::home_dir().as_deref(),
+            user_home.as_deref(),
         ) {
             Some(section) => format!("{preamble}\n\n{section}"),
             None => preamble,
@@ -1954,6 +1956,82 @@ mod tests {
         let without = tool_names_with(true, None).await;
         assert!(!without.contains(&terminal_read));
         assert!(!without.contains(&terminal_run));
+    }
+
+    /// The two requests an agent built with `user_home` sends when its model
+    /// calls `read_skill` for `x` and then answers: the first request's body,
+    /// and the second's, which carries the tool result.
+    async fn requests_with_user_home(user_home: Option<std::path::PathBuf>) -> (String, String) {
+        use super::{AgentBuildContext, AgentClient, AgentServices};
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+        use crate::testing::fake_model::{FakeDaemon, Reply, Script};
+        use futures::StreamExt;
+        use rig_agent::streaming::StreamingPrompt;
+
+        const MODEL: &str = "age-590-model";
+        let _ = crate::init_repositories();
+        let daemon = FakeDaemon::scripted(Script::new().route(
+            MODEL,
+            [
+                Reply::tool_call("read_skill", serde_json::json!({"name": "x"})),
+                Reply::text("done"),
+            ],
+        ));
+        let model = ModelConfig::new(
+            MODEL.to_string(),
+            MODEL.to_string(),
+            ProviderType::OpenRouter,
+            MODEL.to_string(),
+        );
+        let provider = ProviderConfig::new("Hive".to_string(), ProviderType::OpenRouter)
+            .with_api_key("lease-token".to_string())
+            .with_base_url(daemon.base_url());
+        let ctx = AgentBuildContext {
+            user_home,
+            ..AgentBuildContext::from_services(AgentServices::default())
+        };
+        let built = AgentClient::from_model_config_with_tools(&model, &provider, ctx)
+            .await
+            .expect("the agent builds");
+        let mut stream = built.client.agent.stream_prompt("go").max_turns(3).await;
+        while let Some(item) = stream.next().await {
+            item.expect("the run streams");
+        }
+        let requests = daemon.requests();
+        assert_eq!(requests.len(), 2, "the read_skill call, then the answer");
+        (
+            String::from_utf8_lossy(&requests[0].body).into_owned(),
+            String::from_utf8_lossy(&requests[1].body).into_owned(),
+        )
+    }
+
+    /// AGE-590: the global AGENTS.md and the global skills are the
+    /// `user_home`'s. With `None` (a multi-tenant host) neither reaches the
+    /// model, however they are asked for; with a home both do.
+    #[tokio::test]
+    async fn global_instructions_and_skills_come_only_from_user_home() {
+        const INSTRUCTIONS: &str = "AGE590_GLOBAL_INSTRUCTIONS";
+        const SKILL: &str = "AGE590_GLOBAL_SKILL";
+        let home = tempfile::tempdir().expect("a fake home");
+        std::fs::create_dir_all(home.path().join(".agents/skills/x")).unwrap();
+        std::fs::write(home.path().join(".agents/AGENTS.md"), INSTRUCTIONS).unwrap();
+        std::fs::write(home.path().join(".agents/skills/x/SKILL.md"), SKILL).unwrap();
+
+        let (first, second) = requests_with_user_home(None).await;
+        assert!(!first.contains(INSTRUCTIONS), "no global section: {first}");
+        assert!(
+            !second.contains(SKILL),
+            "read_skill finds no global skill: {second}"
+        );
+        assert!(second.contains("Skill not found"), "{second}");
+
+        let (first, second) = requests_with_user_home(Some(home.path().to_path_buf())).await;
+        assert!(
+            first.contains(INSTRUCTIONS),
+            "the home's AGENTS.md: {first}"
+        );
+        assert!(second.contains(SKILL), "the home's skill: {second}");
     }
 
     /// Tool names an Ollama agent is built with when filesystem writes are
