@@ -1036,9 +1036,18 @@ record. A host that tracks a lease's outcome itself can write the record before
 starting the leader, or build the text with
 `chatty_core::services::resume_brief::{snapshot_workspace, render_resume_brief}`.
 
-Two presets ship, both **experimental**: teams are supported, and a team becomes a
+Three presets ship, all **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
-specs name no models. Besides them, five standalone specs ship: `data-analyst`,
+specs name no models. The third, `analyst-swarm` (EV-1, AGE-668), is an eval preset:
+`analyst-swarm-coordinator` (`coordinator`, no plugins) gets a ledger column's numbers
+clean from `analyst-swarm-data-coder` (`coder`), has `analyst-swarm-benford-analyst`
+(`reviewer` without the shell, the `benford` plugin) audit them, and has
+`analyst-swarm-reviewer` (`reviewer`) review the audit; the members are
+`callers`-only. Its fixture (`teams/analyst-swarm/fixture/`: `ledger.csv` and the
+verdict in `expected.json`) and specs are frozen at their merge
+(`the_analyst_swarm_preset_is_frozen` pins their hashes): a prompt change needs a new
+preset name. `participant/analyst_swarm.rs` (`analyst_swarm_smoke`) runs it on the swarm
+kit's fake model with the real plugin. Besides them, five standalone specs ship: `data-analyst`,
 `researcher`, `reviewer`, `typesetter` and `writer`, and the coding and curation teams below. `data-analyst` (AGE-992) answers
 questions from the data files in its workspace with the `coder` profile (DuckDB's
 `query_data` and friends, `calculate`, code execution), capped at 60 tool turns and 15

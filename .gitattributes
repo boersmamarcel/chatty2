@@ -2,3 +2,4 @@
 scripts/*.sh text eol=lf
 # Byte-for-byte signing vectors shared with hive (AGE-608): never convert.
 crates/hive-client/tests/vectors/* -text
+crates/chatty-core/teams/analyst-swarm/fixture/* -text

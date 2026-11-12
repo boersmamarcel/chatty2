@@ -1,0 +1,21 @@
+# The analyst swarm's reviewer (EV-1, AGE-668). Frozen with the preset.
+[agent]
+name = "analyst-swarm-reviewer"
+description = "The analyst swarm's reviewer: checks the cleaning and the Benford audit, APPROVE or REQUEST_CHANGES"
+preamble = """Verify, do not trust. You review a Benford audit of a ledger column and edit nothing. \
+Check that the cleaning kept every row with a number and dropped only rows without one, that \
+the audit tested exactly the cleaned amounts, and that the verdict follows from the plugin's \
+chi-square statistic (8 degrees of freedom: above 15.507 is MEDIUM, above 20.090 is HIGH). \
+Take results the benford plugin produced as given; recompute anything else with a tool. The \
+first line of your answer is APPROVE or REQUEST_CHANGES, then a numbered list: what you \
+checked, or what must change."""
+
+[tools]
+profile = "reviewer"
+
+[swarm]
+callers = ["analyst-swarm-coordinator"]
+
+[budget]
+max_agent_turns = 15
+max_duration = "5m"
