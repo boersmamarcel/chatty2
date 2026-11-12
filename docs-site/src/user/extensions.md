@@ -8,7 +8,7 @@
 
 Hive is the registry Chatty installs extensions from; the address it is talking to is shown next to **Hive Account**. **Sign In** or **Register** (username, email, password) to install from it and to run cloud modules; the session lasts thirty days.
 
-**Browse Marketplace** searches the registry. Each result shows its type and pricing; **Install** downloads it into your module directory (the one set in the module settings) and adds it to your **Installed** list, **Uninstall** removes it. Chatty refuses a module whose name or version is malformed or whose download is over 64 MiB, and remembers each installed module's checksum: if its file changes on disk afterwards, it no longer loads. Installed items carry two kinds of badge:
+**Browse Marketplace** searches the registry. Each result shows its type and pricing; **Install** downloads it into your module directory (the one set in the module settings) and adds it to your **Installed** list, **Uninstall** removes it. Chatty refuses a module whose name or version is malformed, whose download is over 64 MiB, or that is published as remote-only (running modules on the Hive runner is no longer supported), and remembers each installed module's checksum: if its file changes on disk afterwards, it no longer loads. Installed items carry two kinds of badge:
 
 | Badge | Meaning |
 |-------|---------|
@@ -22,6 +22,8 @@ Hive is the registry Chatty installs extensions from; the address it is talking 
 **Paid** plugins are metered wherever they run, including when an agent spec lists them and when a delegated worker calls them. Each module's free calls are used first (the count comes from Hive); after that a call needs a positive credit balance, and every call is reported to Hive. If Chatty cannot read your balance — you are signed out, your sign-in has expired, or Hive is unreachable — a paid call is refused with "Cannot verify credits … sign in to Hive" rather than run unbilled. Delegated workers reuse the sign-in the desktop app saved, so if the app has been idle for over an hour, open it once to refresh the session.
 
 The **Teams** tab next to the plugin listing finds published agent teams and installs them with one click; see [Install a team from the marketplace](./install-team.md).
+
+If an older `hive_settings.json` still contains a `runner_url` entry, Chatty shows an error on this page and leaves the file (and your Hive sign-in) untouched; delete the `runner_url` line from the file to continue.
 
 Each row has **Enable** / **Disable** (🟢 enabled, ⏸ disabled), and modules that support both modes offer **Switch to Local** / **Switch to Cloud**.
 
