@@ -196,7 +196,22 @@ impl McpConnection {
     ///
     /// Returns `Some(authorization_servers)` if the server has a
     /// `.well-known/oauth-protected-resource` endpoint, `None` otherwise.
+    ///
+    /// The probe goes through the same guarded client as OAuth discovery
+    /// (AGE-1101): no redirects, and the address it connects to must pass
+    /// [`mcp_oauth_endpoint`](super::ssrf_guard::mcp_oauth_endpoint), so a
+    /// public server cannot redirect it into the LAN or to loopback.
     async fn probe_oauth_metadata(url: &str) -> Option<Vec<String>> {
+        let server_on_lan = server_on_lan(url).await;
+        let client = super::http_client::mcp_oauth_client(5, url, server_on_lan);
+        Self::probe_oauth_metadata_with(&client, url, server_on_lan).await
+    }
+
+    async fn probe_oauth_metadata_with(
+        client: &reqwest::Client,
+        url: &str,
+        server_on_lan: bool,
+    ) -> Option<Vec<String>> {
         let base = url.trim_end_matches('/');
         let origin = if let Ok(parsed) = reqwest::Url::parse(base) {
             format!("{}://{}", parsed.scheme(), parsed.authority())
@@ -205,7 +220,8 @@ impl McpConnection {
         };
 
         let metadata_url = format!("{origin}/.well-known/oauth-protected-resource");
-        let client = super::http_client::probe_client(5);
+        super::ssrf_guard::check_mcp_oauth_url_without_lookup(url, server_on_lan, &metadata_url)
+            .ok()?;
 
         let resp = client.get(&metadata_url).send().await.ok()?;
         if !resp.status().is_success() {
@@ -1231,6 +1247,64 @@ mod tests {
             Some("https://auth.example.com/token".to_string())
         );
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A server that answers every request with a redirect to `location`.
+    async fn redirecting_server(location: String) -> u16 {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nlocation: {location}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        port
+    }
+
+    /// AGE-1101: the well-known probe follows no redirect, and a public
+    /// server's probe never connects to loopback, even when its name
+    /// resolves there.
+    #[tokio::test]
+    async fn oauth_probe_follows_no_redirect_and_refuses_loopback_for_a_public_server() {
+        let (target, hits) = metadata_server().await;
+
+        // A local server redirecting its well-known document elsewhere: the
+        // redirect is not followed.
+        let redirect = redirecting_server(format!(
+            "http://127.0.0.1:{target}/.well-known/oauth-protected-resource"
+        ))
+        .await;
+        let local = format!("http://127.0.0.1:{redirect}/mcp");
+        let client = super::super::http_client::mcp_oauth_client_with(
+            5,
+            &local,
+            false,
+            Arc::new(ResolvesToLoopback),
+        );
+        assert_eq!(
+            McpConnection::probe_oauth_metadata_with(&client, &local, false).await,
+            None
+        );
+
+        // A public name that resolves to loopback is refused before connecting.
+        let public = format!("http://mcp.example.com:{target}/mcp");
+        let client = super::super::http_client::mcp_oauth_client_with(
+            5,
+            &public,
+            false,
+            Arc::new(ResolvesToLoopback),
+        );
+        assert_eq!(
+            McpConnection::probe_oauth_metadata_with(&client, &public, false).await,
+            None
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     /// Resolves every name to a fixed address.
