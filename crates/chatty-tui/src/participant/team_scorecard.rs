@@ -84,14 +84,14 @@ fn check_golden(name: &str, actual: &str) {
 }
 
 /// Invariant 1: the baseline is derived, not written. `coder-reviewer` (the
-/// test fixture; it no longer ships) and the `crosscheck` preset each derive
-/// a valid spec that matches its golden. `analyst-swarm` is not on main yet
-/// (AGE-668), so `crosscheck` stands in for it.
+/// test fixture; it no longer ships), the `crosscheck` preset and the
+/// `analyst-swarm` preset each derive a valid spec that matches its golden.
 #[test]
 fn single_arm_is_derived_from_team() {
     let teams = [
         crate::team_fixture::load(),
         load_team("crosscheck", None, None).expect("the crosscheck preset loads"),
+        load_team("analyst-swarm", None, None).expect("the analyst-swarm preset loads"),
     ];
     for team in &teams {
         let single = derive_single(team, &[], &PriceBook::default());

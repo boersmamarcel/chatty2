@@ -467,6 +467,24 @@ struct Cli {
     #[arg(long, value_name = "NAME[@VERSION]", conflicts_with_all = ["headless", "pipe", "participant_fd", "team", "agent"])]
     install_team: Option<String>,
 
+    /// Print the single agent derived from team ID as an agent spec in
+    /// JSON, then exit (TD-1, AGE-1136): the team's tools, strongest
+    /// model and summed budget, and no one to delegate to. It is what
+    /// `--agent-json` takes, so a benchmark harness can run a team's
+    /// baseline without writing it. The team is looked up as for `--team`
+    /// (`--workspace` first, then the data directory, then the presets);
+    /// models resolve against the saved models, and no role is priced.
+    ///
+    /// Example: --derive-single data-analysis
+    #[arg(long, value_name = "TEAM", conflicts_with_all = [
+        "headless", "pipe", "participant_fd", "team", "agent", "agent_json", "install_team",
+        "message", "model", "enable", "disable", "only", "tool_loading", "tools", "preamble",
+        "max_agent_turns", "max_duration", "usage_file", "restore", "save_conversation",
+        "export_atif", "export", "out", "auto_approve", "ollama", "openai_compat_url",
+        "api_key", "think", "broker",
+    ])]
+    derive_single: Option<String>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -607,6 +625,25 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // A module settings file in a shape no longer read (agent objects in
     // `virtual_agents`, AGE-614) is an error to fix, not a default to run.
     let module_settings = module_settings_result.context("Failed to load module settings")?;
+    if let Some(id) = &cli.derive_single {
+        let workspace = match cli.workspace.as_deref() {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => std::env::current_dir().context("Failed to read the current directory")?,
+        };
+        let team = chatty_core::services::team::load_team(
+            id,
+            Some(workspace.as_path()),
+            dirs::data_dir().as_deref(),
+        )
+        .with_context(|| format!("--derive-single '{id}' could not be loaded"))?;
+        let single = chatty_core::services::team_scorecard::derive_single(
+            &team,
+            &models_list,
+            &chatty_core::models::token_usage::PriceBook::default(),
+        );
+        println!("{}", single.to_json()?);
+        return Ok(());
+    }
     let remote_agents = a2a_agents_result.unwrap_or_default();
     // Before any agent is built: every spec plugin call is metered (AGE-837).
     engine::install_plugin_meter().await;
@@ -1894,6 +1931,36 @@ mod resolve_model_tests {
     #[test]
     fn no_models_configured_is_an_error() {
         assert!(resolve_model(cli(&[]).model.as_deref(), &ModelsModel::new()).is_err());
+    }
+
+    /// AGE-1136: `--derive-single <team>` stands alone, as `--install-team` does.
+    #[test]
+    fn derive_single_takes_a_team_and_excludes_a_run() {
+        let cli = Cli::try_parse_from(["chatty-tui", "--derive-single", "data-analysis"])
+            .expect("--derive-single parses");
+        assert_eq!(cli.derive_single.as_deref(), Some("data-analysis"));
+        // Every flag that only shapes a run would be ignored: refused.
+        for other in [
+            vec!["--headless"],
+            vec!["-m", "hi"],
+            vec!["--team", "crosscheck"],
+            vec!["--model", "m"],
+            vec!["--usage-file", "/tmp/u.json"],
+            vec!["--max-duration", "5m"],
+            vec!["--max-agent-turns", "3"],
+            vec!["--tools", "coder"],
+            vec!["--auto-approve"],
+            vec!["--openai-compat-url", "http://x"],
+            vec!["--think", "true"],
+        ] {
+            let mut args = vec!["chatty-tui", "--derive-single", "data-analysis"];
+            args.extend(other.iter().copied());
+            assert!(Cli::try_parse_from(args).is_err(), "{other:?}");
+        }
+        // The workspace is where the team is looked up, so it is allowed.
+        assert!(
+            Cli::try_parse_from(["chatty-tui", "--derive-single", "x", "--workspace", "."]).is_ok()
+        );
     }
 
     #[test]
