@@ -86,6 +86,7 @@ pub(super) fn delegation_stream(
             agent: delegation.agent.clone(),
             prompt: delegation.prompt.clone(),
             include_trace: false,
+            handle: None,
         };
         let call = async move {
             match tool {

@@ -5,7 +5,7 @@
 //!
 //! | Origin | Source | Reach |
 //! | -- | -- | -- |
-//! | [`Origin::Handle`] | [`HandleSource`]: none until resumable handles exist (RC-3) | `Live` or `Idle` |
+//! | [`Origin::Handle`] | [`HandleSource`]: none until the broker's handles (RC-3) are wired in (RO-4) | `Live` or `Idle` |
 //! | [`Origin::Node`] | [`DirectorySource`]: `Directory::in_scope(caller.scope)` | `Live`, `Idle`, `Unreachable` |
 //! | [`Origin::LocalSpec`] | [`LocalSpecSource`]: the agent-spec loader (PL-U1) | `Startable` |
 //! | [`Origin::Hosted`] | [`HostedSource`]: nothing until PL-S6 | — |
@@ -534,9 +534,10 @@ impl RosterSource for BrokerNodeSource {
     }
 }
 
-/// The resumable handles a conversation's swarm holds. Handles do not
-/// exist yet (resumable conversations, RC-3): nothing implements this
-/// outside tests until then.
+/// The resumable handles a conversation's swarm holds. The root broker
+/// keeps them (`chatty_fabric::HandleStore`, RC-3), but nothing implements
+/// this outside tests until RO-4 wires them in — together with
+/// `invoke_agent` routing an `agent` that names a handle.
 pub trait HandleIndex: Send + Sync {
     fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)>;
 }

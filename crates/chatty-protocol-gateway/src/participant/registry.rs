@@ -620,6 +620,7 @@ impl ParticipantRegistry {
             spawn_context: task.spawn_context,
             handoff: task.handoff,
             swarm_events: task.swarm_events,
+            resume: task.resume,
         };
         if BrokerCodec::line_len_bound(&frame) > MAX_FRAME_BYTES {
             warn!(participant = %name, task = %task_id, "Refusing a task over the worker's frame cap");

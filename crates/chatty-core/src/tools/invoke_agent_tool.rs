@@ -173,6 +173,12 @@ pub struct InvokeAgentArgs {
     /// grow unless it asks for this.
     #[serde(default)]
     pub include_trace: bool,
+    /// Keep the agent's conversation under this name (RC-3): a name not
+    /// used before starts a fresh agent and saves its conversation; the
+    /// same name again continues it, in a fresh process on the same
+    /// worktree. Absent for a plain call, which keeps nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
 }
 
 /// Output from the invoke_agent tool
@@ -214,6 +220,15 @@ pub struct InvokeAgentOutput {
     /// AGE-853). Never in the JSON the model sees.
     #[serde(skip)]
     pub usage: Vec<TokenUsage>,
+    /// The handle the agent's conversation is saved under (RC-3): the name
+    /// to pass as `handle` to continue it. Absent for a plain call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    /// How many commits the resumed handle's worktree was behind its base
+    /// branch when this task started (RC-3). Absent unless the call resumed
+    /// a handle with a worktree of its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind_by: Option<u64>,
 }
 
 /// Error type for invoke_agent tool
@@ -644,6 +659,13 @@ impl Tool for InvokeAgentTool {
                                    context. Use only when you must judge *how* the worker \
                                    reached its answer, e.g. to compare several workers' \
                                    derivations."
+                },
+                "handle": {
+                    "type": "string",
+                    "description": "Optional. A name to keep this agent's conversation under. \
+                                   A new name starts the agent fresh and saves its \
+                                   conversation; the same name again continues that \
+                                   conversation, on the same worktree. Local agents only."
                 }
             },
             "required": ["agent", "prompt"]
@@ -683,6 +705,13 @@ impl InvokeAgentTool {
     async fn run(&self, args: InvokeAgentArgs) -> Result<InvokeAgentOutput, InvokeAgentError> {
         let agent_name = args.agent.trim().to_string();
         let prompt = args.prompt.trim().to_string();
+        // An empty handle is no handle: a plain call.
+        let handle = args
+            .handle
+            .as_deref()
+            .map(str::trim)
+            .filter(|handle| !handle.is_empty())
+            .map(str::to_string);
 
         if agent_name.is_empty() {
             return Err(InvokeAgentError::NotFound(
@@ -749,12 +778,25 @@ impl InvokeAgentTool {
                 source: ToolSource::Local,
             });
             return self
-                .call_over_fabric(transport.as_ref(), local, &prompt, args.include_trace)
+                .call_over_fabric(
+                    transport.as_ref(),
+                    local,
+                    &prompt,
+                    args.include_trace,
+                    handle,
+                )
                 .await;
         }
 
         // 2. A configured remote A2A agent.
         if let Some(config) = self.remote_agents.iter().find(|a| a.name == agent_name) {
+            // The broker keeps handles (RC-3); a remote has its own state.
+            if let Some(handle) = handle {
+                return Err(InvokeAgentError::InvocationFailed(format!(
+                    "'{agent_name}' is a remote agent; handle '{handle}' can only keep a \
+                     local agent's conversation. Call it without `handle`."
+                )));
+            }
             if !config.enabled {
                 return Err(InvokeAgentError::Disabled(format!(
                     "Remote agent '{}' is disabled. Enable it in Settings → A2A Agents.",
@@ -955,13 +997,14 @@ impl InvokeAgentTool {
         agent: &str,
         prompt: &str,
         include_trace: bool,
+        handle: Option<String>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         use futures::StreamExt;
 
         let request = CallRequest::InvokeAgent(InvokeAgentParams {
             agent: agent.to_string(),
             prompt: prompt.to_string(),
-            handle: None,
+            handle,
             include_trace,
             spawn_context: None,
             remaining: self.remaining(),
@@ -1089,6 +1132,8 @@ impl InvokeAgentTool {
                 metadata: None,
                 messages: Vec::new(),
                 cancelled_by_user: false,
+                handle: None,
+                behind_by: None,
             },
             (None, Some(Ok(outcome))) => outcome,
             (None, None) => InvokeAgentOutcome {
@@ -1098,6 +1143,8 @@ impl InvokeAgentTool {
                 metadata: None,
                 messages: Vec::new(),
                 cancelled_by_user: false,
+                handle: None,
+                behind_by: None,
             },
         };
 
@@ -1137,6 +1184,7 @@ impl InvokeAgentTool {
         };
         // Failed or not, the run's conversation is the export's (AGE-859).
         let conversation = metadata.and_then(CapturedConversation::from_metadata);
+        let (handle, behind_by) = (outcome.handle, outcome.behind_by);
         self.finish(
             agent,
             outcome.response,
@@ -1148,6 +1196,11 @@ impl InvokeAgentTool {
             handoff,
             outcome.messages,
         )
+        .map(|output| InvokeAgentOutput {
+            handle,
+            behind_by,
+            ..output
+        })
     }
 
     /// Report how a delegation ended, to the progress channel and to the
@@ -1266,6 +1319,8 @@ impl InvokeAgentTool {
             handoff: handoff_value,
             messages,
             usage,
+            handle: None,
+            behind_by: None,
         })
     }
 }
@@ -1646,6 +1701,7 @@ mod tests {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await;
@@ -1678,6 +1734,7 @@ mod tests {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await;
@@ -1706,6 +1763,7 @@ mod tests {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -1771,6 +1829,7 @@ mod tests {
                     agent: "voucher".to_string(),
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -1800,6 +1859,7 @@ mod tests {
                     agent: "nonexistent".to_string(),
                     prompt: "hello".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await;
@@ -1822,12 +1882,45 @@ mod tests {
                     agent: "my-agent".to_string(),
                     prompt: "hello".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), InvokeAgentError::Disabled(_)));
+    }
+
+    /// RC-3: the broker keeps handles, so a remote agent refuses one
+    /// before anything is sent; a plain call's arguments need no handle.
+    #[tokio::test]
+    async fn a_remote_agent_refuses_a_handle() {
+        let tool = InvokeAgentTool::new(vec![make_agent(
+            "my-agent",
+            "https://example.com/a2a",
+            true,
+        )]);
+        let error = tool
+            .call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "my-agent".to_string(),
+                    prompt: "hello".to_string(),
+                    include_trace: false,
+                    handle: Some("fixer".to_string()),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("handle 'fixer' can only keep a local agent's"),
+            "{error}"
+        );
+        let plain: InvokeAgentArgs =
+            serde_json::from_value(serde_json::json!({"agent": "a", "prompt": "p"})).unwrap();
+        assert_eq!(plain.handle, None);
     }
 
     /// PL-U5: a WASM module is never an agent. A name only a module
@@ -1844,6 +1937,7 @@ mod tests {
                     agent: "benford".to_string(),
                     prompt: "analyze data".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -1865,6 +1959,7 @@ mod tests {
                     agent: "data-analyst".to_string(),
                     prompt: "Sum column b of data.csv".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -1906,6 +2001,7 @@ mod tests {
                     agent: "data-analyst".to_string(),
                     prompt: "Sum column b of data.csv".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -1930,6 +2026,7 @@ mod tests {
                     agent: "  ".to_string(),
                     prompt: "hello".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await;
@@ -1949,6 +2046,7 @@ mod tests {
                     agent: "some-agent".to_string(),
                     prompt: "".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await;
@@ -1979,6 +2077,7 @@ mod tests {
                     agent: "shared-name".to_string(),
                     prompt: "hello".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -2001,6 +2100,7 @@ mod tests {
                     agent: "voucher-agent-0".to_string(),
                     prompt: "hi".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -2018,6 +2118,7 @@ mod tests {
                     agent: "local-coder-0".to_string(),
                     prompt: "hi".to_string(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await
@@ -2067,6 +2168,7 @@ mod tests {
                 agent: "worker".to_string(),
                 prompt: "do the thing".to_string(),
                 include_trace: false,
+                handle: None,
             },
         )
         .await
@@ -2169,6 +2271,7 @@ mod tests {
                         agent: s("data-coder"),
                         prompt: s("fix it"),
                         include_trace: false,
+                        handle: None,
                     },
                 )
                 .await
@@ -2222,6 +2325,8 @@ mod tests {
                     metadata: None,
                     messages: Vec::new(),
                     cancelled_by_user: false,
+                    handle: None,
+                    behind_by: None,
                 })));
             }
             .boxed())
@@ -2280,6 +2385,7 @@ mod tests {
                     agent: "coder".into(),
                     prompt: "go".into(),
                     include_trace: false,
+                    handle: None,
                 },
             )
             .await

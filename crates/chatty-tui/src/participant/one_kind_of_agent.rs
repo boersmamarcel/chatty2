@@ -112,6 +112,7 @@ async fn a_spec_with_a_plugin_is_listed_and_reached_like_any_local_agent() {
                 agent: BENFORD.to_string(),
                 prompt: "Audit 120, 245, 1300, 1450, 2100.".to_string(),
                 include_trace: false,
+                handle: None,
             },
         )
         .await

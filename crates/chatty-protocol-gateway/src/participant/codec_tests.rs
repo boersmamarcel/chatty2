@@ -39,6 +39,7 @@ fn task(task_id: &str) -> BrokerFrame {
         handoff: None,
         budget: Box::default(),
         swarm_events: false,
+        resume: None,
     }
 }
 
@@ -343,6 +344,54 @@ fn a_relayed_question_is_a_broker_request_answered_or_escalated() {
     );
 }
 
+/// RC-3: a resumed handle's task carries the conversation to restore,
+/// verbatim, as `resume`; every other task has no such key.
+#[test]
+fn a_resumed_task_carries_its_conversation() {
+    let broker = BrokerCodec::new();
+    let worker = WorkerCodec::new();
+    let conversation = Opaque::from_value(&json!([{"role": "user", "content": "hi"}])).unwrap();
+    let BrokerFrame::Task {
+        task_id,
+        text,
+        identity,
+        capture_conversation,
+        spawn_context,
+        handoff,
+        budget,
+        swarm_events,
+        ..
+    } = task("t")
+    else {
+        unreachable!()
+    };
+    let line = broker
+        .encode(&BrokerFrame::Task {
+            task_id,
+            text,
+            identity,
+            capture_conversation,
+            spawn_context,
+            handoff,
+            budget,
+            swarm_events,
+            resume: Some(conversation.clone()),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&line)["params"]["resume"],
+        json!([{"role": "user", "content": "hi"}])
+    );
+    let Some(BrokerFrame::Task { resume, .. }) = worker.decode(&line).unwrap() else {
+        panic!("a task");
+    };
+    assert_eq!(resume, Some(conversation), "byte for byte");
+
+    let plain = BrokerCodec::new().encode(&task("t2")).unwrap().unwrap();
+    assert!(value(&plain)["params"].get("resume").is_none());
+}
+
 #[test]
 fn a_task_run_carries_its_fields_and_omits_the_defaults() {
     let broker = BrokerCodec::new();
@@ -362,6 +411,7 @@ fn a_task_run_carries_its_fields_and_omits_the_defaults() {
             handoff: None,
             budget: Box::new(budget.clone()),
             swarm_events: true,
+            resume: None,
         })
         .unwrap()
         .unwrap();
@@ -938,6 +988,8 @@ fn the_line_length_bound_is_an_upper_bound() {
                 metadata: None,
                 messages: Vec::new(),
                 cancelled_by_user: false,
+                handle: None,
+                behind_by: None,
             }),
         },
     ] {

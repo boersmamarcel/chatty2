@@ -225,14 +225,22 @@ mod tests {
     }
 
     /// Kill criterion 4 (ADR-0021): the only any-value ("accepts anything")
-    /// schemas in the export are the four payloads chatty-core owns by
-    /// contract. Adding a fifth means the criterion fired — see the PR
-    /// body, never widen this list to make the test pass.
+    /// schemas in the export are the listed pointers to the payloads
+    /// chatty-core owns by contract — the captured conversation (up on a
+    /// terminal status, and down again as a resumed handle's
+    /// `TaskRunParams.resume`, RC-3), the handoff answer, the handoff schema
+    /// and the evidence data. A new pointer means the criterion fired — say
+    /// so in the PR; never widen this list just to make the test pass.
     #[test]
-    fn export_has_no_any_value_outside_four_opaque_payloads() {
-        const ALLOWED: [&str; 4] = [
+    fn export_has_no_any_value_outside_the_listed_opaque_payloads() {
+        const ALLOWED: [&str; 5] = [
             // The captured conversation (`TaskMetadata.conversation`).
             "/$defs/TaskMetadata/properties/conversation",
+            // The same payload on its way back down (RC-3, AGE-652): a
+            // resumed handle's saved conversation (`TaskRunParams.resume`).
+            // Still the captured conversation, not another kind of payload;
+            // flagged for ADR-0021's kill criterion 4 review in the PR.
+            "/$defs/TaskRunParams/properties/resume",
             // The handoff answer (`TaskMetadata.handoff`).
             "/$defs/TaskMetadata/properties/handoff",
             // The handoff schema (`HandoffContract.schema`).
@@ -276,9 +284,11 @@ mod tests {
         allowed.sort_unstable();
         assert_eq!(
             found, allowed,
-            "the export's any-value schemas must be exactly the four opaque payloads ADR-0021 \
-             § 1 names; adding a fifth is kill criterion 4 (say so in the PR, don't widen this \
-             list silently)"
+            "the export's any-value schemas must be exactly the listed opaque payload pointers: \
+             TaskMetadata.conversation (the captured conversation), TaskRunParams.resume (the \
+             captured conversation going back down to a resumed handle's worker, RC-3), \
+             TaskMetadata.handoff, HandoffContract.schema and TaskMetadata.evidence; a new one \
+             is kill criterion 4 (ADR-0021: say so in the PR, don't widen this list silently)"
         );
     }
 

@@ -152,6 +152,10 @@
             "include_trace": {
               "type": "boolean",
               "description": "Return the worker's compacted tool trace (calls, inputs, outputs) alongside its response. Off by default; costs context. Use only when you must judge *how* the worker reached its answer, e.g. to compare several workers' derivations."
+            },
+            "handle": {
+              "type": "string",
+              "description": "Optional. A name to keep this agent's conversation under. A new name starts the agent fresh and saves its conversation; the same name again continues that conversation, on the same worktree. Local agents only."
             }
           },
           "required": [

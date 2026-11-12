@@ -7,7 +7,8 @@
 //! direct handle in the root process or a worker's broker-made connection.
 //! An [`EndpointBudget`] meters how many runs talk to one model endpoint at
 //! once, and a [`RunPermit`] holds a run's slot only while the run is not
-//! waiting on its own calls (§3.5).
+//! waiting on its own calls (§3.5). A [`HandleStore`] keeps the
+//! conversations of resumable handles (RC-3).
 //!
 //! This crate is pure: both `chatty-protocol-gateway` and `chatty-core`
 //! depend on it, so it depends on neither, and never on axum, wasmtime,
@@ -22,6 +23,7 @@ mod approval;
 mod delegation;
 mod directory;
 mod edge_log;
+mod handle;
 mod handoff;
 mod origin;
 mod pending;
@@ -39,6 +41,7 @@ pub use directory::{
     ConversationScope, Directory, DirectoryError, Node, NodeId, NodeName, NodeState, ROOT_NAME,
 };
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES, UsagePricer};
+pub use handle::{Handle, HandleSlot, HandleStore, SavedConversation, WorkerTreeRef};
 pub use handoff::HandoffContract;
 pub use origin::AgentOrigin;
 pub use pending::{

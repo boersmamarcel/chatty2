@@ -29,6 +29,7 @@ fn task() -> BrokerFrame {
         handoff: None,
         budget: Box::default(),
         swarm_events: false,
+        resume: None,
     }
 }
 

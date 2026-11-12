@@ -534,6 +534,21 @@ worker's compacted tool-call trace — otherwise the field is absent from the JS
 model sees, so an ordinary delegation costs no more context than it did before this
 existed.
 
+**`handle`** (RC-3, AGE-652, optional): keep a local agent's conversation under a name of
+the caller's choosing. The first call under a name runs a fresh worker as usual, and the
+root broker saves the conversation it captured (RC-0); a later call from the same caller
+under the same name spawns another fresh, one-shot worker that restores that conversation
+(`task.run`'s `resume`) before its first turn — so the request it sends is the earlier one
+plus the new turn, an append-only prefix — and, for an isolated team, attaches it to the
+handle's worktree and branch (`worker_tree::attach`) instead of making a new one. Its
+evidence is that task's commits only (`task_base..HEAD`, `task_base` recorded when the
+worker got the tree), and `InvokeAgentOutput.behind_by` says how many commits the tree's
+branch is behind its base. Calls to one handle queue in arrival order, one run at a time.
+Handles live in the root broker's memory only, keyed by owner and name, and are bound to
+the agent they were first used with; a remote agent refuses one. A plain call names none,
+and its result carries neither `handle` nor `behind_by`. Not yet: expiry, caps, the owner
+and scope rules and `list_agents` listing handles (RC-4, RO-4).
+
 ### `send_message`
 
 A worker tells the agent that gave it its task something besides its final

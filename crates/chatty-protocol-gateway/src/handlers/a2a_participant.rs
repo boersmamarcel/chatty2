@@ -73,6 +73,12 @@ impl RunningTask {
         &self.guard.participant
     }
 
+    /// The tree a spawned worker was given of its own (RC-3); `None` for a
+    /// registered participant or a worker in its caller's tree.
+    pub(crate) fn tree(&self) -> Option<crate::participant::WorkerTreeInfo> {
+        self.worker.as_ref()?.tree()
+    }
+
     /// The task reached a terminal state; nothing is left to cancel.
     ///
     /// `metadata` is the terminal status's, carrying the worker's token

@@ -52,6 +52,15 @@
 //! commits produces none at all: a read-only reviewer must not be handed
 //! something to merge.
 //!
+//! # A resumed handle's tree (RC-3)
+//!
+//! A handle keeps its conversation across tasks, and each of its tasks runs
+//! in a fresh worker. [`attach`] gives that worker the tree the handle's
+//! first worker made — the same directory, the same branch, every earlier
+//! commit — rather than a new one, which [`create`] never does. Its evidence
+//! is per task: measured from the commit the tree was at when the task
+//! started, so it shows this task's commits and none of the earlier ones.
+//!
 //! # What it does not get
 //!
 //! Automatic cleanup. The worktree is left on disk with the worker's output
@@ -278,6 +287,67 @@ pub async fn commit(tree: &WorkerTree, task: &str) {
     }
 }
 
+/// The tree `name` that an earlier worker of a resumed handle made under
+/// `workspace_root`, on `branch` (RC-3).
+///
+/// Nothing is created: the tree must still be at
+/// `<workspace_root>/.chatty/worktrees/<name>`, on `branch`, or this fails
+/// rather than hand the worker some other tree. The returned tree's `base`
+/// is the commit it is at now, so its evidence is this task's commits and
+/// nothing an earlier task left.
+pub async fn attach(workspace_root: &str, name: &str, branch: &str) -> Result<WorkerTree> {
+    let git = GitService::new(workspace_root)
+        .await
+        .with_context(|| format!("cannot attach to worktree '{name}'"))?;
+    let path = git.worktree_path(name);
+    if !path.is_dir() {
+        bail!(
+            "the worktree '{name}' is gone from {}; it cannot be resumed",
+            path.display()
+        );
+    }
+    let tree = GitService::new(&path.to_string_lossy())
+        .await
+        .with_context(|| format!("cannot open worktree '{name}'"))?;
+    let actual = tree.current_branch().await?;
+    if actual.as_deref() != Some(branch) {
+        bail!(
+            "the worktree '{name}' is on {}, not on its handle's branch {branch}",
+            actual.as_deref().unwrap_or("a detached HEAD")
+        );
+    }
+    let task_base = tree.head_commit().await?;
+    info!(worktree = %path.display(), %branch, %task_base, "Worker attached to a handle's worktree");
+    Ok(WorkerTree {
+        name: name.to_string(),
+        branch: branch.to_string(),
+        path,
+        base: Some(task_base),
+    })
+}
+
+/// How many commits `base` — the caller's branch, else the branch the
+/// workspace is on, else its default branch — carries that `branch` does
+/// not: how far a resumed handle's tree has fallen behind (RC-3). `None`
+/// when there is no base to measure against.
+async fn behind_by(workspace_root: &str, branch: &str, base: Option<&str>) -> Option<u64> {
+    let git = GitService::new(workspace_root).await.ok()?;
+    let base = match base {
+        Some(base) => base.to_string(),
+        None => match git.current_branch().await.ok().flatten() {
+            Some(current) => current,
+            None => git.default_branch().await?,
+        },
+    };
+    match git.commits_ahead(branch, &base).await {
+        Ok(behind) => Some(behind as u64),
+        Err(e) => {
+            warn!(%branch, %base, error = %e, "Cannot count how far a handle's tree is behind");
+            None
+        }
+    }
+}
+
 /// What runs when the worker's process exits, given whether its task
 /// succeeded.
 ///
@@ -421,6 +491,68 @@ pub async fn create_with_commit_hook(
     let Some(tree) = create(workspace_root, worker, base).await? else {
         return Ok(None);
     };
+    // Where this task starts: what a handle records for its next task (RC-3).
+    let task_base = match GitService::new(&tree.path.to_string_lossy()).await {
+        Ok(git) => git.head_commit().await.ok(),
+        Err(_) => None,
+    };
+    Ok(Some(with_commit_hook(tree, verification, task_base, None)))
+}
+
+/// [`attach`] plus the hooks of [`create_with_commit_hook`] (RC-3): a resumed
+/// handle's worker works in `name`'s tree on `branch`, its evidence is this
+/// task's commits only, and `behind_by` says how far the branch is behind
+/// `base` (the caller's branch, as for a new tree).
+pub async fn attach_with_commit_hook(
+    workspace_root: &str,
+    name: &str,
+    branch: &str,
+    base: Option<&str>,
+    verification: Option<String>,
+) -> Result<IsolatedWorker> {
+    let tree = attach(workspace_root, name, branch).await?;
+    let behind = behind_by(workspace_root, branch, base).await;
+    let task_base = tree.base.clone();
+    Ok(with_commit_hook(tree, verification, task_base, behind))
+}
+
+/// The tree a broker's worktree factory gives one worker: `attach`'s, a
+/// resumed handle's tree (RC-3), else a new one under `workspace_root` named
+/// for `worker` ([`create_with_commit_hook`]).
+pub async fn prepare(
+    workspace_root: &str,
+    worker: &str,
+    base: Option<&str>,
+    verification: Option<String>,
+    attach: Option<&chatty_fabric::WorkerTreeRef>,
+) -> Result<Option<IsolatedWorker>> {
+    let Some(tree) = attach else {
+        return create_with_commit_hook(workspace_root, worker, base, verification).await;
+    };
+    let name = tree
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .with_context(|| format!("a handle's worktree {} has no name", tree.path.display()))?;
+    let attached =
+        attach_with_commit_hook(workspace_root, name, &tree.branch, base, verification).await?;
+    // Only the handle's own tree: a same-named one under another root is not.
+    if attached.cwd != tree.path {
+        bail!(
+            "the handle's worktree {} is not under {workspace_root}",
+            tree.path.display()
+        );
+    }
+    Ok(Some(attached))
+}
+
+/// A tree, as an [`IsolatedWorker`] with its two commit hooks.
+fn with_commit_hook(
+    tree: WorkerTree,
+    verification: Option<String>,
+    task_base: Option<String>,
+    behind_by: Option<u64>,
+) -> IsolatedWorker {
     let cwd = tree.path.clone();
     let branch = tree.branch.clone();
     let tree = Arc::new(tree);
@@ -446,15 +578,18 @@ pub async fn create_with_commit_hook(
             commit_once(&tree, &committed).await;
         });
     });
-    Ok(Some(IsolatedWorker {
+    IsolatedWorker {
         cwd,
         branch,
         evidence,
         on_exit,
-    }))
+        task_base,
+        behind_by,
+    }
 }
 
-/// A worker's tree as [`create_with_commit_hook`] made it.
+/// A worker's tree as [`create_with_commit_hook`] made it, or
+/// [`attach_with_commit_hook`] found it.
 pub struct IsolatedWorker {
     /// The worker's `cwd`.
     pub cwd: PathBuf,
@@ -463,6 +598,11 @@ pub struct IsolatedWorker {
     pub branch: String,
     pub evidence: EvidenceHook,
     pub on_exit: ExitHook,
+    /// The commit the tree was at when the worker got it (RC-3).
+    pub task_base: Option<String>,
+    /// How far an attached tree's branch is behind its base (RC-3); `None`
+    /// for a new tree.
+    pub behind_by: Option<u64>,
 }
 
 /// [`commit`], unless something already did.
@@ -1022,6 +1162,69 @@ mod tests {
         assert_eq!(evidence.base, "master");
         assert!(evidence.verification.is_none(), "none was declared");
         assert!(!evidence.block().contains("verification:"));
+    }
+
+    /// RC-3: a resumed handle's worker gets the tree its first worker made,
+    /// on the same branch, with the earlier commits in it; its evidence is
+    /// this task's commits only; and it is told how far the branch fell
+    /// behind the base meanwhile.
+    #[tokio::test]
+    async fn attach_reuses_the_tree_measures_from_the_task_base_and_counts_behind() {
+        let dir = repo().await;
+        let root = dir.path().to_string_lossy().to_string();
+        let first = create_with_commit_hook(&root, "coder-0", None, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.behind_by, None, "a new tree is behind nothing");
+        std::fs::write(first.cwd.join("one.rs"), "// one\n").unwrap();
+        let evidence = (first.evidence)().await.unwrap();
+        assert_eq!((evidence.commits, evidence.base.as_str()), (1, "main"));
+
+        // The base moves on while the handle is idle.
+        std::fs::write(dir.path().join("main.rs"), "// main\n").unwrap();
+        git(&["add", "."], dir.path()).await;
+        git(&["commit", "-q", "-m", "main moves"], dir.path()).await;
+
+        let second = attach_with_commit_hook(&root, "coder-0", "sub-agent/coder-0", None, None)
+            .await
+            .unwrap();
+        assert_eq!(second.cwd, first.cwd, "the same directory");
+        assert_eq!(second.branch, "sub-agent/coder-0", "the same branch");
+        assert!(
+            second.cwd.join("one.rs").is_file(),
+            "the first task's work is there"
+        );
+        assert_eq!(second.behind_by, Some(1), "main gained one commit since");
+        let task_base = second.task_base.clone().expect("recorded at attach");
+        std::fs::write(second.cwd.join("two.rs"), "// two\n").unwrap();
+        let evidence = (second.evidence)().await.unwrap();
+        assert_eq!(evidence.commits, 1, "this task's commit only: {evidence:?}");
+        assert_eq!(evidence.base, task_base);
+        assert!(
+            evidence.diff_stat.contains("two.rs") && !evidence.diff_stat.contains("one.rs"),
+            "{evidence:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_never_makes_a_tree_or_takes_another_branch() {
+        let dir = repo().await;
+        let root = dir.path().to_string_lossy().to_string();
+        let missing = attach(&root, "gone-0", "sub-agent/gone-0")
+            .await
+            .unwrap_err();
+        assert!(missing.to_string().contains("is gone"), "{missing}");
+        assert!(!dir.path().join(".chatty/worktrees/gone-0").exists());
+
+        create(&root, "coder-0", None).await.unwrap().unwrap();
+        let wrong = attach(&root, "coder-0", "sub-agent/other")
+            .await
+            .unwrap_err();
+        assert!(
+            wrong.to_string().contains("not on its handle's branch"),
+            "{wrong}"
+        );
     }
 
     /// The commit has to have happened before the envelope is read, or the

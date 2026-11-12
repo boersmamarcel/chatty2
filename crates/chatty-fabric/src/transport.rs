@@ -20,8 +20,10 @@ use crate::wire::{AgentEntry, TaskMetadata, WireProgress};
 pub struct InvokeAgentParams {
     pub agent: String,
     pub prompt: String,
-    /// A live handle to resume instead of starting a fresh worker
-    /// (resumable conversations); `None` starts a new one.
+    /// Keep the callee's conversation under this handle (RC-3): the first
+    /// call under a name starts a fresh worker and saves its conversation,
+    /// a later one spawns a fresh worker that restores it, on the same
+    /// tree. Handles are the caller's own. `None` is a plain call.
     #[serde(default)]
     pub handle: Option<String>,
     #[serde(default)]
@@ -256,6 +258,16 @@ pub struct InvokeAgentOutcome {
     /// from the JSON when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancelled_by_user: bool,
+    /// The handle the call named (RC-3), once its conversation is saved
+    /// under it: what the caller names to continue it. Absent for a call
+    /// that named none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<String>,
+    /// How many commits the resumed handle's tree was behind its base
+    /// branch when this task started (RC-3). Absent unless the call resumed
+    /// a handle whose workers have a tree of their own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behind_by: Option<u64>,
 }
 
 /// The typed reason a stopped callee's caller reads, in its result's

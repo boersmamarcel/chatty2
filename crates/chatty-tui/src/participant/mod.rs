@@ -46,6 +46,8 @@ mod delegation;
 #[cfg(test)]
 mod equivalence;
 #[cfg(test)]
+mod handles;
+#[cfg(test)]
 mod human_ask;
 #[cfg(test)]
 mod input_required_chain;
@@ -159,6 +161,16 @@ pub async fn run_participant(
     // for a hosted worker (AGE-371) and is not read here.
     connection
         .serve_one_task(move |task, sink, inputs| async move {
+            // A resumed handle's worker (RC-3) continues its conversation:
+            // the agent is rebuilt on it before the first turn, so the
+            // task is the next turn on that history. Still one task, then
+            // this process exits.
+            if let Some(resume) = task.resume.as_ref() {
+                engine
+                    .restore_history(resume.get().to_string())
+                    .await
+                    .context("cannot resume the handle's conversation")?;
+            }
             // The observer is dropped with the engine, which `run_headless`
             // consumes — that is what closes the shared loop's frame queue.
             engine.set_event_observer(sink);

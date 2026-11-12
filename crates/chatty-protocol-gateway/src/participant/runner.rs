@@ -37,7 +37,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use chatty_fabric::{EndpointBudget, HandoffContract, RunPermit, SpawnContext};
+use chatty_fabric::{EndpointBudget, HandoffContract, RunPermit, SpawnContext, WorkerTreeRef};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
@@ -46,7 +46,9 @@ use tracing::{debug, info};
 use super::listener::{LocalConnection, open_connection};
 use super::protocol::{DelegatedTask, ParticipantCard, ParticipantSkill};
 use super::registry::{ParticipantRegistry, TaskStream};
-use super::virtual_agent::{EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle};
+use super::virtual_agent::{
+    EvidenceFuture, VirtualAgent, WorkerFuture, WorkerHandle, WorkerTreeInfo,
+};
 
 /// A worker's directory, and what to do with it once the worker is gone.
 pub struct WorkerWorkspace {
@@ -73,6 +75,13 @@ pub struct WorkerWorkspace {
     /// spawns; the work outlives the worker either way, and the tree it
     /// operates on is nobody else's.
     pub on_exit: Box<dyn FnOnce(bool) + Send>,
+    /// The commit the tree was at when the worker was given it: a resumed
+    /// handle's task's evidence starts here (RC-3). `None` when unknown.
+    pub task_base: Option<String>,
+    /// How many commits the tree's branch is behind its base branch, for a
+    /// tree a resumed handle's worker was attached to (RC-3); `None` for a
+    /// new tree.
+    pub behind_by: Option<u64>,
 }
 
 impl std::fmt::Debug for WorkerWorkspace {
@@ -105,6 +114,9 @@ pub struct WorkspaceRequest {
     pub base_branch: Option<String>,
     /// The team's verification command for this worker (AGE-406).
     pub verification: Option<String>,
+    /// A resumed handle's tree, to attach the worker to instead of making
+    /// a new one (RC-3).
+    pub attach: Option<WorkerTreeRef>,
 }
 
 /// Makes a directory for one worker.
@@ -346,12 +358,14 @@ impl LocalRunner {
                 workspace_root: context.workspace_root.clone(),
                 base_branch: context.base_branch.clone(),
                 verification: context.verification.clone(),
+                attach: task.attach.clone(),
             },
             None => WorkspaceRequest {
                 worker: name.clone(),
                 workspace_root: self.workspace_root.clone(),
                 base_branch: None,
                 verification: self.verification.clone(),
+                attach: task.attach.clone(),
             },
         };
         let workspace = match self.workspace.as_ref() {
@@ -666,6 +680,18 @@ impl WorkerHandle for Worker {
             None => Box::pin(std::future::ready(None)),
         }
     }
+
+    fn tree(&self) -> Option<WorkerTreeInfo> {
+        let workspace = self.workspace.as_ref()?;
+        Some(WorkerTreeInfo {
+            tree: WorkerTreeRef {
+                path: workspace.cwd.clone(),
+                branch: workspace.branch.clone()?,
+            },
+            task_base: workspace.task_base.clone(),
+            behind_by: workspace.behind_by,
+        })
+    }
 }
 
 impl Drop for Worker {
@@ -924,6 +950,8 @@ mod tests {
                         on_exit: Box::new(move |_| {
                             released.store(true, Ordering::Relaxed);
                         }),
+                        task_base: None,
+                        behind_by: None,
                     }))
                 })
             })
