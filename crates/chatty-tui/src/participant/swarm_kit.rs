@@ -1812,7 +1812,7 @@ const SIBLING_MODEL: &str = "kit/sibling";
 
 /// The tool results a request carries, in order: what the worker's tools
 /// handed its model.
-fn tool_results(request: &RecordedRequest) -> Vec<serde_json::Value> {
+pub(crate) fn tool_results(request: &RecordedRequest) -> Vec<serde_json::Value> {
     request.json()["messages"]
         .as_array()
         .expect("a chat request has messages")

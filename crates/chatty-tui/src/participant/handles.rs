@@ -12,7 +12,9 @@ use chatty_core::testing::fake_model::{Reply, Script};
 use chatty_core::tools::invoke_agent_tool::{InvokeAgentArgs, InvokeAgentOutput};
 use rig_agent::tool::{Tool, ToolContext};
 
-use super::swarm_kit::{AgentDef, Endpoint, LeaderRun, SwarmKit, alive, git, subtree};
+use super::swarm_kit::{
+    AgentDef, Endpoint, LeaderRun, SwarmKit, alive, git, subtree, tool_results,
+};
 
 const WORKER: &str = "kit-worker";
 const WORKER_MODEL: &str = "kit/worker";
@@ -462,4 +464,207 @@ async fn a_handle_is_bound_to_its_agent() {
         "{error}"
     );
     assert!(kit.sse.requests_for("kit/other").is_empty());
+}
+
+const LEAD: &str = "kit-lead";
+const LEAD_MODEL: &str = "kit/lead";
+const SENDER: &str = "kit-sender";
+const SENDER_MODEL: &str = "kit/sender";
+
+/// How often `needle` occurs in a model request's body.
+fn occurrences(request: &chatty_core::testing::fake_model::RecordedRequest, needle: &str) -> usize {
+    String::from_utf8_lossy(&request.body)
+        .matches(needle)
+        .count()
+}
+
+fn invoke_fixer(prompt: &str) -> Reply {
+    Reply::tool_call(
+        "invoke_agent",
+        serde_json::json!({ "agent": WORKER, "prompt": prompt, "handle": HANDLE }),
+    )
+}
+
+/// Fabric spec 5 invariant 8 (TM-4): an owner's message to its idle
+/// handle waits for the handle's next task and opens it — in the handle's
+/// first model request of that task, wrapped as untrusted, exactly once:
+/// the task after that carries it only as history.
+#[tokio::test]
+async fn owner_to_handle_delivered_next_run() {
+    const TEXT: &str = "use the second approach";
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse),
+        ],
+        Script::new()
+            .route(
+                LEAD_MODEL,
+                [
+                    invoke_fixer("first task"),
+                    Reply::tool_call(
+                        "send_message",
+                        serde_json::json!({ "to": HANDLE, "text": TEXT }),
+                    ),
+                    invoke_fixer("second task"),
+                    invoke_fixer("third task"),
+                    Reply::text("Done."),
+                ],
+            )
+            .route(
+                WORKER_MODEL,
+                [
+                    Reply::text("first done"),
+                    Reply::text("second done"),
+                    Reply::text("third done"),
+                ],
+            ),
+        Script::new(),
+    )
+    .await;
+
+    let run = kit.run_leader_to(LEAD, "drive the fixer").await;
+    assert_eq!(output(&run).response, "Done.");
+
+    // The message was accepted: the lead's request after the send says so.
+    let lead = kit.sse.requests_for(LEAD_MODEL);
+    assert_eq!(lead.len(), 5);
+    assert_eq!(
+        tool_results(&lead[2]).last(),
+        Some(&serde_json::json!({ "status": "pending", "id": "msg-1" })),
+        "accepted"
+    );
+
+    let wrapped = chatty_fabric::wrap_message(&format!("{LEAD}-0"), TEXT);
+    // Request bodies are JSON: the wrapper's quotes are escaped in them.
+    let wrapped = wrapped.replace('"', "\\\"");
+    let worker = kit.sse.requests_for(WORKER_MODEL);
+    assert_eq!(worker.len(), 3);
+    assert_eq!(occurrences(&worker[0], TEXT), 0, "not in the task before");
+    assert_eq!(
+        occurrences(&worker[1], &wrapped),
+        1,
+        "in the next task's first request, wrapped, once"
+    );
+    assert_eq!(occurrences(&worker[1], TEXT), 1);
+    assert_eq!(
+        occurrences(&worker[2], TEXT),
+        1,
+        "the task after has it as history only, not delivered again"
+    );
+}
+
+/// TM-4: only a handle's owner may message it. The root owns `fixer`; a
+/// worker under the same root that names it is refused as `not_on_tree`,
+/// and the handle's next task never carries the text.
+#[tokio::test]
+async fn non_owner_to_handle_refused() {
+    const TEXT: &str = "I am not your owner";
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse),
+            AgentDef::new(SENDER, SENDER_MODEL, Endpoint::Sse),
+        ],
+        Script::new()
+            .route(
+                WORKER_MODEL,
+                [Reply::text("first done"), Reply::text("second done")],
+            )
+            .route(
+                SENDER_MODEL,
+                [
+                    Reply::tool_call(
+                        "send_message",
+                        serde_json::json!({ "to": HANDLE, "text": TEXT }),
+                    ),
+                    Reply::text("Sent."),
+                ],
+            ),
+        Script::new(),
+    )
+    .await;
+
+    assert!(output(&call(&kit, "first task", Some(HANDLE)).await).success);
+    let sender = kit.run_leader_to(SENDER, "message the fixer").await;
+    assert_eq!(output(&sender).response, "Sent.");
+    let requests = kit.sse.requests_for(SENDER_MODEL);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        tool_results(&requests[1]),
+        [serde_json::json!({ "status": "refused", "reason": "not_on_tree" })]
+    );
+
+    assert!(output(&call(&kit, "second task", Some(HANDLE)).await).success);
+    for request in kit.sse.requests_for(WORKER_MODEL) {
+        assert_eq!(occurrences(&request, TEXT), 0);
+    }
+}
+
+/// TM-4: an owner's ancestor may message the handle too. `boss`, a handle of
+/// `kit-lead`, starts the handle `fixer`; `kit-lead` is above `boss` on the
+/// tree, so its message to `fixer` is accepted and opens `boss`'s next
+/// task's call to `fixer`.
+#[tokio::test]
+async fn ancestor_to_handle_delivered_next_run() {
+    const BOSS: &str = "kit-boss";
+    const BOSS_MODEL: &str = "kit/boss";
+    const TEXT: &str = "the second approach, from above";
+    let invoke_boss = |prompt: &str| {
+        Reply::tool_call(
+            "invoke_agent",
+            serde_json::json!({ "agent": BOSS, "prompt": prompt, "handle": "boss" }),
+        )
+    };
+    let kit = SwarmKit::start(
+        vec![
+            AgentDef::new(LEAD, LEAD_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(BOSS, BOSS_MODEL, Endpoint::Sse).sub_leader(),
+            AgentDef::new(WORKER, WORKER_MODEL, Endpoint::Sse),
+        ],
+        Script::new()
+            .route(
+                LEAD_MODEL,
+                [
+                    invoke_boss("first task"),
+                    Reply::tool_call(
+                        "send_message",
+                        serde_json::json!({ "to": HANDLE, "text": TEXT }),
+                    ),
+                    invoke_boss("second task"),
+                    Reply::text("Done."),
+                ],
+            )
+            .route(
+                BOSS_MODEL,
+                [
+                    invoke_fixer("first task"),
+                    Reply::text("boss one"),
+                    invoke_fixer("second task"),
+                    Reply::text("boss two"),
+                ],
+            )
+            .route(
+                WORKER_MODEL,
+                [Reply::text("first done"), Reply::text("second done")],
+            ),
+        Script::new(),
+    )
+    .await;
+
+    let run = kit.run_leader_to(LEAD, "drive the boss").await;
+    assert_eq!(output(&run).response, "Done.");
+
+    let lead = kit.sse.requests_for(LEAD_MODEL);
+    assert_eq!(lead.len(), 4);
+    assert_eq!(
+        tool_results(&lead[2]).last(),
+        Some(&serde_json::json!({ "status": "pending", "id": "msg-1" })),
+        "an ancestor of the owner is accepted"
+    );
+
+    let wrapped = chatty_fabric::wrap_message(&format!("{LEAD}-0"), TEXT).replace('"', "\\\"");
+    let worker = kit.sse.requests_for(WORKER_MODEL);
+    assert_eq!(worker.len(), 2);
+    assert_eq!(occurrences(&worker[0], TEXT), 0);
+    assert_eq!(occurrences(&worker[1], &wrapped), 1);
 }
