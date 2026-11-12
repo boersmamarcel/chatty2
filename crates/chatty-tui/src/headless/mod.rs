@@ -205,6 +205,7 @@ pub async fn run_headless(
     // The run's clock starts with the run: `--max-duration` bounds the
     // work, not the process's startup.
     let deadline = engine.start_clock();
+    let run_started = std::time::Instant::now();
     // `--usage-file`: an interrupted run still says what it spent.
     usage_file::watch_for_interrupt(engine.usage.clone());
     let mut time_budget = TimeBudget::Running;
@@ -977,6 +978,9 @@ pub async fn run_headless(
             &response,
         )
         .await;
+    // AGE-910: a team that names a report gets it finished: citations
+    // checked, the cost appended, or a partial report kept.
+    engine.finish_team_report(&response, run_started.elapsed());
 
     if let Some(error) = unrecovered_error {
         // Whatever was streamed before the failure is still worth having;

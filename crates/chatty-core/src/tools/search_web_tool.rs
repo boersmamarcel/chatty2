@@ -5,7 +5,7 @@ use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::settings::models::search_settings::SearchProvider;
+use crate::settings::models::search_settings::{SearchProvider, SearchSettingsModel};
 use crate::tools::ToolError;
 use crate::tools::html_entities::decode_html_entities;
 
@@ -244,6 +244,59 @@ impl SearchWebTool {
             default_max_results,
             reranker: None,
         }
+    }
+
+    /// The backend a call uses, for logs and the result: the configured
+    /// provider's name, or `keyless` when no provider and key are set.
+    pub fn backend(&self) -> &'static str {
+        match (&self.provider, &self.api_key) {
+            (Some(SearchProvider::Tavily), Some(_)) => "tavily",
+            (Some(SearchProvider::Brave), Some(_)) => "brave",
+            _ => "keyless",
+        }
+    }
+
+    /// The search tool the settings call for: the managed endpoint when the
+    /// settings carry a usable one, else the active provider with its key,
+    /// else the keyless fallback. The one place a host or a worker turns
+    /// settings into a tool, so both pick the same backend.
+    pub fn from_settings(settings: Option<&SearchSettingsModel>) -> Self {
+        let max_results = settings.map(|s| s.max_results).unwrap_or(5);
+        let api_tool = settings.and_then(|cfg| {
+            if let Some((endpoint, token)) = cfg.managed.as_ref().and_then(|m| m.usable()) {
+                let provider = cfg.managed.as_ref().map(|m| m.provider.clone())?;
+                info!(%provider, "Search web tool enabled through a managed endpoint");
+                return Some(
+                    Self::new(provider, token.to_string(), max_results).with_endpoint(endpoint),
+                );
+            }
+            let api_key = match cfg.active_provider {
+                SearchProvider::Tavily => cfg.tavily_api_key.clone(),
+                SearchProvider::Brave => cfg.brave_api_key.clone(),
+            };
+            api_key.filter(|k| !k.is_empty()).map(|key| {
+                info!(provider = %cfg.active_provider, "Search web tool enabled with API provider");
+                Self::new(cfg.active_provider.clone(), key, max_results)
+            })
+        });
+        api_tool.unwrap_or_else(|| {
+            let reason = if settings.is_none() {
+                "search settings not loaded"
+            } else {
+                "no API key configured"
+            };
+            info!(reason, "Search web tool enabled with the keyless fallback");
+            let tool = Self::new_fallback(max_results);
+            // Keyless only: with a keyed provider the cross-encoder gave
+            // +2.5 points hit@5 (n.s.) for ~2x p95 (AGE-517).
+            match settings.and_then(|s| s.reranker()) {
+                Some((url, model)) => {
+                    info!(url, model, "Keyless search reranks with a cross-encoder");
+                    tool.with_reranker(url, model)
+                }
+                None => tool,
+            }
+        })
     }
 
     /// Search through `endpoint` (a base URL) instead of the provider's
@@ -935,8 +988,10 @@ impl Tool for SearchWebTool {
             }
         };
         let result_count = results.len();
+        let backend = self.backend();
+        info!(backend, result_count, "Web search finished");
         if result_count == 0 {
-            warn!(query = %query, "Web search returned no results");
+            warn!(query = %query, backend, "Web search returned no results");
         }
 
         Ok(SearchWebToolOutput {
@@ -1508,6 +1563,94 @@ mod tests {
             request.contains("x-subscription-token: lease-token"),
             "{request}"
         );
+    }
+
+    #[test]
+    fn settings_pick_the_configured_provider_and_keyless_only_without_one() {
+        use crate::settings::models::search_settings::ManagedSearch;
+
+        // No settings loaded, or none configured: keyless.
+        assert_eq!(SearchWebTool::from_settings(None).backend(), "keyless");
+        let blank = SearchSettingsModel::default();
+        assert_eq!(
+            SearchWebTool::from_settings(Some(&blank)).backend(),
+            "keyless"
+        );
+        let empty_key = SearchSettingsModel {
+            tavily_api_key: Some(String::new()),
+            ..SearchSettingsModel::default()
+        };
+        assert_eq!(
+            SearchWebTool::from_settings(Some(&empty_key)).backend(),
+            "keyless"
+        );
+
+        // A key for the active provider: that provider, never keyless.
+        let tavily = SearchSettingsModel {
+            active_provider: SearchProvider::Tavily,
+            tavily_api_key: Some("tvly-test".into()),
+            ..SearchSettingsModel::default()
+        };
+        assert_eq!(
+            SearchWebTool::from_settings(Some(&tavily)).backend(),
+            "tavily"
+        );
+        let brave = SearchSettingsModel {
+            active_provider: SearchProvider::Brave,
+            brave_api_key: Some("brave-test".into()),
+            ..SearchSettingsModel::default()
+        };
+        assert_eq!(
+            SearchWebTool::from_settings(Some(&brave)).backend(),
+            "brave"
+        );
+
+        // The other provider's key does not count for the active one.
+        let wrong = SearchSettingsModel {
+            active_provider: SearchProvider::Brave,
+            tavily_api_key: Some("tvly-test".into()),
+            ..SearchSettingsModel::default()
+        };
+        assert_eq!(
+            SearchWebTool::from_settings(Some(&wrong)).backend(),
+            "keyless"
+        );
+
+        // A managed endpoint wins over the user's key and names its provider.
+        let managed = SearchSettingsModel {
+            tavily_api_key: Some("tvly-test".into()),
+            managed: Some(ManagedSearch {
+                provider: SearchProvider::Brave,
+                endpoint: "http://172.16.0.1:8080/x".into(),
+                token: "t".into(),
+            }),
+            ..SearchSettingsModel::default()
+        };
+        assert_eq!(
+            SearchWebTool::from_settings(Some(&managed)).backend(),
+            "brave"
+        );
+    }
+
+    #[tokio::test]
+    async fn each_result_names_its_source() {
+        let (base, _rx) =
+            capturing_server(r#"{"results":[{"title":"T","url":"https://e.com","content":"c"}]}"#)
+                .await;
+        let tool =
+            SearchWebTool::new(SearchProvider::Tavily, "tvly-test".into(), 5).with_endpoint(base);
+        let mut context = ToolContext::new();
+        let out = tool
+            .call(
+                &mut context,
+                SearchWebToolArgs {
+                    query: "q".into(),
+                    max_results: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.results[0].source, "tavily");
     }
 
     #[tokio::test]

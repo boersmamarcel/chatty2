@@ -839,7 +839,7 @@ preamble = "Verify, do not trust, verdict first. …"
 max_tokens = 8192                  # optional output cap per model call; absent = the model's, else none
 
 [tools]
-profile = "reviewer"               # coordinator | coder | reviewer | typesetter
+profile = "reviewer"               # coordinator | coder | reviewer | typesetter | web-researcher
 disable = ["fetch"]                # tool groups, narrows only
 skills = ["coder-reviewer"]        # read_skill names, named in the preamble
 
@@ -879,11 +879,12 @@ becomes what an agent is built with: the role, the execution settings narrowed b
 | `agent.model` | Optional. Resolved as `chatty-tui --model` resolves it (id, then name, then a substring of the model identifier). Absent: the roster's default. |
 | `agent.preamble` | Optional. The role's standing instructions, appended to the system prompt after the base preamble, before the tool summary. |
 | `agent.max_tokens` | Optional, opt-in, at least 1. The output cap every model call of this agent carries (`max_tokens` on the wire), over the model's own `max_tokens` (AGE-936). Absent with no model `max_tokens` either: no cap is sent, as before; chatty has no default cap (a fixed cap counts a thinking model's reasoning too and cuts ordinary calls short). Fitting a call to a hosted task's budget is the egress's job, which may lower a call's `max_tokens` itself. A call that reaches its cap (`finish_reason: length`) is handled: the first tool-free cut-off turn of a run is retried once with feedback; a second is accepted as the answer with `[Note: this answer was cut off at the output limit and may be incomplete.]` appended, and one with no answer at all ends the run as an empty completion, which no surface retries. |
-| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder`, `reviewer` or `typesetter` — see below. Profiles joined by `+` (`coder+coordinator`), each named once, are their union, in any order (its name is the parts sorted): how a team's derived single agent (TD-1, `team_scorecard::derive_single`) holds every role's tools. |
+| `tools.profile` | Optional. A named tool profile: `coordinator`, `coder`, `reviewer`, `typesetter` or `web-researcher` — see below. Profiles joined by `+` (`coder+coordinator`), each named once, are their union, in any order (its name is the parts sorted): how a team's derived single agent (TD-1, `team_scorecard::derive_single`) holds every role's tools. |
 | `tools.disable` | Optional. Tool groups switched off: `shell`, `fs-read`, `fs-write`, `fetch`, `git`, `code-exec`, `docker-exec`, `ask-user`, `terminal` (`_` works for `-`). Composes with the profile: it can narrow it further, never re-enable a tool the profile excludes. |
 | `tools.skills` | Optional. Skills the role is told to `read_skill` before it starts. |
 | `swarm.delegates_to` | Optional. The agents it may call, by name or `*` glob (`"*-reviewer"`). Non-empty is what gives an agent `list_agents` and `invoke_agent`, whatever its profile; empty or absent, it has neither (PL-S2 DP-1). |
 | `swarm.exposed` | Optional, default `true`. `false`: no other agent may call it. |
+| `swarm.rounds` | Optional. `agent` (named in `delegates_to`) and `max` (at least 1): the most rounds of calls to `agent` this agent may run (AGE-910). A round is one model turn that calls `agent`, however many calls it makes side by side; a turn that would open round `max + 1` has each such call refused with `round_limit: …` as its result, without starting the callee. Calls to other agents are not counted. `chatty_core::services::round_limit::RoundLimit` holds it, across the agent's passes. |
 | `swarm.callers` | Optional. When set, only these agents (names or `*` globs) may call it. `chatty_core::services::delegation_policy::may_call` checks both specs: the caller's `delegates_to`, then the callee's `exposed` and `callers`. The broker asks it on every worker's `invoke_agent` before anything is spawned, and on the root's when the root runs as a spec (a `--team` leader, an `--agent <spec>` root; a plain root may call anyone), then refuses a call that closes a cycle or goes deeper than 4 levels below the root; the calling model reads `Error: invoke_agent: not_listed: …`, `cycle: root → a → b → a` or `too_deep: depth 5 > max 4` (PL-S2 DP-2). |
 | `budget.max_agent_turns` | Optional. The agent's own turn budget (AGE-440). Absent: an unattended run has no turn cap and a 30-minute time budget. An `AgentSession` whose agent was built from the spec holds a turn to it even when the host's settings cap less tightly or not at all (hive's hosted worker runs on its user's uncapped settings; AGE-992). A run that spends it is not killed: it gets one tool-free call to answer with what it has, and a delegated worker's answer goes to its caller prefixed with `[limit_reached: turns. …]` (`[limit_reached: time. …]` for the deadline), so the caller's `invoke_agent` result says why the answer may be incomplete. |
 | `budget.max_duration` | Optional. The wall-clock budget, as `--max-duration` writes it. |
@@ -1016,6 +1017,7 @@ beside it.
 | `max_agent_turns` | Optional. The leader's turn budget for the run, ahead of the leader spec's own; without either a headless leader has no turn cap and a 30-minute time budget. A worker's budget is its own spec's. |
 | `handoffs` | Optional. Role → a JSON Schema its handoff must match, as a path relative to the team directory (see *Typed handoffs* below). |
 | `verifier` | Optional. `{ "role": "<roster role>", "verdicts": ["APPROVE", "PASS"] }`: the role whose verdict passes the team's work, and the first words of its answer that do (`verdicts` defaults to `APPROVE` and `PASS`). TD-1's scorecard tags a run `verification_passed_wrong` when that role passed work the runner's check then failed (AGE-1137). A role not in `agents`, or no verdict, fails the load. Absent: every roster role whose tool profile is `reviewer`. |
+| `report` | Optional. A path inside the workspace (`research-report.md`) the team writes its report to (AGE-910). When a `--team` run ends, however it ends, headless finishes the file with `chatty_core::services::team_report`: a *Citation check* section listing each cited URL no researcher's note carries, and a *Cost of this run* footer (spend, web searches, page fetches, wall time, counted from the run's swarm trace). When the team wrote no report, the leader's last answer goes there as a partial report. An absolute path or one with `..` fails the load. |
 
 A `team.json` in the old shape — a `leader` object, agent objects in `agents` — fails to
 load with an error naming the field.
@@ -1085,9 +1087,26 @@ record. A host that tracks a lease's outcome itself can write the record before
 starting the leader, or build the text with
 `chatty_core::services::resume_brief::{snapshot_workspace, render_resume_brief}`.
 
-Three presets ship, all **experimental**: teams are supported, and a team becomes a
+Four presets ship, all **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
-specs name no models. The third, `analyst-swarm` (EV-1, AGE-668), is an eval preset:
+specs name no models. `deep-research` (AGE-910) answers an open question from the web
+with a cited report: `deep-research-lead` (`coder+coordinator` without shell, git or
+code execution) writes its plan of sub-questions to `research-plan.md` and runs
+rounds of `deep-research-web-researcher` (the `web-researcher` profile: the read set,
+`search_web`, `fetch`, `calculate`) side by side, at most 4 at once and at most 4 rounds
+(`[swarm.rounds]`); each researcher's answer is a note matching `schemas/note.json`
+(at most 8 claims, each with its URL, an exact quote and the access date, and 5 open
+questions, every field capped so a note stays under 12 KiB). `deep-research-writer`
+(`coder` without shell, git, code execution or fetch) writes `research-report.md` from
+the notes only, and `deep-research-checker` (`web-researcher`, thinking off, the
+crosscheck judge's pattern) re-fetches the cited pages once and checks the quotes
+(`schemas/check.json`, `PASS`/`FAIL`; the team's `verifier`). The team file's
+`report` names the report: when a `--team` run ends, headless finishes it with
+`chatty_core::services::team_report` — a section listing any cited URL that is in no
+note, then the run's spend, web searches, page fetches and wall time counted from the
+swarm trace — or, when no report was written (a spent budget, AGE-903), writes the
+leader's last answer there as a partial report. `participant/deep_research.rs` runs it
+on the swarm kit's fake model. `analyst-swarm` (EV-1, AGE-668) is an eval preset:
 `analyst-swarm-coordinator` (`coordinator`, no plugins) gets a ledger column's numbers
 clean from `analyst-swarm-data-coder` (`coder`), has `analyst-swarm-benford-analyst`
 (`reviewer` without the shell, the `benford` plugin) audit them, and has

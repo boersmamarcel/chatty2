@@ -62,6 +62,21 @@ pub struct TeamPreset {
 /// as `--team <id>`.
 pub const PRESETS: &[TeamPreset] = &[
     TeamPreset {
+        id: "deep-research",
+        team_json: include_str!("../../teams/deep-research/team.json"),
+        skill: None,
+        schemas: &[
+            (
+                "schemas/note.json",
+                include_str!("../../teams/deep-research/schemas/note.json"),
+            ),
+            (
+                "schemas/check.json",
+                include_str!("../../teams/deep-research/schemas/check.json"),
+            ),
+        ],
+    },
+    TeamPreset {
         id: "analyst-swarm",
         team_json: include_str!("../../teams/analyst-swarm/team.json"),
         skill: None,
@@ -88,8 +103,9 @@ pub const PRESETS: &[TeamPreset] = &[
 ];
 
 /// Where an experimental preset's results are summarised for users (AGE-696).
-/// Two of the three experimental presets are Crosscheck variants; the third,
-/// the `analyst-swarm` eval preset (AGE-668), has no results page of its own.
+/// Two of the four experimental presets are Crosscheck variants; the
+/// `analyst-swarm` eval preset (AGE-668) and `deep-research` (AGE-910) have
+/// no results page of their own yet.
 pub const EXPERIMENTAL_NOTES: &str = "https://boersmamarcel.github.io/chatty2/user/crosscheck.html";
 
 /// The presets shown wherever teams are listed. An `experimental` one is
@@ -171,6 +187,13 @@ pub struct TeamFile {
     /// failed. Absent: see [`Team::verifiers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verifier: Option<TeamVerifier>,
+    /// The workspace file the team writes its report to, relative to the
+    /// workspace (AGE-910). When the run ends the host finishes it
+    /// ([`team_report`](crate::services::team_report)): a citation check,
+    /// the run's cost, and the leader's last answer as a partial report
+    /// when the team wrote none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
 }
 
 /// `team.json`'s `verifier`: `{ "role": "<roster role>", "verdicts": [...] }`.
@@ -544,6 +567,20 @@ pub fn load_team(id: &str, workspace: Option<&Path>, data_dir: Option<&Path>) ->
         }
         if verifier.verdicts.is_empty() || verifier.verdicts.iter().any(|v| v.trim().is_empty()) {
             bail!("team '{id}': `verifier` has no verdict, or an empty one");
+        }
+    }
+    if let Some(report) = &file.report {
+        let path = Path::new(report);
+        if report.trim().is_empty()
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            bail!(
+                "team '{id}': `report` must be a path inside the workspace, such as \
+                 research-report.md, not '{report}'"
+            );
         }
     }
     Ok(Team {
@@ -1001,6 +1038,232 @@ mod tests {
             "analyst-swarm is frozen (AGE-668): put a changed prompt or fixture under a new \
              preset name instead"
         );
+    }
+
+    const DEEP_RESEARCH_MEMBERS: [&str; 3] = [
+        "deep-research-web-researcher",
+        "deep-research-writer",
+        "deep-research-checker",
+    ];
+
+    /// AGE-910: the deep-research preset is experimental (listed nowhere);
+    /// its lead delegates to its three members, runs at
+    /// most 4 rounds of researchers, and writes its report to the
+    /// workspace; the researcher and the checker reach the web and write
+    /// nothing; the writer writes but neither fetches nor runs anything.
+    #[test]
+    fn the_deep_research_preset_is_a_lead_and_three_members() {
+        let team = load_team("deep-research", None, None).expect("the preset loads");
+        assert_eq!(team.source, TeamSource::Preset);
+        assert!(
+            team.file.experimental,
+            "listed nowhere until a benchmark says so"
+        );
+        assert!(!listed_presets().any(|preset| preset.id == "deep-research"));
+        assert_eq!(team.file.leader, "deep-research-lead");
+        assert_eq!(team.file.agents, DEEP_RESEARCH_MEMBERS);
+        assert_eq!(team.file.report.as_deref(), Some("research-report.md"));
+        assert_eq!(
+            team.file.verifier.as_ref().map(|v| v.role.as_str()),
+            Some("deep-research-checker")
+        );
+        assert_eq!(team.leader.swarm.delegates_to, DEEP_RESEARCH_MEMBERS);
+        assert_eq!(
+            team.leader.swarm.rounds,
+            Some(crate::agent_spec::RoundsSection {
+                agent: "deep-research-web-researcher".to_string(),
+                max: 4,
+            })
+        );
+        let preamble = team.leader.agent.preamble.as_deref().unwrap_or_default();
+        assert!(!preamble.contains(TODAY_TOKEN), "today is filled in");
+        for must in [
+            "research-plan.md",
+            "round_limit",
+            "boundaries",
+            "once, always",
+        ] {
+            assert!(preamble.contains(must), "{must}: {preamble}");
+        }
+        assert_eq!(
+            team.handoffs.keys().collect::<Vec<_>>(),
+            ["deep-research-checker", "deep-research-web-researcher"]
+        );
+
+        let member = |name: &str| {
+            team.agents
+                .iter()
+                .find(|spec| spec.agent.name == name)
+                .unwrap_or_else(|| panic!("{name} is on the roster"))
+        };
+        let allows = |name: &str, tool: &str| {
+            let spec = member(name);
+            let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+            profile.allows(tool)
+                && !spec
+                    .tools
+                    .disable
+                    .iter()
+                    .any(|group| tool_group_of(tool) == Some(group.as_str()))
+        };
+        for name in ["deep-research-web-researcher", "deep-research-checker"] {
+            assert!(
+                allows(name, "search_web") && allows(name, "fetch"),
+                "{name}"
+            );
+            assert!(
+                !allows(name, "write_file") && !allows(name, "shell_execute"),
+                "{name}"
+            );
+        }
+        assert!(allows("deep-research-writer", "write_file"));
+        for tool in ["fetch", "shell_execute", "execute_code", "git_commit"] {
+            assert!(
+                !allows("deep-research-writer", tool),
+                "the writer has no {tool}"
+            );
+        }
+        assert_eq!(member("deep-research-checker").agent.think, Some(false));
+        for name in DEEP_RESEARCH_MEMBERS {
+            let spec = member(name);
+            assert!(
+                spec.swarm.delegates_to.is_empty(),
+                "{name} delegates to no one"
+            );
+            assert_eq!(
+                spec.swarm.callers,
+                Some(vec!["deep-research-lead".to_string()]),
+                "{name} is the lead's alone"
+            );
+        }
+    }
+
+    /// The group a `tools.disable` entry names for `tool`, for the preset
+    /// test above.
+    fn tool_group_of(tool: &str) -> Option<&'static str> {
+        match tool {
+            "fetch" | "search_web" => Some("fetch"),
+            "shell_execute" => Some("shell"),
+            "execute_code" => Some("code-exec"),
+            "git_commit" => Some("git"),
+            "write_file" => Some("fs-write"),
+            _ => None,
+        }
+    }
+
+    /// AGE-910: a researcher's note is bounded. The schema's caps keep the
+    /// worst-case note under [`NOTE_SIZE_CAP`] characters, so the lead's
+    /// context grows by at most that per researcher; a note over a cap, or
+    /// a claim without its URL, quote or date, fails the handoff.
+    #[test]
+    fn researcher_note_matches_schema_and_size_cap() {
+        use crate::services::handoff::{HandoffOutcome, check};
+        const NOTE_SIZE_CAP: u64 = 12 * 1024;
+        let team = load_team("deep-research", None, None).expect("the preset loads");
+        let contract = &team.handoffs["deep-research-web-researcher"];
+        let schema = contract.schema.to_value().expect("the schema is JSON");
+
+        // The largest note the schema admits, in characters, JSON quoting
+        // and punctuation included (generously: 64 per object, 8 per
+        // string).
+        let max_len = |field: &serde_json::Value| field["maxLength"].as_u64();
+        let claim = &schema["properties"]["claims"]["items"]["properties"];
+        let claim_chars: u64 = ["claim", "url", "quote"]
+            .iter()
+            .map(|f| max_len(&claim[f]).unwrap_or_else(|| panic!("{f} is capped")) + 8)
+            .sum::<u64>()
+            + "YYYY-MM-DD".len() as u64
+            + 8
+            + 64;
+        let claims = schema["properties"]["claims"]["maxItems"]
+            .as_u64()
+            .expect("claims are capped");
+        let questions = &schema["properties"]["open_questions"];
+        let question_chars = (max_len(&questions["items"]).expect("capped") + 8)
+            * questions["maxItems"].as_u64().expect("capped");
+        let sub_question = max_len(&schema["properties"]["sub_question"]).expect("capped") + 8;
+        let worst = claims * claim_chars + question_chars + sub_question + 64;
+        assert!(
+            worst <= NOTE_SIZE_CAP,
+            "a note can reach {worst} characters"
+        );
+        assert_eq!(schema["additionalProperties"], false, "no extra fields");
+
+        let claim = |url: &str, quote: &str| {
+            serde_json::json!({
+                "claim": "The tower is 330 m tall.",
+                "url": url,
+                "quote": quote,
+                "accessed": "2026-11-12",
+            })
+        };
+        let note = |claims: Vec<serde_json::Value>| {
+            serde_json::json!({
+                "sub_question": "SQ1: How tall is the Eiffel Tower?",
+                "claims": claims,
+                "open_questions": ["Height before the 2022 antenna?"],
+            })
+        };
+        let answer = |note: &serde_json::Value| format!("Note:\n```json\n{note}\n```");
+        let good = note(vec![claim("https://www.toureiffel.paris/en", "330 metres")]);
+        assert!(
+            matches!(check(contract, &answer(&good)), HandoffOutcome::Valid(_)),
+            "{:?}",
+            check(contract, &answer(&good))
+        );
+        let worst_valid = note(
+            (0..8)
+                .map(|_| {
+                    claim(
+                        &format!("https://a.example/{}", "p".repeat(470)),
+                        &"q".repeat(300),
+                    )
+                })
+                .collect(),
+        );
+        assert!(matches!(
+            check(contract, &answer(&worst_valid)),
+            HandoffOutcome::Valid(_)
+        ));
+        assert!(worst_valid.to_string().len() as u64 <= NOTE_SIZE_CAP);
+
+        let invalid = [
+            note((0..9).map(|_| claim("https://a.example", "q")).collect()),
+            note(vec![claim("https://a.example", &"q".repeat(301))]),
+            note(vec![claim("ftp://a.example", "q")]),
+            note(vec![
+                serde_json::json!({ "claim": "c", "url": "https://a.example" }),
+            ]),
+            serde_json::json!({ "sub_question": "SQ1", "claims": [], "open_questions": [],
+                                "pages": ["<html>whole page</html>"] }),
+        ];
+        for bad in invalid {
+            assert!(
+                matches!(
+                    check(contract, &answer(&bad)),
+                    HandoffOutcome::Invalid { .. }
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    /// `report` must stay inside the workspace.
+    #[test]
+    fn a_report_outside_the_workspace_fails_the_load() {
+        let workspace = tempfile::tempdir().unwrap();
+        for report in ["/etc/passwd", "../out.md", "", "a/../../b.md"] {
+            let dir = workspace.path().join(WORKSPACE_TEAMS_DIR).join("t");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("team.json"),
+                serde_json::json!({ "leader": "writer", "report": report }).to_string(),
+            )
+            .unwrap();
+            let error = load_team("t", Some(workspace.path()), None)
+                .expect_err("a report outside the workspace");
+            assert!(format!("{error:#}").contains("`report`"), "{error:#}");
+        }
     }
 
     /// SHA-256 of each analyst-swarm file as it merged (AGE-668).

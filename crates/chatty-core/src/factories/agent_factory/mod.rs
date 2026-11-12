@@ -238,6 +238,9 @@ pub struct AgentClient {
     /// same broker, so the swarm tree shows. `None` for a role that does not
     /// delegate.
     delegator: Option<crate::tools::invoke_agent_tool::InvokeAgentTool>,
+    /// The spec's `[swarm.rounds]` cap (AGE-910), held across this agent's
+    /// runs; a no-op for every other agent.
+    round_limit: crate::services::round_limit::RoundLimit,
 }
 
 impl AgentClient {
@@ -273,6 +276,11 @@ impl AgentClient {
     /// (AGE-744); `None` for a role that does not delegate.
     pub fn delegator(&self) -> Option<&crate::tools::invoke_agent_tool::InvokeAgentTool> {
         self.delegator.as_ref()
+    }
+
+    /// This agent's `[swarm.rounds]` hook (AGE-910).
+    pub fn round_limit(&self) -> &crate::services::round_limit::RoundLimit {
+        &self.round_limit
     }
 
     /// The tree messages waiting for this agent, taken because its next run
@@ -788,50 +796,13 @@ impl AgentClient {
         };
 
         // Create search web tool
-        let search_web_tool: Option<SearchWebTool> = if internet_access_allowed(
-            exec_settings.as_ref(),
-        ) {
-            use crate::settings::models::search_settings::SearchProvider;
-            let max_results = search_settings.as_ref().map(|s| s.max_results).unwrap_or(5);
-            let api_tool = search_settings.as_ref().and_then(|search_cfg| {
-                if let Some((endpoint, token)) =
-                    search_cfg.managed.as_ref().and_then(|m| m.usable())
-                {
-                    let provider = search_cfg.managed.as_ref().map(|m| m.provider.clone())?;
-                    tracing::info!(%provider, "Search web tool enabled through a managed endpoint");
-                    return Some(
-                        SearchWebTool::new(provider, token.to_string(), max_results)
-                            .with_endpoint(endpoint),
-                    );
-                }
-                let api_key = match search_cfg.active_provider {
-                    SearchProvider::Tavily => search_cfg.tavily_api_key.clone(),
-                    SearchProvider::Brave => search_cfg.brave_api_key.clone(),
-                };
-                api_key.filter(|k| !k.is_empty()).map(|key| {
-                    tracing::info!(provider = %search_cfg.active_provider, "Search web tool enabled with API provider");
-                    SearchWebTool::new(search_cfg.active_provider.clone(), key, max_results)
-                })
-            });
-            Some(api_tool.unwrap_or_else(|| {
-                tracing::info!(
-                    "Search web tool enabled with DuckDuckGo fallback (no API key configured)"
-                );
-                let tool = SearchWebTool::new_fallback(max_results);
-                // Keyless only: with a keyed provider the cross-encoder gave
-                // +2.5 points hit@5 (n.s.) for ~2x p95 (AGE-517).
-                match search_settings.as_ref().and_then(|s| s.reranker()) {
-                    Some((url, model)) => {
-                        tracing::info!(url, model, "Keyless search reranks with a cross-encoder");
-                        tool.with_reranker(url, model)
-                    }
-                    None => tool,
-                }
-            }))
-        } else {
-            tracing::info!("Search web tool disabled (internet access is off)");
-            None
-        };
+        let search_web_tool: Option<SearchWebTool> =
+            if internet_access_allowed(exec_settings.as_ref()) {
+                Some(SearchWebTool::from_settings(search_settings.as_ref()))
+            } else {
+                tracing::info!("Search web tool disabled (internet access is off)");
+                None
+            };
 
         // Create the built-in browser tools. Lane A (localhost and workspace
         // file:// only) by default; when internet access is on, an open-web
@@ -1664,6 +1635,9 @@ impl AgentClient {
             agent.context_shaper.deliver_mid_run_messages(transport);
         }
         agent.delegator = delegator;
+        agent.round_limit = crate::services::round_limit::RoundLimit::new(
+            role.rounds.clone().filter(|_| role.delegates),
+        );
         agent.plugin_usage = plugins
             .iter()
             .map(|plugin| (plugin.name.clone(), plugin.usage.clone()))

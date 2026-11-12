@@ -38,7 +38,7 @@
 
 **Agent spec.** The one declarative definition of an agent (AGE-614): `[agent]`, `[tools]`, `[[plugins]]`, `[swarm]`, `[budget]` in `<name>.toml` under `.chatty/agents/`, the data directory or the presets; `AgentBuildContext::from_spec` builds it. Owning page: [Agents and specs](./architecture/agents-and-specs.md#local-agent--a-chatty-agent-in-its-own-process).
 
-**Tool profile.** A named allowlist of tool *names* (`coordinator`, `coder`, `reviewer`, `typesetter` in `tool_profile.rs`) that is a worker's whole tool set, MCP included; it only ever removes tools. Passed as `chatty-tui --tools`. Contrast tool *groups*, which `--enable` / `--disable` switch.
+**Tool profile.** A named allowlist of tool *names* (`coordinator`, `coder`, `reviewer`, `typesetter`, `web-researcher` in `tool_profile.rs`) that is a worker's whole tool set, MCP included; it only ever removes tools. Passed as `chatty-tui --tools`. Contrast tool *groups*, which `--enable` / `--disable` switch.
 
 **Team.** A directory `teams/<id>/team.json` + `SKILL.md` declaring a leader (model, profile, preamble), a roster of virtual agents, a verification command, the skill the leader follows and a turn budget; run with `chatty-tui --team <id>`. Two presets ship, both experimental: `crosscheck` and `crosscheck-data`. Owning page: [Sub-agents › Teams](../user/sub-agents.md#teams).
 

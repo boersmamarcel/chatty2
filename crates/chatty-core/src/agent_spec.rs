@@ -123,6 +123,22 @@ pub const PRESETS: &[(&str, &str)] = &[
         include_str!("../agents/crosscheck-writer.toml"),
     ),
     (
+        "deep-research-lead",
+        include_str!("../agents/deep-research-lead.toml"),
+    ),
+    (
+        "deep-research-web-researcher",
+        include_str!("../agents/deep-research-web-researcher.toml"),
+    ),
+    (
+        "deep-research-writer",
+        include_str!("../agents/deep-research-writer.toml"),
+    ),
+    (
+        "deep-research-checker",
+        include_str!("../agents/deep-research-checker.toml"),
+    ),
+    (
         "code-reviewer",
         include_str!("../agents/code-reviewer.toml"),
     ),
@@ -199,7 +215,8 @@ pub struct AgentSection {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolsSection {
-    /// A named tool profile (`coordinator`, `coder`, `reviewer`, `typesetter`).
+    /// A named tool profile (`coordinator`, `coder`, `reviewer`, `typesetter`,
+    /// `web-researcher`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// Tool groups switched off on top of the profile; narrows only.
@@ -429,6 +446,13 @@ pub struct SwarmSection {
     /// solver at once, then the verifier or the judge picks one attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_of: Option<BestOfSection>,
+    /// Caps how many rounds of one fan-out this agent may run (AGE-910): a
+    /// round is a model turn that delegates to `rounds.agent`, however many
+    /// calls it makes side by side. Past the cap the calls are refused with
+    /// [`ROUND_LIMIT_REACHED`](crate::services::round_limit::ROUND_LIMIT_REACHED)
+    /// and the agent writes up what it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rounds: Option<RoundsSection>,
 }
 
 impl Default for SwarmSection {
@@ -438,8 +462,21 @@ impl Default for SwarmSection {
             exposed: exposed_default(),
             callers: None,
             best_of: None,
+            rounds: None,
         }
     }
+}
+
+/// `[swarm.rounds]`: which callee's fan-out is counted, and the cap
+/// (AGE-910).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoundsSection {
+    /// The agent whose calls make a round, named literally in
+    /// `delegates_to`.
+    pub agent: String,
+    /// The most rounds the agent may run; at least 1.
+    pub max: u32,
 }
 
 /// `[swarm.best_of]`: who attempts, and who picks (AGE-853).
@@ -512,6 +549,9 @@ pub enum SpecError {
     /// `swarm.best_of` is malformed: too few solvers, or a name not in
     /// `delegates_to`.
     BadBestOf(String),
+    /// `swarm.rounds` is malformed: a cap of zero, or an agent not in
+    /// `delegates_to`.
+    BadRounds(String),
 }
 
 impl std::fmt::Display for SpecError {
@@ -557,6 +597,7 @@ impl std::fmt::Display for SpecError {
             Self::BadCap(cap) => write!(f, "budget.cap_usd {cap} is not a positive amount"),
             Self::BadMaxTokens => write!(f, "agent.max_tokens must be at least 1"),
             Self::BadBestOf(why) => write!(f, "swarm.best_of: {why}"),
+            Self::BadRounds(why) => write!(f, "swarm.rounds: {why}"),
         }
     }
 }
@@ -722,6 +763,17 @@ impl AgentSpec {
                         "'{name}' is not named in swarm.delegates_to"
                     )));
                 }
+            }
+        }
+        if let Some(rounds) = &self.swarm.rounds {
+            if rounds.max == 0 {
+                errors.push(SpecError::BadRounds("max must be at least 1".to_string()));
+            }
+            if !self.swarm.delegates_to.contains(&rounds.agent) {
+                errors.push(SpecError::BadRounds(format!(
+                    "'{}' is not named in swarm.delegates_to",
+                    rounds.agent
+                )));
             }
         }
         if errors.is_empty() {
@@ -2147,6 +2199,7 @@ cap_usd = 2.0
                 "analyst-swarm-coordinator",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "deep-research-lead",
                 "code-reviewer",
                 "coding-lead",
                 "curator-lead",
@@ -2193,6 +2246,9 @@ cap_usd = 2.0
             "crosscheck-data-direct",
             "crosscheck-data-plan",
             "crosscheck-data-verify",
+            "deep-research-web-researcher",
+            "deep-research-writer",
+            "deep-research-checker",
             "coder",
             "tester",
         ] {
@@ -2202,6 +2258,7 @@ cap_usd = 2.0
             "analyst-swarm-coordinator",
             "crosscheck-lead",
             "crosscheck-data-lead",
+            "deep-research-lead",
             "coding-lead",
         ] {
             assert!(roster.iter().any(|n| n == leader), "{leader}");
@@ -2241,6 +2298,10 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "deep-research-lead",
+                "deep-research-web-researcher",
+                "deep-research-writer",
+                "deep-research-checker",
                 "code-reviewer",
                 "coder",
                 "coding-lead",
@@ -2266,6 +2327,7 @@ cap_usd = 2.0
                 "analyst-swarm-coordinator",
                 "crosscheck-data-lead",
                 "crosscheck-lead",
+                "deep-research-lead",
                 "code-reviewer",
                 "coding-lead",
                 "curator-lead",
@@ -2442,6 +2504,10 @@ cap_usd = 2.0
                 "crosscheck-solver-plan",
                 "crosscheck-solver-verify",
                 "crosscheck-writer",
+                "deep-research-lead",
+                "deep-research-web-researcher",
+                "deep-research-writer",
+                "deep-research-checker",
                 "code-reviewer",
                 "coder",
                 "coding-lead",
@@ -2622,6 +2688,32 @@ cap_usd = 2.0
             of("root").spec
         );
         assert!(of("helper").spec.is_ok(), "the invalid spec fails alone");
+    }
+
+    /// AGE-910: `swarm.rounds` counts a callee the spec delegates to, at
+    /// least once.
+    #[test]
+    fn rounds_name_an_agent_it_delegates_to_and_a_positive_cap() {
+        let spec = |rounds: &str| {
+            toml::from_str::<AgentSpec>(&format!(
+                "[agent]\nname = \"lead\"\n[swarm]\ndelegates_to = [\"r\"]\n\
+                 [swarm.rounds]\n{rounds}\n"
+            ))
+            .unwrap()
+        };
+        assert!(spec("agent = \"r\"\nmax = 3").validate(None).is_ok());
+        for bad in ["agent = \"x\"\nmax = 3", "agent = \"r\"\nmax = 0"] {
+            let errors = spec(bad).validate(None).unwrap_err().0;
+            assert!(
+                errors.iter().all(|e| matches!(e, SpecError::BadRounds(_))),
+                "{errors:?}"
+            );
+        }
+        assert!(
+            toml::from_str::<AgentSpec>("[agent]\nname = \"l\"\n[swarm.rounds]\nagent = \"r\"\n")
+                .is_err(),
+            "max is required"
+        );
     }
 
     /// AGE-853: `swarm.best_of` needs two solvers, and every name it uses

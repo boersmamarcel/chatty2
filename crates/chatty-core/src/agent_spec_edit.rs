@@ -65,7 +65,7 @@ impl From<&SpecError> for FieldError {
             SpecError::DuplicatePlugin(_)
             | SpecError::BadPlugin(_)
             | SpecError::UnrequestedGrant(_) => SpecField::Plugins,
-            SpecError::BadBestOf(_) => SpecField::DelegatesTo,
+            SpecError::BadBestOf(_) | SpecError::BadRounds(_) => SpecField::DelegatesTo,
             SpecError::BadDuration(_) => SpecField::MaxDuration,
             SpecError::BadCap(_) => SpecField::CapUsd,
             SpecError::BadMaxTokens => SpecField::Other,

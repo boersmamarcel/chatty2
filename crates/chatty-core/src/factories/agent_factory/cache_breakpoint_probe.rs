@@ -126,6 +126,7 @@ fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
         plugin_usage: Vec::new(),
         run_inbox: None,
         delegator: None,
+        round_limit: Default::default(),
     }
 }
 

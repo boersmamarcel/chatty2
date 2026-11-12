@@ -1,0 +1,56 @@
+{
+  "title": "A researcher's note on one sub-question",
+  "description": "Facts with their sources, no prose. Bounded: at most 8 claims and 5 open questions, each field capped, so a note stays under 12 KiB of text however a model fills it.",
+  "type": "object",
+  "required": ["sub_question", "claims", "open_questions"],
+  "properties": {
+    "sub_question": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 300,
+      "description": "The sub-question this note answers, with its id, as the brief gave it."
+    },
+    "claims": {
+      "type": "array",
+      "maxItems": 8,
+      "description": "The strongest facts found, each backed by a page that was fetched.",
+      "items": {
+        "type": "object",
+        "required": ["claim", "url", "quote", "accessed"],
+        "properties": {
+          "claim": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 400,
+            "description": "One fact, in one sentence."
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^https?://",
+            "maxLength": 500,
+            "description": "The page the fact is on."
+          },
+          "quote": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300,
+            "description": "The words on that page that state it, copied exactly."
+          },
+          "accessed": {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "description": "The day the page was fetched, YYYY-MM-DD."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "open_questions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": { "type": "string", "minLength": 1, "maxLength": 200 },
+      "description": "What could not be backed by a source, or what the sources leave open."
+    }
+  },
+  "additionalProperties": false
+}

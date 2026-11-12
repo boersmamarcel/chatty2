@@ -140,7 +140,7 @@ Flags a worker is started with (a leader rarely passes these by hand):
 `--workspace <DIR>` (its own `git worktree`), `--participant-fd <N>` (the
 connection the broker made for it; say hello and wait for one task — set by the
 broker, never by hand),
-`--tools <profile>` (`coordinator` / `coder` / `reviewer` / `typesetter` allowlist), `--preamble
+`--tools <profile>` (`coordinator` / `coder` / `reviewer` / `typesetter` / `web-researcher` allowlist), `--preamble
 <text>` (role instructions) and `--max-agent-turns <n>` (that worker's own turn
 budget, AGE-440; `0` is no cap). A run without a human (`--headless`, `--pipe`, a
 worker) never takes the persisted turn cap: with no `--max-agent-turns` it runs
