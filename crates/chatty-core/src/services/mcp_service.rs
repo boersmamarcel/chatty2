@@ -44,6 +44,28 @@ async fn discover_metadata(
     Ok(resolution.metadata)
 }
 
+/// Whether the configured server is on the LAN, by IP literal or by what
+/// its name resolves to; see [`super::ssrf_guard::mcp_server_on_lan`].
+async fn server_on_lan(url: &str) -> bool {
+    super::ssrf_guard::mcp_server_on_lan(url, &super::ssrf_guard::SystemLookup).await
+}
+
+/// rmcp's OAuth manager for the server at `url`. A server on the LAN may
+/// name OAuth endpoints on the LAN (`new_allowing_private_addresses`);
+/// loopback still needs a loopback server URL and link-local stays refused
+/// either way (AGE-1101).
+async fn oauth_manager(
+    url: &str,
+    server_on_lan: bool,
+) -> Result<rmcp::transport::auth::AuthorizationManager, rmcp::transport::auth::AuthError> {
+    use rmcp::transport::auth::AuthorizationManager;
+    if server_on_lan {
+        AuthorizationManager::new_allowing_private_addresses(url).await
+    } else {
+        AuthorizationManager::new(url).await
+    }
+}
+
 /// Represents an active MCP server connection
 pub struct McpConnection {
     /// Server name
@@ -214,23 +236,29 @@ impl McpConnection {
     /// The server names those hosts, so they are fetched through
     /// [`mcp_oauth_client`](super::http_client::mcp_oauth_client): no
     /// loopback, private or link-local address unless `server_url` itself is
-    /// local, no redirects, and a capped body (AGE-1101).
+    /// local (or, for private-LAN addresses, on the LAN), no redirects, and a
+    /// capped body (AGE-1101).
     async fn discover_auth_metadata_manually(
         server_url: &str,
+        server_on_lan: bool,
         auth_servers: &[String],
     ) -> Option<rmcp::transport::auth::AuthorizationMetadata> {
-        let client = super::http_client::mcp_oauth_client(10, server_url);
-        Self::discover_auth_metadata_with(&client, server_url, auth_servers).await
+        let client = super::http_client::mcp_oauth_client(10, server_url, server_on_lan);
+        Self::discover_auth_metadata_with(&client, server_url, server_on_lan, auth_servers).await
     }
 
     async fn discover_auth_metadata_with(
         client: &reqwest::Client,
         server_url: &str,
+        server_on_lan: bool,
         auth_servers: &[String],
     ) -> Option<rmcp::transport::auth::AuthorizationMetadata> {
         let get = |url: String| async move {
-            if let Err(e) = super::ssrf_guard::check_mcp_oauth_url_without_lookup(server_url, &url)
-            {
+            if let Err(e) = super::ssrf_guard::check_mcp_oauth_url_without_lookup(
+                server_url,
+                server_on_lan,
+                &url,
+            ) {
                 warn!(url = %url, error = %e, "Refusing OAuth metadata URL");
                 return None;
             }
@@ -293,7 +321,7 @@ impl McpConnection {
         url: &str,
         probed_auth_servers: Option<Vec<String>>,
     ) -> Result<Self> {
-        use rmcp::transport::auth::{AuthClient, AuthorizationManager, CredentialStore};
+        use rmcp::transport::auth::{AuthClient, CredentialStore};
 
         let credential_store = FileCredentialStore::for_server(name);
 
@@ -324,7 +352,8 @@ impl McpConnection {
         }
 
         // Full browser-based OAuth flow
-        let mut auth_manager = AuthorizationManager::new(url)
+        let server_on_lan = server_on_lan(url).await;
+        let mut auth_manager = oauth_manager(url, server_on_lan)
             .await
             .with_context(|| format!("Failed to create OAuth manager for {name}"))?;
 
@@ -342,7 +371,9 @@ impl McpConnection {
         // to bypass rmcp's discover_metadata() which fails when the MCP endpoint
         // returns 200 HTML for GET requests (e.g. HuggingFace).
         let metadata = if let Some(ref servers) = probed_auth_servers {
-            if let Some(meta) = Self::discover_auth_metadata_manually(url, servers).await {
+            if let Some(meta) =
+                Self::discover_auth_metadata_manually(url, server_on_lan, servers).await
+            {
                 meta
             } else {
                 // Manual discovery failed; fall back to rmcp's built-in discovery
@@ -481,9 +512,10 @@ impl McpConnection {
         credential_store: FileCredentialStore,
         probed_auth_servers: Option<Vec<String>>,
     ) -> Result<Self> {
-        use rmcp::transport::auth::{AuthClient, AuthorizationManager};
+        use rmcp::transport::auth::AuthClient;
 
-        let mut auth_manager = AuthorizationManager::new(url)
+        let server_on_lan = server_on_lan(url).await;
+        let mut auth_manager = oauth_manager(url, server_on_lan)
             .await
             .with_context(|| format!("Failed to create OAuth manager for {name}"))?;
 
@@ -492,7 +524,9 @@ impl McpConnection {
 
         // Use manual discovery when probed_auth_servers is available (same as connect_with_oauth)
         let metadata = if let Some(ref servers) = probed_auth_servers {
-            if let Some(meta) = Self::discover_auth_metadata_manually(url, servers).await {
+            if let Some(meta) =
+                Self::discover_auth_metadata_manually(url, server_on_lan, servers).await
+            {
                 meta
             } else {
                 discover_metadata(&auth_manager)
@@ -1138,14 +1172,25 @@ mod tests {
     }
 
     async fn discover(server_url: &str, auth_server: String) -> Option<String> {
-        let client = super::super::http_client::mcp_oauth_client_with(
-            5,
+        discover_via(server_url, false, Arc::new(ResolvesToLoopback), auth_server).await
+    }
+
+    async fn discover_via(
+        server_url: &str,
+        server_on_lan: bool,
+        lookup: Arc<dyn crate::services::ssrf_guard::HostLookup>,
+        auth_server: String,
+    ) -> Option<String> {
+        let client =
+            super::super::http_client::mcp_oauth_client_with(5, server_url, server_on_lan, lookup);
+        McpConnection::discover_auth_metadata_with(
+            &client,
             server_url,
-            Arc::new(ResolvesToLoopback),
-        );
-        McpConnection::discover_auth_metadata_with(&client, server_url, &[auth_server])
-            .await
-            .map(|metadata| metadata.token_endpoint)
+            server_on_lan,
+            &[auth_server],
+        )
+        .await
+        .map(|metadata| metadata.token_endpoint)
     }
 
     /// AGE-1101 / RUSTSEC-2026-0457: a public MCP server cannot steer
@@ -1186,5 +1231,61 @@ mod tests {
             Some("https://auth.example.com/token".to_string())
         );
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Resolves every name to a fixed address.
+    struct ResolvesTo(std::net::IpAddr);
+
+    impl crate::services::ssrf_guard::HostLookup for ResolvesTo {
+        fn lookup(
+            &self,
+            _host: &str,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::io::Result<Vec<std::net::IpAddr>>> + Send>,
+        > {
+            let ip = self.0;
+            Box::pin(async move { Ok(vec![ip]) })
+        }
+    }
+
+    /// A server configured by a name that resolves to the LAN may keep its
+    /// authorization server on the LAN; a public server may not, and
+    /// neither may reach loopback (AGE-1101).
+    #[tokio::test]
+    async fn oauth_discovery_allows_lan_only_for_a_server_on_the_lan() {
+        use crate::services::ssrf_guard::mcp_server_on_lan;
+        let lan: std::net::IpAddr = "192.168.1.5".parse().unwrap();
+
+        let lan_server = "https://homey.local/mcp";
+        assert!(mcp_server_on_lan(lan_server, &ResolvesTo(lan)).await);
+        let public_server = "https://mcp.example.com/mcp";
+        let public: std::net::IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(!mcp_server_on_lan(public_server, &ResolvesTo(public)).await);
+
+        // Nothing listens on a LAN address in a test, so the policy that
+        // the client's resolver and literal check share is checked directly.
+        use crate::services::ssrf_guard::check_mcp_oauth_url_without_lookup;
+        assert!(
+            check_mcp_oauth_url_without_lookup(lan_server, true, "http://192.168.1.7/").is_ok()
+        );
+        assert!(
+            check_mcp_oauth_url_without_lookup(public_server, false, "http://192.168.1.7/")
+                .is_err()
+        );
+        assert!(check_mcp_oauth_url_without_lookup(lan_server, true, "http://127.0.0.1/").is_err());
+
+        // Loopback stays refused for a LAN server, by name too.
+        let (port, hits) = metadata_server().await;
+        assert_eq!(
+            discover_via(
+                lan_server,
+                true,
+                Arc::new(ResolvesToLoopback),
+                format!("http://auth.example.com:{port}")
+            )
+            .await,
+            None
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

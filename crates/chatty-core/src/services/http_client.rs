@@ -106,10 +106,15 @@ pub fn probe_client(timeout_secs: u64) -> reqwest::Client {
 /// No redirects and no proxy, so the address checked is the one connected
 /// to. IP-literal URLs must be checked with
 /// [`check_mcp_oauth_url_without_lookup`](crate::services::ssrf_guard::check_mcp_oauth_url_without_lookup).
-pub fn mcp_oauth_client(timeout_secs: u64, server_url: &str) -> reqwest::Client {
+pub fn mcp_oauth_client(
+    timeout_secs: u64,
+    server_url: &str,
+    server_on_lan: bool,
+) -> reqwest::Client {
     mcp_oauth_client_with(
         timeout_secs,
         server_url,
+        server_on_lan,
         std::sync::Arc::new(crate::services::ssrf_guard::SystemLookup),
     )
 }
@@ -118,6 +123,7 @@ pub fn mcp_oauth_client(timeout_secs: u64, server_url: &str) -> reqwest::Client 
 pub(crate) fn mcp_oauth_client_with(
     timeout_secs: u64,
     server_url: &str,
+    server_on_lan: bool,
     lookup: std::sync::Arc<dyn crate::services::ssrf_guard::HostLookup>,
 ) -> reqwest::Client {
     use crate::services::ssrf_guard::{GuardedResolver, mcp_oauth_endpoint};
@@ -127,7 +133,7 @@ pub(crate) fn mcp_oauth_client_with(
         .no_proxy()
         .dns_resolver(std::sync::Arc::new(GuardedResolver::new(
             lookup,
-            mcp_oauth_endpoint(server_url),
+            mcp_oauth_endpoint(server_url, server_on_lan),
         )))
         .build()
         .expect("Failed to initialize HTTP client (TLS backend error)")
