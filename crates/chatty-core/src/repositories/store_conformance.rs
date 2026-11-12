@@ -580,6 +580,7 @@ mod tests {
                 rerank_url: Some("http://127.0.0.1:8001/rerank".to_string()),
                 rerank_model: Some("BAAI/bge-reranker-v2-m3".to_string()),
                 managed: None,
+                managed_extract: None,
             },
         )
         .await;

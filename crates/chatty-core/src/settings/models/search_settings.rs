@@ -87,6 +87,11 @@ pub struct SearchSettingsModel {
     /// API and the user's key. Unset (the desktop default) changes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed: Option<ManagedSearch>,
+    /// Read pages for `fetch` through this endpoint and token instead of
+    /// connecting out (AGE-1183). Same shape as `managed`; unset changes
+    /// nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_extract: Option<ManagedSearch>,
 }
 
 impl SearchSettingsModel {
@@ -121,6 +126,7 @@ impl Default for SearchSettingsModel {
             rerank_url: None,
             rerank_model: None,
             managed: None,
+            managed_extract: None,
         }
     }
 }
@@ -154,6 +160,28 @@ mod tests {
         );
         let json = serde_json::to_value(SearchSettingsModel::default()).unwrap();
         assert!(json.get("managed").is_none());
+    }
+
+    #[test]
+    fn settings_without_managed_extract_still_parse() {
+        let loaded: SearchSettingsModel = serde_json::from_str(
+            r#"{"enabled":true,"managed":{"provider":"Tavily","endpoint":"http://172.16.0.1:8080/api/egress/managed/tavily_search","token":"t"}}"#,
+        )
+        .unwrap();
+        assert!(loaded.managed_extract.is_none());
+        let loaded: SearchSettingsModel = serde_json::from_str(
+            r#"{"managed_extract":{"provider":"Tavily","endpoint":"http://172.16.0.1:8080/api/egress/managed/tavily_extract/","token":"t"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.managed_extract.unwrap().usable(),
+            Some((
+                "http://172.16.0.1:8080/api/egress/managed/tavily_extract",
+                "t"
+            ))
+        );
+        let json = serde_json::to_value(SearchSettingsModel::default()).unwrap();
+        assert!(json.get("managed_extract").is_none());
     }
 
     #[test]

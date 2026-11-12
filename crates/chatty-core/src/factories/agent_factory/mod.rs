@@ -778,7 +778,18 @@ impl AgentClient {
                 .and_then(|s| s.workspace_dir.as_ref())
                 .map(std::path::PathBuf::from);
             tracing::info!(?workspace, "Fetch tool enabled");
-            Some(FetchTool::new(workspace))
+            let fetch = FetchTool::new(workspace);
+            match search_settings
+                .as_ref()
+                .and_then(|s| s.managed_extract.as_ref())
+                .and_then(|m| m.usable())
+            {
+                Some((endpoint, token)) => {
+                    tracing::info!("Fetch tool reads pages through a managed extract endpoint");
+                    Some(fetch.with_managed_extract(endpoint, token))
+                }
+                None => Some(fetch),
+            }
         } else {
             tracing::info!("Fetch tool disabled by execution settings");
             None

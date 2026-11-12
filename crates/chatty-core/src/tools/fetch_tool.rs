@@ -144,9 +144,34 @@ pub struct FetchTool {
     wayback_available_url: String,
     wayback_web_url: String,
     wayback_lookup_timeout: std::time::Duration,
+    /// Hosted guests read pages through the lease's managed Tavily Extract
+    /// endpoint instead of connecting out (AGE-1183). `None` on desktop and
+    /// TUI, where nothing below changes.
+    managed_extract: Option<ManagedExtract>,
+}
+
+/// The managed extract endpoint, its bearer token and the client that
+/// reaches it. The client is a plain one: the endpoint is the lease proxy
+/// on a private address, which the SSRF-guarded web client refuses.
+#[derive(Clone)]
+struct ManagedExtract {
+    endpoint: String,
+    token: String,
+    client: reqwest::Client,
 }
 
 impl FetchTool {
+    /// Read pages through the managed extract `endpoint` with `token`
+    /// instead of fetching them directly.
+    pub fn with_managed_extract(mut self, endpoint: &str, token: &str) -> Self {
+        self.managed_extract = Some(ManagedExtract {
+            endpoint: endpoint.to_string(),
+            token: token.to_string(),
+            client: crate::services::http_client::default_client(REQUEST_TIMEOUT_SECS),
+        });
+        self
+    }
+
     pub fn new(workspace_dir: Option<PathBuf>) -> Self {
         let client = crate::services::http_client::open_web_client(REQUEST_TIMEOUT_SECS);
         Self {
@@ -156,6 +181,7 @@ impl FetchTool {
             wayback_available_url: WAYBACK_AVAILABLE_URL.to_string(),
             wayback_web_url: WAYBACK_WEB_URL.to_string(),
             wayback_lookup_timeout: WAYBACK_LOOKUP_TIMEOUT,
+            managed_extract: None,
         }
     }
 
@@ -177,7 +203,8 @@ impl Tool for FetchTool {
     type Output = FetchToolOutput;
 
     fn description(&self) -> String {
-        "Fetch a URL and return its content. HTML is converted to readable text, \
+        let mut description =
+            "Fetch a URL and return its content. HTML is converted to readable text, \
          with links kept as `text (url)` and table cells separated by ` | `. \
          A long page comes back one window at a time: continue with the `start_index` \
          the result names, or pass `find` to get only the passages that mention a word \
@@ -188,7 +215,16 @@ impl Tool for FetchTool {
          Rate limits are waited out; a page that is blocked or gone is served from the \
          Wayback Machine when an archived copy exists, and the result's `note` says so. \
          Only performs GET requests (read-only)."
-            .to_string()
+                .to_string();
+        if self.managed_extract.is_some() {
+            description.push_str(
+                " In this hosted environment pages are read through a managed extraction \
+                 service: binary files are not saved, redirects and the Wayback Machine \
+                 fallback do not apply, and `user_agent` is ignored. A page the service \
+                 cannot read comes back with status 0 and an explanation.",
+            );
+        }
+        description
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -275,7 +311,7 @@ impl Tool for FetchTool {
                 page
             }
             None => match self
-                .download(
+                .download_or_extract(
                     &url,
                     args.user_agent.as_deref(),
                     fragment.as_deref(),
@@ -383,7 +419,94 @@ impl PageCache {
     }
 }
 
+/// Tavily Extract's answer, reduced to what `fetch` reads.
+#[derive(Deserialize)]
+struct ExtractResponse {
+    #[serde(default)]
+    results: Vec<ExtractResult>,
+    #[serde(default)]
+    failed_results: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct ExtractResult {
+    #[serde(default)]
+    raw_content: Option<String>,
+}
+
 impl FetchTool {
+    /// The managed extract path when hosted, else the direct download.
+    async fn download_or_extract(
+        &self,
+        url: &str,
+        user_agent: Option<&str>,
+        fragment: Option<&str>,
+        start_index: usize,
+        max_length: usize,
+    ) -> Result<Download, ToolError> {
+        match &self.managed_extract {
+            Some(managed) => self.extract(managed, url).await,
+            None => {
+                self.download(url, user_agent, fragment, start_index, max_length)
+                    .await
+            }
+        }
+    }
+
+    /// Read `url` through the managed extract endpoint: one POST, no direct
+    /// connection to the page's host.
+    async fn extract(&self, managed: &ManagedExtract, url: &str) -> Result<Download, ToolError> {
+        info!(url = %url, "Reading URL through the managed extract endpoint");
+        let response = managed
+            .client
+            .post(format!("{}/extract", managed.endpoint))
+            .bearer_auth(&managed.token)
+            .json(&serde_json::json!({ "urls": [url], "format": "markdown" }))
+            .send()
+            .await
+            .map_err(|e| ToolError::OperationFailed(format!("Extract request failed: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ToolError::OperationFailed(format!(
+                "The managed extract service returned {}",
+                status.as_u16()
+            )));
+        }
+        let answer: ExtractResponse = response.json().await.map_err(|e| {
+            ToolError::OperationFailed(format!("Unreadable extract service answer: {e}"))
+        })?;
+        let text = answer
+            .results
+            .into_iter()
+            .find_map(|r| r.raw_content.filter(|c| !c.trim().is_empty()));
+        match text {
+            Some(text) => Ok(Download::Page(CachedPage {
+                status: 200,
+                content_type: "text/markdown".to_string(),
+                text,
+                note: None,
+            })),
+            None => {
+                let reason = answer
+                    .failed_results
+                    .iter()
+                    .find_map(|f| f.get("error").and_then(|e| e.as_str()).map(str::to_string));
+                Ok(Download::Done(FetchToolOutput {
+                    status: 0,
+                    content: format!(
+                        "Couldn't read this page: the extraction service returned no content{}.",
+                        reason.map(|r| format!(" ({r})")).unwrap_or_default()
+                    ),
+                    content_type: "unknown".to_string(),
+                    truncated: false,
+                    total_length: None,
+                    saved_to: None,
+                    note: Some("Read through the managed extract service.".to_string()),
+                }))
+            }
+        }
+    }
+
     /// GET `url` and turn the response into either a page of extracted
     /// text or a final answer (an error status's body, or a binary file
     /// saved to the workspace).
@@ -3109,6 +3232,189 @@ mod tests {
                 .is_err(),
             "the private server must never be connected to"
         );
+    }
+
+    /// A fake extract endpoint: answers every request with `body` and logs
+    /// the raw requests it got.
+    async fn fake_extract(body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!(
+            "http://{}/managed/tavily_extract",
+            listener.local_addr().unwrap()
+        );
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let log = Arc::clone(&log);
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = stream.read(&mut buf).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        raw.extend_from_slice(&buf[..n]);
+                        let text = String::from_utf8_lossy(&raw);
+                        if let Some((head, rest)) = text.split_once("\r\n\r\n") {
+                            let want = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .and_then(|v| v.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            if rest.len() >= want {
+                                break;
+                            }
+                        }
+                    }
+                    log.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&raw).into_owned());
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (base, seen)
+    }
+
+    /// A tool whose direct client can only reach `direct` (for
+    /// `pages.example.test`), so a direct fetch is observable.
+    fn tool_with_direct_listener(direct: std::net::SocketAddr) -> FetchTool {
+        FetchTool {
+            client: reqwest::Client::builder()
+                .resolve("pages.example.test", direct)
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            ..FetchTool::new(None)
+        }
+    }
+
+    fn fetch_args(url: &str) -> FetchToolArgs {
+        FetchToolArgs {
+            url: url.to_string(),
+            max_length: None,
+            start_index: None,
+            find: None,
+            user_agent: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_fetch_uses_managed_extract() {
+        let (base, seen) = fake_extract(
+            r##"{"results":[{"url":"https://pages.example.test/a","raw_content":"# Title\n\nThe needle is here."}],"failed_results":[]}"##,
+        )
+        .await;
+        let direct = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = direct.local_addr().unwrap().port();
+        let tool = tool_with_direct_listener(direct.local_addr().unwrap())
+            .with_managed_extract(&base, "lease-token-for-test");
+        let url = format!("https://pages.example.test:{port}/a");
+        let out = tool
+            .call(&mut ToolContext::new(), fetch_args(&url))
+            .await
+            .unwrap();
+        assert_eq!(out.status, 200);
+        assert!(out.content.contains("The needle is here."));
+        // Paging and find read the cached text without another request.
+        let found = tool
+            .call(
+                &mut ToolContext::new(),
+                FetchToolArgs {
+                    find: Some("needle".into()),
+                    ..fetch_args(&url)
+                },
+            )
+            .await
+            .unwrap();
+        assert!(found.content.contains("needle"));
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "exactly one extract request");
+        let request = requests[0].to_ascii_lowercase();
+        assert!(request.starts_with("post /managed/tavily_extract/extract "));
+        assert!(request.contains("authorization: bearer lease-token-for-test"));
+        assert!(request.contains(r#""urls":["#) && request.contains(r#""format":"markdown""#));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), direct.accept())
+                .await
+                .is_err(),
+            "no direct connection to the page's host"
+        );
+    }
+
+    /// The hosted guest has no resolver: the page's host is never looked up.
+    #[tokio::test]
+    async fn hosted_fetch_needs_no_dns() {
+        let (base, seen) = fake_extract(
+            r#"{"results":[{"url":"https://example.invalid/page","raw_content":"hello"}],"failed_results":[]}"#,
+        )
+        .await;
+        let tool = FetchTool::new(None).with_managed_extract(&base, "t");
+        let out = tool
+            .call(
+                &mut ToolContext::new(),
+                fetch_args("https://example.invalid/page"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.content, "hello");
+        assert_eq!(seen.lock().unwrap().len(), 1, "exactly one POST");
+    }
+
+    #[tokio::test]
+    async fn hosted_fetch_reports_failed_result() {
+        let (base, _) = fake_extract(
+            r#"{"results":[],"failed_results":[{"url":"https://pages.example.test/x","error":"timed out"}]}"#,
+        )
+        .await;
+        let tool = FetchTool::new(None).with_managed_extract(&base, "t");
+        let out = tool
+            .call(
+                &mut ToolContext::new(),
+                fetch_args("https://pages.example.test/x"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.status, 0);
+        assert!(
+            out.content.contains("Couldn't read this page"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn desktop_fetch_unchanged() {
+        let (base, seen) = mock_server(|_, _, _| {
+            (
+                "200 OK",
+                "content-type: text/plain\r\n".into(),
+                "the data".into(),
+            )
+        })
+        .await;
+        let tool = tool_with_archive(&base);
+        assert!(tool.managed_extract.is_none());
+        assert!(!tool.description().contains("hosted"));
+        let page = fetch_page(&tool, &format!("{base}/data")).await;
+        assert_eq!(page.text, "the data");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "/data");
     }
 
     #[tokio::test]
