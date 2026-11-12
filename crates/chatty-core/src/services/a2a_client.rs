@@ -59,8 +59,8 @@ impl A2aClarificationRequest {
 pub const USAGE_METADATA_KEY: &str = "usage";
 
 /// `metadata.usage` for a terminal status, as the wire carries it
-/// ([`WireUsage`]): the four token totals, and `lines`, one per model
-/// (AGE-682). Nothing on it is a price.
+/// ([`WireUsage`]): the four token totals, and `lines`, one per agent and
+/// model (AGE-682, AGE-665). Nothing on it is a price.
 pub fn wire_usage(lines: &[TokenUsage]) -> WireUsage {
     WireUsage::from_lines(lines.iter().map(WireUsageLine::from).collect())
 }
@@ -81,6 +81,7 @@ fn usage_line(line: WireUsageLine) -> Option<TokenUsage> {
 impl From<&TokenUsage> for WireUsageLine {
     fn from(line: &TokenUsage) -> Self {
         Self {
+            agent: line.delegated_to.clone(),
             model: line.model.as_ref().map(WireModelRef::from),
             input_tokens: line.input_tokens,
             output_tokens: line.output_tokens,
@@ -108,15 +109,18 @@ impl TryFrom<WireUsageLine> for TokenUsage {
             model: line.model.as_ref().map(ModelRef::from_wire).transpose()?,
             at: line.at.map(|ms| UNIX_EPOCH + Duration::from_millis(ms)),
             duration_ms: line.duration_ms,
+            delegated_to: line.agent,
             ..TokenUsage::default()
         })
     }
 }
 
 /// The usage a delegated task reports on its terminal status:
-/// `metadata.usage.lines`, one [`TokenUsage`] per model, each naming its
-/// model (AGE-682). Whatever the worker itself delegated is already folded
-/// in by its mapper, so this is the whole subtree (AGE-415). A line that does
+/// `metadata.usage.lines`, one [`TokenUsage`] per agent and model, each
+/// naming its model (AGE-682). Whatever the worker itself delegated is
+/// forwarded by its mapper as lines of their own, `delegated_to` the path
+/// below the worker (AGE-665), so this is the whole subtree (AGE-415); the
+/// worker's own lines name no agent. A line that does
 /// not parse is logged and skipped, not the whole report; a report with the
 /// four totals but no `lines` is one line naming no model, so it counts,
 /// unpriced. Empty when the status carries no usage.
@@ -1166,6 +1170,16 @@ mod tests {
             ),
             (100, 20, 7, 3)
         );
+        assert_eq!(back[0].delegated_to, None, "the worker's own line");
+
+        // A line the worker forwarded keeps the path below it (AGE-665).
+        let forwarded = TokenUsage {
+            delegated_to: Some("coder/tester".to_string()),
+            ..line
+        };
+        let metadata = json!({ "usage": wire_usage(&[forwarded]) });
+        let back = usage_from_status_metadata(Some(&metadata));
+        assert_eq!(back[0].delegated_to.as_deref(), Some("coder/tester"));
     }
 
     /// AGE-682: a line that does not parse costs only itself, not the rest

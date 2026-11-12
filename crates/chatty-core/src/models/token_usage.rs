@@ -255,7 +255,12 @@ pub struct TokenUsage {
     /// The agent this usage was spent by on the conversation's behalf, when
     /// it is a delegated line rather than the turn's own requests (AGE-415):
     /// what a worker reported on its terminal status, folded into the
-    /// leader's conversation so the bill follows the bearer. `None` for the
+    /// leader's conversation so the bill follows the bearer. A path down
+    /// the tree from this conversation's agent (TB-3, AGE-665):
+    /// `"reviewer"` is what the reviewer itself spent,
+    /// `"reviewer/local-coder"` what the reviewer's coder spent, so the
+    /// conversation has a line per agent in the tree, not one per direct
+    /// child. Each segment is the name the caller asked for. `None` for the
     /// turn's own usage, which is every record written before this existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_to: Option<String>,
@@ -313,6 +318,23 @@ impl TokenUsage {
             output_tokens,
             ..Default::default()
         }
+    }
+
+    /// This line as the caller of `agent` books it (TB-3, AGE-665):
+    /// `agent`'s own spend is named `agent`, and a line `agent` forwarded
+    /// from below it keeps its path under `agent/`.
+    ///
+    /// `/` separates the path's segments, so a segment never holds one: a
+    /// `/` in `agent` becomes `_`. A spec's name cannot have one anyway; a
+    /// remote A2A agent's configured name can. Every segment is added here,
+    /// one hop at a time, so the path is unambiguous by construction.
+    pub fn delegated_by(mut self, agent: &str) -> Self {
+        let agent = agent.replace('/', "_");
+        self.delegated_to = Some(match self.delegated_to.take() {
+            Some(below) => format!("{agent}/{below}"),
+            None => agent,
+        });
+        self
     }
 
     /// Create a new TokenUsage with an explicit turn count.
@@ -713,6 +735,32 @@ mod tests {
 
         conv.recalculate_totals();
         assert_eq!(conv.total_cache_read_tokens, 900);
+    }
+
+    /// TB-3 (AGE-665): a line forwarded from below an agent keeps its path
+    /// under that agent's name, one segment per hop.
+    #[test]
+    fn delegated_by_prefixes_the_path() {
+        let own = TokenUsage::new(1, 1).delegated_by("local-coder");
+        assert_eq!(own.delegated_to.as_deref(), Some("local-coder"));
+        let up = own.delegated_by("reviewer").delegated_by("planner");
+        assert_eq!(
+            up.delegated_to.as_deref(),
+            Some("planner/reviewer/local-coder")
+        );
+        assert_eq!((up.input_tokens, up.output_tokens), (1, 1));
+    }
+
+    /// AGE-665: a `/` in an agent's name cannot pass for a level of the
+    /// tree: one hop is one segment.
+    #[test]
+    fn delegated_by_keeps_a_slash_in_a_name_out_of_the_path() {
+        let line = TokenUsage::new(1, 1)
+            .delegated_by("acme/coder")
+            .delegated_by("reviewer");
+        let path = line.delegated_to.unwrap();
+        assert_eq!(path, "reviewer/acme_coder");
+        assert_eq!(path.split('/').count(), 2, "two hops, two segments");
     }
 
     /// AGE-415: a delegated line names its agent and round-trips; the turn's

@@ -26,7 +26,7 @@
 //! | `duration_ms` | Wall-clock time since the run started |
 //! | `exit` | `running`, `completed`, `deadline`, `error` or `cancelled` |
 //! | `model` | The model identifier the run was started with |
-//! | `delegated_by_agent` | Agent name → `input_tokens`, `output_tokens`, `model_calls` its delegations reported (part of the totals above); absent when nothing was delegated |
+//! | `delegated_by_agent` | Name of an agent this run delegated to → `input_tokens`, `output_tokens`, `model_calls` its delegations reported, the agents below it included (part of the totals above); absent when nothing was delegated |
 //! | `handoff_invalid_by_role` | A `--team` leader's roles → how many of their handoffs failed their schema (TD-2); absent when none did |
 //! | `failure_tags` | `["handoff_misread"]` when a handoff skipped a field its read rules require (TD-2); absent otherwise |
 //!
@@ -121,8 +121,14 @@ impl RunTotals {
             usage.calls.len() as u64
         };
         self.model_calls += model_calls;
-        if let Some(agent) = &usage.delegated_to {
-            let totals = self.delegated_by_agent.entry(agent.clone()).or_default();
+        // Keyed by the agent this run delegated to, its whole subtree
+        // included: a line's path (AGE-665) starts with that agent.
+        if let Some(path) = &usage.delegated_to {
+            let agent = path.split('/').next().unwrap_or(path);
+            let totals = self
+                .delegated_by_agent
+                .entry(agent.to_string())
+                .or_default();
             totals.input_tokens += u64::from(usage.prompt_tokens());
             totals.output_tokens += u64::from(usage.output_tokens);
             totals.model_calls += model_calls;
@@ -489,17 +495,22 @@ mod tests {
         let mut judge = TokenUsage::with_turn_count(50, 5, 1);
         judge.delegated_to = Some("panel-adjudicator".to_string());
         totals.add_delegated(&judge);
+        // What the analyst's own worker spent is the analyst's delegation's
+        // (AGE-665: the line names the path to it).
+        let mut checker = TokenUsage::with_turn_count(30, 3, 1);
+        checker.delegated_to = Some("panel-analyst-1/checker".to_string());
+        totals.add_delegated(&checker);
         // A plugin's spend names no agent: in the totals only.
         totals.add_delegated(&TokenUsage::with_turn_count(7, 7, 1));
 
-        assert_eq!(totals.input_tokens, 257);
+        assert_eq!(totals.input_tokens, 287);
         let report = totals.report(RunExit::Completed, 1, "m");
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(
             json["delegated_by_agent"],
             serde_json::json!({
                 "panel-adjudicator": {"input_tokens": 50, "output_tokens": 5, "model_calls": 1},
-                "panel-analyst-1": {"input_tokens": 200, "output_tokens": 20, "model_calls": 4},
+                "panel-analyst-1": {"input_tokens": 230, "output_tokens": 23, "model_calls": 5},
             })
         );
         let none =

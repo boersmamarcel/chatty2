@@ -352,11 +352,12 @@ mod delegated_usage {
         assert_eq!(reported.cache_write_tokens, 40);
     }
 
-    /// A sub-leader forwards its own delegations with its own usage, and
-    /// lines on the same model merge (AGE-682) — here none names one — so
-    /// the root sees the tree's spend as one line, not a flat list.
+    /// A sub-leader forwards its own delegations with its own usage, one
+    /// line per agent below it (AGE-665): lines merge only on the same agent
+    /// and model (AGE-682), so the root sees who in the tree spent what,
+    /// each named by its path, and the lines sum to the tree's spend.
     #[tokio::test]
-    async fn a_sub_leaders_line_includes_its_own_workers() {
+    async fn a_sub_leaders_report_has_a_line_per_agent() {
         let mut events = vec![SessionEvent::TurnStarted];
         for (name, spent) in [
             ("local-coder", usage(5_000, 500, 0, 0)),
@@ -376,18 +377,31 @@ mod delegated_usage {
         let run = broker_run(events).await;
 
         assert!(run.succeeded);
-        let [reported] = run.usage.as_slice() else {
-            panic!("the sub-leader's usage reaches the root: {:?}", run.usage);
-        };
+        let mut lines: Vec<(&str, u32, u32, u32, u32)> = run
+            .usage
+            .iter()
+            .map(|line| {
+                (
+                    line.delegated_to.as_deref().unwrap_or_default(),
+                    line.input_tokens,
+                    line.output_tokens,
+                    line.cache_read_tokens,
+                    line.cache_write_tokens,
+                )
+            })
+            .collect();
+        lines.sort();
+        let coder = format!("{LOCAL_AGENT_NAME}/local-coder");
+        let reviewer = format!("{LOCAL_AGENT_NAME}/local-reviewer");
         assert_eq!(
-            reported.delegated_to.as_deref(),
-            Some(LOCAL_AGENT_NAME),
-            "one line, named for the agent the root delegated to"
+            lines,
+            [
+                (LOCAL_AGENT_NAME, 300, 30, 0, 10),
+                (coder.as_str(), 5_000, 500, 0, 0),
+                (reviewer.as_str(), 2_000, 100, 1_000, 0),
+            ],
+            "one line per agent, named by its path from the root"
         );
-        assert_eq!(reported.input_tokens, 300 + 5_000 + 2_000);
-        assert_eq!(reported.output_tokens, 30 + 500 + 100);
-        assert_eq!(reported.cache_read_tokens, 1_000);
-        assert_eq!(reported.cache_write_tokens, 10);
     }
 
     /// A worker that reports no usage adds no line: nothing is invented.
