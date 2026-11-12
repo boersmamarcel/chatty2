@@ -207,6 +207,105 @@ pub fn a2a_peer_with_bypass(allow_private_network: bool) -> AddressPolicy {
     })
 }
 
+/// The policy for OAuth endpoints an MCP server names in its metadata
+/// (`authorization_servers`, AGE-1101): the server chooses those hosts, so
+/// they must not lead into this machine or its network.
+///
+/// - Link-local, including cloud metadata, is never reachable.
+/// - Loopback is reachable only when the configured server URL is itself
+///   loopback (`localhost` or a loopback IP literal).
+/// - A private-LAN address (RFC-1918, CGN `100.64.0.0/10`, ULA) is
+///   reachable only when the server is on the LAN: a private-LAN IP
+///   literal, or `server_on_lan` (its name resolves to the LAN, see
+///   [`mcp_server_on_lan`]).
+/// - Anything else must be public, so a public server never reaches a
+///   private address.
+///
+/// What the configured host resolves to never makes loopback reachable.
+pub fn mcp_oauth_endpoint(server_url: &str, server_on_lan: bool) -> AddressPolicy {
+    let (server_loopback, server_lan) = match parse_host(server_url) {
+        Ok(host) if host.eq_ignore_ascii_case("localhost") => (true, false),
+        Ok(host) => match ip_literal(&host) {
+            Some(ip) => (is_loopback_ip(&ip), is_lan_ip(&ip)),
+            None => (false, false),
+        },
+        Err(_) => (false, false),
+    };
+    let server_lan = server_lan || server_on_lan;
+    Arc::new(move |_host: &str, ip: IpAddr| {
+        if is_link_local_ip(&ip) {
+            false
+        } else if is_loopback_ip(&ip) {
+            server_loopback
+        } else if is_lan_ip(&ip) {
+            server_lan
+        } else {
+            !is_private_ip(&ip)
+        }
+    })
+}
+
+/// The IP-literal half of [`mcp_oauth_endpoint`], for `url` itself: reqwest
+/// never hands a literal to the resolver.
+pub fn check_mcp_oauth_url_without_lookup(
+    server_url: &str,
+    server_on_lan: bool,
+    url: &str,
+) -> Result<(), String> {
+    let host = parse_host(url)?;
+    match ip_literal(&host) {
+        Some(ip) if !mcp_oauth_endpoint(server_url, server_on_lan)(&host, ip) => {
+            Err(blocked_ip_error(ip))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether the configured MCP server is on the LAN (AGE-1101): its host is
+/// a private-LAN IP literal, or a name every resolved address of which is
+/// private-LAN. A name that resolves to loopback, link-local, a public
+/// address, or nothing is not on the LAN. The user chose this host, so its
+/// answer may widen [`mcp_oauth_endpoint`] to the LAN, never to loopback.
+pub async fn mcp_server_on_lan(server_url: &str, lookup: &dyn HostLookup) -> bool {
+    let Ok(host) = parse_host(server_url) else {
+        return false;
+    };
+    if let Some(ip) = ip_literal(&host) {
+        return is_lan_ip(&ip);
+    }
+    match lookup.lookup(&host).await {
+        Ok(addrs) => !addrs.is_empty() && addrs.iter().all(is_lan_ip),
+        Err(_) => false,
+    }
+}
+
+/// Loopback, including through an IPv4-mapped IPv6 address.
+fn is_loopback_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+        }
+    }
+}
+
+/// A private-LAN address: RFC-1918, CGN `100.64.0.0/10`, or IPv6 ULA
+/// `fc00::/7`, including through an IPv4-mapped IPv6 address.
+fn is_lan_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_private() || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        IpAddr::V6(v6) => {
+            (v6.segments()[0] & 0xfe00) == 0xfc00
+                || v6
+                    .to_ipv4_mapped()
+                    .is_some_and(|v4| is_lan_ip(&IpAddr::V4(v4)))
+        }
+    }
+}
+
 /// The IP-literal half of [`a2a_peer`], for the URL itself: reqwest never
 /// hands a literal to the resolver, so the resolver cannot refuse it.
 pub fn check_a2a_url_without_lookup(url: &str) -> Result<(), String> {
@@ -553,6 +652,87 @@ mod tests {
         assert!(guard.resolve_checked("example.com").await.is_err());
         assert!(guard.resolve_checked("example.com").await.is_err());
         assert!(guard.resolve_checked("example.com").await.is_err());
+    }
+
+    #[test]
+    fn mcp_oauth_endpoint_policy() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let admits =
+            |server: &str, addr: &str| mcp_oauth_endpoint(server, false)("auth.test", ip(addr));
+
+        // A public server: its OAuth hosts must resolve to public addresses.
+        let public = "https://mcp.example.com/mcp";
+        assert!(admits(public, "93.184.216.34"));
+        assert!(!admits(public, "127.0.0.1"));
+        assert!(!admits(public, "::1"));
+        assert!(!admits(public, "::ffff:127.0.0.1"));
+        assert!(!admits(public, "10.0.0.9"));
+        assert!(!admits(public, "192.168.1.5"));
+        assert!(!admits(public, "100.64.0.1"));
+        assert!(!admits(public, "fd00::1"));
+        assert!(!admits(public, "169.254.169.254"));
+        assert!(!admits(public, "0.0.0.0"));
+
+        // A loopback server may use loopback, not the LAN or link-local.
+        for local in ["http://localhost:3000/mcp", "http://127.0.0.1:3000/mcp"] {
+            assert!(admits(local, "127.0.0.1"));
+            assert!(!admits(local, "10.0.0.9"));
+            assert!(!admits(local, "169.254.169.254"));
+        }
+
+        // A LAN server (by IP) may use the LAN, not loopback or link-local.
+        let lan = "http://192.168.1.10:8080/mcp";
+        assert!(admits(lan, "10.0.0.9"));
+        assert!(!admits(lan, "127.0.0.1"));
+        assert!(!admits(lan, "169.254.169.254"));
+
+        // A server whose *name* resolves to the LAN may use the LAN too,
+        // still not loopback or link-local; a public one never.
+        let lan_name =
+            |addr: &str| mcp_oauth_endpoint("https://homey.local/mcp", true)("auth.test", ip(addr));
+        assert!(lan_name("10.0.0.9"));
+        assert!(lan_name("192.168.1.5"));
+        assert!(lan_name("93.184.216.34"));
+        assert!(!lan_name("127.0.0.1"));
+        assert!(!lan_name("169.254.169.254"));
+
+        // The literal check applies the same policy without DNS.
+        assert!(
+            check_mcp_oauth_url_without_lookup(public, false, "http://169.254.169.254/").is_err()
+        );
+        assert!(check_mcp_oauth_url_without_lookup(public, false, "http://[::1]:9/").is_err());
+        assert!(
+            check_mcp_oauth_url_without_lookup(public, false, "https://auth.example.com/").is_ok()
+        );
+        assert!(
+            check_mcp_oauth_url_without_lookup(
+                "http://127.0.0.1:3000/",
+                false,
+                "http://127.0.0.1:9/"
+            )
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_server_on_lan_needs_every_address_on_the_lan() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let on_lan = |answer: std::io::Result<Vec<IpAddr>>| async move {
+            let lookup = Stub(vec![answer], std::sync::Mutex::new(0));
+            mcp_server_on_lan("https://homey.local/mcp", &lookup).await
+        };
+        assert!(on_lan(Ok(vec![ip("192.168.1.5")])).await);
+        assert!(on_lan(Ok(vec![ip("10.0.0.2"), ip("fd00::2")])).await);
+        assert!(!on_lan(Ok(vec![ip("192.168.1.5"), ip("93.184.216.34")])).await);
+        assert!(!on_lan(Ok(vec![ip("127.0.0.1")])).await);
+        assert!(!on_lan(Ok(vec![ip("169.254.169.254")])).await);
+        assert!(!on_lan(Ok(vec![])).await);
+        assert!(!on_lan(Err(std::io::Error::other("stub"))).await);
+
+        // Literals need no lookup.
+        let unused = Stub(vec![], std::sync::Mutex::new(0));
+        assert!(mcp_server_on_lan("http://192.168.1.10:8080/mcp", &unused).await);
+        assert!(!mcp_server_on_lan("http://127.0.0.1:3000/mcp", &unused).await);
     }
 
     #[test]

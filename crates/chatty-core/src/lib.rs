@@ -18,6 +18,7 @@
 // - `AZURE_TOKEN_CACHE`          — factories/agent_factory/provider_builder.rs (OnceLock)
 // - `MCP_WRITE_LOCK`             — settings/models/mcp_store.rs (LazyLock<Mutex>)
 // - `PATH_AUGMENTED`             — auth/azure_auth.rs (OnceLock)
+// - `WORKTREE_ADD_LOCK`          — services/git_service.rs (LazyLock<Mutex>)
 //
 // Design rationale: domain-local singletons stay near their usage to avoid
 // coupling unrelated modules through a central registry. Service and repository

@@ -100,6 +100,45 @@ pub fn probe_client(timeout_secs: u64) -> reqwest::Client {
         .expect("Failed to initialize HTTP client (TLS backend error)")
 }
 
+/// [`probe_client`] for the OAuth endpoints an MCP server at `server_url`
+/// names (AGE-1101): every name it connects to is resolved once and checked
+/// against [`mcp_oauth_endpoint`](crate::services::ssrf_guard::mcp_oauth_endpoint).
+/// No redirects and no proxy, so the address checked is the one connected
+/// to. IP-literal URLs must be checked with
+/// [`check_mcp_oauth_url_without_lookup`](crate::services::ssrf_guard::check_mcp_oauth_url_without_lookup).
+pub fn mcp_oauth_client(
+    timeout_secs: u64,
+    server_url: &str,
+    server_on_lan: bool,
+) -> reqwest::Client {
+    mcp_oauth_client_with(
+        timeout_secs,
+        server_url,
+        server_on_lan,
+        std::sync::Arc::new(crate::services::ssrf_guard::SystemLookup),
+    )
+}
+
+/// [`mcp_oauth_client`] resolving through `lookup` — a stub, in tests.
+pub(crate) fn mcp_oauth_client_with(
+    timeout_secs: u64,
+    server_url: &str,
+    server_on_lan: bool,
+    lookup: std::sync::Arc<dyn crate::services::ssrf_guard::HostLookup>,
+) -> reqwest::Client {
+    use crate::services::ssrf_guard::{GuardedResolver, mcp_oauth_endpoint};
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .dns_resolver(std::sync::Arc::new(GuardedResolver::new(
+            lookup,
+            mcp_oauth_endpoint(server_url, server_on_lan),
+        )))
+        .build()
+        .expect("Failed to initialize HTTP client (TLS backend error)")
+}
+
 /// Build an HTTP client with a browser-like user-agent for web scraping.
 ///
 /// Used by the DuckDuckGo fallback search which requires a realistic

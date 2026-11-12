@@ -5,6 +5,19 @@ use tracing::{debug, info};
 
 use super::path_validator::PathValidator;
 
+/// Serializes `git worktree add` across the process.
+///
+/// `git worktree add` is not safe to run concurrently against one
+/// repository: it enumerates `.git/worktrees/*` to check for conflicts
+/// while writing a new entry there, and a reader can catch another add's
+/// entry mid-write (e.g. `failed to read .git/worktrees/<name>/commondir:
+/// Success`). Every caller funnels through one broker process (the
+/// worker's own `chatty-tui` subprocess is handed an already-created
+/// worktree path, never adds one itself), so one process-wide lock is
+/// enough to make concurrent worker fan-out safe.
+static WORKTREE_ADD_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 /// Output from `git status`
 #[derive(Debug, Serialize)]
 pub struct GitStatusOutput {
@@ -604,7 +617,10 @@ impl GitService {
 
         let mut args = vec!["worktree", "add", "-b", branch, &rel];
         args.extend(start_point);
-        self.run_git(&args).await?;
+        {
+            let _guard = WORKTREE_ADD_LOCK.lock().await;
+            self.run_git(&args).await?;
+        }
 
         info!(worktree = %path.display(), branch = %branch, "Worktree created");
         Ok(path)

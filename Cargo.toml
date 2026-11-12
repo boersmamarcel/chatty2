@@ -35,10 +35,11 @@ rig-agent = { version = "=0.42.0", features = ["derive"] }
 rig-mcp = "=0.2.5"
 # Trace capture for AGE-5 / walking skeleton — pinned now, wired later.
 rig-tap = "=0.3.0"
-# rig-agent's `rmcp` feature requires rmcp ^2 (was 1.4 under rig-core 0.37).
-# Pin 2.1.0: 2.2.0 calls SseStream::from_bytes_stream which does not exist on
-# sse-stream 0.2.x (the method is from_byte_stream).
-rmcp = { version = "=2.1.0", features = ["client", "macros", "transport-streamable-http-client-reqwest", "auth"] }
+# chatty's MCP client and its rig tool adapter (chatty-core tools/mcp_tool_adapter.rs).
+# rig-agent's own `rmcp` feature is off: it requires rmcp ^2, and rmcp < 3.9
+# carries RUSTSEC-2026-0457 (OAuth SSRF) and RUSTSEC-2026-0462 (unbounded
+# Streamable HTTP buffering) (AGE-1101).
+rmcp = { version = "=3.9.0", features = ["client", "macros", "transport-streamable-http-client-reqwest", "auth"] }
 
 # Persistence layer
 serde = { version = "1.0", features = ["derive"] }

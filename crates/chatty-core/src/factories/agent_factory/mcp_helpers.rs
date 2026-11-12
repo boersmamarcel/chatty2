@@ -166,17 +166,21 @@ macro_rules! build_with_mcp_tools {
                             tools_list,
                             $reserved_tool_names,
                         );
-                    let mut iter = deduped
+                    let tools: Vec<rig_agent::tool::DynamicTool> = deduped
                         .into_iter()
-                        .filter(|(_name, t, _sink)| !t.is_empty());
-                    if let Some((_first_name, first_tools, first_sink)) = iter.next() {
-                        let mut b = $builder.rmcp_tools(first_tools, first_sink);
-                        for (_name, tools, sink) in iter {
-                            b = b.rmcp_tools(tools, sink);
-                        }
-                        b.build()
-                    } else {
+                        .flat_map(|(_name, tools, sink)| {
+                            tools.into_iter().map(move |tool| {
+                                $crate::tools::mcp_tool_adapter::mcp_dynamic_tool(
+                                    tool,
+                                    sink.clone(),
+                                )
+                            })
+                        })
+                        .collect();
+                    if tools.is_empty() {
                         $builder.build()
+                    } else {
+                        $builder.dynamic_tools(tools).build()
                     }
                 }
                 None => $builder.build(),

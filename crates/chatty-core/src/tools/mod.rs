@@ -183,6 +183,8 @@ pub mod invoke_agent_tool;
 pub mod list_agents_tool;
 pub mod list_mcp_tool;
 pub mod list_tools_tool;
+#[cfg(feature = "mcp")]
+pub mod mcp_tool_adapter;
 pub mod passages;
 mod path_utils;
 #[cfg(feature = "pdf")]
