@@ -65,7 +65,7 @@ jobs:
             | tar xz -C /usr/local/bin
 
       - name: Install lychee
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: lychee
 
