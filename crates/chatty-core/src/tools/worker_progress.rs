@@ -71,21 +71,31 @@ fn resolve_worker_executable(
     }
     let dir = current_exe.and_then(|p| p.parent().map(Path::to_path_buf));
     dir.iter()
+        .cloned()
+        .chain(dir.as_deref().and_then(test_profile_dir))
         .map(|d| d.join("chatty-tui"))
-        // A test binary runs from `target/<profile>/deps`, one level below
-        // the `chatty-tui` its crate builds — the swarm kit's real workers
-        // (AGE-632).
-        .chain(
-            dir.as_deref()
-                .filter(|d| d.ends_with("deps"))
-                .and_then(Path::parent)
-                .map(|d| d.join("chatty-tui")),
-        )
-        .find(|p| p.exists())
+        // `is_file`: under the new layout `target/<profile>/build/chatty-tui`
+        // is a directory.
+        .find(|p| p.is_file())
         .unwrap_or_else(|| {
             warn!("chatty-tui not found next to current binary, falling back to PATH");
             PathBuf::from("chatty-tui")
         })
+}
+
+/// `target/<profile>` for a test binary, where the `chatty-tui` its crate
+/// builds lives — the swarm kit's real workers (AGE-632). Cargo before 1.100
+/// ran test binaries from `target/<profile>/deps`; 1.100's build-dir layout
+/// runs them from `target/<profile>/build/<package>/<hash>/out`.
+fn test_profile_dir(dir: &Path) -> Option<PathBuf> {
+    if dir.ends_with("deps") {
+        return dir.parent().map(Path::to_path_buf);
+    }
+    if !dir.ends_with("out") {
+        return None;
+    }
+    let build = dir.ancestors().nth(3).filter(|d| d.ends_with("build"))?;
+    build.parent().map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -103,6 +113,30 @@ mod tests {
         assert_eq!(
             resolve_worker_executable(Some("".into()), exe.clone()),
             resolve_worker_executable(None, exe)
+        );
+    }
+
+    #[test]
+    fn a_test_binary_finds_the_chatty_tui_of_its_profile_in_either_layout() {
+        let target = tempfile::tempdir().expect("tempdir");
+        let profile = target.path().join("debug");
+        let deps = profile.join("deps");
+        let out = profile.join("build/chatty-tui/0355fcbfdd6343d3/out");
+        std::fs::create_dir_all(&deps).expect("deps dir");
+        std::fs::create_dir_all(&out).expect("out dir");
+        let bin = profile.join("chatty-tui");
+        std::fs::write(&bin, b"").expect("bin");
+
+        // Cargo < 1.100: target/debug/deps/<test>.
+        assert_eq!(
+            resolve_worker_executable(None, Some(deps.join("chatty_tui-0123"))),
+            bin
+        );
+        // Cargo 1.100: target/debug/build/<package>/<hash>/out/<test>, where
+        // target/debug/build/chatty-tui is a directory, not the binary.
+        assert_eq!(
+            resolve_worker_executable(None, Some(out.join("chatty_tui-0355fcbfdd6343d3"))),
+            bin
         );
     }
 
