@@ -37,7 +37,10 @@ the rules in one place.
   bearer or token travels with a local call; a worker never holds a credential.
 - `CallChain::extend` refuses a **cycle** (the callee is already on the chain)
   and a call deeper than **`MAX_DEPTH` = 4** (the root's callee is depth 1).
-  The cycle is checked first.
+  The cycle is checked first. A root that runs as a spec (`--agent`, a `--team`
+  leader, a hosted root with a spec) carries that spec on its chain as
+  `root_spec`: calling it again anywhere under that root is a cycle, though it
+  is not a hop and does not count towards the depth (AGE-1138).
 - A refusal is `CallError::Delegation(Refusal)`, written to the edge log and
   shown to the calling model as `Error: invoke_agent: cycle: …`,
   `too_deep: depth 5 > max 4` or `not_listed: a may not call c`.
