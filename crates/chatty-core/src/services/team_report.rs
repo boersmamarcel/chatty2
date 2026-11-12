@@ -10,15 +10,21 @@
 //!   the researchers' notes (their typed handoffs, TD-2) carries. A report
 //!   that cites anything else gets a section listing it
 //!   ([`citations_outside_notes`]). Whether a quote is really on its page
-//!   is the checker's job: that needs the web.
+//!   is the checker's job: that needs the web. The notes are read from the
+//!   files the host kept them in (`research_notes`, AGE-1295), not from the
+//!   lead's history, which a compaction thins out.
 //! - **Cost.** The spend the run was billed, the number of web searches
 //!   and page fetches every agent in the tree made, and the wall time
 //!   ([`RunTally`]), counted from the run's swarm trace, not reported by a
 //!   model.
 //! - **A partial report.** When no report was written (the budget ran out
 //!   before the writer ran, AGE-903), the file is the leader's last answer
-//!   under a heading that says so: the budget stop's final message lists
-//!   every note finished so far.
+//!   under a heading that says so, then every note finished so far: its
+//!   claims with their URLs and quotes.
+//!
+//! The run's answer then opens with the report's own opening
+//! ([`answer_from_report`]), read from the file rather than recalled by
+//! the lead (AGE-1295).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -38,6 +44,9 @@ pub const CITATION_CHECK_HEADING: &str = "## Citation check";
 
 /// The heading of a report the team never wrote.
 pub const PARTIAL_HEADING: &str = "# Partial report";
+
+/// The heading of a partial report's notes.
+pub const NOTES_HEADING: &str = "## Notes finished";
 
 /// The tool that searches the web, and the one that fetches a page.
 pub const SEARCH_TOOL: &str = "search_web";
@@ -226,11 +235,20 @@ pub fn finish(
 ) -> String {
     let mut report = match written.filter(|text| !text.trim().is_empty()) {
         Some(text) => text.trim_end().to_string(),
-        None => format!(
-            "{PARTIAL_HEADING}\n\nThe team ended before its report was written. What it had \
-             finished:\n\n{}",
-            last_answer.trim()
-        ),
+        None => {
+            let mut partial = format!(
+                "{PARTIAL_HEADING}\n\nThe team ended before its report was written. What it \
+                 had finished:\n\n{}",
+                last_answer.trim()
+            );
+            if !notes.is_empty() {
+                partial.push_str(&format!("\n\n{NOTES_HEADING}\n"));
+                for note in notes {
+                    partial.push_str(&note_section(note));
+                }
+            }
+            partial
+        }
     };
     let outside = citations_outside_notes(&report, notes);
     if !outside.is_empty() {
@@ -245,6 +263,80 @@ pub fn finish(
     report.push_str("\n\n");
     report.push_str(&cost_footer(tally));
     report
+}
+
+/// One note for a partial report: the sub-question, then each claim with
+/// its quote and URL.
+fn note_section(note: &Value) -> String {
+    let mut section = format!(
+        "\n### {}\n\n",
+        note["sub_question"].as_str().unwrap_or("A note").trim()
+    );
+    for claim in note["claims"].as_array().into_iter().flatten() {
+        let text = |field: &str| claim[field].as_str().unwrap_or_default().trim().to_string();
+        section.push_str(&format!(
+            "- {} \"{}\" ({})\n",
+            text("claim"),
+            text("quote"),
+            text("url")
+        ));
+    }
+    section
+}
+
+/// The heading a report's short answer is under, when it has one.
+const SHORT_ANSWER: &str = "short answer";
+
+/// The report's opening: its title, then its short-answer section when it
+/// has one (a heading saying "Short answer"), else everything up to the
+/// first section heading. `None` for a partial report, which has no
+/// opening of its own.
+pub fn report_opening(report: &str) -> Option<String> {
+    let body = report_body(report).trim();
+    if body.is_empty() || body.starts_with(PARTIAL_HEADING) {
+        return None;
+    }
+    let lines: Vec<&str> = body.lines().collect();
+    let is_heading = |line: &str| line.trim_start().starts_with('#');
+    let title = lines
+        .first()
+        .filter(|line| line.starts_with("# "))
+        .map(|line| line.trim().to_string());
+    let section = |start: usize| {
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| is_heading(line))
+            .map_or(lines.len(), |at| start + 1 + at);
+        lines[start..end].join("\n").trim().to_string()
+    };
+    let short = lines.iter().position(|line| {
+        is_heading(line)
+            && line
+                .trim_start_matches('#')
+                .trim()
+                .to_lowercase()
+                .starts_with(SHORT_ANSWER)
+    });
+    let opening = match (short, &title) {
+        (Some(at), Some(title)) if at > 0 => format!("{title}\n\n{}", section(at)),
+        (Some(at), _) => section(at),
+        (None, _) => section(0),
+    };
+    (!opening.is_empty()).then_some(opening)
+}
+
+/// The run's answer for a team that wrote its report at `path`: the
+/// report's opening, where the report is, then the lead's own last reply
+/// (its checker verdict and open sub-questions). `None` when the report
+/// has no opening (a partial report): the lead's answer stands.
+pub fn answer_from_report(report: &str, path: &str, reply: &str) -> Option<String> {
+    let opening = report_opening(report)?;
+    let reply = reply.trim();
+    let mut answer = format!("{opening}\n\nThe full report: {path}");
+    if !reply.is_empty() {
+        answer.push_str(&format!("\n\n{reply}"));
+    }
+    Some(answer)
 }
 
 /// [`finish`] the report at `workspace`/`relative`, writing the file (and
@@ -366,6 +458,55 @@ mod tests {
             assert!(finished.contains(answer), "{finished}");
             assert!(finished.contains(COST_HEADING));
         }
+    }
+
+    /// AGE-1295: a partial report keeps every finished note, quotes and
+    /// URLs included, not only what the lead's last answer recalls.
+    #[test]
+    fn a_partial_report_lists_the_finished_notes() {
+        let finished = finish(
+            None,
+            "Budget spent.",
+            &[note(&["https://a.example/1"])],
+            &tally(),
+        );
+        let notes = &finished[finished.find(NOTES_HEADING).expect("the notes")..];
+        assert!(
+            notes.contains("- c \"q\" (https://a.example/1)"),
+            "{finished}"
+        );
+        assert!(finished.find(NOTES_HEADING) < finished.find(COST_HEADING));
+    }
+
+    /// AGE-1295: the run's answer opens with the report's own opening —
+    /// its title and short answer — read from the file, not recalled.
+    #[test]
+    fn the_answer_opens_with_the_reports_opening() {
+        let report = "# Memory in agents\n\nSources are numbered by note.\n\n## Short answer\n\n\
+                      No approach dominates [1](https://a.example).\n\n## Comparison\n\n| a |\n\n\
+                      ## Cost of this run\n\n- Spend: $1\n";
+        let answer =
+            answer_from_report(report, "research-report.md", "Checker: PASS.").expect("an opening");
+        assert!(
+            answer.starts_with(
+                "# Memory in agents\n\n## Short answer\n\nNo approach dominates \
+                 [1](https://a.example).\n\nThe full report: research-report.md"
+            ),
+            "{answer}"
+        );
+        assert!(answer.ends_with("Checker: PASS."), "{answer}");
+        assert!(!answer.contains("Comparison") && !answer.contains("Spend"));
+
+        // No short-answer heading: the title and what precedes the first
+        // section.
+        assert_eq!(
+            report_opening("# T\n\nThe answer is 330 m.\n\n## Details\n\nMore.").as_deref(),
+            Some("# T\n\nThe answer is 330 m.")
+        );
+        // A partial report has no opening of its own.
+        let partial = finish(None, "Budget spent.", &[], &tally());
+        assert_eq!(answer_from_report(&partial, "r.md", "x"), None);
+        assert_eq!(report_opening("  \n"), None);
     }
 
     #[test]

@@ -10,7 +10,9 @@
 //! have their internet tools (`fetch_enabled`), but a scripted fetch names
 //! a loopback URL, which the fetch tool's SSRF guard refuses before any
 //! request: nothing leaves the machine. When the turn ends, the test
-//! finishes the report as the host does (`team_report::finish_file`).
+//! finishes the report as the host does (`team_report::finish_file`), on
+//! the notes the host kept in the workspace (`research_notes`, AGE-1295).
+//! The lead's own results carry only a reference to each note.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,12 +23,13 @@ use chatty_core::agent_spec::AgentSpec;
 use chatty_core::factories::{AgentBuildContext, AgentServices};
 use chatty_core::services::StreamSurface;
 use chatty_core::services::budget_stop::BUDGET_EXHAUSTED;
+use chatty_core::services::research_notes::{NOTE_FILES_HEADING, read_notes};
 use chatty_core::services::round_limit::ROUND_LIMIT_REACHED;
 use chatty_core::services::swarm_trace::SwarmTrace;
 use chatty_core::services::team::{Team, load_team};
 use chatty_core::services::team_report::{
-    CITATION_CHECK_HEADING, COST_HEADING, PARTIAL_HEADING, RunTally, citations_outside_notes,
-    finish_file, note_in_result, note_urls,
+    CITATION_CHECK_HEADING, COST_HEADING, PARTIAL_HEADING, RunTally, answer_from_report,
+    citations_outside_notes, finish_file, note_in_result, note_urls,
 };
 use chatty_core::session::{AgentSession, AgentSessionConfig, SessionEvent, TurnInput};
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
@@ -53,6 +56,8 @@ const CHECKER_MODEL: &str = "kit/research-checker";
 const QUESTION: &str = "How tall is the Eiffel Tower, and how did its height change?";
 const PLAN: &str = "research-plan.md";
 const REPORT: &str = "research-report.md";
+/// Where the lead's spec has the host keep the notes (AGE-1295).
+const NOTES_DIR: &str = "research-notes";
 
 /// Generous for CI under load; a run takes seconds.
 const WALL_TIME: Duration = Duration::from_secs(120);
@@ -126,8 +131,15 @@ fn roster(team: &Team) -> Vec<AgentDef> {
 }
 
 /// The root conversation, running as the preset's lead on the kit's SSE
-/// endpoint, delegating through the kit's broker.
-async fn lead_session(kit: &SwarmKit, lead: &AgentSpec, members: &[String]) -> AgentSession {
+/// endpoint, delegating through the kit's broker. With `window`, the lead
+/// is an unattended run (as `--team` is) on a model with that context
+/// window, so its history is compacted near it.
+async fn lead_session(
+    kit: &SwarmKit,
+    lead: &AgentSpec,
+    members: &[String],
+    window: Option<i32>,
+) -> AgentSession {
     let _ = chatty_core::init_repositories();
     let settings = ExecutionSettingsModel {
         enabled: true,
@@ -145,13 +157,14 @@ async fn lead_session(kit: &SwarmKit, lead: &AgentSpec, members: &[String]) -> A
     let provider = ProviderConfig::new("Fake SSE".to_string(), ProviderType::OpenRouter)
         .with_api_key("swarm-kit-key".to_string())
         .with_base_url(kit.sse.base_url());
-    let model = ModelConfig::new(
+    let mut model = ModelConfig::new(
         LEAD_MODEL.to_string(),
         LEAD_MODEL.to_string(),
         ProviderType::OpenRouter,
         LEAD_MODEL.to_string(),
     );
-    let build = AgentBuildContext::from_spec(
+    model.max_context_window = window;
+    let mut build = AgentBuildContext::from_spec(
         lead,
         AgentServices {
             exec_settings: Some(settings),
@@ -161,6 +174,7 @@ async fn lead_session(kit: &SwarmKit, lead: &AgentSpec, members: &[String]) -> A
         },
     )
     .expect("the lead's spec builds");
+    build.context.unattended = window.is_some();
     session
         .create_conversation(
             "age-910".to_string(),
@@ -181,9 +195,10 @@ struct Run {
     edges: Vec<EdgeRow>,
     /// The root's tool calls in order: `(name, arguments, result)`.
     calls: Vec<(String, Value, String)>,
-    /// The researchers' notes, as the lead's `invoke_agent` results carry
-    /// them.
+    /// The researchers' notes, as the host kept them in the workspace.
     notes: Vec<Value>,
+    /// The references the lead's researcher results carry instead.
+    references: Vec<Value>,
     /// What the root said.
     said: String,
     wall: Duration,
@@ -221,13 +236,18 @@ impl Run {
 
 /// Run the lead's turn on `QUESTION` with these scripts.
 async fn run(sse: Script, ndjson: Script) -> Run {
+    run_in_window(sse, ndjson, None).await
+}
+
+/// [`run`], the lead on a model with a `window`-token context when set.
+async fn run_in_window(sse: Script, ndjson: Script, window: Option<i32>) -> Run {
     let started = Instant::now();
     let team = load_team(TEAM, None, None).expect("the preset loads");
     let members = team.agent_names();
     let kit =
         SwarmKit::start_led_with_web(team.leader.clone(), 4, roster(&team), sse, ndjson).await;
 
-    let mut session = lead_session(&kit, &team.leader, &members).await;
+    let mut session = lead_session(&kit, &team.leader, &members, window).await;
     let events: Rc<RefCell<Vec<SessionEvent>>> = Rc::default();
     let sink = events.clone();
     let turn = session
@@ -245,10 +265,14 @@ async fn run(sse: Script, ndjson: Script) -> Run {
         .map(|line| serde_json::from_str(line).expect("an edge row"))
         .collect();
     let calls = root_tool_calls(&events);
-    let notes = calls
+    let notes = read_notes(&kit.workspace(), NOTES_DIR);
+    let references = calls
         .iter()
         .filter(|(name, args, _)| name == "invoke_agent" && args["agent"] == RESEARCHER)
-        .filter_map(|(_, _, result)| note_in_result(result))
+        .filter_map(|(_, _, result)| {
+            let result: Value = serde_json::from_str(result).ok()?;
+            Some(result.get("note")?.clone())
+        })
         .collect();
     let said = events
         .iter()
@@ -263,6 +287,7 @@ async fn run(sse: Script, ndjson: Script) -> Run {
         edges,
         calls,
         notes,
+        references,
         said,
         wall: started.elapsed(),
     }
@@ -392,9 +417,39 @@ async fn deep_research_round_trip_produces_cited_report() {
     assert!(plan.contains("SQ1") && plan.contains("SQ2"), "{plan}");
 
     // Both researchers ran, from one model turn, and each note passed the
-    // schema: it rides the result as `handoff`.
+    // schema. AGE-1295: the host kept each in its own file of round 1, and
+    // the lead's result carries a reference to it, not the note.
     assert_eq!(run.completed(RESEARCHER), 2, "{:?}", run.edges);
     assert_eq!(run.notes.len(), 2, "{:?}", run.calls);
+    assert_eq!(run.references.len(), 2, "{:?}", run.calls);
+    let mut files: Vec<&str> = run
+        .references
+        .iter()
+        .filter_map(|reference| reference["note_file"].as_str())
+        .collect();
+    files.sort_unstable();
+    assert_eq!(
+        files,
+        ["research-notes/1-1.json", "research-notes/1-2.json"]
+    );
+    for (_, args, result) in run
+        .calls
+        .iter()
+        .filter(|(_, args, _)| args["agent"] == RESEARCHER)
+    {
+        assert!(note_in_result(result).is_none(), "no note in {result}");
+        assert!(
+            !result.contains(SQ1_QUOTE) && !result.contains(SQ2_QUOTE),
+            "{args}: {result}"
+        );
+    }
+    // The writer is offered both files.
+    let writer = run.kit.ndjson.requests_for(WRITER_MODEL);
+    let brief = writer[0].json().to_string();
+    assert!(brief.contains(NOTE_FILES_HEADING), "{brief}");
+    for file in &files {
+        assert!(brief.contains(file), "{file} offered to the writer");
+    }
     let researcher = run.kit.ndjson.requests_for("Brief SQ1");
     assert!(!researcher.is_empty());
     let offered = researcher[0].json()["tools"].to_string();
@@ -601,4 +656,186 @@ async fn budget_exhausted_mid_run_still_yields_a_partial_report() {
     );
     assert!(!report.contains("unreachable"), "{report}");
     assert!(report.contains(COST_HEADING), "{report}");
+}
+
+/// A long round summary for the plan: enough text that a few of them fill
+/// a small window.
+fn long_summary(round: usize) -> String {
+    let words: String = (0..2_500).map(|i| format!("r{round}w{i} ")).collect();
+    format!("\n## Round {round}\n\n{words}\n")
+}
+
+/// AGE-1295: a long run whose lead is compacted mid-run, as the first real
+/// run was. Three rounds of researchers, each followed by a long round
+/// summary the lead appends to the plan, on a small window. The notes do
+/// not depend on what the lead's history keeps: each is in its own file,
+/// the lead only ever held references, the writer is offered every file
+/// and reads each one, the host's citation check reads the files and
+/// lists nothing a note carries, and the run's answer opens with the
+/// report's own opening.
+#[tokio::test]
+async fn long_run_with_compaction_keeps_every_note_in_the_workspace() {
+    const WINDOW: i32 = 32_000;
+    // Round → its sub-questions, each with one URL and quote of its own.
+    let rounds: [&[&str]; 3] = [&["QA1", "QB1"], &["QA2", "QB2"], &["QA3"]];
+    let source = |id: &str| {
+        (
+            format!("https://source.example/{}", id.to_lowercase()),
+            format!("quote for {id}"),
+        )
+    };
+    let ids: Vec<&str> = rounds
+        .iter()
+        .flat_map(|round| round.iter().copied())
+        .collect();
+
+    let mut lead = vec![
+        Reply::tool_call("list_agents", json!({})),
+        write(PLAN, "# Plan\n\n- QA: one half\n- QB: the other\n"),
+    ];
+    for (round, members) in rounds.iter().enumerate() {
+        lead.push(Reply::ToolCalls(
+            members.iter().map(|id| research(id)).collect(),
+        ));
+        lead.push(Reply::tool_call(
+            "write_file",
+            json!({ "path": PLAN, "content": long_summary(round + 1), "append": true }),
+        ));
+    }
+    lead.push(invoke(WRITER, format!("Write the report to {REPORT}.")));
+    lead.push(invoke(CHECKER, format!("Check {REPORT}.")));
+    lead.push(Reply::text("Checker: PASS. No sub-question is left open."));
+
+    let citations: Vec<Value> = ids
+        .iter()
+        .map(|id| json!({ "url": source(id).0, "status": "found" }))
+        .collect();
+    let check = json!({ "verdict": "PASS", "citations": citations, "sampled_claims": [] });
+    let sse = Script::new()
+        // The compaction's summary call runs on the lead's own model.
+        .route_body(
+            "You are compacting the working history",
+            (0..8).map(|_| Reply::text("Done so far: rounds of research. Next step: go on.")),
+        )
+        .route(LEAD_MODEL, lead)
+        .route(
+            CHECKER_MODEL,
+            [Reply::text(format!("PASS\n```json\n{check}\n```"))],
+        );
+
+    // Every note file the run will have: round r has one per member.
+    let files: Vec<String> = rounds
+        .iter()
+        .enumerate()
+        .flat_map(|(round, members)| {
+            (1..=members.len()).map(move |n| format!("{NOTES_DIR}/{}-{n}.json", round + 1))
+        })
+        .collect();
+    let report = format!(
+        "# Halves\n\nSources are numbered by note.\n\n## Short answer\n\nBoth halves are \
+         answered [1]({}).\n\n## Details\n\n{}\n\n## Gaps and disagreements\n\n- None\n",
+        source("QA1").0,
+        ids.iter()
+            .enumerate()
+            .map(|(n, id)| format!("- {id} [{}]({})", n + 1, source(id).0))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let mut ndjson = Script::new().route(
+        WRITER_MODEL,
+        [
+            Reply::ToolCalls(
+                files
+                    .iter()
+                    .map(|file| ("read_file".to_string(), json!({ "path": file })))
+                    .collect(),
+            ),
+            write(REPORT, &report),
+            Reply::text(format!("{REPORT}: written from every note.")),
+        ],
+    );
+    for id in &ids {
+        let (url, quote) = source(id);
+        ndjson = ndjson.route_body(
+            format!("Brief {id}."),
+            [handoff(&note(id, &[(url.as_str(), quote.as_str())]))],
+        );
+    }
+    let run = run_in_window(sse, ndjson, Some(WINDOW)).await;
+
+    // The lead's history was compacted mid-run.
+    let summaries = run
+        .kit
+        .sse
+        .requests_for("You are compacting the working history")
+        .len();
+    assert!(summaries >= 1, "the lead's history was compacted");
+    assert_eq!(run.completed(RESEARCHER), ids.len(), "{:?}", run.edges);
+
+    // Every note survived, in its file, whole: quote and all.
+    assert_eq!(run.notes.len(), ids.len());
+    for file in &files {
+        assert!(run.kit.workspace().join(file).is_file(), "{file}");
+    }
+    let kept: Vec<String> = run.notes.iter().map(Value::to_string).collect();
+    for id in &ids {
+        let (url, quote) = source(id);
+        assert!(
+            kept.iter()
+                .any(|note| note.contains(&url) && note.contains(&quote)),
+            "{id}'s note is kept"
+        );
+    }
+
+    // The lead only ever held references: no quote reached its model.
+    assert_eq!(run.references.len(), ids.len());
+    for request in run.kit.sse.requests_for(LEAD_MODEL) {
+        let body = request.json().to_string();
+        for id in &ids {
+            assert!(
+                !body.contains(&source(id).1),
+                "{id}'s quote reached the lead"
+            );
+        }
+    }
+
+    // The writer was offered every note file and read each one.
+    let writer = run.kit.ndjson.requests_for(WRITER_MODEL);
+    let brief = writer[0].json().to_string();
+    assert!(
+        brief.contains(&format!("{NOTE_FILES_HEADING} ({} files", files.len())),
+        "{brief}"
+    );
+    for file in &files {
+        assert!(
+            brief.contains(file.as_str()),
+            "{file} offered to the writer"
+        );
+    }
+    let read = writer[1].json().to_string();
+    for id in &ids {
+        assert!(read.contains(&source(id).1), "the writer read {id}'s note");
+    }
+
+    // The citation check reads the files: nothing a note carries is listed.
+    let finished = run.finish_report();
+    assert!(citations_outside_notes(&finished, &run.notes).is_empty());
+    assert!(!finished.contains(CITATION_CHECK_HEADING), "{finished}");
+
+    // The run's answer opens with the report's own opening, read from the
+    // file, then the lead's last reply.
+    let answer = answer_from_report(
+        &finished,
+        REPORT,
+        "Checker: PASS. No sub-question is left open.",
+    )
+    .expect("a written report has an opening");
+    assert!(
+        answer.starts_with(&format!(
+            "# Halves\n\n## Short answer\n\nBoth halves are answered [1]({}).",
+            source("QA1").0
+        )),
+        "{answer}"
+    );
+    assert!(answer.ends_with("Checker: PASS. No sub-question is left open."));
 }
