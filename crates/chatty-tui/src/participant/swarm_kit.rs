@@ -12,7 +12,7 @@
 //!   (NDJSON) endpoint, so "separate endpoints" is two providers — and starts
 //!   a root [`Broker`] with the declared roster.
 //! - Every worker is the real `chatty-tui` from
-//!   [`worker_executable`], started through a two-line `sh` wrapper that only
+//!   [`worker_executable`], started through a short `sh` wrapper (a probe line, then the exec) that only
 //!   points `HOME` and the XDG directories at the kit's temp dir, so a worker
 //!   reads the kit's config and never the developer's.
 //! - [`SwarmKit::run_leader`] is the leader's `invoke_agent` call: it returns
@@ -637,6 +637,10 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// Set by [`wait_until_executable`]: the wrapper exits before starting a
+/// worker.
+const WRAPPER_PROBE_ENV: &str = "CHATTY_KIT_WRAPPER_PROBE";
+
 /// A `chatty-tui` that runs `real` with the kit's home and XDG dirs, so the
 /// worker reads the kit's settings and keeps any secret in the kit's config
 /// dir (`CHATTY_SECRET_STORE=file`). Everything else is inherited.
@@ -661,7 +665,7 @@ fn wrapper(base: &Path, real: &Path, stall_scale: Option<u32>) -> PathBuf {
         .map(|scale| format!(" {STALL_SCALE_ENV}={scale}"))
         .unwrap_or_default();
     let script = format!(
-        "#!/bin/sh\nexport HOME='{}' XDG_CONFIG_HOME='{}' XDG_DATA_HOME='{}' \
+        "#!/bin/sh\n[ -z \"${WRAPPER_PROBE_ENV}\" ] || exit 0\nexport HOME='{}' XDG_CONFIG_HOME='{}' XDG_DATA_HOME='{}' \
          XDG_CACHE_HOME='{}' XDG_STATE_HOME='{}' XDG_RUNTIME_DIR='{}' \
          CHATTY_SECRET_STORE=file{scale}\nexec '{}' \"$@\"\n",
         dir("home"),
@@ -676,7 +680,31 @@ fn wrapper(base: &Path, real: &Path, stall_scale: Option<u32>) -> PathBuf {
     std::fs::write(&path, script).expect("worker wrapper");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("worker wrapper is executable");
+    wait_until_executable(&path);
     path
+}
+
+/// Block until `script` can be exec'd. A test in this binary that forks
+/// while the wrapper is being written leaves its child holding a copy of
+/// the write descriptor until that child execs, and until then every exec
+/// of the wrapper fails with `ETXTBSY` ("Text file busy"): the worker
+/// never starts and its attempt reads as an error. The descriptor is
+/// closed by now, so once one exec goes through no holder is left and
+/// none can appear later.
+fn wait_until_executable(script: &Path) {
+    for _ in 0..500 {
+        match std::process::Command::new(script)
+            .env(WRAPPER_PROBE_ENV, "1")
+            .stdout(std::process::Stdio::null())
+            .status()
+        {
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            _ => return,
+        }
+    }
+    panic!("the worker wrapper stayed busy (ETXTBSY) for 5 s");
 }
 
 // ---------------------------------------------------------------------------
