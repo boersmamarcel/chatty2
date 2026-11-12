@@ -82,6 +82,20 @@ pub struct PendingApproval {
     pub command: String,
     pub is_sandboxed: bool,
     pub asker: Option<chatty_core::models::execution_approval_store::ApprovalAsker>,
+    /// When the prompt appeared. Keys in the first [`APPROVAL_ARM_DELAY`]
+    /// are ignored, so a `y` typed into a draft before the prompt showed up
+    /// cannot approve it (AGE-1277).
+    pub shown_at: std::time::Instant,
+}
+
+/// How long an approval prompt ignores y/n after it appears (AGE-1277).
+pub const APPROVAL_ARM_DELAY: std::time::Duration = std::time::Duration::from_millis(600);
+
+impl PendingApproval {
+    /// Whether the prompt has been on screen long enough to take an answer.
+    pub fn is_armed(&self) -> bool {
+        self.shown_at.elapsed() >= APPROVAL_ARM_DELAY
+    }
 }
 
 /// Clarifying questions the agent is blocked on, answered one at a time.
@@ -1218,6 +1232,7 @@ impl ChatEngine {
                     command,
                     is_sandboxed,
                     asker,
+                    shown_at: std::time::Instant::now(),
                 });
                 EngineAction::Redraw
             }
@@ -1691,6 +1706,22 @@ pub fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// AGE-1277: a fresh approval prompt is not armed; one shown longer
+    /// than the delay is.
+    #[test]
+    fn approval_prompt_arms_only_after_the_delay() {
+        let mut pending = super::PendingApproval {
+            id: "a1".into(),
+            command: "rm -rf build".into(),
+            is_sandboxed: false,
+            asker: None,
+            shown_at: std::time::Instant::now(),
+        };
+        assert!(!pending.is_armed());
+        pending.shown_at = std::time::Instant::now() - super::APPROVAL_ARM_DELAY;
+        assert!(pending.is_armed());
+    }
+
     use super::*;
     use rig_core::message::UserContent;
 
