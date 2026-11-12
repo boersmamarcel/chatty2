@@ -333,6 +333,7 @@ impl AgentClient {
             ask_user_enabled,
             instructions_dir,
             user_home,
+            data_dir,
             embedded_terminals,
             fabric_transport,
             fabric_owner,
@@ -1392,7 +1393,7 @@ impl AgentClient {
                     .as_ref()
                     .and_then(|settings| settings.workspace_dir.as_ref())
                     .map(std::path::PathBuf::from),
-                dirs::data_dir(),
+                data_dir,
             )
             .with_caller(crate::tools::list_agents_tool::caller_policy(
                 lazy_broker.as_ref(),
@@ -2032,6 +2033,92 @@ mod tests {
             "the home's AGENTS.md: {first}"
         );
         assert!(second.contains(SKILL), "the home's skill: {second}");
+    }
+
+    /// A broker that offers no transport: it only makes `local_agents`
+    /// addressable, so `list_agents` lists them from their specs.
+    struct IdleBroker;
+
+    #[async_trait::async_trait]
+    impl crate::services::lazy_broker::LazyBroker for IdleBroker {
+        fn bound_sockets(&self) -> Vec<std::path::PathBuf> {
+            Vec::new()
+        }
+    }
+
+    /// The `list_agents` result an agent built with `data_dir` gets back for
+    /// a roster of one local agent, `age1134-spec`.
+    async fn list_agents_result_with_data_dir(data_dir: Option<std::path::PathBuf>) -> String {
+        use super::{AgentBuildContext, AgentClient, AgentServices};
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+        use crate::testing::fake_model::{FakeDaemon, Reply, Script};
+        use futures::StreamExt;
+        use rig_agent::streaming::StreamingPrompt;
+
+        const MODEL: &str = "age-1134-model";
+        let _ = crate::init_repositories();
+        let daemon = FakeDaemon::scripted(Script::new().route(
+            MODEL,
+            [
+                Reply::tool_call("list_agents", serde_json::json!({})),
+                Reply::text("done"),
+            ],
+        ));
+        let model = ModelConfig::new(
+            MODEL.to_string(),
+            MODEL.to_string(),
+            ProviderType::OpenRouter,
+            MODEL.to_string(),
+        );
+        let provider = ProviderConfig::new("Hive".to_string(), ProviderType::OpenRouter)
+            .with_api_key("lease-token".to_string())
+            .with_base_url(daemon.base_url());
+        let ctx = AgentBuildContext {
+            data_dir,
+            local_agents: vec!["age1134-spec".to_string()],
+            lazy_broker: Some(std::sync::Arc::new(IdleBroker)),
+            ..AgentBuildContext::from_services(AgentServices::default())
+        };
+        let built = AgentClient::from_model_config_with_tools(&model, &provider, ctx)
+            .await
+            .expect("the agent builds");
+        let mut stream = built.client.agent.stream_prompt("go").max_turns(3).await;
+        while let Some(item) = stream.next().await {
+            item.expect("the run streams");
+        }
+        let requests = daemon.requests();
+        assert_eq!(requests.len(), 2, "the list_agents call, then the answer");
+        String::from_utf8_lossy(&requests[1].body).into_owned()
+    }
+
+    /// AGE-1134: the installed specs `list_agents` describes are the
+    /// `data_dir`'s. With `None` (a multi-tenant host) the operator's spec
+    /// text never reaches the model; with a data dir it does.
+    #[tokio::test]
+    async fn list_agents_reads_specs_only_from_data_dir() {
+        const DESCRIPTION: &str = "AGE1134_OPERATOR_SPEC_DESCRIPTION";
+        let data = tempfile::tempdir().expect("a fake data dir");
+        let agents = data.path().join("chatty").join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(
+            agents.join("age1134-spec.toml"),
+            format!("[agent]\nname = \"age1134-spec\"\ndescription = \"{DESCRIPTION}\"\n"),
+        )
+        .unwrap();
+
+        let without = list_agents_result_with_data_dir(None).await;
+        assert!(
+            without.contains("age1134-spec"),
+            "the roster name still lists: {without}"
+        );
+        assert!(
+            !without.contains(DESCRIPTION),
+            "no data-dir spec: {without}"
+        );
+
+        let with = list_agents_result_with_data_dir(Some(data.path().to_path_buf())).await;
+        assert!(with.contains(DESCRIPTION), "the data dir's spec: {with}");
     }
 
     /// Tool names an Ollama agent is built with when filesystem writes are

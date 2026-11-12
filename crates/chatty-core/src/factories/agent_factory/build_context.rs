@@ -145,6 +145,14 @@ pub struct AgentBuildContext {
     /// one process (`chatty-server` in the `hive` repo) sets it, so no
     /// tenant gets the operator's files (AGE-590).
     pub user_home: Option<std::path::PathBuf>,
+    /// The platform data directory whose `chatty/agents/` holds the agent
+    /// specs the user installed, and which `list_agents` looks a local
+    /// agent's spec up in (AGE-1134). `from_services` sets the process
+    /// owner's, which on the desktop and the TUI is the user's. `None`
+    /// means no data-dir specs: a host serving many users from one process
+    /// (`chatty-server` in the `hive` repo) sets it, so no tenant sees the
+    /// names and descriptions of the operator's installed specs.
+    pub data_dir: Option<std::path::PathBuf>,
     /// The desktop's embedded terminal tabs (AGE-583), a live registry the
     /// dock keeps current. When set, `terminal_read` is always offered and
     /// reads the tabs the human shared (per tab, at call time); a tab never
@@ -336,6 +344,9 @@ impl AgentBuildContext {
             // The process owner's home is the user's on the desktop and the
             // TUI; a multi-tenant host overrides it (AGE-590).
             user_home: dirs::home_dir(),
+            // Likewise the user's own on the desktop and the TUI; a
+            // multi-tenant host overrides it (AGE-1134).
+            data_dir: dirs::data_dir(),
             // Only the desktop has embedded terminals.
             embedded_terminals: None,
             // Only a delegated worker has a connection to its broker.
