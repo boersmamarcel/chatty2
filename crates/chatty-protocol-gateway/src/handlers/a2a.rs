@@ -45,11 +45,23 @@ pub(crate) async fn agent_card(
     Path(module_name): Path<String>,
     State(state): State<GatewayState>,
 ) -> impl IntoResponse {
+    let card = state.feature_cards.get(&module_name);
+
+    // The one role route loopback still serves (AGE-1135): the feature card,
+    // without the fields that reveal swarm topology. A role with no card is
+    // refused like every other role route (BI-7).
     if is_role(&state, &module_name) {
-        return refuse_role(&state, &module_name);
+        return match card {
+            Some(card) => {
+                let mut card = card.clone();
+                strip_topology(&mut card);
+                Json(card).into_response()
+            }
+            None => refuse_role(&state, &module_name),
+        };
     }
 
-    if let Some(card) = state.feature_cards.get(&module_name) {
+    if let Some(card) = card {
         return Json(card.clone()).into_response();
     }
 
@@ -102,6 +114,19 @@ pub(crate) async fn aggregated_agent_card(State(state): State<GatewayState>) -> 
         "agents": agents,
     }))
     .into_response()
+}
+
+/// Remove `callers` and `delegates_to` wherever they live in `value`.
+fn strip_topology(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("callers");
+            map.remove("delegates_to");
+            map.values_mut().for_each(strip_topology);
+        }
+        Value::Array(items) => items.iter_mut().for_each(strip_topology),
+        _ => {}
+    }
 }
 
 /// Whether `name` is one of the broker's roles — a connected participant or
