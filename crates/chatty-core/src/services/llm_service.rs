@@ -522,7 +522,7 @@ pub const BUDGET_SPENT_NOTE: &str = "[Stopped: this response's turn or time budg
 
 /// The normal end of a run whose tool-free wrap-up call asked for a tool
 /// anyway (see [`crate::services::turn_budget`]): rig reports it as
-/// `MaxTurnsError` (a tool call left in the reasoning channel trips
+/// `MaxTurns` (a tool call left in the reasoning channel trips
 /// `EmptyTurnRetry` into one call past the budget; "reached max turns
 /// limit: 51" under `--max-agent-turns 50`) or as the budget hook's own
 /// stop. Either way the model had its last word, so the run ends with it:
@@ -1060,20 +1060,69 @@ mod tests {
     }
 
     use rig_agent::agent::CompletionCall;
-    use rig_core::completion::CompletionError;
     use rig_core::completion::message::{
-        ProviderCallId, Text, ToolCall, CallId, ToolFunction, ToolResult, ToolResultContent,
+        CallId, ToolCall, ToolFunction, ToolResult, ToolResultContent,
     };
-    use rig_core::streaming::ToolCallDeltaContent;
+    use rig_core::error::ProviderError;
+    use rig_core::ProviderResponseError;
+    use rig_core::streaming::{Item, Part, PartKind, StreamEvent};
+    use std::sync::Arc;
 
     use super::{
         BUDGET_SPENT_NOTE, IMAGE_UNSUPPORTED_NOTE, Message, MultiTurnStreamItem, PromptError,
-        RequestRecorder, StreamChunk, StreamErrorKind, StreamedAssistantContent,
-        StreamedUserContent, StreamingError, UsageClock, UsageSemantics, WRAP_UP_TOOL_CALL_STOP,
-        budget_spent_end, classify_completion_error, classify_streaming_error, cut_off_tool_call,
-        failed_run_messages, map_item, map_stream_result, normalize_usage,
-        streamed_tool_result_to_text, strip_unsupported_images, tool_result_looks_like_error,
+        RequestRecorder, StreamChunk, StreamErrorKind, UsageClock, UsageSemantics,
+        WRAP_UP_TOOL_CALL_STOP, budget_spent_end, classify_streaming_error, failed_run_messages,
+        map_item, map_stream_result, normalize_usage, streamed_tool_result_to_text,
+        strip_unsupported_images, tool_result_looks_like_error,
     };
+
+    /// The usage rig 0.46 reads off an OpenRouter chat completion whose
+    /// `usage` block is `usage`, through chatty's own OpenRouter client.
+    async fn openrouter_usage(usage: serde_json::Value) -> rig_core::completion::Usage {
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "gen-1",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "m",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hi"},
+                    "finish_reason": "stop",
+                }],
+                "usage": usage,
+            })))
+            .mount(&server)
+            .await;
+        let model = ModelConfig::new("m".into(), "m".into(), ProviderType::OpenRouter, "m".into());
+        let provider = ProviderConfig::new("or".into(), ProviderType::OpenRouter)
+            .with_api_key("k".into())
+            .with_base_url(format!("{}/v1", server.uri()));
+        crate::factories::agent_factory::completion_model(&model, &provider)
+            .unwrap()
+            .for_request(false)
+            .call(rig_core::completion::CompletionRequest::new(Message::user("hi")))
+            .await
+            .expect("the fake server answers")
+            .usage
+    }
+
+    fn status_error(code: u16) -> PromptError {
+        PromptError::Provider(ProviderError::ProviderResponse(ProviderResponseError::new(
+            reqwest::StatusCode::from_u16(code).unwrap(),
+            "{}",
+        )))
+    }
+
+    fn response_error(message: &str) -> PromptError {
+        PromptError::Provider(ProviderError::Response(message.to_string()))
+    }
     use rig_core::message::{Image, UserContent};
 
     // ── AGE image-input-on-text-only-model guard ─────────────────────────────
@@ -1127,9 +1176,9 @@ mod tests {
     fn unsupported_model_replaces_a_tool_result_image_with_a_note() {
         let tool_result = ToolResult {
             call: CallId::from_wire("call-1"),
-            provider: None,
-            name: "pdf_to_image".to_string(),
+            name: crate::testing::tool_name("pdf_to_image"),
             content: vec![ToolResultContent::Image(Image::default())],
+            is_error: false,
         };
         let history = vec![Message::User {
             content: vec![UserContent::ToolResult(tool_result)],
@@ -1156,16 +1205,16 @@ mod tests {
     #[test]
     fn usage_normalisation_agrees_across_provider_conventions() {
         let mut anthropic = rig_core::completion::Usage::new();
-        anthropic.input_tokens = 200;
-        anthropic.cached_input_tokens = 9_000;
-        anthropic.cache_creation_input_tokens = 800;
-        anthropic.output_tokens = 30;
+        anthropic.input_tokens = Some(200);
+        anthropic.cached_input_tokens = Some(9_000);
+        anthropic.cache_creation_input_tokens = Some(800);
+        anthropic.output_tokens = Some(30);
 
         let mut openai_style = rig_core::completion::Usage::new();
-        openai_style.input_tokens = 200 + 9_000 + 800;
-        openai_style.cached_input_tokens = 9_000;
-        openai_style.cache_creation_input_tokens = 800;
-        openai_style.output_tokens = 30;
+        openai_style.input_tokens = Some(200 + 9_000 + 800);
+        openai_style.cached_input_tokens = Some(9_000);
+        openai_style.cache_creation_input_tokens = Some(800);
+        openai_style.output_tokens = Some(30);
 
         let a = normalize_usage(UsageSemantics::InputExcludesCache, 2, &anthropic);
         let o = normalize_usage(UsageSemantics::InputIncludesCache, 2, &openai_style);
@@ -1184,18 +1233,15 @@ mod tests {
     /// silently-zero cache read is indistinguishable from a cache that is not
     /// working, which is the thing ADR-0010's threshold is measured against
     /// (AGE-278).
-    #[test]
-    fn openrouter_cached_tokens_reach_the_normalised_record() {
-        let reported: rig_core::providers::openrouter::Usage = serde_json::from_str(
+    #[tokio::test]
+    async fn openrouter_cached_tokens_reach_the_normalised_record() {
+        let reported = openrouter_usage(serde_json::from_str(
             r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120,
                 "prompt_tokens_details":{"cached_tokens":1200,"cache_write_tokens":300}}"#,
         )
-        .expect("an OpenRouter usage block deserializes");
-        let call = normalize_usage(
-            UsageSemantics::InputIncludesCache,
-            1,
-            &rig_core::completion::Usage::from(&reported),
-        );
+        .unwrap())
+        .await;
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &reported);
         assert_eq!(call.cache_read_tokens, 1_200);
         assert_eq!(call.cache_write_tokens, 300);
         // OpenRouter counts both inside `prompt_tokens`; chatty stores the
@@ -1203,15 +1249,12 @@ mod tests {
         assert_eq!(call.input_tokens, 3_500);
         assert_eq!(call.prompt_tokens(), 5_000);
 
-        let uncached: rig_core::providers::openrouter::Usage = serde_json::from_str(
+        let uncached = openrouter_usage(serde_json::from_str(
             r#"{"prompt_tokens":5000,"completion_tokens":120,"total_tokens":5120}"#,
         )
-        .expect("usage without a details block deserializes");
-        let call = normalize_usage(
-            UsageSemantics::InputIncludesCache,
-            1,
-            &rig_core::completion::Usage::from(&uncached),
-        );
+        .unwrap())
+        .await;
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &uncached);
         assert_eq!(call.cache_read_tokens, 0);
         assert_eq!(call.input_tokens, 5_000);
         assert_eq!(call.cache_hit_rate(), Some(0.0));
@@ -1219,18 +1262,15 @@ mod tests {
 
     /// Reasoning tokens reach the per-call record, where the headless usage
     /// file sums them (they are part of `output_tokens`, not on top of it).
-    #[test]
-    fn reasoning_tokens_reach_the_normalised_record() {
-        let reported: rig_core::providers::openrouter::Usage = serde_json::from_str(
+    #[tokio::test]
+    async fn reasoning_tokens_reach_the_normalised_record() {
+        let reported = openrouter_usage(serde_json::from_str(
             r#"{"prompt_tokens":50,"completion_tokens":40,"total_tokens":90,
                 "completion_tokens_details":{"reasoning_tokens":25}}"#,
         )
-        .expect("an OpenRouter usage block deserializes");
-        let call = normalize_usage(
-            UsageSemantics::InputIncludesCache,
-            1,
-            &rig_core::completion::Usage::from(&reported),
-        );
+        .unwrap())
+        .await;
+        let call = normalize_usage(UsageSemantics::InputIncludesCache, 1, &reported);
         assert_eq!(call.reasoning_tokens, 25);
         assert_eq!(call.output_tokens, 40);
     }
@@ -1238,8 +1278,8 @@ mod tests {
     #[test]
     fn usage_normalisation_never_underflows_on_inconsistent_counts() {
         let mut odd = rig_core::completion::Usage::new();
-        odd.input_tokens = 10;
-        odd.cached_input_tokens = 50;
+        odd.input_tokens = Some(10);
+        odd.cached_input_tokens = Some(50);
         let n = normalize_usage(UsageSemantics::InputIncludesCache, 1, &odd);
         assert_eq!(n.input_tokens, 0);
         assert_eq!(n.cache_read_tokens, 50);
@@ -1260,7 +1300,7 @@ mod tests {
     fn streamed_tool_result_serializes_json_payload_for_ui() {
         let tool_result = ToolResult {
             call: CallId::from_wire("call-1"),
-            name: "query_data".into(),
+            name: crate::testing::tool_name("query_data"),
             content: vec![ToolResultContent::json(serde_json::json!({
                 "markdown_table": "| a |\n| --- |\n| 1 |",
                 "preview": {
@@ -1272,7 +1312,7 @@ mod tests {
                     "source": {"kind": "query", "sql": "SELECT 1"}
                 }
             }))],
-            provider: None,
+            is_error: false,
         };
 
         let text = streamed_tool_result_to_text(&tool_result);
@@ -1287,9 +1327,10 @@ mod tests {
 
     #[test]
     fn map_item_maps_text() {
-        let item = MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-            Text::new("hello"),
-        ));
+        let item = MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Text {
+            part: Part::new(0),
+            text: "hello".into(),
+        }));
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], StreamChunk::Text(t) if t == "hello"));
@@ -1301,12 +1342,10 @@ mod tests {
     /// responding" while the provider is busy the whole time.
     #[test]
     fn map_item_maps_reasoning_delta_to_a_chunk() {
-        let item =
-            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ReasoningDelta {
-                id: "r-1".into(),
-                provider_id: None,
-                reasoning: "Let me think".into(),
-            });
+        let item = MultiTurnStreamItem::StreamAssistantItem(Item::Event(StreamEvent::Reasoning {
+            part: Part::new(0),
+            text: "Let me think".into(),
+        }));
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], StreamChunk::Reasoning(t) if t == "Let me think"));
@@ -1318,31 +1357,33 @@ mod tests {
     /// count as activity in the meantime.
     #[test]
     fn map_item_maps_tool_call_delta_to_a_chunk() {
-        for content in [
-            ToolCallDeltaContent::Name("write_file".into()),
-            ToolCallDeltaContent::Delta("{\"path\": \"src/".into()),
+        for event in [
+            StreamEvent::Start {
+                part: Part::new(0),
+                kind: PartKind::ToolCall,
+                name: Some(crate::testing::tool_name("write_file")),
+            },
+            StreamEvent::Arguments {
+                part: Part::new(0),
+                json: "{\"path\": \"src/".into(),
+            },
         ] {
-            let item =
-                MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCallDelta {
-                    internal_call_id: "internal-1".into(),
-                    content,
-                });
+            let item = MultiTurnStreamItem::StreamAssistantItem(Item::Event(event));
             let chunks = map_item(item, UsageSemantics::InputIncludesCache);
             assert_eq!(chunks.len(), 1);
             assert!(matches!(&chunks[0], StreamChunk::ToolCallDelta));
         }
     }
 
+    /// rig 0.46 reports a call once history holds it (a projection of
+    /// committed history, AGE-1151); its one id is the provider's.
     #[test]
-    fn map_item_tool_call_prefers_provider_call_id() {
+    fn map_item_tool_call_uses_the_provider_call_id() {
         let tool_call = ToolCall::from_wire(
             "call-99",
-            ToolFunction::new("read_file".into(), serde_json::json!({"path": "README.md"})),
+            ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "README.md"})),
         );
-        let item = MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-            tool_call,
-            internal_call_id: "internal-1".into(),
-        });
+        let item = MultiTurnStreamItem::ToolCall { tool_call };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 2);
         assert!(matches!(
@@ -1358,19 +1399,17 @@ mod tests {
     }
 
     #[test]
-    fn map_item_tool_call_falls_back_to_internal_call_id_without_a_provider_id() {
+    fn map_item_tool_call_without_a_provider_id_uses_rigs_own() {
+        let local = rig_core::message::LocalCallId::new();
         let tool_call = ToolCall::new(
-            CallId::Local(rig_core::message::LocalCallId::new()),
-            ToolFunction::new("search_code".into(), serde_json::json!({})),
+            CallId::Local(local),
+            ToolFunction::new(crate::testing::tool_name("search_code"), serde_json::json!({})),
         );
-        let item = MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
-            tool_call,
-            internal_call_id: "internal-42".into(),
-        });
+        let item = MultiTurnStreamItem::ToolCall { tool_call };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert!(matches!(
             &chunks[0],
-            StreamChunk::ToolCallStarted { id, .. } if id == "internal-42"
+            StreamChunk::ToolCallStarted { id, .. } if *id == local.to_string()
         ));
     }
 
@@ -1378,14 +1417,11 @@ mod tests {
     fn map_item_tool_result_text_is_success() {
         let tool_result = ToolResult {
             call: CallId::from_wire("call-1"),
-            name: "read_file".into(),
+            name: crate::testing::tool_name("read_file"),
             content: vec![ToolResultContent::text("# Chatty")],
-            provider: ProviderCallId::new("call-1"),
+            is_error: false,
         };
-        let item = MultiTurnStreamItem::StreamUserItem(StreamedUserContent::tool_result(
-            tool_result,
-            "internal-1".into(),
-        ));
+        let item = MultiTurnStreamItem::ToolResult { tool_result };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
@@ -1399,22 +1435,19 @@ mod tests {
     fn map_item_tool_result_error_prefix_becomes_tool_call_error() {
         let tool_result = ToolResult {
             call: CallId::from_wire("call-1"),
-            name: "run_shell".into(),
+            name: crate::testing::tool_name("run_shell"),
             content: vec![ToolResultContent::text(
                 "Error: run_shell: exited with status 1",
             )],
-            provider: None,
+            is_error: false,
         };
-        let item = MultiTurnStreamItem::StreamUserItem(StreamedUserContent::tool_result(
-            tool_result,
-            "internal-1".into(),
-        ));
+        let item = MultiTurnStreamItem::ToolResult { tool_result };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
             &chunks[0],
             StreamChunk::ToolCallError { id, error }
-                if id == "internal-1" && error.starts_with("Error:")
+                if id == "call-1" && error.starts_with("Error:")
         ));
     }
 
@@ -1422,14 +1455,11 @@ mod tests {
     fn map_item_tool_result_json_is_serialised_to_text() {
         let tool_result = ToolResult {
             call: CallId::from_wire("call-1"),
-            name: "query_data".into(),
+            name: crate::testing::tool_name("query_data"),
             content: vec![ToolResultContent::json(serde_json::json!({"rows": 1}))],
-            provider: None,
+            is_error: false,
         };
-        let item = MultiTurnStreamItem::StreamUserItem(StreamedUserContent::tool_result(
-            tool_result,
-            "internal-1".into(),
-        ));
+        let item = MultiTurnStreamItem::ToolResult { tool_result };
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert!(matches!(
             &chunks[0],
@@ -1442,6 +1472,7 @@ mod tests {
         let item = MultiTurnStreamItem::CompletionCall(CompletionCall::new(
             1,
             rig_core::completion::Usage::new(),
+            serde_json::Value::Null,
         ));
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
@@ -1454,8 +1485,8 @@ mod tests {
     #[test]
     fn map_item_final_response_yields_turn_usage() {
         let mut usage = rig_core::completion::Usage::new();
-        usage.input_tokens = 100;
-        usage.output_tokens = 20;
+        usage.input_tokens = Some(100);
+        usage.output_tokens = Some(20);
         let item = MultiTurnStreamItem::final_response(Vec::new(), usage);
         let chunks = map_item(item, UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
@@ -1467,7 +1498,7 @@ mod tests {
 
     #[test]
     fn map_stream_result_err_yields_error_and_ends_the_stream() {
-        let err = StreamingError::Completion(CompletionError::ResponseError("boom".into()));
+        let err = response_error("boom");
         let (chunks, stop) = map_stream_result(Err(err), UsageSemantics::InputIncludesCache);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(
@@ -1479,16 +1510,13 @@ mod tests {
 
     #[test]
     fn a_truncated_stream_says_the_connection_closed() {
-        let err = StreamingError::Completion(CompletionError::ResponseError(
-            "provider stream ended without a terminal record; treating the turn as truncated"
-                .into(),
-        ));
+        let err = PromptError::Provider(ProviderError::Truncated);
         let (chunks, _) = map_stream_result(Err(err), UsageSemantics::InputIncludesCache);
         assert!(matches!(
             &chunks[0],
             StreamChunk::Error(e) if e.kind == StreamErrorKind::Transport
                 && e.message.starts_with("The connection to the model provider closed")
-                && e.message.contains("without a terminal record")
+                && e.message.contains("the reply ended before the provider ended it")
         ));
     }
 
@@ -1497,17 +1525,10 @@ mod tests {
     // correctly to a StreamErrorKind.
     // -------------------------------------------------------------------
 
-    fn status_error(code: u16) -> CompletionError {
-        use rig_core::http_client;
-        CompletionError::HttpError(http_client::Error::InvalidStatusCode(
-            reqwest::StatusCode::from_u16(code).unwrap(),
-        ))
-    }
-
     #[test]
     fn classifies_401_as_auth() {
         assert_eq!(
-            classify_completion_error(&status_error(401)),
+            classify_streaming_error(&status_error(401)),
             StreamErrorKind::Auth
         );
     }
@@ -1515,7 +1536,7 @@ mod tests {
     #[test]
     fn classifies_403_as_auth() {
         assert_eq!(
-            classify_completion_error(&status_error(403)),
+            classify_streaming_error(&status_error(403)),
             StreamErrorKind::Auth
         );
     }
@@ -1523,7 +1544,7 @@ mod tests {
     #[test]
     fn classifies_429_as_rate_limited() {
         assert_eq!(
-            classify_completion_error(&status_error(429)),
+            classify_streaming_error(&status_error(429)),
             StreamErrorKind::RateLimited
         );
     }
@@ -1531,7 +1552,7 @@ mod tests {
     #[test]
     fn classifies_5xx_as_provider_status() {
         assert_eq!(
-            classify_completion_error(&status_error(503)),
+            classify_streaming_error(&status_error(503)),
             StreamErrorKind::ProviderStatus(503)
         );
     }
@@ -1540,7 +1561,9 @@ mod tests {
     fn classifies_json_error_as_malformed_tool_call() {
         let json_err = serde_json::from_str::<serde_json::Value>("{not json").unwrap_err();
         assert_eq!(
-            classify_completion_error(&CompletionError::JsonError(json_err)),
+            classify_streaming_error(&PromptError::Provider(ProviderError::Json(Arc::new(
+                json_err
+            )))),
             StreamErrorKind::MalformedToolCall
         );
     }
@@ -1548,32 +1571,9 @@ mod tests {
     #[test]
     fn classifies_response_error_with_no_status_as_transport() {
         assert_eq!(
-            classify_completion_error(&CompletionError::ResponseError("boom".into())),
+            classify_streaming_error(&response_error("boom")),
             StreamErrorKind::Transport
         );
-    }
-
-    /// AGE-983: rig's error for a streamed tool call whose arguments never
-    /// parsed is a malformed tool call (nudged), not a transport failure
-    /// (re-sent, and cut off again).
-    #[test]
-    fn classifies_a_cut_off_tool_call_as_malformed() {
-        let cut_off = CompletionError::ResponseError(
-            "tool call `write_file` arrived with malformed JSON input: EOF while parsing a \
-             string at line 1 column 13114"
-                .into(),
-        );
-        assert_eq!(
-            classify_completion_error(&cut_off),
-            StreamErrorKind::MalformedToolCall
-        );
-        let err = StreamingError::Completion(cut_off);
-        assert_eq!(
-            cut_off_tool_call(&err).map(|cut| cut.tool),
-            Some("write_file".to_string())
-        );
-        let transport = StreamingError::Completion(CompletionError::ResponseError("boom".into()));
-        assert!(cut_off_tool_call(&transport).is_none());
     }
 
     /// AGE-936: a run rig ended because its last turn was cut off with no
@@ -1581,13 +1581,11 @@ mod tests {
     /// transport failure headless would re-run five times into the same cap.
     #[test]
     fn classifies_a_cut_off_turn_with_no_answer_as_empty() {
-        let err = CompletionError::ResponseError(
-            "the model produced no answer and stopped with finish_reason=Length; the turn ran \
-             out of output budget before producing one — raise max_tokens for this request"
-                .into(),
+        let err = response_error(
+            &rig_core::completion::FinishReason::Length.no_answer_message(),
         );
         assert_eq!(
-            classify_completion_error(&err),
+            classify_streaming_error(&err),
             StreamErrorKind::EmptyCompletion
         );
         assert_eq!(
@@ -1602,11 +1600,11 @@ mod tests {
 
     #[test]
     fn classifies_max_turns_as_other() {
-        let err = StreamingError::Prompt(Box::new(PromptError::MaxTurnsError {
+        let err = PromptError::MaxTurns {
             max_turns: 10,
-            chat_history: Box::new(Vec::new()),
-            prompt: Box::new(Message::user("hi")),
-        }));
+            chat_history: Vec::new(),
+            prompt: Message::user("hi"),
+        };
         assert_eq!(classify_streaming_error(&err), StreamErrorKind::Other);
     }
 
@@ -1614,21 +1612,25 @@ mod tests {
     /// outright `Stop` as max-turns/cancellation/memory errors.
     #[test]
     fn classifies_unknown_tool_call_distinctly_from_other() {
-        let err = StreamingError::Prompt(Box::new(PromptError::UnknownToolCall {
+        let err = PromptError::UnknownToolCall {
             tool_name: "web_search".to_string(),
             available_tools: vec!["search_web".to_string()],
             allowed_tools: vec!["search_web".to_string()],
-            chat_history: Box::new(Vec::new()),
-        }));
+            chat_history: Vec::new(),
+        };
         assert_eq!(
             classify_streaming_error(&err),
             StreamErrorKind::UnknownToolCall
         );
     }
 
+    /// A provider failure relayed as an effect report keeps its status.
     #[test]
-    fn classifies_prompt_completion_error_by_delegating() {
-        let err = StreamingError::Prompt(Box::new(PromptError::CompletionError(status_error(401))));
+    fn classifies_a_relayed_report_by_its_status() {
+        let report = rig_core::ErrorReport::from(ProviderError::ProviderResponse(
+            ProviderResponseError::new(reqwest::StatusCode::UNAUTHORIZED, "{}"),
+        ));
+        let err = PromptError::Report(report);
         assert_eq!(classify_streaming_error(&err), StreamErrorKind::Auth);
     }
 
@@ -1657,11 +1659,11 @@ mod tests {
             Message::user("the task"),
             Message::assistant("partial work"),
         ];
-        let max_turns = StreamingError::Prompt(Box::new(PromptError::MaxTurnsError {
+        let max_turns = PromptError::MaxTurns {
             max_turns: 51,
-            chat_history: Box::new(history.clone()),
-            prompt: Box::new(Message::user("tool results")),
-        }));
+            chat_history: history.clone(),
+            prompt: Message::user("tool results"),
+        };
         assert_eq!(
             chunk_names(&budget_spent_end(&max_turns, 2, true).unwrap()),
             vec!["TurnMessages(2)", "Done"]
@@ -1675,10 +1677,10 @@ mod tests {
             ]
         );
 
-        let stopped = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+        let stopped = PromptError::Cancelled {
             chat_history: history,
             reason: WRAP_UP_TOOL_CALL_STOP.to_string(),
-        }));
+        };
         assert_eq!(
             chunk_names(&budget_spent_end(&stopped, 4, true).unwrap()),
             vec!["Done"]
@@ -1688,12 +1690,12 @@ mod tests {
     /// Any other error, a user's cancel included, is still an error.
     #[test]
     fn other_errors_are_not_budget_ends() {
-        let cancelled = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+        let cancelled = PromptError::Cancelled {
             chat_history: Vec::new(),
             reason: "user stop".to_string(),
-        }));
+        };
         assert!(budget_spent_end(&cancelled, 0, true).is_none());
-        let transport = StreamingError::Completion(CompletionError::ProviderError("boom".into()));
+        let transport = PromptError::Provider(ProviderError::Provider("boom".into()));
         assert!(budget_spent_end(&transport, 0, true).is_none());
     }
 
@@ -1707,28 +1709,27 @@ mod tests {
         let call = Message::Assistant(rig_core::message::AssistantMessage::new(vec![rig_core::message::AssistantContent::ToolCall(
                 ToolCall::new(
                     CallId::from_wire("call_1"),
-                    ToolFunction::new("read_file".into(), serde_json::json!({"path": "a"})),
+                    ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "a"})),
                 ),
             )]));
         let result = Message::User {
             content: vec![rig_core::message::UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire("call_1"),
-                name: "read_file".into(),
+                name: crate::testing::tool_name("read_file"),
                 content: vec![ToolResultContent::text("contents")],
-                provider: None,
+                is_error: false,
             })],
         };
         let recorder = RequestRecorder::default();
-        let transport = StreamingError::Completion(CompletionError::ProviderError(
+        let transport = PromptError::Provider(ProviderError::Provider(
             "Http client error: error sending request for url".into(),
         ));
 
-        recorder.record(vec![
-            earlier.clone(),
-            prompt.clone(),
-            call.clone(),
-            result.clone(),
-        ]);
+        recorder.record(
+            [&earlier, &prompt, &call, &result]
+                .map(|m| Arc::new(m.clone()))
+                .to_vec(),
+        );
         match failed_run_messages(&transport, &recorder, 1) {
             Some(StreamChunk::TurnMessages(messages)) => {
                 assert_eq!(messages, vec![prompt.clone(), call.clone(), result.clone()]);
@@ -1740,11 +1741,11 @@ mod tests {
             "the record is handed on once"
         );
 
-        recorder.record(vec![earlier, prompt, call, result]);
-        let cancelled = StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+        recorder.record([earlier, prompt, call, result].map(Arc::new).to_vec());
+        let cancelled = PromptError::Cancelled {
             chat_history: Vec::new(),
             reason: "stop".into(),
-        }));
+        };
         assert!(failed_run_messages(&cancelled, &recorder, 1).is_none());
     }
 

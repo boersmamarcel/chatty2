@@ -800,7 +800,7 @@ mod tests {
             &http_client::Error::InvalidStatusCodeWithDetails {
                 status: reqwest::StatusCode::BAD_REQUEST,
                 body: VLLM_OVERFLOW.to_string(),
-                headers: Box::default(),
+                headers: Default::default(),
             }
         ));
         assert!(!is_context_overflow(&status_error(

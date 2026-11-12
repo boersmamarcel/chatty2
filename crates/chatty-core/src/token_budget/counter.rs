@@ -302,11 +302,11 @@ mod tests {
         let text_result = Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::Local(rig_core::message::LocalCallId::new()),
-                provider: None,
-                name: "test_tool".to_string(),
+                name: crate::testing::tool_name("test_tool"),
                 content: vec![ToolResultContent::Text(
                     rig_core::completion::message::Text::new("Hello, world!"),
                 )],
+                is_error: false,
             })],
         };
         assert_eq!(c.count_message(&text_result), 4);
@@ -314,9 +314,9 @@ mod tests {
         let image_result = Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::Local(rig_core::message::LocalCallId::new()),
-                provider: None,
-                name: "test_tool".to_string(),
+                name: crate::testing::tool_name("test_tool"),
                 content: vec![ToolResultContent::Image(Image::default())],
+                is_error: false,
             })],
         };
         assert_eq!(c.count_message(&image_result), NON_TEXT_CONTENT_TOKENS);
@@ -329,8 +329,7 @@ mod tests {
         let c = TokenCounter::for_model("gpt-4");
         let message = Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
                 CallId::Local(rig_core::message::LocalCallId::new()),
-                ToolFunction::new(
-                    "run_command".to_string(),
+                ToolFunction::new(crate::testing::tool_name("run_command"),
                     serde_json::json!({"command": "ls -la"}),
                 ),
             ))]));

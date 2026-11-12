@@ -475,9 +475,9 @@ fn persisted_tool_round_trips_become_steps() {
         user_message("Read it"),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                 AssistantContent::text("Let me look."),
-                AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
+                AssistantContent::tool_call("call-1", crate::testing::tool_name("read_file"), serde_json::json!({})),
             ])),
-        Message::tool_result("call-1", "read_file", "contents"),
+        Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "contents"),
         assistant_message("Let me look.\n\nDone"),
     ];
     let conv = make_conversation_data(
@@ -647,11 +647,11 @@ fn no_image_attachments_produces_plain_string_message() {
 
 #[test]
 fn tool_calls_with_observation() {
-    use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
+    use rig_core::completion::message::{CallId, ToolCall, ToolFunction};
 
     let trace = SystemTrace {
         items: vec![TraceItem::ToolCall(ToolCallBlock {
-            id: "tc_1".to_string(),
+            id: "call_abc".to_string(),
             tool_name: "read_file".to_string(),
             display_name: "read_file".to_string(),
             input: r#"{"path":"/tmp/file.txt"}"#.to_string(),
@@ -667,16 +667,7 @@ fn tool_calls_with_observation() {
         active_tool_index: None,
     };
 
-    let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall {
-            id: CallId::from_wire("tc_1"),
-            provider: ProviderCallId::new("call_abc"),
-            function: ToolFunction {
-                name: "read_file".to_string(),
-                arguments: serde_json::json!({"path": "/tmp/file.txt"}),
-            },
-            signature: None,
-            additional_params: None,
-        })]))];
+    let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_abc"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/file.txt"}),)))]))];
 
     let conv = make_conversation_data(
         "id",
@@ -741,12 +732,12 @@ fn reasoning_extracted_from_trace() {
 
 #[test]
 fn duplicate_tool_names_matched_by_id() {
-    use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
+    use rig_core::completion::message::{CallId, ToolCall, ToolFunction};
 
     let trace = SystemTrace {
         items: vec![
             TraceItem::ToolCall(ToolCallBlock {
-                id: "tc_1".to_string(),
+                id: "call_001".to_string(),
                 tool_name: "read_file".to_string(),
                 display_name: "read_file".to_string(),
                 input: r#"{"path":"/tmp/a.txt"}"#.to_string(),
@@ -759,7 +750,7 @@ fn duplicate_tool_names_matched_by_id() {
                 execution_engine: None,
             }),
             TraceItem::ToolCall(ToolCallBlock {
-                id: "tc_2".to_string(),
+                id: "call_002".to_string(),
                 tool_name: "read_file".to_string(),
                 display_name: "read_file".to_string(),
                 input: r#"{"path":"/tmp/b.txt"}"#.to_string(),
@@ -777,26 +768,8 @@ fn duplicate_tool_names_matched_by_id() {
     };
 
     let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-            AssistantContent::ToolCall(ToolCall {
-                id: CallId::from_wire("tc_1"),
-                provider: ProviderCallId::new("call_001"),
-                function: ToolFunction {
-                    name: "read_file".to_string(),
-                    arguments: serde_json::json!({"path": "/tmp/a.txt"}),
-                },
-                signature: None,
-                additional_params: None,
-            }),
-            AssistantContent::ToolCall(ToolCall {
-                id: CallId::from_wire("tc_2"),
-                provider: ProviderCallId::new("call_002"),
-                function: ToolFunction {
-                    name: "read_file".to_string(),
-                    arguments: serde_json::json!({"path": "/tmp/b.txt"}),
-                },
-                signature: None,
-                additional_params: None,
-            }),
+            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_001"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/a.txt"}),))),
+            AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_002"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/b.txt"}),))),
         ]))];
 
     let conv = make_conversation_data(
@@ -948,7 +921,7 @@ fn shorter_parallel_arrays_dont_panic() {
 
 #[test]
 fn snapshot_full_conversation() {
-    use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
+    use rig_core::completion::message::{CallId, ToolCall, ToolFunction};
 
     let trace = SystemTrace {
         items: vec![
@@ -960,7 +933,7 @@ fn snapshot_full_conversation() {
                 state: ThinkingState::Completed,
             }),
             TraceItem::ToolCall(ToolCallBlock {
-                id: "tc_1".to_string(),
+                id: "call_001".to_string(),
                 tool_name: "read_file".to_string(),
                 display_name: "Read File".to_string(),
                 input: r#"{"path":"/tmp/hello.txt"}"#.to_string(),
@@ -985,16 +958,7 @@ fn snapshot_full_conversation() {
     let history = vec![
         user_message("Read the file /tmp/hello.txt"),
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                AssistantContent::ToolCall(ToolCall {
-                    id: CallId::from_wire("tc_1"),
-                    provider: ProviderCallId::new("call_001"),
-                    function: ToolFunction {
-                        name: "read_file".to_string(),
-                        arguments: serde_json::json!({"path": "/tmp/hello.txt"}),
-                    },
-                    signature: None,
-                    additional_params: None,
-                }),
+                AssistantContent::ToolCall(ToolCall::new(CallId::from_wire("call_001"), ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "/tmp/hello.txt"}),))),
                 AssistantContent::Text(Text::new("The file contains: Hello, World!")),
             ])),
     ];
@@ -1060,25 +1024,16 @@ mod full_run {
     }
 
     fn call(id: &str, name: &str, arguments: Value) -> AssistantContent {
-        AssistantContent::ToolCall(ToolCall {
-            id: CallId::from_wire(id),
-            provider: None,
-            function: ToolFunction {
-                name: name.to_string(),
-                arguments,
-            },
-            signature: None,
-            additional_params: None,
-        })
+        AssistantContent::ToolCall(ToolCall::new(CallId::from_wire(id), ToolFunction::new(crate::testing::tool_name(name), arguments)))
     }
 
     fn result(id: &str, name: &str, text: &str) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire(id),
-                name: name.to_string(),
+                name: crate::testing::tool_name(name),
                 content: vec![ToolResultContent::text(text)],
-                provider: None,
+                is_error: false,
             })],
         }
     }

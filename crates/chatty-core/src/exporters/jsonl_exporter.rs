@@ -577,7 +577,7 @@ mod tests {
                 data: DocumentSourceKind::Base64("fake-base64".to_string()),
                 media_type: Some(ImageMediaType::JPEG),
                 detail: None,
-                additional_params: None,
+                ..Default::default()
             }),
         ];
 
@@ -607,11 +607,11 @@ mod tests {
 
     #[test]
     fn sft_includes_tool_calls() {
-        use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
+        use rig_core::completion::message::{CallId, ToolCall, ToolFunction};
 
         let trace = crate::models::message_types::SystemTrace {
             items: vec![TraceItem::ToolCall(ToolCallBlock {
-                id: "tc_1".to_string(),
+                id: "call_abc".to_string(),
                 tool_name: "read_file".to_string(),
                 display_name: "read_file".to_string(),
                 input: "{}".to_string(),
@@ -630,16 +630,13 @@ mod tests {
         let history = vec![
             user_message("Read the file"),
             Message::Assistant(rig_core::message::AssistantMessage::new(vec![
-                    AssistantContent::ToolCall(ToolCall {
-                        id: CallId::from_wire("tc_1"),
-                        provider: ProviderCallId::new("call_abc"),
-                        function: ToolFunction {
-                            name: "read_file".to_string(),
-                            arguments: serde_json::json!({"path": "/tmp/file.txt"}),
-                        },
-                        signature: None,
-                        additional_params: None,
-                    }),
+                    AssistantContent::ToolCall(ToolCall::new(
+                        CallId::from_wire("call_abc"),
+                        ToolFunction::new(
+                            crate::testing::tool_name("read_file"),
+                            serde_json::json!({"path": "/tmp/file.txt"}),
+                        ),
+                    )),
                     AssistantContent::Text(Text::new("Here is the file")),
                 ])),
         ];
@@ -680,9 +677,9 @@ mod tests {
             user_message("Read the file"),
             Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                     AssistantContent::text("Let me look."),
-                    AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
+                    AssistantContent::tool_call("call-1", crate::testing::tool_name("read_file"), serde_json::json!({})),
                 ])),
-            Message::tool_result("call-1", "read_file", "file contents"),
+            Message::tool_result(rig_core::message::CallId::from_wire("call-1"), crate::testing::tool_name("read_file"), "file contents"),
             assistant_message("Let me look.\n\nHere is the file"),
         ];
         let conv = make_conversation_data(

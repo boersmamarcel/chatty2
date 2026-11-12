@@ -426,7 +426,7 @@ mod tests {
 
     /// AGE-983, criterion 2: the recovery is bounded. After
     /// [`MAX_CUT_OFF_RECOVERIES`] answered cut-offs, the next one ends the
-    /// turn with rig's error, as a malformed tool call (the protocol nudge
+    /// turn with rig's error (rig 0.46's wording), as a malformed tool call (the protocol nudge
     /// follows), not a transport failure to re-send.
     #[tokio::test]
     async fn repeated_cut_offs_end_the_turn_after_the_limit() {
@@ -453,7 +453,7 @@ mod tests {
         assert!(
             errors[0]
                 .message
-                .contains("arrived with malformed JSON input"),
+                .contains("was called with arguments that are not a JSON object"),
             "{}",
             errors[0].message
         );

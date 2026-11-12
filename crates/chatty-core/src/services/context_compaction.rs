@@ -680,16 +680,16 @@ mod tests {
     use super::*;
 
     fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, name, args)]))
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name(name), args)]))
     }
 
     fn result(id: &str, text: &str) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(rig_core::message::ToolResult {
                 call: rig_core::message::CallId::from_wire(id),
-                provider: None,
-                name: "t".into(),
+                name: crate::testing::tool_name("t"),
                 content: vec![ToolResultContent::Text(Text::new(text.to_string()))],
+                is_error: false,
             })],
         }
     }

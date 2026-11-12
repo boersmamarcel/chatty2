@@ -410,7 +410,13 @@ impl AgentHook for TurnBudget {
             ctx.scratchpad().get::<WrapUpCall>(),
             Some(WrapUpCall(t)) if t == ctx.turn()
         );
-        if !wrap_up {
+        // A call whose arguments did not parse is `CutOffCalls`'s, as it was
+        // rig 0.42's stream error rather than an invalid call (AGE-1151).
+        let malformed = matches!(
+            event.reason,
+            rig_agent::agent::InvalidToolCallReason::MalformedArguments { .. }
+        );
+        if !wrap_up || malformed {
             return None;
         }
         tracing::warn!(
@@ -443,7 +449,6 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem};
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
     use rig_core::completion::Message;
     use rig_core::message::UserContent;
@@ -701,13 +706,13 @@ mod tests {
         ]);
         let agent = AgentBuilder::new(model.clone()).tool(MockAddTool).build();
 
-        let mut stream = TurnBudget::new(2).apply(agent.stream_prompt("add")).await;
+        let mut stream = TurnBudget::new(2).apply(agent.prompt("add")).stream();
         let mut final_text = None;
         while let Some(item) = stream.next().await {
             if let MultiTurnStreamItem::FinalResponse(response) =
                 item.expect("the run ends without an error")
             {
-                final_text = Some(response.output);
+                final_text = Some(response.output());
             }
         }
         assert_eq!(final_text.as_deref(), Some("best answer so far: 3"));
@@ -721,9 +726,17 @@ mod tests {
         // tells the model the next reply is its last.
         let last = |i: usize| requests[i].chat_history.last().cloned().unwrap();
         assert_eq!(tool_result_texts(&last(1)), vec!["3".to_string()]);
-        assert_eq!(
-            tool_result_texts(&last(2)),
-            vec![format!("3\n\n{FINAL_TURN_NOTE}")]
+        // AGE-1151, awaiting a decision: rig 0.46 sends a request without
+        // tools its history's calls and results as text (`[called tool …]`,
+        // `[tool … result] …`); rig 0.42 sent them as tool messages. The
+        // note still rides on the last result.
+        let Message::User { content } = &*last(2) else {
+            panic!("the wrap-up call ends on the results")
+        };
+        assert!(
+            matches!(&content[..], [UserContent::Text(text)]
+                if text.text == format!("[tool add result] 3\n\n{FINAL_TURN_NOTE}")),
+            "{content:?}"
         );
     }
 
@@ -741,13 +754,13 @@ mod tests {
             Duration::from_secs(1),
         )));
 
-        let mut stream = budget.apply(agent.stream_prompt("add")).await;
+        let mut stream = budget.apply(agent.prompt("add")).stream();
         let mut final_text = None;
         while let Some(item) = stream.next().await {
             if let MultiTurnStreamItem::FinalResponse(response) =
                 item.expect("the run ends without an error")
             {
-                final_text = Some(response.output);
+                final_text = Some(response.output());
             }
         }
         assert_eq!(final_text.as_deref(), Some("out of time: 3"));
@@ -765,7 +778,7 @@ mod tests {
         let model = MockCompletionModel::from_stream_turns(turns);
         let agent = AgentBuilder::new(model.clone()).tool(MockAddTool).build();
 
-        let mut stream = TurnBudget::new(0).apply(agent.stream_prompt("add")).await;
+        let mut stream = TurnBudget::new(0).apply(agent.prompt("add")).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run ends without an error");
         }
@@ -788,7 +801,7 @@ mod tests {
         ]);
         let agent = AgentBuilder::new(model.clone()).tool(MockAddTool).build();
 
-        let mut stream = TurnBudget::new(2).apply(agent.stream_prompt("add")).await;
+        let mut stream = TurnBudget::new(2).apply(agent.prompt("add")).stream();
         let mut error = None;
         while let Some(item) = stream.next().await {
             if let Err(e) = item {
@@ -799,12 +812,8 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                rig_agent::agent::StreamingError::Prompt(e)
-                    if matches!(
-                        e.as_ref(),
-                        rig_agent::completion::PromptError::PromptCancelled { reason, .. }
-                            if reason == WRAP_UP_TOOL_CALL_STOP
-                    )
+                rig_agent::completion::PromptError::Cancelled { reason, .. }
+                    if reason == WRAP_UP_TOOL_CALL_STOP
             ),
             "{error}"
         );

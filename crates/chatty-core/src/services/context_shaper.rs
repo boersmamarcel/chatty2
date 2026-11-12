@@ -1487,9 +1487,9 @@ mod tests {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire(id),
-                provider: None,
-                name: "test_tool".to_string(),
+                name: crate::testing::tool_name("test_tool"),
                 content: vec![content],
+                is_error: false,
             })],
         }
     }
@@ -1858,9 +1858,7 @@ mod tests {
     }
 
     fn tool_call(id: &str) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
-                id,
-                "test_tool",
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name("test_tool"),
                 serde_json::json!({}),
             )]))
     }
@@ -1957,7 +1955,7 @@ mod tests {
         assert_round_trips_intact(&shaped.messages);
         assert!(result_text(&shaped.messages[1]).contains("2 messages snipped"));
         assert!(
-            call_ids(&shaped.messages[2]).any(|id| id.as_ref() == "t1"),
+            call_ids(&shaped.messages[2]).any(|id| id.to_string() == "t1"),
             "the kept tail opens with the call it answers"
         );
     }
@@ -1974,7 +1972,7 @@ mod tests {
         };
         // Unadjusted, the head would end on `t0`'s call, whose result is the
         // first message the snip drops.
-        assert!(call_ids(&history[1]).any(|id| id.as_ref() == "t0"));
+        assert!(call_ids(&history[1]).any(|id| id.to_string() == "t0"));
 
         let shaper = shaper_just_over(&history, settings);
         let shaped = shaper.shape(&history, 0).expect("over budget");
@@ -2038,7 +2036,7 @@ mod tests {
                 data: DocumentSourceKind::base64("AAAA"),
                 media_type: Some(ImageMediaType::PNG),
                 detail: None,
-                additional_params: None,
+                ..Default::default()
             }),
         );
         assert!(!cap_tool_results(&mut message, 1));
@@ -2092,7 +2090,7 @@ mod tests {
                 data: DocumentSourceKind::base64("AAAA"),
                 media_type: Some(ImageMediaType::PNG),
                 detail: None,
-                additional_params: None,
+                ..Default::default()
             }),
         ])
         .unwrap();
@@ -2194,7 +2192,6 @@ mod turn_start_tests {
     use super::*;
     use futures::StreamExt;
     use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
     use rig_core::completion::message::AssistantContent;
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -2227,16 +2224,16 @@ mod turn_start_tests {
                     AssistantContent::text(words(300, &format!("plan {id}"))),
                     AssistantContent::tool_call(
                         &id,
-                        "execute_code",
+                        crate::testing::tool_name("execute_code"),
                         serde_json::json!({ "code": words(1_500, "code") }),
                     ),
                 ])));
             messages.push(Message::User {
                 content: vec![UserContent::ToolResult(ToolResult {
                     call: CallId::from_wire(&id),
-                    provider: None,
-                    name: "execute_code".to_string(),
+                    name: crate::testing::tool_name("execute_code"),
                     content: vec![ToolResultContent::Text(Text::new("fee 12.34 EUR"))],
+                    is_error: false,
                 })],
             });
         }
@@ -2402,17 +2399,16 @@ mod turn_start_tests {
             MockStreamEvent::final_response_with_total_tokens(4),
         ]]);
         let mut stream = agent(&model, &shaper)
-            .stream_prompt("continue the task")
+            .prompt("continue the task")
             .history(history.clone())
-            .max_turns(2)
-            .await;
+            .max_turns(2).stream();
         while let Some(item) = stream.next().await {
             item.expect("the turn completes");
         }
 
         let requests = model.requests();
         assert_eq!(requests.len(), 1);
-        let sent = &requests[0].chat_history;
+        let sent: &Vec<Message> = &requests[0].chat_history.iter().map(|m| (**m).clone()).collect();
         assert!(
             BASE + tokens(sent) <= WINDOW - WINDOW / 10 - RESPONSE_RESERVE,
             "{} tokens sent",
@@ -2440,10 +2436,9 @@ mod turn_start_tests {
             MockStreamEvent::final_response_with_total_tokens(4),
         ]]);
         let mut stream = agent(&model, &shaper)
-            .stream_prompt("continue")
+            .prompt("continue")
             .history(history)
-            .max_turns(2)
-            .await;
+            .max_turns(2).stream();
         let mut error = None;
         while let Some(item) = stream.next().await {
             if let Err(e) = item {
@@ -2465,7 +2460,6 @@ mod compaction_tests {
     use crate::services::context_compaction::COMPACTION_HEADER;
     use futures::StreamExt;
     use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
     use rig_core::completion::message::AssistantContent;
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
@@ -2485,16 +2479,16 @@ mod compaction_tests {
     }
 
     fn call(id: &str, name: &str, args: serde_json::Value) -> Message {
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, name, args)]))
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name(name), args)]))
     }
 
     fn result(id: &str, name: &str, text: String) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire(id),
-                provider: None,
-                name: name.to_string(),
+                name: crate::testing::tool_name(name),
                 content: vec![ToolResultContent::Text(Text::new(text))],
+                is_error: false,
             })],
         }
     }
@@ -2571,7 +2565,7 @@ mod compaction_tests {
     async fn below_the_threshold_nothing_is_compacted() {
         let history = coding_run(12);
         let shaper = shaper_at(&history, 0.80);
-        let model = MockCompletionModel::new([MockTurn::text(PROSE)]);
+        let model = MockCompletionModel::from_turns([MockTurn::text(PROSE)]);
         shaper.enable_compaction(Some(summarizer(&model)), None);
 
         let prompt = Message::user("go on");
@@ -2583,7 +2577,7 @@ mod compaction_tests {
     async fn over_the_threshold_the_old_part_becomes_a_grounded_summary() {
         let history = coding_run(24);
         let shaper = shaper_at(&history, 0.95);
-        let model = MockCompletionModel::new([MockTurn::text(format!("<think>x</think>{PROSE}"))]);
+        let model = MockCompletionModel::from_turns([MockTurn::text(format!("<think>x</think>{PROSE}"))]);
         shaper.enable_compaction(Some(summarizer(&model)), None);
 
         let sent = shaper
@@ -2624,7 +2618,7 @@ mod compaction_tests {
     async fn a_failed_summary_call_falls_back_to_a_deterministic_summary() {
         let history = coding_run(24);
         let shaper = shaper_at(&history, 0.95);
-        let model = MockCompletionModel::new([MockTurn::error("provider down")]);
+        let model = MockCompletionModel::from_turns([MockTurn::error("provider down")]);
         shaper.enable_compaction(Some(summarizer(&model)), None);
 
         let sent = shaper
@@ -2648,7 +2642,7 @@ mod compaction_tests {
     async fn later_requests_reuse_the_compaction() {
         let mut history = coding_run(24);
         let shaper = shaper_at(&history, 0.95);
-        let model = MockCompletionModel::new([MockTurn::text(PROSE)]);
+        let model = MockCompletionModel::from_turns([MockTurn::text(PROSE)]);
         shaper.enable_compaction(Some(summarizer(&model)), None);
         let first = shaper
             .prepare_request(&history, &Message::user("go on"), 1)
@@ -2706,7 +2700,7 @@ mod compaction_tests {
         let counter = counter();
         let total = tokens(&history) + counter.count_message(&Message::user(prompt_text));
         let shaper = ContextShaper::new(settings(), counter, Some((total as f64 / 0.95) as usize));
-        let utility = MockCompletionModel::new([MockTurn::text(PROSE)]);
+        let utility = MockCompletionModel::from_turns([MockTurn::text(PROSE)]);
         shaper.enable_compaction(Some(summarizer(&utility)), None);
 
         let model = MockCompletionModel::from_stream_turns([vec![
@@ -2718,20 +2712,27 @@ mod compaction_tests {
             .add_hook(shaper.clone())
             .build();
         let mut stream = agent
-            .stream_prompt(prompt_text)
+            .prompt(prompt_text)
             .history(history.clone())
-            .max_turns(2)
-            .await;
+            .max_turns(2).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run succeeds");
         }
 
         let requests = model.requests();
         assert_eq!(requests.len(), 1);
-        let sent = &requests[0].chat_history;
+        let sent: &Vec<Message> = &requests[0].chat_history.iter().map(|m| (**m).clone()).collect();
         assert!(text_of(&sent[0]).starts_with(COMPACTION_HEADER));
         assert!(sent.len() < history.len());
-        assert_eq!(text_of(sent.last().unwrap()), prompt_text);
+        // rig 0.46 joins adjacent user messages (AGE-1151): the prompt
+        // closes the message that holds the last tool result.
+        let Message::User { content } = sent.last().unwrap() else {
+            panic!("the request ends on a user message")
+        };
+        assert!(
+            matches!(content.last(), Some(UserContent::Text(t)) if t.text == prompt_text),
+            "{content:?}"
+        );
         assert_round_trips_intact(sent, &[]);
         assert_eq!(utility.request_count(), 1);
     }
@@ -2745,7 +2746,6 @@ mod results_ledger_tests {
     use crate::services::results_ledger::{LEDGER_HEADER, figures_not_in};
     use futures::StreamExt;
     use rig_agent::agent::{AgentBuilder, MultiTurnStreamItem};
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockToolError;
     use rig_agent::tool::{Tool, ToolContext};
     use rig_core::completion::message::AssistantContent;
@@ -2826,9 +2826,7 @@ mod results_ledger_tests {
         } else {
             "reviewer"
         };
-        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
-                id,
-                "invoke_agent",
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(id, crate::testing::tool_name("invoke_agent"),
                 serde_json::json!({ "agent": agent, "prompt": task }),
             )]))
     }
@@ -2837,9 +2835,9 @@ mod results_ledger_tests {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire(id),
-                provider: None,
-                name: name.to_string(),
+                name: crate::testing::tool_name(name),
                 content: vec![ToolResultContent::Json { value }],
+                is_error: false,
             })],
         }
     }
@@ -2895,7 +2893,7 @@ mod results_ledger_tests {
             let id = format!("r{n}");
             history.push(Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
                     &id,
-                    "read_file",
+                    crate::testing::tool_name("read_file"),
                     serde_json::json!({ "path": format!("f{n}.rs") }),
                 )])));
             history.push(result(
@@ -3048,18 +3046,18 @@ mod results_ledger_tests {
             .tool(FakeInvokeAgent)
             .add_hook(shaper.clone())
             .build();
-        let mut stream = agent.stream_prompt(TASK).max_turns(2 * CHAPTERS + 2).await;
+        let mut stream = agent.prompt(TASK).max_turns(2 * CHAPTERS + 2).stream();
         let mut answer = None;
         while let Some(item) = stream.next().await {
             if let MultiTurnStreamItem::FinalResponse(response) = item.expect("the run succeeds") {
-                answer = Some(response.output);
+                answer = Some(response.output());
             }
         }
         assert_eq!(answer.as_deref(), Some(table.as_str()));
 
         let requests = model.requests();
         assert_eq!(requests.len(), 2 * CHAPTERS + 1);
-        let last: Vec<Message> = requests.last().unwrap().chat_history.to_vec();
+        let last: Vec<Message> = requests.last().unwrap().chat_history.iter().map(|m| (**m).clone()).collect();
         let text = all_text(&last);
         assert!(
             text.contains("messages snipped"),

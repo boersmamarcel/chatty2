@@ -771,26 +771,7 @@ fn approval_preview(summary: &str) -> String {
 mod tests {
     use super::approval_preview;
     use super::edit_excel_parameters_schema;
-    use rig_core::completion::ToolDefinition;
-    use rig_core::providers::gemini::completion::gemini_api_types::{Schema, Tool};
     use serde_json::Value;
-
-    fn assert_no_empty_types(schema: &Schema) {
-        assert!(
-            !schema.r#type.is_empty(),
-            "Gemini schema type should never be empty"
-        );
-
-        if let Some(items) = &schema.items {
-            assert_no_empty_types(items);
-        }
-
-        if let Some(properties) = &schema.properties {
-            for property_schema in properties.values() {
-                assert_no_empty_types(property_schema);
-            }
-        }
-    }
 
     #[test]
     fn edit_excel_schema_defines_nested_array_items() {
@@ -830,19 +811,10 @@ mod tests {
 
     #[test]
     fn edit_excel_schema_converts_to_gemini_without_empty_types() {
-        let gemini_tool = Tool::try_from(ToolDefinition {
-            name: "edit_excel".to_string(),
-            description: "Edit an existing Excel file".to_string(),
-            parameters: edit_excel_parameters_schema(),
-        })
-        .expect("edit_excel schema should convert for Gemini");
-
-        let parameters = gemini_tool.function_declarations[0]
-            .parameters
-            .as_ref()
-            .expect("edit_excel should expose Gemini parameters");
-
-        assert_no_empty_types(parameters);
+        crate::tools::gemini_compat_tests::assert_no_empty_types(
+            &edit_excel_parameters_schema(),
+            "edit_excel",
+        );
     }
 
     #[test]

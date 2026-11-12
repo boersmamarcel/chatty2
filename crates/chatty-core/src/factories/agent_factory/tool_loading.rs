@@ -569,6 +569,17 @@ fn load_tools_groups(message: &Message) -> Vec<&str> {
     }
 }
 
+/// Whether `event` is a call whose tool name is the problem (unknown, or not
+/// allowed this turn), not one whose arguments did not parse, which rig 0.46
+/// offers to the same hooks (AGE-1151).
+pub(super) fn is_name_problem(event: &InvalidToolCallContext) -> bool {
+    matches!(
+        event.reason,
+        rig_agent::agent::InvalidToolCallReason::UnknownTool
+            | rig_agent::agent::InvalidToolCallReason::DisallowedByToolChoice
+    )
+}
+
 impl AgentHook for ToolLoader {
     async fn on_completion_call(
         &self,
@@ -592,7 +603,7 @@ impl AgentHook for ToolLoader {
         _ctx: &HookContext,
         event: &InvalidToolCallContext,
     ) -> Option<InvalidToolCallAction> {
-        if event.available_tools.is_empty() {
+        if event.available_tools.is_empty() || !is_name_problem(event) {
             return None;
         }
         let group = self.unloaded_group_of(&event.tool_name)?;
@@ -806,7 +817,7 @@ mod tests {
     fn call(name: &str) -> Message {
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
                 CallId::from_wire("call_1"),
-                ToolFunction::new(name.to_string(), serde_json::json!({})),
+                ToolFunction::new(crate::testing::tool_name(name), serde_json::json!({})),
             ))]))
     }
 
@@ -874,7 +885,7 @@ mod tests {
         let (loader, _) = calibrated(&[]);
         let load = Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
                 CallId::from_wire("call_1"),
-                ToolFunction::new("load_tools".into(), serde_json::json!({"group": "web"})),
+                ToolFunction::new(crate::testing::tool_name("load_tools"), serde_json::json!({"group": "web"})),
             ))]));
         loader.load_groups_called_in(&[Message::user("task"), load]);
         assert_eq!(loader.loaded_groups(), ["web"]);
@@ -938,7 +949,6 @@ mod tests {
 
     use futures::StreamExt;
     use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
     use rig_core::completion::CompletionRequest;
     use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -1003,7 +1013,7 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|definition| (definition.name, 10))
+            .map(|definition| (definition.name.to_string(), 10))
             .collect();
         let shaper = ContextShaper::new(
             Default::default(),
@@ -1015,17 +1025,16 @@ mod tests {
     }
 
     fn advertised(request: &CompletionRequest) -> Vec<String> {
-        let mut names: Vec<String> = request.tools.iter().map(|t| t.name.clone()).collect();
+        let mut names: Vec<String> = request.tools.iter().map(|t| t.name.to_string()).collect();
         names.sort();
         names
     }
 
     async fn run(agent: &rig_agent::Agent, history: Vec<Message>) {
         let mut stream = agent
-            .stream_prompt("go")
+            .prompt("go")
             .history(history)
-            .max_turns(5)
-            .await;
+            .max_turns(5).stream();
         while let Some(item) = stream.next().await {
             item.expect("the run succeeds");
         }
@@ -1059,14 +1068,14 @@ mod tests {
             Message::user("earlier task"),
             Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
                     CallId::from_wire("call_0"),
-                    ToolFunction::new("fetch".into(), serde_json::json!({})),
+                    ToolFunction::new(crate::testing::tool_name("fetch"), serde_json::json!({})),
                 ))])),
             Message::User {
                 content: vec![UserContent::ToolResult(rig_core::message::ToolResult {
                     call: CallId::from_wire("call_0"),
-                    name: "fetch".into(),
+                    name: crate::testing::tool_name("fetch"),
                     content: vec![rig_core::message::ToolResultContent::text("page")],
-                    provider: None,
+                    is_error: false,
                 })],
             },
             Message::assistant("fetched"),

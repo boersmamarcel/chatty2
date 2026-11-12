@@ -802,7 +802,7 @@ mod tests {
     /// result of the call it names, after the assistant message that made
     /// the call — not as a user message.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_tool_message_reaches_the_provider_as_a_tool_result() {
+    async fn a_tool_message_reaches_the_provider_without_tools_as_text() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/chat/completions"))
@@ -846,13 +846,18 @@ mod tests {
             .body_json()
             .unwrap();
         let messages = sent["messages"].as_array().expect("messages");
+        // AGE-1151, awaiting a decision: a request that declares no tools
+        // gets its history's calls and results as text under rig 0.46; rig
+        // 0.42 sent them as a `tool_calls` message and a `tool` message.
         assert_eq!(messages.len(), 3, "{sent}");
         assert_eq!(messages[1]["role"], "assistant", "{sent}");
-        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_7", "{sent}");
-        assert_eq!(messages[1]["tool_calls"][0]["function"]["name"], "count");
-        assert_eq!(messages[2]["role"], "tool", "{sent}");
-        assert_eq!(messages[2]["tool_call_id"], "call_7", "{sent}");
-        assert_eq!(messages[2]["content"], "3", "{sent}");
+        assert_eq!(messages[1]["content"], "[called tool count with {}]", "{sent}");
+        assert_eq!(messages[2]["role"], "user", "{sent}");
+        assert_eq!(
+            messages[2]["content"][0]["text"],
+            "[tool count result] 3",
+            "{sent}"
+        );
     }
 
     /// The call's deadline still bounds a provider that answers late: the

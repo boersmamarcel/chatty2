@@ -373,7 +373,7 @@ mod tests {
         assert!(has_output(&[text("done")]));
         assert!(has_output(&[AssistantContent::ToolCall(ToolCall::new(
             CallId::from_wire("call-1".to_string()),
-            ToolFunction::new("read_file".to_string(), serde_json::json!({"path": "x"})),
+            ToolFunction::new(crate::testing::tool_name("read_file"), serde_json::json!({"path": "x"})),
         ))]));
     }
 

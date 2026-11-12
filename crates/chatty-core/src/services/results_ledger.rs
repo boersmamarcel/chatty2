@@ -471,7 +471,7 @@ mod tests {
     fn call(id: &str, agent: &str, prompt: &str) -> Message {
         Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::tool_call(
                 id,
-                DELEGATION_TOOL,
+                crate::testing::tool_name(DELEGATION_TOOL),
                 serde_json::json!({ "agent": agent, "prompt": prompt }),
             )]))
     }
@@ -480,9 +480,9 @@ mod tests {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
                 call: CallId::from_wire(id),
-                provider: None,
-                name: DELEGATION_TOOL.to_string(),
+                name: crate::testing::tool_name(DELEGATION_TOOL),
                 content: vec![content],
+                is_error: false,
             })],
         }
     }

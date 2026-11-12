@@ -861,7 +861,7 @@ mod tests {
             .flatten()
             .filter_map(|c| match c {
                 AssistantContent::ToolCall(call) => {
-                    Some((call.function.name.clone(), call.function.arguments.clone()))
+                    Some((call.function.name.to_string(), call.function.arguments_value()))
                 }
                 _ => None,
             })
@@ -870,7 +870,9 @@ mod tests {
             calls,
             [
                 ("read_file".to_string(), serde_json::json!({ "path": "x" })),
-                ("final_answer".to_string(), serde_json::json!("")),
+                // rig 0.46 keeps a call's arguments as an object: an
+                // empty argument string is `{}` (AGE-1151).
+                ("final_answer".to_string(), serde_json::json!({})),
             ]
         );
         let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &messages[0] else {

@@ -343,10 +343,8 @@ where
 #[cfg(test)]
 mod tests {
     use futures::StreamExt;
-    use rig_agent::agent::AgentBuilder;
-    use rig_agent::streaming::StreamingPrompt;
     use rig_agent::test_utils::MockAddTool;
-    use rig_core::completion::{CompletionRequestBuilder, ToolDefinition};
+    use rig_core::completion::{CompletionRequest, ToolDefinition};
     use rig_core::message::{AssistantContent, Message, UserContent};
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, Request as WireRequest, ResponseTemplate};
@@ -375,15 +373,15 @@ mod tests {
     }
 
     fn add_tool() -> ToolDefinition {
-        ToolDefinition {
-            name: "add".to_string(),
-            description: "add two numbers".to_string(),
-            parameters: serde_json::json!({
+        ToolDefinition::new(
+            crate::testing::tool_name("add"),
+            "add two numbers",
+            serde_json::json!({
                 "type": "object",
                 "properties": {"x": {"type": "number"}, "y": {"type": "number"}},
                 "required": ["x", "y"],
             }),
-        }
+        )
     }
 
     fn usage() -> serde_json::Value {
@@ -435,10 +433,9 @@ mod tests {
     }
 
     /// One non-streaming request with the `add` tool through `model`.
-    async fn send_with_tools(model: rig_agent::ModelHandle) -> rig_core::completion::Usage {
-        CompletionRequestBuilder::new(model, Message::user("hi"))
-            .tools(vec![add_tool()])
-            .send()
+    async fn send_with_tools(model: &CompletionModel) -> rig_core::completion::Usage {
+        model
+            .call(CompletionRequest::new(Message::user("hi")).tools(vec![add_tool()]))
             .await
             .expect("the fake server answers")
             .usage
@@ -485,13 +482,12 @@ mod tests {
             "sk-openai",
             "gpt-6.1-sol",
             super::super::connect_retry_http::ConnectRetryHttpClient::new(
-                crate::services::http_client::llm_client().clone(),
+                crate::services::http_client::llm_client().clone().into(),
             ),
-        )
-        .unwrap();
-        let usage = send_with_tools(model).await;
-        assert_eq!(usage.cached_input_tokens, 4);
-        assert_eq!(usage.reasoning_tokens, 2);
+        );
+        let usage = send_with_tools(&model).await;
+        assert_eq!(usage.cached_input_tokens, Some(4));
+        assert_eq!(usage.reasoning_tokens, Some(2));
 
         let body = only_body(&server).await;
         assert_eq!(body["tools"][0]["name"], "add");
@@ -526,7 +522,7 @@ mod tests {
             &format!("{}/v1", server.uri()),
         );
         ensure_tools_reachable(&model_config, &provider_config).unwrap();
-        send_with_tools(completion_model(&model_config, &provider_config).unwrap()).await;
+        send_with_tools(completion_model(&model_config, &provider_config).unwrap().for_request(true)).await;
         assert_eq!(
             only_body(&server).await["tools"][0]["function"]["name"],
             "add"
@@ -554,23 +550,20 @@ mod tests {
             "sk-compat",
             &format!("{}/v1", server.uri()),
         );
-        let mut request = CompletionRequestBuilder::new(
-            completion_model(&compat, &compat_provider).unwrap(),
-            "hi",
-        )
-        .tools(vec![add_tool()]);
+        let compat_models = completion_model(&compat, &compat_provider).unwrap();
+        let mut request = CompletionRequest::new(Message::user("hi")).tools(vec![add_tool()]);
         if let Some(params) =
             crate::factories::agent_factory::request_params(&compat, &ProviderType::OpenRouter)
         {
             request = request.additional_params(params);
         }
-        request.send().await.unwrap();
+        compat_models.for_request(true).call(request).await.unwrap();
 
         let inference = format!("{}/models", server.uri());
         let azure_provider = provider(ProviderType::AzureOpenAI, "sk-azure", &inference);
         let azure = model(ProviderType::AzureOpenAI, false);
         assert_eq!(azure_wire(&inference), AzureWire::ChatCompletionsOnly);
-        send_with_tools(completion_model(&azure, &azure_provider).unwrap()).await;
+        send_with_tools(completion_model(&azure, &azure_provider).unwrap().for_request(true)).await;
 
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 2);
@@ -611,8 +604,8 @@ mod tests {
         );
         ensure_tools_reachable(&model_config, &provider_config).unwrap();
         let usage =
-            send_with_tools(completion_model(&model_config, &provider_config).unwrap()).await;
-        assert_eq!(usage.cached_input_tokens, 4);
+            send_with_tools(completion_model(&model_config, &provider_config).unwrap().for_request(true)).await;
+        assert_eq!(usage.cached_input_tokens, Some(4));
 
         let requests = server.received_requests().await.unwrap();
         assert!(
@@ -649,12 +642,11 @@ mod tests {
                 "sk-azure",
                 &format!("{}{pasted}", server.uri()),
             );
-            let reply = CompletionRequestBuilder::new(
-                completion_model(&model_config, &provider_config).unwrap(),
-                Message::user("hi"),
-            )
-            .send()
-            .await
+            let reply = completion_model(&model_config, &provider_config)
+                .unwrap()
+                .for_request(false)
+                .call(CompletionRequest::new(Message::user("hi")))
+                .await
             .expect("chat completions answers");
             assert!(
                 reply
@@ -697,7 +689,7 @@ mod tests {
                 server.uri()
             ),
         );
-        send_with_tools(completion_model(&model_config, &provider_config).unwrap()).await;
+        send_with_tools(completion_model(&model_config, &provider_config).unwrap().for_request(true)).await;
     }
 
     /// Every Azure URL a portal shows is read for its resource: the v1 base,
@@ -864,19 +856,19 @@ mod tests {
 
         let model_config = model(ProviderType::AzureOpenAI, true);
         let provider_config = provider(ProviderType::AzureOpenAI, "sk-azure", &server.uri());
-        let agent = AgentBuilder::from_model_handle(
-            completion_model(&model_config, &provider_config).unwrap(),
-        )
-        .tool(MockAddTool)
-        .build();
+        let agent = completion_model(&model_config, &provider_config)
+            .unwrap()
+            .agent_builder()
+            .tool(MockAddTool)
+            .build();
 
-        let mut stream = agent.stream_prompt("add 2 and 3").max_turns(3).await;
+        let mut stream = agent.prompt("add 2 and 3").max_turns(3).stream();
         let mut history = None;
         while let Some(item) = stream.next().await {
             if let rig_agent::agent::MultiTurnStreamItem::FinalResponse(done) =
                 item.expect("the run succeeds")
             {
-                history = done.messages;
+                history = Some(done.messages);
             }
         }
 

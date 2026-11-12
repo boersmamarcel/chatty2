@@ -79,12 +79,15 @@ async fn connect() -> RunningService<RoleClient, ()> {
 
 async fn tool_set(client: &RunningService<RoleClient, ()>, timeout: Duration) -> ToolSet {
     let tools = client.list_all_tools().await.expect("tools/list");
-    ToolSet::from_dynamic_tools(
-        tools
-            .into_iter()
-            .map(|tool| mcp_dynamic_tool_with_timeout(tool, client.peer().clone(), timeout))
-            .collect(),
-    )
+    let mut set = ToolSet::default();
+    for tool in tools {
+        set.add_dynamic_tool(mcp_dynamic_tool_with_timeout(
+            tool,
+            client.peer().clone(),
+            timeout,
+        ));
+    }
+    set
 }
 
 #[tokio::test]
@@ -92,7 +95,7 @@ async fn lists_server_tools_as_rig_definitions() {
     let client = connect().await;
     let set = tool_set(&client, MCP_TOOL_TIMEOUT).await;
 
-    let definitions = set.get_tool_definitions();
+    let definitions = set.tool_definitions();
     let names: Vec<&str> = definitions.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(names, ["echo", "fail", "structured", "hang"]);
     let echo = &definitions[0];

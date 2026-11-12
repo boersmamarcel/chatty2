@@ -1829,16 +1829,14 @@ mod tests {
         if let Some(text) = text {
             content.push(AssistantContent::text(text));
         }
-        content.push(AssistantContent::tool_call(
-            id,
-            "read_file",
+        content.push(AssistantContent::tool_call(id, crate::testing::tool_name("read_file"),
             serde_json::json!({ "path": format!("{id}.md") }),
         ));
         Message::Assistant(rig_core::message::AssistantMessage::new(content))
     }
 
     fn tool_result(id: &str) -> Message {
-        Message::tool_result(id, "read_file", format!("contents of {id}"))
+        Message::tool_result(rig_core::message::CallId::from_wire(id), crate::testing::tool_name("read_file"), format!("contents of {id}"))
     }
 
     /// rig's record of a turn with two tool calls: the prompt, two
@@ -1891,10 +1889,10 @@ mod tests {
                 assert!(
                     content.iter().any(|ac| matches!(
                         ac,
-                        AssistantContent::ToolCall(tc) if tc.id.as_str() == result.call.as_str()
+                        AssistantContent::ToolCall(tc) if tc.id == result.call
                     )),
                     "tool result {} at index {i} does not follow its call",
-                    result.call.as_str()
+                    result.call
                 );
             }
         }
