@@ -151,21 +151,17 @@ pub(super) fn build_agent_step(
 
     for ac in content.iter() {
         if let AssistantContent::ToolCall(tc) = ac {
-            let atif_id = tc
-                .provider
-                .as_ref()
-                .map(|p| p.call_id.clone())
-                .unwrap_or_else(|| tc.id.to_string());
+            let atif_id = tc.id.to_string();
 
             tool_calls_vec.push(AtifToolCall {
                 tool_call_id: atif_id.clone(),
-                function_name: tc.function.name.clone(),
-                arguments: tc.function.arguments.clone(),
+                function_name: tc.function.name.to_string(),
+                arguments: tc.function.arguments_value(),
                 extra: plugin_extra(&tc.function.name),
             });
 
             // If we have output from the trace, add it to observation results
-            if let Some(output) = trace_outputs.get(tc.id.as_str()) {
+            if let Some(output) = trace_outputs.get(tc.id.to_string().as_str()) {
                 observation_results.push(AtifObservationResult {
                     source_call_id: Some(atif_id),
                     content: Some(output.clone()),

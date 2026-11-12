@@ -1,5 +1,5 @@
-//! Reading a message history that was written before assistant content
-//! carried a `type` tag (AGE-369).
+//! Reading a message history written by an older rig: before assistant
+//! content carried a `type` tag (AGE-369), or by rig 0.42 (AGE-1151).
 //!
 //! rig's [`AssistantContent`](rig_core::completion::message::AssistantContent)
 //! is internally tagged (`#[serde(tag = "type")]`) and the tag is required on
@@ -13,6 +13,22 @@
 //! of that row and nothing else, and no row is rewritten: the write path stays
 //! tagged, and a legacy row is re-tagged on disk only when its conversation is
 //! saved again for its own reasons.
+//!
+//! # rig 0.42 histories (AGE-1151)
+//!
+//! chatty stores rig's own message JSON, and rig 0.46 reads rig 0.42's tool
+//! calls, tool results and reasoning differently. A 0.42 history is upgraded
+//! on load ([`upgrade_rig_042`]), one way and without a backup: it is written
+//! back in 0.46's shape the next time its conversation is saved.
+//!
+//! - A tool call's id (a string, with the provider's id beside it) becomes
+//!   0.46's `CallId`: the provider's id when it issued one, else the id rig
+//!   0.42 minted, kept as the call's id. A result's `call` is mapped the same
+//!   way, so every call and its result still pair.
+//! - Reasoning blocks are dropped: 0.42's are a list of typed parts with
+//!   signatures, and 0.46 would replay an unsigned block to another model as
+//!   plain text. Answers and tool calls stay. An assistant turn that held
+//!   only reasoning is dropped with it.
 
 use anyhow::{Context, Result};
 use rig_core::completion::Message;
@@ -23,24 +39,100 @@ const NEITHER_SHAPE: &str =
     "message history is neither the tagged nor the legacy untagged content shape";
 
 /// Parse a persisted `Vec<Message>` history, accepting legacy untagged text
-/// content blocks alongside today's tagged ones.
+/// content blocks and rig 0.42's shapes alongside today's.
 pub fn parse_history(json: &str) -> Result<Vec<Message>> {
     let tagged_error = match serde_json::from_str::<Vec<Message>>(json) {
         Ok(history) => return Ok(history),
         Err(error) => error,
     };
 
-    // Anything that is not the legacy shape — malformed JSON, an unknown
+    // Anything that is not a legacy shape — malformed JSON, an unknown
     // content block, a missing field — is reported as the tagged parse saw
     // it, since that error still points at the real offset in `json`.
-    let Ok(mut value) = serde_json::from_str::<Value>(json) else {
+    let Ok(value) = serde_json::from_str::<Value>(json) else {
         return Err(tagged_error).context(NEITHER_SHAPE);
     };
-    if !tag_untagged_text_blocks(&mut value) {
-        return Err(tagged_error).context(NEITHER_SHAPE);
-    }
+    upgrade(value).ok_or(tagged_error).context(NEITHER_SHAPE)?
+}
 
-    serde_json::from_value(value).context(NEITHER_SHAPE)
+/// [`parse_history`] for a history already read as JSON, such as the
+/// messages a swarm trace recorded.
+pub fn parse_history_value(value: Value) -> Result<Vec<Message>> {
+    let current_error = match serde_json::from_value::<Vec<Message>>(value.clone()) {
+        Ok(history) => return Ok(history),
+        Err(error) => error,
+    };
+    upgrade(value).ok_or(current_error).context(NEITHER_SHAPE)?
+}
+
+/// The history `value` holds once its legacy shapes are upgraded, or `None`
+/// when it holds none, so the caller reports its own parse error.
+fn upgrade(mut value: Value) -> Option<Result<Vec<Message>>> {
+    let tagged = tag_untagged_text_blocks(&mut value);
+    let upgraded = upgrade_rig_042(&mut value);
+    (tagged || upgraded).then(|| serde_json::from_value(value).context(NEITHER_SHAPE))
+}
+
+/// Rewrite rig 0.42's tool-call ids and drop its reasoning blocks (module
+/// docs). Returns whether anything changed.
+fn upgrade_rig_042(value: &mut Value) -> bool {
+    let Some(messages) = value.as_array_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    let mut emptied = Vec::new();
+    for (index, message) in messages.iter_mut().enumerate() {
+        let role = message.get("role").and_then(Value::as_str).map(str::to_owned);
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before = blocks.len();
+        blocks.retain(|block| !is_rig_042_reasoning(block));
+        if blocks.len() != before {
+            changed = true;
+            if blocks.is_empty() && role.as_deref() == Some("assistant") {
+                emptied.push(index);
+            }
+        }
+        for block in blocks.iter_mut().filter_map(Value::as_object_mut) {
+            match block.get("type").and_then(Value::as_str) {
+                Some("toolcall") => changed |= upgrade_call_id(block, "id"),
+                Some("toolresult") => changed |= upgrade_call_id(block, "call"),
+                _ => {}
+            }
+        }
+    }
+    for index in emptied.into_iter().rev() {
+        messages.remove(index);
+    }
+    changed
+}
+
+/// Whether `block` is a rig 0.42 reasoning block: `{"type": "reasoning",
+/// "content": [...]}`, where rig 0.46's carries a `text`.
+fn is_rig_042_reasoning(block: &Value) -> bool {
+    block.get("type").and_then(Value::as_str) == Some("reasoning")
+        && !block.get("text").is_some_and(Value::is_string)
+}
+
+/// Turn a rig 0.42 call id under `key` (a string, with `provider` beside it)
+/// into a rig 0.46 `CallId`; a call's 0.42-only fields go with it. Returns
+/// whether it changed anything.
+fn upgrade_call_id(block: &mut serde_json::Map<String, Value>, key: &str) -> bool {
+    let Some(Value::String(id)) = block.get(key) else {
+        return false;
+    };
+    let provider_id = block
+        .get("provider")
+        .and_then(|provider| provider.get("call_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let id = provider_id.unwrap_or(id).to_owned();
+    block.insert(key.to_owned(), serde_json::json!({ "provider": id }));
+    for field in ["provider", "signature", "additional_params"] {
+        block.remove(field);
+    }
+    true
 }
 
 /// Give every untagged `{"text": …}` content block the `text` tag it was
@@ -81,7 +173,7 @@ mod tests {
 
     fn assistant_text(message: &Message) -> String {
         match message {
-            Message::Assistant { content, .. } => content
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
                 .iter()
                 .map(|block| match block {
                     AssistantContent::Text(text) => text.text.clone(),

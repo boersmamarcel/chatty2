@@ -92,10 +92,7 @@ fn user_message(text: &str) -> Message {
 }
 
 fn assistant_message(text: &str) -> Message {
-    Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(Text::new(text.to_string()))],
-    }
+    Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(text.to_string()))]))
 }
 
 // ── format_timestamp tests ────────────────────────────────────────
@@ -476,13 +473,10 @@ fn persisted_tool_round_trips_become_steps() {
 
     let history = vec![
         user_message("Read it"),
-        Message::Assistant {
-            id: None,
-            content: vec![
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                 AssistantContent::text("Let me look."),
                 AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
-            ],
-        },
+            ])),
         Message::tool_result("call-1", "read_file", "contents"),
         assistant_message("Let me look.\n\nDone"),
     ];
@@ -653,7 +647,7 @@ fn no_image_attachments_produces_plain_string_message() {
 
 #[test]
 fn tool_calls_with_observation() {
-    use rig_core::completion::message::{ProviderCallId, ToolCall, ToolCallId, ToolFunction};
+    use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
 
     let trace = SystemTrace {
         items: vec![TraceItem::ToolCall(ToolCallBlock {
@@ -673,10 +667,8 @@ fn tool_calls_with_observation() {
         active_tool_index: None,
     };
 
-    let history = vec![Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::ToolCall(ToolCall {
-            id: ToolCallId::new("tc_1").unwrap(),
+    let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall {
+            id: CallId::from_wire("tc_1"),
             provider: ProviderCallId::new("call_abc"),
             function: ToolFunction {
                 name: "read_file".to_string(),
@@ -684,8 +676,7 @@ fn tool_calls_with_observation() {
             },
             signature: None,
             additional_params: None,
-        })],
-    }];
+        })]))];
 
     let conv = make_conversation_data(
         "id",
@@ -750,7 +741,7 @@ fn reasoning_extracted_from_trace() {
 
 #[test]
 fn duplicate_tool_names_matched_by_id() {
-    use rig_core::completion::message::{ProviderCallId, ToolCall, ToolCallId, ToolFunction};
+    use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
 
     let trace = SystemTrace {
         items: vec![
@@ -785,11 +776,9 @@ fn duplicate_tool_names_matched_by_id() {
         active_tool_index: None,
     };
 
-    let history = vec![Message::Assistant {
-        id: None,
-        content: vec![
+    let history = vec![Message::Assistant(rig_core::message::AssistantMessage::new(vec![
             AssistantContent::ToolCall(ToolCall {
-                id: ToolCallId::new("tc_1").unwrap(),
+                id: CallId::from_wire("tc_1"),
                 provider: ProviderCallId::new("call_001"),
                 function: ToolFunction {
                     name: "read_file".to_string(),
@@ -799,7 +788,7 @@ fn duplicate_tool_names_matched_by_id() {
                 additional_params: None,
             }),
             AssistantContent::ToolCall(ToolCall {
-                id: ToolCallId::new("tc_2").unwrap(),
+                id: CallId::from_wire("tc_2"),
                 provider: ProviderCallId::new("call_002"),
                 function: ToolFunction {
                     name: "read_file".to_string(),
@@ -808,8 +797,7 @@ fn duplicate_tool_names_matched_by_id() {
                 signature: None,
                 additional_params: None,
             }),
-        ],
-    }];
+        ]))];
 
     let conv = make_conversation_data(
         "id",
@@ -960,7 +948,7 @@ fn shorter_parallel_arrays_dont_panic() {
 
 #[test]
 fn snapshot_full_conversation() {
-    use rig_core::completion::message::{ProviderCallId, ToolCall, ToolCallId, ToolFunction};
+    use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
 
     let trace = SystemTrace {
         items: vec![
@@ -996,11 +984,9 @@ fn snapshot_full_conversation() {
 
     let history = vec![
         user_message("Read the file /tmp/hello.txt"),
-        Message::Assistant {
-            id: None,
-            content: vec![
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                 AssistantContent::ToolCall(ToolCall {
-                    id: ToolCallId::new("tc_1").unwrap(),
+                    id: CallId::from_wire("tc_1"),
                     provider: ProviderCallId::new("call_001"),
                     function: ToolFunction {
                         name: "read_file".to_string(),
@@ -1010,8 +996,7 @@ fn snapshot_full_conversation() {
                     additional_params: None,
                 }),
                 AssistantContent::Text(Text::new("The file contains: Hello, World!")),
-            ],
-        },
+            ])),
     ];
 
     let conv = make_conversation_data(
@@ -1056,7 +1041,7 @@ mod full_run {
     use crate::tools::invoke_agent_tool::{InvokeAgentProgress, STOPPED_BY_USER};
     use chatty_fabric::{CallChain, CapturedConversation, SwarmEvent, SwarmItem};
     use rig_core::completion::message::{
-        Reasoning, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
+        Reasoning, ToolCall, CallId, ToolFunction, ToolResult, ToolResultContent,
     };
     use serde_json::{Value, json};
 
@@ -1076,7 +1061,7 @@ mod full_run {
 
     fn call(id: &str, name: &str, arguments: Value) -> AssistantContent {
         AssistantContent::ToolCall(ToolCall {
-            id: ToolCallId::new(id).unwrap(),
+            id: CallId::from_wire(id),
             provider: None,
             function: ToolFunction {
                 name: name.to_string(),
@@ -1090,7 +1075,7 @@ mod full_run {
     fn result(id: &str, name: &str, text: &str) -> Message {
         Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::new(id).unwrap(),
+                call: CallId::from_wire(id),
                 name: name.to_string(),
                 content: vec![ToolResultContent::text(text)],
                 provider: None,
@@ -1103,24 +1088,18 @@ mod full_run {
     fn worker(callee: Option<&str>) -> CapturedConversation {
         let mut messages = vec![
             Message::user("write it"),
-            Message::Assistant {
-                id: None,
-                content: vec![
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                     AssistantContent::Reasoning(Reasoning::new("thinking about it")),
                     call("w-read", "read_file", json!({ "path": "main.rs" })),
-                ],
-            },
+                ])),
             result("w-read", "read_file", "fn main() {}"),
         ];
         if let Some(callee) = callee {
-            messages.push(Message::Assistant {
-                id: None,
-                content: vec![call(
+            messages.push(Message::Assistant(rig_core::message::AssistantMessage::new(vec![call(
                     "w-call",
                     "invoke_agent",
                     json!({ "agent": callee, "prompt": "test it" }),
-                )],
-            });
+                )])));
             messages.push(result("w-call", "invoke_agent", "tests pass"));
         }
         messages.push(Message::assistant("done"));
@@ -1258,7 +1237,7 @@ mod full_run {
                 "m",
                 vec![
                     Message::user("build it"),
-                    Message::Assistant { id: None, content },
+                    Message::Assistant(rig_core::message::AssistantMessage::new(content)),
                 ],
                 vec![None, Some(trace)],
                 self.usage,

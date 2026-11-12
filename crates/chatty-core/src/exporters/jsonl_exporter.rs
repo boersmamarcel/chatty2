@@ -92,18 +92,14 @@ pub fn conversation_to_sft_jsonl(
                     }));
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 if options.include_tool_calls {
                     // Collect tool calls and text separately
                     let tool_calls: Vec<serde_json::Value> = content
                         .iter()
                         .filter_map(|ac| match ac {
                             AssistantContent::ToolCall(tc) => {
-                                let id = tc
-                                    .provider
-                                    .as_ref()
-                                    .map(|p| p.call_id.clone())
-                                    .unwrap_or_else(|| tc.id.to_string());
+                                let id = tc.id.to_string();
                                 Some(serde_json::json!({
                                     "id": id,
                                     "type": "function",
@@ -140,13 +136,9 @@ pub fn conversation_to_sft_jsonl(
 
                         for ac in content.iter() {
                             if let AssistantContent::ToolCall(tc) = ac {
-                                let call_id = tc
-                                    .provider
-                                    .as_ref()
-                                    .map(|p| p.call_id.clone())
-                                    .unwrap_or_else(|| tc.id.to_string());
+                                let call_id = tc.id.to_string();
                                 let output = trace_outputs
-                                    .get(tc.id.as_str())
+                                    .get(tc.id.to_string().as_str())
                                     .cloned()
                                     .unwrap_or_default();
                                 messages.push(serde_json::json!({
@@ -225,7 +217,7 @@ pub fn conversation_to_dpo_jsonl(
         let chosen = history
             .get(record.message_index)
             .map(|msg| match msg {
-                Message::Assistant { content, .. } => extract_assistant_text(content),
+                Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => extract_assistant_text(content),
                 Message::User { content } => extract_user_text_lines(content),
                 Message::System { content } => content.clone(),
             })
@@ -289,7 +281,7 @@ fn messages_to_chatml_prefix(
                     }));
                 }
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => {
                 let text = extract_assistant_text(content);
                 if !text.is_empty() {
                     messages.push(serde_json::json!({
@@ -457,10 +449,7 @@ mod tests {
     }
 
     fn assistant_message(text: &str) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Text(Text::new(text.to_string()))],
-        }
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::Text(Text::new(text.to_string()))]))
     }
 
     // ── SFT tests ─────────────────────────────────────────────────────
@@ -618,7 +607,7 @@ mod tests {
 
     #[test]
     fn sft_includes_tool_calls() {
-        use rig_core::completion::message::{ProviderCallId, ToolCall, ToolCallId, ToolFunction};
+        use rig_core::completion::message::{ProviderCallId, ToolCall, CallId, ToolFunction};
 
         let trace = crate::models::message_types::SystemTrace {
             items: vec![TraceItem::ToolCall(ToolCallBlock {
@@ -640,11 +629,9 @@ mod tests {
 
         let history = vec![
             user_message("Read the file"),
-            Message::Assistant {
-                id: None,
-                content: vec![
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                     AssistantContent::ToolCall(ToolCall {
-                        id: ToolCallId::new("tc_1").unwrap(),
+                        id: CallId::from_wire("tc_1"),
                         provider: ProviderCallId::new("call_abc"),
                         function: ToolFunction {
                             name: "read_file".to_string(),
@@ -654,8 +641,7 @@ mod tests {
                         additional_params: None,
                     }),
                     AssistantContent::Text(Text::new("Here is the file")),
-                ],
-            },
+                ])),
         ];
 
         let conv = make_conversation_data(
@@ -692,13 +678,10 @@ mod tests {
     fn sft_skips_persisted_tool_round_trips() {
         let history = vec![
             user_message("Read the file"),
-            Message::Assistant {
-                id: None,
-                content: vec![
+            Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                     AssistantContent::text("Let me look."),
                     AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
-                ],
-            },
+                ])),
             Message::tool_result("call-1", "read_file", "file contents"),
             assistant_message("Let me look.\n\nHere is the file"),
         ];

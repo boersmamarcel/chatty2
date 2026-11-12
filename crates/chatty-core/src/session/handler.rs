@@ -18,8 +18,8 @@ use anyhow::Result;
 use rig_agent::tool::Tool;
 use rig_core::completion::Message;
 use rig_core::message::{
-    AssistantContent, Text, ToolCall, ToolCallId, ToolFunction, ToolResult, ToolResultContent,
-    UserContent,
+    AssistantContent, CallId, ProviderCallId, Text, ToolCall, ToolFunction, ToolName,
+    ToolResultContent, UserContent,
 };
 
 use crate::models::token_usage::{ApiCallUsage, TokenUsage};
@@ -270,7 +270,10 @@ impl SeenRoundTrips {
             let Some((_, output)) = results.iter().find(|(r, _)| *r == id) else {
                 continue;
             };
-            let Some(call_id) = ToolCallId::new(id.clone()) else {
+            let Some(call_id) = ProviderCallId::new(id.clone()).map(CallId::from) else {
+                continue;
+            };
+            let Ok(name) = ToolName::new(name) else {
                 continue;
             };
             let raw = self.args.remove(&id).unwrap_or_default();
@@ -280,17 +283,16 @@ impl SeenRoundTrips {
                 call_id.clone(),
                 ToolFunction::new(name.clone(), arguments),
             )));
-            answers.push(UserContent::ToolResult(ToolResult {
-                call: call_id,
+            answers.push(UserContent::tool_result(
+                call_id,
                 name,
-                content: vec![ToolResultContent::text(output.clone())],
-                provider: None,
-            }));
+                vec![ToolResultContent::text(output.clone())],
+            ));
         }
         if answers.is_empty() {
             return;
         }
-        self.messages.push(Message::Assistant { id: None, content });
+        self.messages.push(Message::Assistant(rig_core::message::AssistantMessage::new(content)));
         self.messages.push(Message::User { content: answers });
     }
 
@@ -853,7 +855,7 @@ mod tests {
         let calls: Vec<(String, serde_json::Value)> = messages
             .iter()
             .filter_map(|m| match m {
-                Message::Assistant { content, .. } => Some(content.iter()),
+                Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => Some(content.iter()),
                 _ => None,
             })
             .flatten()
@@ -871,7 +873,7 @@ mod tests {
                 ("final_answer".to_string(), serde_json::json!("")),
             ]
         );
-        let Message::Assistant { content, .. } = &messages[0] else {
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) = &messages[0] else {
             panic!("{messages:?}");
         };
         assert!(matches!(&content[0], AssistantContent::Text(t) if t.text == "Looking."));

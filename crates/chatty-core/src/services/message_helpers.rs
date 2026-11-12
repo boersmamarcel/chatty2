@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use rig_core::completion::Message;
-use rig_core::completion::message::{AssistantContent, ToolCall, ToolCallId, ToolResultContent};
+use rig_core::completion::message::{AssistantContent, ToolCall, CallId, ToolResultContent};
 use rig_core::message::UserContent;
 use tracing::info;
 
@@ -33,7 +33,7 @@ pub fn extract_user_text_lines(contents: &[UserContent]) -> String {
 pub fn is_tool_call_message(message: &Message) -> bool {
     matches!(
         message,
-        Message::Assistant { content, .. }
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. })
             if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)))
     )
 }
@@ -84,7 +84,7 @@ pub fn exchange_count<'a>(messages: impl IntoIterator<Item = &'a Message>) -> us
         }
         match message {
             Message::User { .. } => awaiting_answer = true,
-            Message::Assistant { .. } if awaiting_answer => {
+            Message::Assistant(_) if awaiting_answer => {
                 exchanges += 1;
                 awaiting_answer = false;
             }
@@ -95,12 +95,12 @@ pub fn exchange_count<'a>(messages: impl IntoIterator<Item = &'a Message>) -> us
 }
 
 /// The ids of the tool calls `message` makes.
-pub fn call_ids(message: &Message) -> impl Iterator<Item = &ToolCallId> {
+pub fn call_ids(message: &Message) -> impl Iterator<Item = &CallId> {
     tool_calls(message).map(|call| &call.id)
 }
 
 /// The ids of the tool calls `message` answers.
-pub fn result_ids(message: &Message) -> impl Iterator<Item = &ToolCallId> {
+pub fn result_ids(message: &Message) -> impl Iterator<Item = &CallId> {
     let content = match message {
         Message::User { content } => Some(content.iter()),
         _ => None,
@@ -114,7 +114,7 @@ pub fn result_ids(message: &Message) -> impl Iterator<Item = &ToolCallId> {
 /// The tool calls `message` makes.
 fn tool_calls(message: &Message) -> impl Iterator<Item = &ToolCall> {
     let content = match message {
-        Message::Assistant { content, .. } => Some(content.iter()),
+        Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => Some(content.iter()),
         _ => None,
     };
     content.into_iter().flatten().filter_map(|item| match item {
@@ -131,15 +131,15 @@ fn tool_calls(message: &Message) -> impl Iterator<Item = &ToolCall> {
 /// Worth checking before repairing: a history that is already intact is sent
 /// byte for byte as recorded, which is what keeps the append-only prefix
 /// property (AGE-277) — and so the provider's prompt cache — intact.
-pub fn tool_round_trips_intact(messages: &[Message], answered_outside: &[ToolCallId]) -> bool {
-    let mut called: HashSet<&ToolCallId> = HashSet::new();
+pub fn tool_round_trips_intact(messages: &[Message], answered_outside: &[CallId]) -> bool {
+    let mut called: HashSet<&CallId> = HashSet::new();
     for message in messages {
         if result_ids(message).any(|id| !called.contains(id)) {
             return false;
         }
         called.extend(call_ids(message));
     }
-    let answered: HashSet<&ToolCallId> = messages.iter().flat_map(result_ids).collect();
+    let answered: HashSet<&CallId> = messages.iter().flat_map(result_ids).collect();
     messages
         .iter()
         .flat_map(call_ids)
@@ -165,7 +165,7 @@ pub fn tool_round_trips_intact(messages: &[Message], answered_outside: &[ToolCal
 /// would be its own 400.
 pub fn enforce_tool_round_trips(
     messages: Vec<Message>,
-    answered_outside: &[ToolCallId],
+    answered_outside: &[CallId],
 ) -> Vec<Message> {
     if tool_round_trips_intact(&messages, answered_outside) {
         return messages;
@@ -177,7 +177,7 @@ pub fn enforce_tool_round_trips(
 
 /// Drop every tool result that answers no call made before it.
 fn drop_orphan_results(messages: Vec<Message>) -> Vec<Message> {
-    let mut called: HashSet<ToolCallId> = HashSet::new();
+    let mut called: HashSet<CallId> = HashSet::new();
     let mut kept_messages: Vec<Message> = Vec::with_capacity(messages.len());
     for message in messages {
         let message = match message {
@@ -212,8 +212,8 @@ fn drop_orphan_results(messages: Vec<Message>) -> Vec<Message> {
 
 /// Give every unanswered tool call a placeholder result, behind the batch it
 /// belongs to so the results that did arrive keep their place.
-fn answer_dangling_calls(messages: Vec<Message>, answered_outside: &[ToolCallId]) -> Vec<Message> {
-    let answered: HashSet<ToolCallId> = messages
+fn answer_dangling_calls(messages: Vec<Message>, answered_outside: &[CallId]) -> Vec<Message> {
+    let answered: HashSet<CallId> = messages
         .iter()
         .flat_map(result_ids)
         .chain(answered_outside)
@@ -247,9 +247,8 @@ fn placeholder_result(call: &ToolCall) -> Message {
         "History carries a tool call nothing answers; synthesizing a placeholder result"
     );
     Message::User {
-        content: vec![UserContent::tool_result_for(
+        content: vec![UserContent::tool_result(
             call.id.clone(),
-            call.provider.clone(),
             call.function.name.clone(),
             vec![ToolResultContent::text(
                 "Cancelled: the turn ended before this tool call's result arrived.",
@@ -303,22 +302,17 @@ mod tests {
     }
 
     fn tool_call() -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![
+        Message::Assistant(rig_core::message::AssistantMessage::new(vec![
                 AssistantContent::text("Let me look."),
                 AssistantContent::tool_call("call-1", "read_file", serde_json::json!({})),
-            ],
-        }
+            ]))
     }
 
     /// One assistant message with `n` parallel tool calls, `call-1`..`call-n`
     /// — the shape a provider that supports parallel tool calls sends back
     /// in one turn, and the shape AGE-485's malformed-history bug is about.
     fn parallel_tool_calls(n: usize) -> Message {
-        Message::Assistant {
-            id: None,
-            content: (1..=n)
+        Message::Assistant(rig_core::message::AssistantMessage::new((1..=n)
                 .map(|i| {
                     AssistantContent::tool_call(
                         format!("call-{i}"),
@@ -326,8 +320,7 @@ mod tests {
                         serde_json::json!({ "path": format!("/tmp/{i}") }),
                     )
                 })
-                .collect(),
-        }
+                .collect()))
     }
 
     #[test]
@@ -457,7 +450,7 @@ mod tests {
 
         assert!(tool_round_trips_intact(&repaired, &[]));
         assert_eq!(repaired.len(), 2, "the orphaned result's message is gone");
-        assert!(matches!(&repaired[1], Message::Assistant { .. }));
+        assert!(matches!(&repaired[1], Message::Assistant(_)));
     }
 
     /// An orphaned result sharing its message with real content costs only
@@ -468,7 +461,7 @@ mod tests {
             content: vec![
                 UserContent::text("and this too"),
                 UserContent::tool_result_for(
-                    ToolCallId::new("call-1").unwrap(),
+                    CallId::from_wire("call-1"),
                     None,
                     "read_file".to_string(),
                     vec![ToolResultContent::text("a")],
@@ -493,7 +486,7 @@ mod tests {
     #[test]
     fn a_call_the_prompt_answers_is_left_alone() {
         let messages = vec![Message::user("read it"), tool_call()];
-        let answered_by_prompt = [ToolCallId::new("call-1").unwrap()];
+        let answered_by_prompt = [CallId::from_wire("call-1")];
 
         assert!(
             !tool_round_trips_intact(&messages, &[]),

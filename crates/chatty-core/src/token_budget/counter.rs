@@ -124,7 +124,7 @@ impl TokenCounter {
         match message {
             Message::System { content } => self.count(content),
             Message::User { content } => content.iter().map(|c| self.count_user_content(c)).sum(),
-            Message::Assistant { content, .. } => content
+            Message::Assistant(rig_core::message::AssistantMessage { content, .. }) => content
                 .iter()
                 .map(|c| self.count_assistant_content(c))
                 .sum(),
@@ -155,9 +155,9 @@ impl TokenCounter {
             AssistantContent::Text(text) => self.count(&text.text),
             AssistantContent::ToolCall(tool_call) => {
                 self.count(&tool_call.function.name)
-                    + self.count(&tool_call.function.arguments.to_string())
+                    + self.count(&tool_call.function.arguments_json())
             }
-            AssistantContent::Reasoning(_) | AssistantContent::Image(_) => 0,
+            _ => 0,
         }
     }
 
@@ -295,13 +295,13 @@ mod tests {
 
     #[test]
     fn tool_result_text_is_bpe_counted_but_tool_result_image_is_fixed() {
-        use rig_core::completion::message::{Image, ToolCallId, ToolResult};
+        use rig_core::completion::message::{Image, CallId, ToolResult};
 
         let c = TokenCounter::for_model("gpt-4");
 
         let text_result = Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::mint(),
+                call: CallId::Local(rig_core::message::LocalCallId::new()),
                 provider: None,
                 name: "test_tool".to_string(),
                 content: vec![ToolResultContent::Text(
@@ -313,7 +313,7 @@ mod tests {
 
         let image_result = Message::User {
             content: vec![UserContent::ToolResult(ToolResult {
-                call: ToolCallId::mint(),
+                call: CallId::Local(rig_core::message::LocalCallId::new()),
                 provider: None,
                 name: "test_tool".to_string(),
                 content: vec![ToolResultContent::Image(Image::default())],
@@ -324,19 +324,16 @@ mod tests {
 
     #[test]
     fn tool_call_name_and_arguments_are_bpe_counted() {
-        use rig_core::completion::message::{ToolCall, ToolCallId, ToolFunction};
+        use rig_core::completion::message::{ToolCall, CallId, ToolFunction};
 
         let c = TokenCounter::for_model("gpt-4");
-        let message = Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(ToolCall::new(
-                ToolCallId::mint(),
+        let message = Message::Assistant(rig_core::message::AssistantMessage::new(vec![AssistantContent::ToolCall(ToolCall::new(
+                CallId::Local(rig_core::message::LocalCallId::new()),
                 ToolFunction::new(
                     "run_command".to_string(),
                     serde_json::json!({"command": "ls -la"}),
                 ),
-            ))],
-        };
+            ))]));
         assert!(c.count_message(&message) > 0);
     }
 
