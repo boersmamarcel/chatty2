@@ -248,6 +248,14 @@ fn collect_doc_files(root: &Path, limit: usize) -> anyhow::Result<Vec<PathBuf>> 
             if name.starts_with('.') {
                 continue;
             }
+            // Never follow a symlink: it can point outside the workspace
+            // (AGE-1289).
+            if std::fs::symlink_metadata(&path)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(true)
+            {
+                continue;
+            }
             if path.is_dir() {
                 dirs.push_back(path);
             } else if path.is_file() && is_doc_file(&path) {
@@ -475,6 +483,26 @@ fn relative_path(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AGE-1289: the walk skips symlinked files and directories, so it never
+    /// reads outside the workspace.
+    #[cfg(unix)]
+    #[test]
+    fn walk_skips_symlinks() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.md"), "# secret").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("own.md"), "# own").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.md"),
+            root.path().join("link.md"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linkdir")).unwrap();
+
+        let files = collect_doc_files(root.path(), 100).unwrap();
+        assert_eq!(files, vec![root.path().join("own.md")]);
+    }
     use rig_agent::tool::{Tool, ToolContext};
 
     #[tokio::test]
