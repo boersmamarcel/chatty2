@@ -75,6 +75,10 @@ jobs:
               # eventual rename) must re-run the build.
               - 'templates/module/**'
               - 'wit/**'
+              # Agent TOMLs and team fixtures are embedded by tests (the
+              # analyst-swarm preset is SHA-256-frozen), AGE-668.
+              - 'crates/chatty-core/agents/**'
+              - 'crates/chatty-core/teams/**'
               # Goldens are test inputs: editing one must re-run the tests
               # that replay it (the pre-fabric ones above all, AGE-640).
               - '**/goldens/**'
