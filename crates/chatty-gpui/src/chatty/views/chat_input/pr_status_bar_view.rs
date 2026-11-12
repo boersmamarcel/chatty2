@@ -19,7 +19,6 @@
 //! nothing at all.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -160,25 +159,25 @@ impl PrStatusBarView {
     }
 }
 
-/// Open a URL in the user's default browser.
-fn open_in_browser(url: &str) {
-    let result = {
-        #[cfg(target_os = "macos")]
-        {
-            Command::new("open").arg(url).spawn()
-        }
-        #[cfg(target_os = "windows")]
-        {
-            Command::new("cmd").args(["/C", "start", "", url]).spawn()
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            Command::new("xdg-open").arg(url).spawn()
-        }
-    };
-    if let Err(error) = result {
-        tracing::warn!(error = ?error, "Failed to open pull request URL");
+/// Open a PR or CI check URL in the browser (AGE-1265).
+///
+/// The URL comes from GitHub (a check's `detailsUrl` is set by whoever
+/// publishes the check), so it is untrusted: only `http`/`https` are
+/// opened, and through gpui's opener, never `cmd /C start`, whose parsing
+/// would run `&`-separated commands on Windows.
+fn open_in_browser(url: &str, cx: &mut App) {
+    if is_browser_url(url) {
+        cx.open_url(url);
+    } else {
+        tracing::warn!(url, "Refused to open a non-http(s) pull request URL");
     }
+}
+
+/// Whether `url` is an absolute `http`/`https` URL.
+fn is_browser_url(url: &str) -> bool {
+    url::Url::parse(url)
+        .map(|u| matches!(u.scheme(), "http" | "https"))
+        .unwrap_or(false)
 }
 
 fn state_icon(state: PrState) -> CustomIcon {
@@ -223,7 +222,7 @@ impl Render for PrStatusBarView {
         // Every text target opens the same PR page.
         let open_pr = {
             let url = pr.url.clone();
-            move |_event: &ClickEvent, _window: &mut Window, _cx: &mut App| open_in_browser(&url)
+            move |_event: &ClickEvent, _window: &mut Window, cx: &mut App| open_in_browser(&url, cx)
         };
 
         let checks_pill = pr.checks_state().map(|state| {
@@ -287,9 +286,9 @@ impl Render for PrStatusBarView {
                                 .text_xs()
                                 .when(url.is_some(), |d| {
                                     d.cursor_pointer().hover(move |s| s.bg(hover_bg)).on_click(
-                                        move |_event, _window, _cx| {
+                                        move |_event, _window, cx| {
                                             if let Some(url) = url.as_deref() {
-                                                open_in_browser(url);
+                                                open_in_browser(url, cx);
                                             }
                                         },
                                     )
@@ -397,6 +396,17 @@ impl Render for PrStatusBarView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_http_urls_open() {
+        assert!(super::is_browser_url("https://github.com/o/r/pull/1"));
+        assert!(super::is_browser_url("http://ci.example/run/1"));
+        assert!(!super::is_browser_url(
+            "file:///C:/Windows/System32/calc.exe"
+        ));
+        assert!(!super::is_browser_url("ms-msdt:/id PCWDiagnostic"));
+        assert!(!super::is_browser_url("run&calc"));
+    }
+
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
     use super::{IDLE_POLL_INTERVAL, PENDING_POLL_INTERVAL, PrStatusBarView};
