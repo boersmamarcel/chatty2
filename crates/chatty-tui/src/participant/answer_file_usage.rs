@@ -124,7 +124,10 @@ async fn best_of_counts_solvers_ended_by_their_answer_file() {
     let script = SOLVERS.iter().fold(Script::new(), |script, (_, model)| {
         script.route(*model, ends_on_answer_file("42"))
     });
-    let kit = SwarmKit::start_with_endpoint_budget(3, roster, script, Script::new()).await;
+    // Each solver gets a worktree of its own: on one shared tree the first
+    // to write `answer.txt` makes its siblings' write fail, and a failed
+    // write does not trip the answer-file stop (one more model round).
+    let kit = SwarmKit::start_in_repo_with_endpoint_budget(3, roster, script, Script::new()).await;
 
     let tool = BestOfTool::new(
         kit.leader_tool(),
