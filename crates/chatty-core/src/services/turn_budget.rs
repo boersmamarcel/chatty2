@@ -726,10 +726,10 @@ mod tests {
         // tells the model the next reply is its last.
         let last = |i: usize| requests[i].chat_history.last().cloned().unwrap();
         assert_eq!(tool_result_texts(&last(1)), vec!["3".to_string()]);
-        // AGE-1151, awaiting a decision: rig 0.46 sends a request without
-        // tools its history's calls and results as text (`[called tool …]`,
-        // `[tool … result] …`); rig 0.42 sent them as tool messages. The
-        // note still rides on the last result.
+        // AGE-1151 (Marcel, 2026-11-12: accepted): rig 0.46 sends a request
+        // without tools its history's calls and results as text (`[called
+        // tool …]`, `[tool … result] …`); rig 0.42 sent them as tool
+        // messages. The note still rides on the last result.
         let Message::User { content } = &*last(2) else {
             panic!("the wrap-up call ends on the results")
         };

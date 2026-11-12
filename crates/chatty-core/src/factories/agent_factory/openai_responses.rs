@@ -505,6 +505,10 @@ mod tests {
         let body = only_body(&server).await;
         assert_eq!(body["tools"][0]["name"], "add");
         assert_eq!(body["tools"][0]["type"], "function");
+        // AGE-1151 (Marcel, 2026-11-12: accepted): rig 0.46 always sends
+        // `strict: false` on a Responses function tool; rig 0.42 left the
+        // field out.
+        assert_eq!(body["tools"][0]["strict"], false, "{body}");
     }
 
     /// OpenAI-compatible servers (vLLM, OpenRouter) keep chat completions,

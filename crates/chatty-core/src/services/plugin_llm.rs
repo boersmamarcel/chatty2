@@ -848,9 +848,10 @@ mod tests {
             .body_json()
             .unwrap();
         let messages = sent["messages"].as_array().expect("messages");
-        // AGE-1151, awaiting a decision: a request that declares no tools
-        // gets its history's calls and results as text under rig 0.46; rig
-        // 0.42 sent them as a `tool_calls` message and a `tool` message.
+        // AGE-1151 (Marcel, 2026-11-12: accepted): a request that declares
+        // no tools gets its history's calls and results as text under rig
+        // 0.46; rig 0.42 sent them as a `tool_calls` message and a `tool`
+        // message.
         assert_eq!(messages.len(), 3, "{sent}");
         assert_eq!(messages[1]["role"], "assistant", "{sent}");
         assert_eq!(
