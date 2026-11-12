@@ -318,6 +318,11 @@ pub enum CallError {
     /// specs do not allow it, it closes a cycle, or it is too deep (PL-S2).
     #[error(transparent)]
     Delegation(crate::delegation::Refusal),
+    /// A call naming a resumable handle the gate refused (RC-4): the handle
+    /// ended (`handle_expired`), or the caller does not own it
+    /// (`not_owner`). Nothing was spawned.
+    #[error(transparent)]
+    Handle(crate::HandleError),
     #[error("cancelled: {0}")]
     Cancelled(String),
     /// The connection to the broker went away mid-call.
@@ -340,6 +345,19 @@ pub type CallStream = BoxStream<'static, Result<CallEvent, CallError>>;
 #[async_trait::async_trait]
 pub trait Transport: Send + Sync {
     async fn call(&self, req: CallRequest) -> Result<CallStream, CallError>;
+
+    /// This transport as the root of the conversation `scope` (RC-4): one
+    /// broker serves every conversation on the desktop, and a resumable
+    /// handle is reached only from the conversation it was started in.
+    /// Only the root's direct handle has a conversation to name; the
+    /// default is `None`, and a worker's calls are its run's conversation's.
+    fn for_conversation(
+        &self,
+        scope: &crate::ConversationScope,
+    ) -> Option<std::sync::Arc<dyn Transport>> {
+        let _ = scope;
+        None
+    }
 
     /// Answer the question the broker delivered as [`CallEvent::Ask`]
     /// `id` (EN-2b): the answers become the result of the asking worker's

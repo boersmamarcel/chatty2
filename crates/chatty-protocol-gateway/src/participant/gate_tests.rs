@@ -110,6 +110,7 @@ fn reaching<'a>(policy: &'a dyn CallPolicy, spec: &str) -> Result<Snapshot<'a>, 
         addressee: Addressee::None,
         binding: None,
         answer_nonce: None,
+        handle: HandleCheck::None,
     })
 }
 
@@ -211,6 +212,11 @@ fn outsiders_are_refused_every_request() {
             Request::Cancel { node: "n" },
             Request::TakeRunMessages,
             Request::Take,
+            Request::DropHandle {
+                name: "fix",
+                run: None,
+            },
+            Request::TaskGet { id: "task-1" },
         ] {
             let decision = decide(&caller, &request, &reaching(&policy, "target"));
             assert!(decision.outcome.is_err(), "{caller} {request:?}");
@@ -494,6 +500,7 @@ fn hosted_client_rows() {
         reaching(policy, "analyst").map(|snapshot| Snapshot {
             binding: Some(binding),
             answer_nonce: nonce.map(str::to_string),
+            handle: HandleCheck::None,
             ..snapshot
         })
     }
@@ -686,4 +693,234 @@ fn the_roots_own_spec_is_a_cycle_for_a_member() {
         &reaching(&plain, "lead"),
     );
     assert!(matches!(decision.outcome, Ok(Grant::Invoke { .. })));
+}
+
+/// `agent.invoke` naming the handle `name` as `party`, in a run rooted at
+/// `root`, against a handle in `status`.
+fn handle_call(
+    caller: &Caller,
+    party: HandleParty,
+    root: RunRoot,
+    status: HandleStatus,
+) -> Result<Grant, Refused> {
+    let policy = Watching::new([delegating("lead"), delegating("worker")]);
+    let mut snapshot = reaching(&policy, "worker").unwrap();
+    snapshot.handle = HandleCheck::Named {
+        name: "fix".to_string(),
+        party,
+        root,
+        status,
+    };
+    let params = InvokeAgentParams {
+        handle: Some("fix".to_string()),
+        ..invoke("worker", Some("r-1"))
+    };
+    decide(caller, &Request::Invoke(&params), &Ok(snapshot)).outcome
+}
+
+fn owned_by(root: RunRoot, owner: HandleParty, ancestors: Vec<HandleParty>) -> HandleStatus {
+    HandleStatus::Live(chatty_fabric::HandleOwner::new(root, owner, ancestors))
+}
+
+/// Invariant 5 at the gate (`handle_owner_rule`): the owner and its
+/// ancestors task a live handle; anyone else is `not_owner`, and an ended
+/// handle is `handle_expired` for everyone.
+#[test]
+fn handle_owner_rule_is_a_decide_row() {
+    let lead = node("lead-0", "lead", "r-1");
+    let sibling = node("coder-3", "lead", "r-1");
+    let status = || {
+        owned_by(
+            RunRoot::Owner,
+            HandleParty::Node("lead-0".into()),
+            vec![HandleParty::Root],
+        )
+    };
+    let owner = handle_call(
+        &lead,
+        HandleParty::Node("lead-0".into()),
+        RunRoot::Owner,
+        status(),
+    );
+    assert!(matches!(owner, Ok(Grant::Invoke { .. })), "{owner:?}");
+    let ancestor = handle_call(&Caller::Root, HandleParty::Root, RunRoot::Owner, status());
+    assert!(matches!(ancestor, Ok(Grant::Invoke { .. })), "{ancestor:?}");
+    let other = handle_call(
+        &sibling,
+        HandleParty::Node("coder-3".into()),
+        RunRoot::Owner,
+        status(),
+    );
+    assert_eq!(
+        other.unwrap_err().to_call_error(),
+        CallError::Handle(HandleError::NotOwner {
+            name: "fix".into(),
+            caller: "node 'coder-3'".into(),
+            owner: "node 'lead-0'".into(),
+        })
+    );
+    let ended = handle_call(
+        &Caller::Root,
+        HandleParty::Root,
+        RunRoot::Owner,
+        HandleStatus::Ended,
+    );
+    assert_eq!(
+        ended.unwrap_err().to_call_error(),
+        CallError::Handle(HandleError::Expired { name: "fix".into() })
+    );
+    // A free name starts a handle, for anyone the other rows admit.
+    let free = handle_call(
+        &sibling,
+        HandleParty::Node("coder-3".into()),
+        RunRoot::Owner,
+        HandleStatus::Free,
+    );
+    assert!(matches!(free, Ok(Grant::Invoke { .. })), "{free:?}");
+}
+
+/// ADR-0023 § 3 "Resume handles": a handle's owner includes its run's root
+/// kind and key. An `External`-rooted run resumes only its own key's
+/// handles, and an owner-rooted run never resumes an `External`-rooted
+/// one, even as the root itself. GT-3 has not landed, so no broker opens an
+/// `External`-rooted run yet; these are the row on its own, over a node
+/// whose run the snapshot says is `External`-rooted.
+#[test]
+fn an_external_rooted_run_resumes_only_its_key_s_handles() {
+    let key = |id: &str| RunRoot::External {
+        key: id.to_string(),
+    };
+    let lead = node("lead-0", "lead", "r-1");
+    let party = || HandleParty::Node("lead-0".into());
+    let k1_handle = || owned_by(key("k1"), party(), vec![]);
+
+    let same_key = handle_call(&lead, party(), key("k1"), k1_handle());
+    assert!(matches!(same_key, Ok(Grant::Invoke { .. })), "{same_key:?}");
+    let other_key = handle_call(&lead, party(), key("k2"), k1_handle());
+    assert!(
+        matches!(
+            other_key,
+            Err(Refused::Handle(HandleError::NotOwner { .. }))
+        ),
+        "{other_key:?}"
+    );
+    // An external key's run cannot reach the human's handles either.
+    let owners = handle_call(
+        &lead,
+        party(),
+        key("k1"),
+        owned_by(RunRoot::Owner, party(), vec![]),
+    );
+    assert!(
+        matches!(owners, Err(Refused::Handle(HandleError::NotOwner { .. }))),
+        "{owners:?}"
+    );
+}
+
+#[test]
+fn an_owner_rooted_run_cannot_resume_an_external_rooted_handle() {
+    let external = || {
+        owned_by(
+            RunRoot::External { key: "k1".into() },
+            HandleParty::Node("lead-0".into()),
+            vec![],
+        )
+    };
+    let lead = node("lead-0", "lead", "r-1");
+    let same_name = handle_call(
+        &lead,
+        HandleParty::Node("lead-0".into()),
+        RunRoot::Owner,
+        external(),
+    );
+    assert!(
+        matches!(
+            same_name,
+            Err(Refused::Handle(HandleError::NotOwner { .. }))
+        ),
+        "{same_name:?}"
+    );
+    // Not even the root, the ancestor of every owner-rooted handle.
+    let root = handle_call(&Caller::Root, HandleParty::Root, RunRoot::Owner, external());
+    assert!(
+        matches!(root, Err(Refused::Handle(HandleError::NotOwner { .. }))),
+        "{root:?}"
+    );
+}
+
+/// `handle.drop`: the owner and its ancestors only, a live handle only, and
+/// never from outside the tree.
+#[test]
+fn only_the_owner_line_drops_a_handle() {
+    let policy = Watching::new([]);
+    let snapshot = |party: HandleParty, status: HandleStatus| {
+        let mut snapshot = reaching(&policy, "worker").unwrap();
+        snapshot.callee = Callee::None;
+        snapshot.handle = HandleCheck::Named {
+            name: "fix".into(),
+            party,
+            root: RunRoot::Owner,
+            status,
+        };
+        Ok(snapshot)
+    };
+    let live = || owned_by(RunRoot::Owner, HandleParty::Root, vec![]);
+    let granted = decide(
+        &Caller::Root,
+        &Request::DropHandle {
+            name: "fix",
+            run: None,
+        },
+        &snapshot(HandleParty::Root, live()),
+    );
+    assert_eq!(granted.outcome, Ok(Grant::DropHandle));
+    assert_eq!(granted.row.method.as_str(), "handle.drop");
+    let node_drop = decide(
+        &node("coder-0", "worker", "r-1"),
+        &Request::DropHandle {
+            name: "fix",
+            run: Some("r-1"),
+        },
+        &snapshot(HandleParty::Node("coder-0".into()), live()),
+    );
+    assert!(matches!(
+        node_drop.outcome,
+        Err(Refused::Handle(HandleError::NotOwner { .. }))
+    ));
+    // A node drops from a run it serves, as it calls from one (GT-0b).
+    let owner_runless = decide(
+        &node("coder-0", "worker", "r-1"),
+        &Request::DropHandle {
+            name: "fix",
+            run: None,
+        },
+        &snapshot(
+            HandleParty::Node("coder-0".into()),
+            owned_by(RunRoot::Owner, HandleParty::Node("coder-0".into()), vec![]),
+        ),
+    );
+    assert!(matches!(owner_runless.outcome, Err(Refused::Caller(_))));
+    let free = decide(
+        &Caller::Root,
+        &Request::DropHandle {
+            name: "fix",
+            run: None,
+        },
+        &snapshot(HandleParty::Root, HandleStatus::Free),
+    );
+    assert!(matches!(free.outcome, Err(Refused::Caller(_))));
+    for outsider in outsiders() {
+        let refused = decide(
+            &outsider,
+            &Request::DropHandle {
+                name: "fix",
+                run: None,
+            },
+            &snapshot(HandleParty::Root, live()),
+        );
+        assert!(
+            matches!(refused.outcome, Err(Refused::Caller(_))),
+            "{outsider}"
+        );
+    }
 }

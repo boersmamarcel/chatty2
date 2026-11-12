@@ -1416,6 +1416,13 @@ impl AgentClient {
         if let Some(broker) = lazy_broker {
             invoke_agent_tool = invoke_agent_tool.with_lazy_broker(broker);
         }
+        // The root names its conversation to its broker, which keeps
+        // resumable handles per conversation (RC-4); a worker's broker
+        // already knows its run's.
+        if let Some(id) = conversation_id.as_deref() {
+            invoke_agent_tool =
+                invoke_agent_tool.with_conversation(chatty_fabric::ConversationScope::new(id));
+        }
         // ... and reaches its local roles over it too; remote agents stay on
         // `A2aClient`.
         if let Some(transport) = fabric_transport {

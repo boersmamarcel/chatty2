@@ -34,11 +34,21 @@
 //!
 //! | Caller | `agent.invoke` | `agent.list` | `mailbox.post` | `mailbox.take` | `human.approve`, `human.ask` | Local root requests |
 //! |---|---|---|---|---|---|---|
-//! | `Root` | Root policy, chain, budget, then (spawning) roster and spawn context | Granted | Any live node, at its next tool round (TM-5) | Refused (its messages open its next run) | Answers its pending ones | Granted |
-//! | `Node` | The named run must be its own open run; `may_call` from its admitted spec, chain, budget, then (spawning) roster and spawn context | Granted | Its owner (TM-2's delivery points), or its own live child at the child's next tool round (TM-5) | Granted: its own mid-run list | Raises one from the task it serves (its open run) | Refused |
+//! | `Root` | Root policy, chain, budget, the handle rule, then (spawning) roster and spawn context | Granted | Any live node, at its next tool round (TM-5) | Refused (its messages open its next run) | Answers its pending ones | Granted |
+//! | `Node` | The named run must be its own open run; `may_call` from its admitted spec, chain, budget, the handle rule, then (spawning) roster and spawn context | Granted | Its owner (TM-2's delivery points), or its own live child at the child's next tool round (TM-5) | Granted: its own mid-run list | Raises one from the task it serves (its open run) | Refused |
 //! | `Remote` | Refused | Refused | Refused | Refused | Refused | Refused |
 //! | `External` | Refused | Refused | Refused | Refused | Refused | Refused |
 //! | hosted `Root` | As `Root` | Granted | Refused (`not_on_tree`) | Refused | Answers its pending ones, each with its nonce | Cancel, read, and conversation create, list and delete |
+//!
+//! The handle rule (RC-4, ADR-0023 § 3 "Resume handles"): an
+//! `agent.invoke` naming a resumable handle — and `handle.drop`, which
+//! only the root and nodes have a row for — is refused `handle_expired`
+//! when the handle has ended, and `not_owner` unless the caller is the
+//! handle's owner or one of the owner's ancestors, in a run with the same
+//! root kind and key. So an `External`-rooted run reaches only its own
+//! key's handles, and no owner-rooted run reaches an `External`-rooted one.
+//! A name no handle goes by is free: the call starts one, owned by its
+//! caller.
 //!
 //! On a typed-root broker the hosted client may only cancel and read
 //! (take its run messages); every other row refuses it.
@@ -53,8 +63,9 @@
 //! still `not_on_tree`. Whoever sent it, it grants nothing.
 //!
 //! The local root requests are its own: answering a question or an
-//! approval the broker delivered to it, stopping one run, and taking its
-//! run's waiting messages.
+//! approval the broker delivered to it, stopping one run, taking its
+//! run's waiting messages, and reading one of its conversation's tasks
+//! (`tasks/get`; the hosted client may too, as a read).
 //!
 //! `human.approve` (EN-2a, ADR-0021 § 2) is raised by a node from the task
 //! it serves, whose run's chain stamps the asker; a refused one is denied
@@ -83,8 +94,9 @@ use std::fmt;
 use std::time::SystemTime;
 
 use chatty_fabric::{
-    ApprovalRequest, AskRequest, CallChain, CallError, CallPolicy, InvokeAgentParams, NodeId,
-    ROOT_NAME, Refusal, RefusalReason, RunId, SendMessageParams, SpawnContext,
+    ApprovalRequest, AskRequest, CallChain, CallError, CallPolicy, HandleError, HandleParty,
+    HandleStatus, InvokeAgentParams, NodeId, ROOT_NAME, Refusal, RefusalReason, RunId, RunRoot,
+    SendMessageParams, SpawnContext,
 };
 
 use super::protocol::CallStamp;
@@ -276,6 +288,13 @@ pub enum Request<'a> {
     /// A hosted root conversation's own lifecycle (ADR-0023 § 1: hosted
     /// `Root` rows).
     Conversation(ConversationOp),
+    /// The caller ends the resumable handle `name`, which it owns (RC-4).
+    /// A node names the open run it drops it from, as its `agent.invoke`
+    /// does; the root names none.
+    DropHandle { name: &'a str, run: Option<&'a str> },
+    /// The root reads one task of its conversation, live or recently
+    /// finished (A2A `tasks/get`, RC-4).
+    TaskGet { id: &'a str },
 }
 
 /// What the hosted client does to a hosted root conversation.
@@ -303,6 +322,8 @@ impl Request<'_> {
             Self::Conversation(ConversationOp::Create) => Method::ConversationCreate,
             Self::Conversation(ConversationOp::List) => Method::ConversationList,
             Self::Conversation(ConversationOp::Delete) => Method::ConversationDelete,
+            Self::DropHandle { .. } => Method::DropHandle,
+            Self::TaskGet { .. } => Method::TaskGet,
         }
     }
 }
@@ -323,6 +344,8 @@ pub enum Method {
     ConversationCreate,
     ConversationList,
     ConversationDelete,
+    DropHandle,
+    TaskGet,
 }
 
 impl Method {
@@ -341,6 +364,8 @@ impl Method {
             Self::ConversationCreate => "conversation.create",
             Self::ConversationList => "conversation.list",
             Self::ConversationDelete => "conversation.delete",
+            Self::DropHandle => "handle.drop",
+            Self::TaskGet => "tasks/get",
         }
     }
 }
@@ -378,6 +403,26 @@ pub struct Snapshot<'a> {
     /// For an answer: the nonce the broker gave the hosted client with
     /// the pending id it names, if one is pending under it.
     pub answer_nonce: Option<String>,
+    /// The resumable handle an `agent.invoke` or a `handle.drop` names
+    /// (RC-4).
+    pub handle: HandleCheck,
+}
+
+/// A resumable handle a request names, as the broker found it, and who the
+/// caller is to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandleCheck {
+    /// The request names no handle.
+    None,
+    Named {
+        name: String,
+        /// The caller as a handle's owner would name it: the root, the
+        /// handle whose task it runs, or itself.
+        party: HandleParty,
+        /// The root the caller's run hangs from.
+        root: RunRoot,
+        status: HandleStatus,
+    },
 }
 
 /// A snapshot that does not add up — the registry says one thing and the
@@ -479,6 +524,11 @@ pub enum Grant {
     TakeRunMessages,
     /// The hosted client's conversation request; hive performs it.
     Conversation,
+    /// End the handle the request names.
+    DropHandle,
+    /// Answer the task the request names, if the root's conversation has
+    /// it.
+    TaskGet,
 }
 
 /// Where a granted `agent.invoke` runs.
@@ -525,6 +575,8 @@ pub enum Refused {
     SpawnContext(CallError),
     /// A message the tree does not allow ([`MessageStatus::Refused`](chatty_fabric::MessageStatus)).
     Message(RefusalReason),
+    /// The handle rule refuses it ([`CallError::Handle`]).
+    Handle(HandleError),
     /// No row grants this caller this request ([`CallError::Refused`]).
     Caller(String),
     /// The snapshot did not add up: refused before any effect, and alarmed
@@ -541,6 +593,7 @@ impl Refused {
             Self::Roster(why) | Self::Caller(why) => CallError::Refused(why.clone()),
             Self::SpawnContext(error) => error.clone(),
             Self::Message(reason) => CallError::Refused(reason.to_string()),
+            Self::Handle(error) => CallError::Handle(error.clone()),
             Self::Internal(why) => CallError::Refused(format!("internal: {why}")),
         }
     }
@@ -583,6 +636,11 @@ fn decide_row(
             invoke(caller, params, snapshot)
         }
         (Caller::Root | Caller::Node(_), Request::List) => Ok(Grant::List),
+        (Caller::Root, Request::DropHandle { .. }) => drop_handle(&snapshot.handle),
+        (Caller::Node(node), Request::DropHandle { run, .. }) => {
+            named_run(node, *run)?;
+            drop_handle(&snapshot.handle)
+        }
         (Caller::Root, Request::Post(_)) => human_post(&snapshot.addressee),
         (Caller::Node(node), Request::Post(params)) => post(node, params, snapshot),
         (Caller::Node(_), Request::Take) => Ok(Grant::Take),
@@ -601,6 +659,7 @@ fn decide_row(
         (Caller::Root, Request::Answer { .. }) => Ok(Grant::Answer),
         (Caller::Root, Request::Cancel { .. }) => Ok(Grant::Cancel),
         (Caller::Root, Request::TakeRunMessages) => Ok(Grant::TakeRunMessages),
+        (Caller::Root, Request::TaskGet { .. }) => Ok(Grant::TaskGet),
         (Caller::Root, Request::Conversation(_)) => Err(Refused::Caller(format!(
             "{caller} may not {}: conversations are the hosted root's rows",
             request.method().as_str()
@@ -611,7 +670,8 @@ fn decide_row(
             | Request::Answer { .. }
             | Request::Cancel { .. }
             | Request::TakeRunMessages
-            | Request::Conversation(_),
+            | Request::Conversation(_)
+            | Request::TaskGet { .. },
         ) => Err(Refused::Caller(format!(
             "{} is the local root's own request",
             request.method().as_str()
@@ -632,7 +692,9 @@ fn decide_row(
             | Request::Answer { .. }
             | Request::Cancel { .. }
             | Request::TakeRunMessages
-            | Request::Conversation(_),
+            | Request::Conversation(_)
+            | Request::DropHandle { .. }
+            | Request::TaskGet { .. },
         ) => Err(Refused::Caller(outside(caller, request))),
     }
 }
@@ -667,11 +729,13 @@ fn hosted(
     match request {
         Request::Cancel { .. } => Ok(Grant::Cancel),
         Request::TakeRunMessages => Ok(Grant::TakeRunMessages),
+        Request::TaskGet { .. } => Ok(Grant::TaskGet),
         Request::Invoke(_)
         | Request::List
         | Request::AnswerApproval { .. }
         | Request::Answer { .. }
         | Request::Conversation(_)
+        | Request::DropHandle { .. }
             if typed =>
         {
             Err(Refused::Caller(format!(
@@ -695,6 +759,7 @@ fn hosted(
             nonce_matches(caller, id, *nonce, snapshot).map(|()| Grant::Answer)
         }
         Request::Conversation(_) => Ok(Grant::Conversation),
+        Request::DropHandle { .. } => drop_handle(&snapshot.handle),
     }
 }
 
@@ -777,6 +842,7 @@ fn invoke(
         .extend(callee_spec)
         .and_then(|chain| chain.budget(&params.remaining, &own, snapshot.now))
         .map_err(Refused::Delegation)?;
+    handle_rule(&snapshot.handle)?;
     let stamp = CallStamp {
         caller: node.map(|node| node.name.clone()),
         from_run,
@@ -794,6 +860,44 @@ fn invoke(
         }
     };
     Ok(Grant::Invoke { target, stamp })
+}
+
+/// The handle rule (RC-4): a handle that ended is `handle_expired`; a live
+/// one admits only its owner and the owner's ancestors, under the same root
+/// kind and key. A free name, or none, passes.
+fn handle_rule(check: &HandleCheck) -> Result<(), Refused> {
+    let HandleCheck::Named {
+        name,
+        party,
+        root,
+        status,
+    } = check
+    else {
+        return Ok(());
+    };
+    match status {
+        HandleStatus::Free => Ok(()),
+        HandleStatus::Ended => Err(Refused::Handle(HandleError::Expired { name: name.clone() })),
+        HandleStatus::Live(owner) if owner.admits(root, party) => Ok(()),
+        HandleStatus::Live(owner) => Err(Refused::Handle(HandleError::NotOwner {
+            name: name.clone(),
+            caller: party.to_string(),
+            owner: owner.owner().to_string(),
+        })),
+    }
+}
+
+/// `handle.drop`: the handle rule, on a handle that is live.
+fn drop_handle(check: &HandleCheck) -> Result<Grant, Refused> {
+    match check {
+        HandleCheck::Named {
+            name,
+            status: HandleStatus::Free,
+            ..
+        } => Err(Refused::Caller(format!("no handle is named '{name}'"))),
+        HandleCheck::Named { .. } => handle_rule(check).map(|()| Grant::DropHandle),
+        HandleCheck::None => Err(Refused::Caller("handle.drop names no handle".to_string())),
+    }
 }
 
 /// The run a node's call is made from: the one it names, which must be one

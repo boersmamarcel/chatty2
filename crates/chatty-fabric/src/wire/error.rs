@@ -3,7 +3,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{CallError, Refusal};
+use crate::{CallError, HandleError, Refusal};
 
 /// Why a request failed, as the wire carries it: a closed set tagged by
 /// `kind`, one variant per [`CallError`] variant plus [`Self::Protocol`],
@@ -28,6 +28,9 @@ pub enum WireError {
     Refused { reason: String },
     #[error(transparent)]
     Delegation { refusal: Refusal },
+    /// A call naming a resumable handle, refused (RC-4).
+    #[error(transparent)]
+    Handle { error: HandleError },
     #[error("cancelled: {reason}")]
     Cancelled { reason: String },
     #[error("disconnected: {reason}")]
@@ -61,6 +64,10 @@ enum Repr {
         refusal: Refusal,
         message: String,
     },
+    Handle {
+        error: HandleError,
+        message: String,
+    },
     Cancelled {
         reason: String,
         message: String,
@@ -91,6 +98,7 @@ impl From<WireError> for Repr {
             },
             WireError::Refused { reason } => Self::Refused { reason, message },
             WireError::Delegation { refusal } => Self::Delegation { refusal, message },
+            WireError::Handle { error } => Self::Handle { error, message },
             WireError::Cancelled { reason } => Self::Cancelled { reason, message },
             WireError::Disconnected { reason } => Self::Disconnected { reason, message },
             WireError::Failed { reason } => Self::Failed { reason, message },
@@ -109,6 +117,7 @@ impl From<Repr> for WireError {
             }
             Repr::Refused { reason, .. } => Self::Refused { reason },
             Repr::Delegation { refusal, .. } => Self::Delegation { refusal },
+            Repr::Handle { error, .. } => Self::Handle { error },
             Repr::Cancelled { reason, .. } => Self::Cancelled { reason },
             Repr::Disconnected { reason, .. } => Self::Disconnected { reason },
             Repr::Failed { reason, .. } => Self::Failed { reason },
@@ -126,6 +135,7 @@ impl From<CallError> for WireError {
             }
             CallError::Refused(reason) => Self::Refused { reason },
             CallError::Delegation(refusal) => Self::Delegation { refusal },
+            CallError::Handle(error) => Self::Handle { error },
             CallError::Cancelled(reason) => Self::Cancelled { reason },
             CallError::Disconnected(reason) => Self::Disconnected { reason },
             CallError::Failed(reason) => Self::Failed { reason },
@@ -143,6 +153,7 @@ impl From<WireError> for CallError {
             }
             WireError::Refused { reason } => Self::Refused(reason),
             WireError::Delegation { refusal } => Self::Delegation(refusal),
+            WireError::Handle { error } => Self::Handle(error),
             WireError::Cancelled { reason } => Self::Cancelled(reason),
             WireError::Disconnected { reason } => Self::Disconnected(reason),
             WireError::Failed { reason } => Self::Failed(reason),
@@ -165,6 +176,12 @@ mod tests {
             },
             CallError::Refused("over the call cap".into()),
             CallError::Delegation(Refusal::TooDeep { depth: 5, max: 4 }),
+            CallError::Handle(HandleError::Expired { name: "fix".into() }),
+            CallError::Handle(HandleError::NotOwner {
+                name: "fix".into(),
+                caller: "node 'coder-1'".into(),
+                owner: "root".into(),
+            }),
             CallError::Cancelled("caller went away".into()),
             CallError::Disconnected("socket closed".into()),
             CallError::Failed("boom".into()),

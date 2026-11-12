@@ -44,6 +44,7 @@ pub mod gate;
 pub mod hosted;
 pub mod limits;
 mod protocol;
+mod recent_tasks;
 mod registry;
 pub mod spawn_context;
 mod virtual_agent;
