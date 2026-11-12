@@ -663,7 +663,7 @@ mod tests {
 
     /// AGE-227: the utility agent must carry no tools. This mirrors the exact
     /// builder path used for the `utility` field — no
-    /// `.tool()`/`.rmcp_tools()` calls before `.build()` — without needing the
+    /// `.tool()`/`.dynamic_tools()` calls before `.build()` — without needing the
     /// full `NativeTools` tool-collection setup that `build_provider_agent`
     /// requires.
     #[tokio::test]

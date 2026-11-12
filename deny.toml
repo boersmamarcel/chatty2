@@ -19,6 +19,11 @@ ignore = [
     "RUSTSEC-2026-0187",
     # calamine: calamine 0.22 is pinned by memvid-core 2.0.140 (latest release, no newer one uses calamine >= 0.38, the fixed line). Panic/OOM on malformed .xls/.xlsb (CFB parser). Exposure: chatty's own Excel and data-query tools use calamine 0.38 (fixed); which memvid-core ingest path reaches calamine 0.22 is not yet traced. Remove once memvid-core upgrades calamine.
     "RUSTSEC-2026-0436",
+    # libsqlite3-sys 0.30.1 (bundled SQLite < 3.54.0, CVE-2026-119375): pulled only by sqlx-sqlite 0.9.0 (latest), which caps libsqlite3-sys at < 0.38;
+    # the fix is in libsqlite3-sys >= 0.39 (no rusqlite in the tree). Exposure: the only SQLite file chatty opens is its own conversation DB
+    # (crates/chatty-core/src/repositories/conversation_sqlite_repository.rs open_pool, path from the app data dir); an attacker who can plant a
+    # crafted DB + mismatched -wal there already has the user's file access. Re-check by 2026-12-10: remove once sqlx-sqlite allows libsqlite3-sys >= 0.39.
+    "RUSTSEC-2026-0459",
     # paste: unmaintained, no patched release; replace or wait for upstream
     "RUSTSEC-2024-0436",
     # proc-macro-error2: unmaintained, no patched release; replace or wait for upstream
