@@ -642,6 +642,37 @@ fn mid_run_message_rows() {
     );
 }
 
+/// TM-4: a node's message to its own idle handle is granted at TM-2's
+/// run delivery; the human has no handles to message.
+#[test]
+fn handle_message_rows() {
+    let policy = Watching::new([]);
+    let snapshot = reaching(&policy, "target").map(|snapshot| Snapshot {
+        addressee: Addressee::Handle,
+        ..snapshot
+    });
+    let to = SendMessageParams {
+        to: "fixer".to_string(),
+        text: "use the second approach".to_string(),
+    };
+    assert_eq!(
+        decide(
+            &node("lead-0", "lead", "task-1"),
+            &Request::Post(&to),
+            &snapshot
+        )
+        .outcome,
+        Ok(Grant::Post {
+            to: PostTo::Handle,
+            at: Delivery::Run,
+        })
+    );
+    assert_eq!(
+        decide(&Caller::Root, &Request::Post(&to), &snapshot).outcome,
+        Err(Refused::Message(RefusalReason::NotOnTree))
+    );
+}
+
 /// AGE-1138: a root that runs as spec `lead` has `lead` on its chain, so a
 /// member allowed to call `lead` is refused as a cycle, not given a second
 /// leader. A plain root has no such spec and the call is granted.

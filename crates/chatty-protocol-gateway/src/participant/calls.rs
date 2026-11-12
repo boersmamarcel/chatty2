@@ -223,6 +223,9 @@ pub struct BrokerCalls {
     /// them (TM-2). Shared with each call's stream, which delivers on its
     /// result.
     pending: Arc<Mutex<HashMap<Recipient, PendingList>>>,
+    /// Messages waiting for an idle handle, by its key (TM-4): the handle's next task opens with them. Its workers
+    /// are fresh nodes, so no node's list could hold them.
+    handle_pending: Arc<Mutex<HashMap<HandleKey, PendingList>>>,
     next_message: AtomicU64,
     /// The spec rules a call is checked against (PL-S2, AGE-745). Always
     /// one: a broker nobody gave a policy consults [`LocalPermissive`].
@@ -291,6 +294,8 @@ impl Drop for ScopeGuard {
 /// end (RC-4).
 struct OwnerGuard {
     handles: Arc<HandleStore>,
+    handle_pending: Arc<Mutex<HashMap<HandleKey, PendingList>>>,
+    edges: Option<Arc<Mutex<EdgeLog>>>,
     scope: ConversationScope,
     node: String,
 }
@@ -299,6 +304,7 @@ impl Drop for OwnerGuard {
     fn drop(&mut self) {
         self.handles
             .owner_ended(&self.scope, &HandleParty::Node(self.node.clone()));
+        drop_ended_handle_mail(&self.handles, &self.handle_pending, &self.edges);
     }
 }
 
@@ -873,6 +879,7 @@ impl BrokerCalls {
             runners,
             edges,
             pending: Arc::default(),
+            handle_pending: Arc::default(),
             next_message: AtomicU64::new(0),
             policy: Policy::LocalPermissive(LocalPermissive::new()),
             pricer: None,
@@ -911,6 +918,13 @@ impl BrokerCalls {
     /// its saved conversation deleted.
     pub fn end_conversation(&self, scope: &ConversationScope) {
         self.handles.end_conversation(scope);
+        self.drop_ended_handle_mail();
+    }
+
+    /// Drop what waits for handles that are no longer live, one `dropped`
+    /// row per message (TM-4).
+    fn drop_ended_handle_mail(&self) {
+        drop_ended_handle_mail(&self.handles, &self.handle_pending, &self.edges);
     }
 
     /// End the handle `name` of `peer`'s conversation for its owner (RC-4):
@@ -931,6 +945,9 @@ impl BrokerCalls {
             Ok(_) => {
                 let key = HandleKey::new(self.conversation_of(peer, scope, run), name);
                 self.handles.drop_handle(&key);
+                // The handle's own, and those of the handles it owned.
+                drop_handle_mail(&self.handle_pending, &self.edges, &key);
+                self.drop_ended_handle_mail();
                 Ok(())
             }
             Err(refused) => {
@@ -1466,6 +1483,42 @@ impl BrokerCalls {
         }
     }
 
+    /// The idle handle `name` that `peer` may message (TM-4): one of the
+    /// conversations `peer` works in holds it live and idle with a saved
+    /// conversation, and `peer` is its owner or one of the owner's
+    /// ancestors ([`HandleOwner::admits`]). Only a node has handles to
+    /// message.
+    fn idle_handle_of(&self, peer: &Peer, name: &str) -> Option<HandleKey> {
+        let Peer::Node(node) = peer else {
+            return None;
+        };
+        let mut scopes = vec![ConversationScope::new(format!("node:{node}"))];
+        if let Some(key) = self.handles.served_by(node) {
+            scopes.push(key.scope);
+        }
+        if let Some((_, runs)) = self.registry.open_runs_of(node) {
+            for run in runs {
+                scopes.push(
+                    locked(&self.scopes)
+                        .get(&run.chain.root_task_id)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            ConversationScope::new(format!("run:{}", run.chain.root_task_id))
+                        }),
+                );
+            }
+        }
+        let root = self.run_root();
+        scopes.into_iter().find_map(|scope| {
+            let key = HandleKey::new(scope, name);
+            let HandleStatus::Live(owner) = self.handles.status(&key) else {
+                return None;
+            };
+            let party = self.handle_party(peer, &key.scope);
+            (owner.admits(&root, &party) && self.handles.is_idle(&key)).then_some(key)
+        })
+    }
+
     /// The owner of a handle `peer` starts in `scope`, followed by its
     /// ancestors (RC-4): a handle's worker by its handle's line, a node by
     /// the nodes that own it up to the root, each as the handle it runs
@@ -1529,6 +1582,7 @@ impl BrokerCalls {
         };
         let addressee = match request {
             Request::Post(params) => match self.registry.node_and_owner(&params.to) {
+                None if self.idle_handle_of(peer, &params.to).is_some() => Addressee::Handle,
                 None => Addressee::None,
                 Some((node, owner)) => Addressee::Node {
                     id: node.id(),
@@ -1751,23 +1805,31 @@ impl BrokerCalls {
         params: SendMessageParams,
     ) -> MessageStatus {
         let refused = |reason| MessageStatus::Refused { reason };
-        let recipient = match self.gate(peer, caller, &Request::Post(&params)).outcome {
-            Ok(Grant::Post {
-                to: PostTo::Root, ..
-            }) => Recipient::Root,
-            Ok(Grant::Post {
-                to: PostTo::Node(id),
-                at: Delivery::Run,
-            }) => Recipient::Node(id),
-            Ok(Grant::Post {
-                to: PostTo::Node(id),
-                at: Delivery::ToolRound,
-            }) => Recipient::MidRun(id),
-            Ok(other) => unreachable!("mailbox.post granted as {other:?}"),
+        let granted = match self.gate(peer, caller, &Request::Post(&params)).outcome {
+            Ok(granted) => granted,
             Err(Refused::Message(reason)) => return refused(reason),
             // Nothing else refuses a post; were it to, it is not on the
             // tree.
             Err(_) => return refused(RefusalReason::NotOnTree),
+        };
+        let recipient = match granted {
+            Grant::Post {
+                to: PostTo::Root, ..
+            } => Some(Recipient::Root),
+            Grant::Post {
+                to: PostTo::Node(id),
+                at: Delivery::Run,
+            } => Some(Recipient::Node(id)),
+            Grant::Post {
+                to: PostTo::Node(id),
+                at: Delivery::ToolRound,
+            } => Some(Recipient::MidRun(id)),
+            // The sender's idle handle (TM-4), named by the sender and
+            // the message.
+            Grant::Post {
+                to: PostTo::Handle, ..
+            } => None,
+            other => unreachable!("mailbox.post granted as {other:?}"),
         };
         let from = match peer {
             Peer::Root => Sender::Root,
@@ -1787,8 +1849,20 @@ impl BrokerCalls {
             from_name: peer.name().to_string(),
             text: params.text,
         };
-        let mut pending = lock(&self.pending);
-        match pending.entry(recipient).or_default().push(message) {
+        let pushed = match recipient {
+            Some(recipient) => lock(&self.pending)
+                .entry(recipient)
+                .or_default()
+                .push(message),
+            None => match self.idle_handle_of(peer, &params.to) {
+                Some(key) => lock(&self.handle_pending)
+                    .entry(key)
+                    .or_default()
+                    .push(message),
+                None => Err(RefusalReason::NotOnTree),
+            },
+        };
+        match pushed {
             Ok(()) => MessageStatus::Pending { id },
             Err(reason) => refused(reason),
         }
@@ -1879,21 +1953,7 @@ impl BrokerCalls {
                 .flat_map(|mut list| list.take_all())
                 .collect()
         };
-        for message in dropped {
-            debug!(from = %message.from_name, to = %name, id = %message.id, "Dropped a message with its recipient");
-            EdgeGuard {
-                log: self.edges.clone(),
-                from: message.from_name.clone(),
-                to: name.to_string(),
-                chain: vec![message.from_name.clone()],
-                bytes: message.bytes() as u64,
-                outcome: None,
-                usd: None,
-                root_task_id: None,
-                sibling_names: None,
-            }
-            .write(EdgeKind::Message, "dropped".to_string());
-        }
+        write_dropped(&self.edges, &dropped, name);
     }
 
     /// Every agent a call can address, as the aggregated agent card lists
@@ -1988,6 +2048,8 @@ impl BrokerCalls {
             root: _root_scope,
         } = handle;
         let handles = self.handles.clone();
+        let handle_pending = self.handle_pending.clone();
+        let edge_log = self.edges.clone();
         let submits = matches!(effect, Effect::Submit(_));
         let queued_heartbeat = self.queued_heartbeat;
         let tasks = self.tasks.clone();
@@ -2057,6 +2119,11 @@ impl BrokerCalls {
                 }
                 None => None,
             };
+            let mut undelivered = Undelivered {
+                edges: edge_log.clone(),
+                to: handle_name.clone().unwrap_or_default(),
+                messages: Vec::new(),
+            };
             if let Some(name) = handle_name.as_deref() {
                 let refused = if submits {
                     Some(format!(
@@ -2074,6 +2141,19 @@ impl BrokerCalls {
                                 task = task
                                     .with_resume(Some(conversation))
                                     .with_attach(saved.tree.clone());
+                                // The owner's messages to this handle open
+                                // the task, as a node's own open its next
+                                // run (TM-4, delivery point b).
+                                let waiting = start_handle_run(
+                                    &handle_pending,
+                                    &HandleKey::new(scope.clone(), name),
+                                );
+                                if !waiting.is_empty() {
+                                    let wrapped: Vec<String> =
+                                        waiting.iter().map(Message::wrapped).collect();
+                                    task.text = format!("{}\n\n{}", wrapped.join("\n"), task.text);
+                                    undelivered.messages = waiting;
+                                }
                                 None
                             }
                             Err(e) => Some(format!("handle '{name}' cannot be resumed: {e}")),
@@ -2118,6 +2198,8 @@ impl BrokerCalls {
                     return;
                 }
             };
+            // The worker has the messages in its task now.
+            undelivered.disarm();
             edge.to = running.participant().to_string();
             // The worker of a handle's task calls as that handle; a plain
             // call's spawned worker owns what handles it starts until the
@@ -2127,6 +2209,8 @@ impl BrokerCalls {
             }
             let _owned = (!submits && ticket.is_none()).then(|| OwnerGuard {
                 handles: handles.clone(),
+                handle_pending: handle_pending.clone(),
+                edges: edge_log.clone(),
                 scope: scope.clone(),
                 node: running.participant().to_string(),
             });
@@ -2381,6 +2465,7 @@ impl BrokerCalls {
                     _ => {
                         warn!(agent = %agent, handle = %name, "The task captured no conversation; the handle is dropped");
                         ticket.clear();
+                        drop_handle_mail(&handle_pending, &edge_log, ticket.key());
                     }
                 }
             }
@@ -2501,11 +2586,96 @@ fn deliver(list: &mut PendingList) -> Vec<String> {
     list.take_all().iter().map(Message::wrapped).collect()
 }
 
+/// A handle starts a task: take what was sent to it, oldest first, and give
+/// the senders their allowance back (TM-4).
+fn start_handle_run(
+    pending: &Mutex<HashMap<HandleKey, PendingList>>,
+    key: &HandleKey,
+) -> Vec<Message> {
+    lock(pending)
+        .get_mut(key)
+        .map(|list| {
+            list.start_run();
+            list.take_all()
+        })
+        .unwrap_or_default()
+}
+
+/// One `message` row with outcome `dropped` per message that will never
+/// reach `to`.
+fn write_dropped(edges: &Option<Arc<Mutex<EdgeLog>>>, dropped: &[Message], to: &str) {
+    for message in dropped {
+        debug!(from = %message.from_name, %to, id = %message.id, "Dropped a message with its recipient");
+        EdgeGuard {
+            log: edges.clone(),
+            from: message.from_name.clone(),
+            to: to.to_string(),
+            chain: vec![message.from_name.clone()],
+            bytes: message.bytes() as u64,
+            outcome: None,
+            usd: None,
+            root_task_id: None,
+            sibling_names: None,
+        }
+        .write(EdgeKind::Message, "dropped".to_string());
+    }
+}
+
+/// The handle `key` is gone: what waited for it is dropped, with a row each.
+fn drop_handle_mail(
+    pending: &Mutex<HashMap<HandleKey, PendingList>>,
+    edges: &Option<Arc<Mutex<EdgeLog>>>,
+    key: &HandleKey,
+) {
+    let dropped = lock(pending)
+        .remove(key)
+        .map(|mut list| list.take_all())
+        .unwrap_or_default();
+    write_dropped(edges, &dropped, &key.name);
+}
+
+/// Drop what waits for every handle that is no longer live: ended by its
+/// owner, its conversation, idleness or eviction.
+fn drop_ended_handle_mail(
+    handles: &HandleStore,
+    pending: &Mutex<HashMap<HandleKey, PendingList>>,
+    edges: &Option<Arc<Mutex<EdgeLog>>>,
+) {
+    let waiting: Vec<HandleKey> = lock(pending).keys().cloned().collect();
+    for key in waiting {
+        if !matches!(handles.status(&key), HandleStatus::Live(_)) {
+            drop_handle_mail(pending, edges, &key);
+        }
+    }
+}
+
+/// Messages taken for a handle's task that has not started: unless
+/// [`disarm`](Self::disarm)ed (the worker started), dropping this writes a
+/// `dropped` row for each, as a spawn failure or a cancelled call leaves
+/// them nowhere to go (TM-4).
+struct Undelivered {
+    edges: Option<Arc<Mutex<EdgeLog>>>,
+    to: String,
+    messages: Vec<Message>,
+}
+
+impl Undelivered {
+    fn disarm(&mut self) {
+        self.messages.clear();
+    }
+}
+
+impl Drop for Undelivered {
+    fn drop(&mut self) {
+        write_dropped(&self.edges, &self.messages, &self.to);
+    }
+}
+
 /// The pending lists, recovered from a poisoned lock: each list is plain
 /// owned data with no invariant a panic could leave half-kept.
-fn lock(
-    pending: &Mutex<HashMap<Recipient, PendingList>>,
-) -> std::sync::MutexGuard<'_, HashMap<Recipient, PendingList>> {
+fn lock<K>(
+    pending: &Mutex<HashMap<K, PendingList>>,
+) -> std::sync::MutexGuard<'_, HashMap<K, PendingList>> {
     pending.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -2951,6 +3121,60 @@ mod tests {
                 "<message from=\"{lead}\" untrusted=\"true\">for the root</message>"
             )],
             "the root's own list is not the ended node's"
+        );
+    }
+
+    /// TM-4: messages waiting for a handle that goes, and messages taken
+    /// for a task whose worker never starts, are not lost silently: each
+    /// leaves a `dropped` row.
+    #[tokio::test]
+    async fn handle_messages_that_go_nowhere_are_dropped_with_a_row() {
+        let data = tempfile::tempdir().unwrap();
+        let log = EdgeLog::open(data.path()).unwrap();
+        let path = log.path();
+        let edges = Some(Arc::new(Mutex::new(log)));
+        let (calls, _registry) = broker(edges.clone());
+        let message = |text: &str| Message {
+            id: "msg-1".to_string(),
+            from: Sender::Root,
+            from_name: "lead-0".to_string(),
+            text: text.to_string(),
+        };
+
+        // The conversation ends with a message waiting for its handle.
+        let key = HandleKey::new(ConversationScope::new("conv-a"), "fixer");
+        lock(&calls.handle_pending)
+            .entry(key.clone())
+            .or_default()
+            .push(message("hello"))
+            .unwrap();
+        calls.end_conversation(&key.scope);
+        assert!(lock(&calls.handle_pending).is_empty());
+
+        // The call taking messages for a task ends before its worker starts.
+        drop(Undelivered {
+            edges,
+            to: "fixer".to_string(),
+            messages: vec![message("again")],
+        });
+        assert_eq!(
+            rows(&path),
+            [
+                (
+                    EdgeKind::Message,
+                    "lead-0".to_string(),
+                    "fixer".to_string(),
+                    5,
+                    "dropped".to_string()
+                ),
+                (
+                    EdgeKind::Message,
+                    "lead-0".to_string(),
+                    "fixer".to_string(),
+                    5,
+                    "dropped".to_string()
+                ),
+            ]
         );
     }
 

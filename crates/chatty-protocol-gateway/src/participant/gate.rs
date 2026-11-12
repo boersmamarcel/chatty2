@@ -482,6 +482,9 @@ pub enum Addressee {
         owner: Option<String>,
         ended: bool,
     },
+    /// No node goes by the name, but the sender owns an idle handle that
+    /// does (TM-4). Only the broker's handle store can say so.
+    Handle,
 }
 
 /// What the gate decided, and the row it matched.
@@ -548,6 +551,9 @@ pub enum InvokeTarget {
 pub enum PostTo {
     Root,
     Node(NodeId),
+    /// The sender's idle handle the message names (TM-4): it waits for the
+    /// handle's next task.
+    Handle,
 }
 
 /// When a granted message reaches its recipient.
@@ -982,8 +988,9 @@ fn approve(node: &NodeCaller) -> Result<Grant, Refused> {
 }
 
 /// `mailbox.post` from a node: to its owner, while the owner is live, at
-/// TM-2's delivery points (TM-1); or to its own live child, at the child's
-/// next tool round (TM-5). Anyone else — a sibling, itself, a grandchild,
+/// TM-2's delivery points (TM-1); to its own live child, at the child's
+/// next tool round (TM-5); or to its own idle handle, at the start of the
+/// handle's next task (TM-4). Anyone else — a sibling, itself, a grandchild,
 /// a name nobody has — is not on the tree. The list's bounds are the
 /// effect's quota.
 fn post(
@@ -1013,6 +1020,11 @@ fn post(
             owner: Some(owner),
             ended,
         } if *owner == node.name => mid_run(*id, *ended),
+        // The owner of an idle handle (TM-4): its next task opens with it.
+        Addressee::Handle => Ok(Grant::Post {
+            to: PostTo::Handle,
+            at: Delivery::Run,
+        }),
         Addressee::Node { .. } | Addressee::None => Err(Refused::Message(RefusalReason::NotOnTree)),
     }
 }
@@ -1022,7 +1034,8 @@ fn post(
 fn human_post(addressee: &Addressee) -> Result<Grant, Refused> {
     match addressee {
         Addressee::Node { id, ended, .. } => mid_run(*id, *ended),
-        Addressee::None => Err(Refused::Message(RefusalReason::NotOnTree)),
+        // A handle is its owner's: the human has no handles of its own.
+        Addressee::Handle | Addressee::None => Err(Refused::Message(RefusalReason::NotOnTree)),
     }
 }
 

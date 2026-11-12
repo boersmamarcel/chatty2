@@ -312,6 +312,17 @@ impl HandleStore {
         inner.status(key)
     }
 
+    /// Whether `key` is a live handle that is idle and holds a saved
+    /// conversation: not mid-task, not queued on, not yet made (TM-4).
+    pub fn is_idle(&self, key: &HandleKey) -> bool {
+        let mut inner = self.lock();
+        inner.sweep((self.clock)());
+        inner
+            .live
+            .get(key)
+            .is_some_and(|entry| entry.busy == 0 && entry.saved.is_some())
+    }
+
     /// The handle whose task the node `node` is running, if it runs one.
     pub fn served_by(&self, node: &str) -> Option<HandleKey> {
         self.lock().workers.get(node).cloned()
