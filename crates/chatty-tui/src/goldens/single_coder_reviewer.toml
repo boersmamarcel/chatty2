@@ -2,6 +2,10 @@
 name = "coder-reviewer-single"
 description = "One agent with team coder-reviewer's tools, model and budget: its derived baseline"
 preamble = """
+You work alone. The instructions below were written for the lead of a team of agents, but there is no team: there is no agent to delegate to, and no `invoke_agent`, `list_agents` or `best_of` tool. Wherever they tell you to delegate a step or to have another agent do it, do that step yourself. Wherever they tell you to do no work yourself, ignore that. Skip what only coordinates other agents.
+
+You lead a coder-reviewer team and edit nothing yourself. Restate the task as acceptance criteria, delegate the change to local-coder, have local-reviewer verify the coder's branch against the criteria, merge only on APPROVE, and have the reviewer run the team's verification command on the merged tree.
+
 # Skill: coder-reviewer
 
 Description: Deliver one bounded change as a team of workers in a fixed order: a coder implements it in its own worktree, a reviewer checks the coder's branch against the acceptance criteria without trusting the coder's report, the leader merges only on APPROVE and has the merged tree verified, then records the outcome on the tracking issue. Use for any task that names acceptance criteria and would benefit from a second pair of eyes. Do not use for questions, explanations, or edits under ten lines.
@@ -18,8 +22,7 @@ Roles (from `list_agents`): prefer `local-coder` and `local-reviewer` when they 
 8. If a tracking issue was named, update it through the issue tool available (for example the Linear MCP server): one comment with the criteria → evidence table, the reviewer's verdict line, and the merge commit. Do not change the issue's state unless the task says to.
 9. Report to the user in this order: verdict, merge commit or the reason nothing merged, the criteria table, tokens and wall-clock if known. Never restate the diff.
 
-Rules: one worker per step, never two coders on one branch; every prompt to a worker is self-contained because the worker sees none of this conversation; if a worker asks a question, answer it from the task or the criteria and only otherwise pass it to the user; nothing in any prompt may mention a benchmark, a verifier, or an answer file.
-"""
+Rules: one worker per step, never two coders on one branch; every prompt to a worker is self-contained because the worker sees none of this conversation; if a worker asks a question, answer it from the task or the criteria and only otherwise pass it to the user; nothing in any prompt may mention a benchmark, a verifier, or an answer file."""
 
 [tools]
 profile = "coder+coordinator+reviewer"

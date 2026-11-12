@@ -18,9 +18,16 @@
 //!   (`0` or none) makes the sum `0`, uncapped, and the single agent then
 //!   runs under its deadline: the roles' `max_duration`s summed. `cap_usd`
 //!   is summed the same way; a role without a cap leaves the sum uncapped.
-//! - **preamble:** the leader's skill (`SKILL.md`) as the addendum. A team
-//!   without one adds none: its playbook is in the leader's preamble, which
-//!   tells it how to delegate, and the single agent cannot.
+//! - **preamble:** the team's playbook, wherever it lives: the leader's
+//!   preamble, then the leader's skill (`SKILL.md`), under
+//!   [`SINGLE_PREFACE`], which tells the agent it works alone and does each
+//!   delegated step itself (AGE-1137). The text is not edited: no rule cuts
+//!   the delegation out of free prose and leaves a playbook that reads
+//!   (Crosscheck's lead would keep "Never change, merge or improve the
+//!   answer" and nothing else), and a hand-trimmed copy would be a tuned
+//!   baseline. A team with neither adds none.
+//! - **skills:** every role's `tools.skills`, each once; **`think` and
+//!   `max_tokens`:** the leader's.
 //!
 //! The single agent delegates to nobody (`swarm.delegates_to` is empty).
 //!
@@ -38,20 +45,28 @@ use serde_json::Value;
 use crate::agent_spec::{AgentSection, AgentSpec, BudgetSection, PluginSpec, ToolsSection};
 use crate::factories::PROFILE_UNION_SEPARATOR;
 use crate::models::token_usage::{Cost, PriceBook, TokenUsage, price};
+use crate::services::delegation_policy::matches_any;
 use crate::services::handoff::HandoffLedger;
 use crate::services::swarm_trace::{SwarmTrace, ToolOutcome, UsageLine};
-use crate::services::team::Team;
+use crate::services::team::{Team, TeamVerifier};
 use crate::settings::models::execution_settings::canonical_tool_group;
 use crate::settings::models::models_store::{ModelConfig, resolve_model_query};
 
 /// The team's leader answered without delegating to anyone.
 pub const NEVER_DELEGATED: &str = "never_delegated";
 
-/// The leader called a role its playbook does not name.
+/// The leader called a role its `swarm.delegates_to` does not list.
 pub const WRONG_ROLE_CALLED: &str = "wrong_role_called";
 
-/// A role answered `APPROVE` and the runner's check failed.
+/// The team's verifier passed the work and the runner's check failed.
 pub const VERIFICATION_PASSED_WRONG: &str = "verification_passed_wrong";
+
+/// What heads the single agent's preamble, over the team's playbook.
+pub const SINGLE_PREFACE: &str = "You work alone. The instructions below were written for \
+the lead of a team of agents, but there is no team: there is no agent to delegate to, and no \
+`invoke_agent`, `list_agents` or `best_of` tool. Wherever they tell you to delegate a step or \
+to have another agent do it, do that step yourself. Wherever they tell you to do no work \
+yourself, ignore that. Skip what only coordinates other agents.";
 
 pub use crate::services::handoff::HANDOFF_MISREAD_TAG as HANDOFF_MISREAD;
 
@@ -73,18 +88,51 @@ pub fn derive_single(team: &Team, models: &[ModelConfig], book: &PriceBook) -> A
                 team.id
             )),
             model: strongest_model(&roles, models, book),
-            preamble: team.skill_content.clone(),
+            preamble: single_preamble(team),
+            think: team.leader.agent.think,
+            max_tokens: team.leader.agent.max_tokens,
             ..AgentSection::default()
         },
         tools: ToolsSection {
             profile: union_profile(&roles),
             disable: disabled_by_all(&roles),
-            skills: Vec::new(),
+            skills: union_skills(&roles),
         },
         plugins: union_plugins(&roles),
         swarm: Default::default(),
         budget: summed_budget(team, &roles),
     }
+}
+
+/// [`SINGLE_PREFACE`] over the leader's preamble and the team's skill;
+/// `None` when the team has neither.
+fn single_preamble(team: &Team) -> Option<String> {
+    let playbook: Vec<&str> = [
+        team.leader.agent.preamble.as_deref(),
+        team.skill_content.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|part| !part.is_empty())
+    .collect();
+    (!playbook.is_empty()).then(|| {
+        std::iter::once(SINGLE_PREFACE)
+            .chain(playbook)
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
+}
+
+/// Every role's `tools.skills`, each once, in the order the roles name them.
+fn union_skills(roles: &[&AgentSpec]) -> Vec<String> {
+    let mut skills: Vec<String> = Vec::new();
+    for skill in roles.iter().flat_map(|spec| &spec.tools.skills) {
+        if !skills.contains(skill) {
+            skills.push(skill.clone());
+        }
+    }
+    skills
 }
 
 /// The model of the role with the highest price per million tokens.
@@ -199,30 +247,29 @@ fn summed_budget(team: &Team, roles: &[&AgentSpec]) -> BudgetSection {
 }
 
 /// Which arm a run was.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum Arm<'a> {
     /// A team's derived single agent, running as `spec`.
     Single { spec: &'a str },
-    /// A team: `id`, the spec its leader (the root) runs as, and its
-    /// playbook, the text that names the roles it may call.
+    /// A team: `id`, the spec its leader (the root) runs as, the roles it
+    /// may call (its `swarm.delegates_to`, names or `*` globs), and who
+    /// passes its work ([`Team::verifiers`]).
     Team {
         id: &'a str,
         leader: &'a str,
-        playbook: Option<&'a str>,
+        delegates_to: &'a [String],
+        verifiers: Vec<TeamVerifier>,
     },
 }
 
 impl<'a> Arm<'a> {
-    /// `team`'s arm. Its playbook is the leader's skill or, for a team
-    /// without one, the leader's preamble.
+    /// `team`'s arm.
     pub fn team(team: &'a Team) -> Self {
         Self::Team {
             id: &team.id,
             leader: &team.leader.agent.name,
-            playbook: team
-                .skill_content
-                .as_deref()
-                .or(team.leader.agent.preamble.as_deref()),
+            delegates_to: &team.leader.swarm.delegates_to,
+            verifiers: team.verifiers(),
         }
     }
 
@@ -244,7 +291,7 @@ impl<'a> Arm<'a> {
 }
 
 /// One benchmark run, finished, as the scorecard reads it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RunRecord<'a> {
     pub run: &'a str,
     pub task: &'a str,
@@ -329,25 +376,32 @@ impl ScorecardRow {
 /// Why a run went wrong, each tag from one fact of its trace:
 ///
 /// - [`NEVER_DELEGATED`]: a team's root called nobody;
-/// - [`WRONG_ROLE_CALLED`]: a team's root called a spec its playbook does
-///   not name, as a whole word;
+/// - [`WRONG_ROLE_CALLED`]: a team's root called, or tried to call, a spec
+///   its leader's `swarm.delegates_to` does not list (AGE-1137);
 /// - [`HANDOFF_MISREAD`]: TD-2's read rules, from the handoff ledger;
-/// - [`VERIFICATION_PASSED_WRONG`]: an answer to the root's `invoke_agent`
-///   opened with `APPROVE`, and the runner's check failed.
+/// - [`VERIFICATION_PASSED_WRONG`]: one of the team's verifiers answered
+///   the root's `invoke_agent` with one of its passing verdicts, and the
+///   runner's check failed (AGE-1137).
 pub fn failure_tags(record: &RunRecord<'_>) -> Vec<String> {
     let tree = record.trace.tree();
-    let called: Vec<&str> = tree
+    let children: Vec<&str> = tree
         .children(tree.root())
         .iter()
         .map(|id| tree.get(*id).spec.as_str())
         .collect();
+    let invocations = root_invocations(record.trace);
     let mut tags = Vec::new();
-    if let Arm::Team { playbook, .. } = record.arm {
-        if called.is_empty() {
+    if let Arm::Team { delegates_to, .. } = &record.arm {
+        if children.is_empty() {
             tags.push(NEVER_DELEGATED.to_string());
         }
-        if let Some(playbook) = playbook
-            && called.iter().any(|spec| !names_word(playbook, spec))
+        // A call the broker refused never became a child; its arguments
+        // did reach the root.
+        if children
+            .iter()
+            .copied()
+            .chain(invocations.iter().map(|(agent, _)| *agent))
+            .any(|spec| !matches_any(delegates_to, spec))
         {
             tags.push(WRONG_ROLE_CALLED.to_string());
         }
@@ -355,39 +409,39 @@ pub fn failure_tags(record: &RunRecord<'_>) -> Vec<String> {
     if let Some(ledger) = record.handoffs {
         tags.extend(ledger.failure_tags());
     }
-    if !record.solved && root_heard_approve(record.trace) {
+    if let Arm::Team { verifiers, .. } = &record.arm
+        && !record.solved
+        && invocations.iter().any(|(agent, outcome)| match outcome {
+            ToolOutcome::Done { result } => verifiers.iter().any(|verifier| {
+                verifier.role == *agent && opens_with_verdict(result, &verifier.verdicts)
+            }),
+            _ => false,
+        })
+    {
         tags.push(VERIFICATION_PASSED_WRONG.to_string());
     }
     tags
 }
 
-/// Whether `text` holds `word` with no name character (`[A-Za-z0-9_-]`) on
-/// either side: `local-coder` is not named by `local-coder-2`.
-fn names_word(text: &str, word: &str) -> bool {
-    let is_name = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
-    text.match_indices(word).any(|(at, _)| {
-        let before = text[..at].chars().next_back();
-        let after = text[at + word.len()..].chars().next();
-        !before.is_some_and(is_name) && !after.is_some_and(is_name)
-    })
-}
-
-/// Whether an `invoke_agent` result the root got opens with `APPROVE`.
-fn root_heard_approve(trace: &SwarmTrace) -> bool {
+/// The root's `invoke_agent` calls: the agent each asked for, by its
+/// arguments, and how it ended.
+fn root_invocations(trace: &SwarmTrace) -> Vec<(&str, &ToolOutcome)> {
     let tree = trace.tree();
     tree.get(tree.root())
         .tool_calls
         .iter()
         .filter(|call| call.name == "invoke_agent")
-        .any(|call| match &call.outcome {
-            ToolOutcome::Done { result } => opens_with_approve(result),
-            _ => false,
+        .filter_map(|call| {
+            let agent = call.arguments.as_ref()?.get("agent")?.as_str()?;
+            Some((agent, &call.outcome))
         })
+        .collect()
 }
 
-/// A verdict's first line, past any markdown, is `APPROVE…`. The result is
-/// the tool's JSON, whose `response` is the agent's answer, or that answer.
-fn opens_with_approve(result: &str) -> bool {
+/// A verdict's first line, past any markdown, opens with one of `verdicts`.
+/// The result is the tool's JSON, whose `response` is the agent's answer,
+/// or that answer.
+fn opens_with_verdict(result: &str, verdicts: &[String]) -> bool {
     let parsed = serde_json::from_str::<Value>(result).ok();
     let answer = parsed
         .as_ref()
@@ -399,8 +453,10 @@ fn opens_with_approve(result: &str) -> bool {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .is_some_and(|line| {
-            line.trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
-                .starts_with("APPROVE")
+            let line = line.trim_start_matches(|c: char| !c.is_ascii_alphanumeric());
+            verdicts
+                .iter()
+                .any(|verdict| line.starts_with(verdict.as_str()))
         })
 }
 
@@ -410,6 +466,7 @@ mod tests {
     use crate::agent_spec::Grant;
     use crate::models::token_usage::TokenPricing;
     use crate::services::team::{TeamFile, TeamSource};
+    use crate::session::SessionEvent;
     use crate::settings::models::providers_store::ProviderType;
 
     fn spec(name: &str, profile: Option<&str>) -> AgentSpec {
@@ -559,21 +616,191 @@ mod tests {
         assert_eq!(unprofiled.tools.profile, None);
     }
 
+    /// AGE-1137: the single agent's preamble is the team's playbook,
+    /// wherever it lives (the leader's preamble, then the skill), under the
+    /// fixed preface that has it do the delegated steps itself; the roles'
+    /// skills and the leader's `think` and `max_tokens` carry over.
     #[test]
-    fn a_role_is_named_as_a_whole_word() {
-        assert!(names_word("delegate to `local-coder`.", "local-coder"));
-        assert!(!names_word("use local-coder-2 here", "local-coder"));
-        assert!(!names_word("the my-local-coder agent", "local-coder"));
+    fn the_single_preamble_is_the_preface_over_the_whole_playbook() {
+        let mut lead = spec("lead", None);
+        lead.agent.preamble = Some("Delegate to a, then answer.".into());
+        lead.agent.think = Some(false);
+        lead.agent.max_tokens = Some(4096);
+        lead.tools.skills = vec!["style".into()];
+        let mut a = spec("a", None);
+        a.tools.skills = vec!["sql".into(), "style".into()];
+        a.agent.think = Some(true);
+        a.agent.max_tokens = Some(64);
+        let mut skilled = team(lead.clone(), vec![a.clone()]);
+        skilled.skill_content = Some("# Skill\n\n1. Ask a.\n".into());
+
+        let single = derive_single(&skilled, &[], &PriceBook::default());
+        assert_eq!(
+            single.agent.preamble.as_deref(),
+            Some(
+                format!("{SINGLE_PREFACE}\n\nDelegate to a, then answer.\n\n# Skill\n\n1. Ask a.")
+                    .as_str()
+            )
+        );
+        assert_eq!(single.tools.skills, ["style", "sql"]);
+        assert_eq!(
+            (single.agent.think, single.agent.max_tokens),
+            (Some(false), Some(4096)),
+            "the leader's, not a role's"
+        );
+        single.validate(None).expect("a valid spec");
+
+        let preamble_only = derive_single(&team(lead, vec![a.clone()]), &[], &PriceBook::default());
+        assert_eq!(
+            preamble_only.agent.preamble.as_deref(),
+            Some(format!("{SINGLE_PREFACE}\n\nDelegate to a, then answer.").as_str()),
+            "a team without a skill keeps its lead's playbook"
+        );
+
+        let bare = derive_single(
+            &team(spec("lead", None), vec![a]),
+            &[],
+            &PriceBook::default(),
+        );
+        assert_eq!(bare.agent.preamble, None, "no playbook, no preface");
+    }
+
+    /// The root's turn: one `invoke_agent` call per `(agent, outcome)`,
+    /// `Ok` its result and `Err` its error (a refused call). The broker's
+    /// edge log is left out: no call here became a child.
+    fn root_turn(calls: &[(&str, Result<&str, &str>)]) -> SwarmTrace {
+        let mut events = vec![SessionEvent::TurnStarted];
+        for (n, (agent, outcome)) in calls.iter().enumerate() {
+            let id = format!("call-{n}");
+            events.push(SessionEvent::ToolCallStarted {
+                id: id.clone(),
+                name: "invoke_agent".into(),
+            });
+            events.push(SessionEvent::ToolCallInput {
+                id: id.clone(),
+                arguments: serde_json::json!({ "agent": agent, "prompt": "go" }).to_string(),
+            });
+            events.push(match outcome {
+                Ok(result) => SessionEvent::ToolCallResult {
+                    id,
+                    result: serde_json::json!({ "response": result, "agent": agent }).to_string(),
+                },
+                Err(error) => SessionEvent::ToolCallError {
+                    id,
+                    error: error.to_string(),
+                },
+            });
+        }
+        events.push(SessionEvent::TurnEnded);
+        SwarmTrace::from_edges(&[], &events)
+    }
+
+    fn tags(arm: Arm<'_>, trace: &SwarmTrace, solved: bool) -> Vec<String> {
+        failure_tags(&RunRecord {
+            run: "r",
+            task: "t",
+            arm,
+            trace,
+            handoffs: None,
+            solved,
+            wall: Duration::ZERO,
+        })
+    }
+
+    fn team_arm<'a>(delegates_to: &'a [String], verifiers: &[(&str, &[&str])]) -> Arm<'a> {
+        Arm::Team {
+            id: "t",
+            leader: "lead",
+            delegates_to,
+            verifiers: verifiers
+                .iter()
+                .map(|(role, verdicts)| TeamVerifier {
+                    role: role.to_string(),
+                    verdicts: verdicts.iter().map(|v| v.to_string()).collect(),
+                })
+                .collect(),
+        }
+    }
+
+    /// AGE-1137: `wrong_role_called` is a call outside the leader's
+    /// `delegates_to`, globs included, whatever its playbook's prose says;
+    /// a call the broker refused counts too.
+    #[test]
+    fn wrong_role_called_is_a_call_off_the_leaders_delegates_to() {
+        let delegates_to = vec!["coder".to_string(), "*-reviewer".to_string()];
+        let arm = || team_arm(&delegates_to, &[]);
+        let listed = root_turn(&[("coder", Ok("done")), ("code-reviewer", Ok("ok"))]);
+        assert!(!tags(arm(), &listed, true).contains(&WRONG_ROLE_CALLED.to_string()));
+
+        let refused = root_turn(&[("scout", Err("not_listed: lead may not call scout"))]);
+        assert!(tags(arm(), &refused, true).contains(&WRONG_ROLE_CALLED.to_string()));
+
+        // The playbook's prose names the scout only to forbid it; before
+        // AGE-1137 that counted as naming it.
+        let mut lead = spec("lead", None);
+        lead.agent.preamble = Some("Delegate to coder. Never call scout.".into());
+        lead.swarm.delegates_to = vec!["coder".into()];
+        let forbidden = team(lead.clone(), vec![spec("coder", None), spec("scout", None)]);
+        let scouted = root_turn(&[("scout", Ok("found it"))]);
+        assert!(
+            tags(Arm::team(&forbidden), &scouted, true).contains(&WRONG_ROLE_CALLED.to_string()),
+            "named in the prose, not in delegates_to"
+        );
+        lead.swarm.delegates_to = vec!["coder".into(), "sc*".into()];
+        let listed = team(lead, vec![spec("coder", None), spec("scout", None)]);
+        assert!(
+            !tags(Arm::team(&listed), &scouted, true).contains(&WRONG_ROLE_CALLED.to_string()),
+            "listed in delegates_to, whatever the prose says"
+        );
+    }
+
+    /// AGE-1137: `verification_passed_wrong` is the team's verifier
+    /// answering one of its verdicts, never another role's `APPROVE`.
+    #[test]
+    fn verification_passed_wrong_is_the_verifiers_verdict() {
+        let delegates_to = vec!["*".to_string()];
+        let verifier: &[(&str, &[&str])] = &[("reviewer", &["APPROVE", "PASS"])];
+        let failed = |calls: &[(&str, Result<&str, &str>)], verifiers: &[(&str, &[&str])]| {
+            tags(team_arm(&delegates_to, verifiers), &root_turn(calls), false)
+                .contains(&VERIFICATION_PASSED_WRONG.to_string())
+        };
+        assert!(failed(&[("reviewer", Ok("APPROVE\nall good"))], verifier));
+        assert!(failed(&[("reviewer", Ok("**PASS**: 12 tests"))], verifier));
+        assert!(
+            !failed(&[("judge", Ok("APPROVE"))], verifier),
+            "not the verifier"
+        );
+        assert!(!failed(&[("reviewer", Ok("REQUEST_CHANGES"))], verifier));
+        assert!(!failed(&[("reviewer", Ok("APPROVE"))], &[]), "no verifier");
+        assert!(failed(
+            &[("judge", Ok("CHOICE 2: the plan attempt"))],
+            &[("judge", &["CHOICE"])]
+        ));
+        let solved = tags(
+            team_arm(&delegates_to, verifier),
+            &root_turn(&[("reviewer", Ok("APPROVE"))]),
+            true,
+        );
+        assert!(
+            !solved.contains(&VERIFICATION_PASSED_WRONG.to_string()),
+            "a pass the check agrees with: {solved:?}"
+        );
     }
 
     #[test]
-    fn approve_is_the_first_line_of_the_answer() {
-        assert!(opens_with_approve("APPROVE\nall good"));
-        assert!(opens_with_approve("\n**APPROVE** — tests pass"));
-        assert!(opens_with_approve(
-            r#"{"response":"APPROVE","success":true}"#
+    fn a_verdict_is_the_first_line_of_the_answer() {
+        let approve = ["APPROVE".to_string(), "PASS".to_string()];
+        assert!(opens_with_verdict("APPROVE\nall good", &approve));
+        assert!(opens_with_verdict("\n**APPROVE** — tests pass", &approve));
+        assert!(opens_with_verdict("PASS\n12 passed", &approve));
+        assert!(opens_with_verdict(
+            r#"{"response":"APPROVE","success":true}"#,
+            &approve
         ));
-        assert!(!opens_with_approve("REQUEST_CHANGES\n1. APPROVE later"));
-        assert!(!opens_with_approve("I do not approve"));
+        assert!(!opens_with_verdict(
+            "REQUEST_CHANGES\n1. APPROVE later",
+            &approve
+        ));
+        assert!(!opens_with_verdict("I do not approve", &approve));
     }
 }

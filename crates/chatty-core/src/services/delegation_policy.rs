@@ -126,7 +126,7 @@ impl CallPolicy for SpecPolicy {
 }
 
 /// Whether any of `patterns` matches `name`.
-fn matches_any(patterns: &[String], name: &str) -> bool {
+pub(crate) fn matches_any(patterns: &[String], name: &str) -> bool {
     patterns.iter().any(|pattern| glob_match(pattern, name))
 }
 
