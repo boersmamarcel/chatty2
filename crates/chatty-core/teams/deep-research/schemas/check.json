@@ -1,0 +1,41 @@
+{
+  "title": "The checker's citation check",
+  "type": "object",
+  "required": ["verdict", "citations", "sampled_claims"],
+  "properties": {
+    "verdict": {
+      "enum": ["PASS", "FAIL"],
+      "description": "PASS when every checked citation's quote was found and every sampled claim is supported."
+    },
+    "citations": {
+      "type": "array",
+      "maxItems": 12,
+      "description": "Each cited URL that was re-fetched, and whether its note's quote is on the page.",
+      "items": {
+        "type": "object",
+        "required": ["url", "status"],
+        "properties": {
+          "url": { "type": "string", "pattern": "^https?://", "maxLength": 500 },
+          "status": { "enum": ["found", "quote_missing", "unreachable"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "sampled_claims": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "Report sentences judged against the quote they cite.",
+      "items": {
+        "type": "object",
+        "required": ["sentence", "url", "verdict"],
+        "properties": {
+          "sentence": { "type": "string", "minLength": 1, "maxLength": 400 },
+          "url": { "type": "string", "pattern": "^https?://", "maxLength": 500 },
+          "verdict": { "enum": ["supported", "unsupported"] }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

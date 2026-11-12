@@ -1,0 +1,20 @@
+{
+  "name": "Deep research",
+  "experimental": true,
+  "leader": "deep-research-lead",
+  "agents": [
+    "deep-research-web-researcher",
+    "deep-research-writer",
+    "deep-research-checker"
+  ],
+  "max_agent_turns": 24,
+  "report": "research-report.md",
+  "handoffs": {
+    "deep-research-web-researcher": "schemas/note.json",
+    "deep-research-checker": "schemas/check.json"
+  },
+  "verifier": {
+    "role": "deep-research-checker",
+    "verdicts": ["PASS"]
+  }
+}

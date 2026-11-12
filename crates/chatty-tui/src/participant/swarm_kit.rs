@@ -160,6 +160,14 @@ pub(crate) struct SwarmKit {
 /// How long one delegation may take before the test fails instead of hangs.
 const DEADLINE: Duration = Duration::from_secs(60);
 
+/// What only a few kits change: where workers load plugins from, and
+/// whether they have the internet tools.
+#[derive(Default)]
+struct KitExtras {
+    module_dir: Option<PathBuf>,
+    web: bool,
+}
+
 impl SwarmKit {
     /// Start a root broker serving `roster`, the SSE endpoint answering from
     /// `sse` and the NDJSON one from `ndjson`. The workspace holds one file,
@@ -180,7 +188,16 @@ impl SwarmKit {
         ndjson: Script,
     ) -> Self {
         Self::start_opts(
-            None, roster, sse, ndjson, false, false, budget, None, None, None,
+            None,
+            roster,
+            sse,
+            ndjson,
+            false,
+            false,
+            budget,
+            None,
+            None,
+            KitExtras::default(),
         )
         .await
     }
@@ -218,7 +235,7 @@ impl SwarmKit {
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
             None,
-            None,
+            KitExtras::default(),
         )
         .await
     }
@@ -244,7 +261,7 @@ impl SwarmKit {
             budget,
             Some(verification.to_string()),
             None,
-            None,
+            KitExtras::default(),
         )
         .await
     }
@@ -266,7 +283,7 @@ impl SwarmKit {
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
             None,
-            None,
+            KitExtras::default(),
         )
         .await
     }
@@ -293,7 +310,41 @@ impl SwarmKit {
             budget,
             None,
             None,
-            Some(module_dir),
+            KitExtras {
+                module_dir: Some(module_dir),
+                web: false,
+            },
+        )
+        .await
+    }
+
+    /// As [`start_led_with_modules`](Self::start_led_with_modules) without
+    /// plugins, with every worker's internet tools on (`fetch_enabled`):
+    /// a `web-researcher` worker is offered `search_web` and `fetch`
+    /// (AGE-910). A scripted call must name a loopback URL, which the
+    /// fetch tool refuses before any request, so nothing leaves the
+    /// machine.
+    pub async fn start_led_with_web(
+        leader: AgentSpec,
+        budget: usize,
+        roster: Vec<AgentDef>,
+        sse: Script,
+        ndjson: Script,
+    ) -> Self {
+        Self::start_opts(
+            Some(leader),
+            roster,
+            sse,
+            ndjson,
+            false,
+            false,
+            budget,
+            None,
+            None,
+            KitExtras {
+                module_dir: None,
+                web: true,
+            },
         )
         .await
     }
@@ -318,7 +369,7 @@ impl SwarmKit {
             ModuleSettingsModel::default().default_endpoint_budget,
             None,
             Some(scale),
-            None,
+            KitExtras::default(),
         )
         .await
     }
@@ -334,8 +385,9 @@ impl SwarmKit {
         endpoint_budget: usize,
         verification: Option<String>,
         stall_scale: Option<u32>,
-        module_dir: Option<PathBuf>,
+        extras: KitExtras,
     ) -> Self {
+        let KitExtras { module_dir, web } = extras;
         let root = tempfile::tempdir().expect("a temp dir for the swarm");
         let base = root.path().canonicalize().expect("the temp dir resolves");
         let sse = FakeDaemon::scripted(sse);
@@ -435,7 +487,10 @@ impl SwarmKit {
         let execution = ExecutionSettingsModel {
             enabled: true,
             workspace_dir: Some(workspace.to_string_lossy().into_owned()),
-            fetch_enabled: false,
+            // Off unless a test asks for it: a scripted call can then only
+            // reach loopback, which the fetch tool's SSRF guard refuses, so
+            // nothing leaves the machine either way (AGE-910).
+            fetch_enabled: web,
             memory_enabled: false,
             approval_mode: if asking {
                 ApprovalMode::AlwaysAsk

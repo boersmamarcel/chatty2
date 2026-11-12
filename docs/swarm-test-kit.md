@@ -90,6 +90,12 @@ async fn my_swarm_feature() {
   `target/wasm-fixtures` (`scripts/build-wasm-fixtures.sh`).
   `analyst_swarm.rs` uses it with a root `AgentSession` built from the
   coordinator's spec (EV-1, AGE-668).
+- `SwarmKit::start_led_with_web(leader, budget, …)` is `start_led` with
+  every endpoint's budget raised to `budget` and every worker's internet
+  tools on, so a `web-researcher` worker is offered `search_web` and
+  `fetch`. Script a fetch of a loopback URL only: the fetch tool's SSRF
+  guard refuses it before any request, so nothing leaves the machine.
+  `deep_research.rs` uses it (AGE-910).
 - `SwarmKit::start_stall_scaled(scale, …)` divides every worker's stall
   timeouts and heartbeat interval by `scale` (it sets
   `CHATTY_TEST_STALL_SCALE` in the worker wrapper); scope the root's turn with

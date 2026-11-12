@@ -42,6 +42,8 @@ mod crosscheck_lead;
 #[cfg(test)]
 mod curation_team;
 #[cfg(test)]
+mod deep_research;
+#[cfg(test)]
 mod delegation;
 #[cfg(test)]
 mod equivalence;

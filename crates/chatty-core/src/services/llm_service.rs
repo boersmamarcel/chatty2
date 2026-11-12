@@ -18,6 +18,7 @@ use crate::models::execution_approval_store::{ApprovalNotification, ApprovalReso
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::services::budget_stop::{BUDGET_STOP, StopOnBudgetExhausted, endpoint_refusal};
 use crate::services::cut_off_tool_call::{ArgumentTail, CutOffToolCall, MAX_CUT_OFF_RECOVERIES};
+use crate::services::round_limit::RoundLimit;
 use crate::services::stream_processor::{StreamError, StreamErrorKind};
 use crate::services::turn_budget::{TurnBudget, WRAP_UP_TOOL_CALL_STOP};
 use crate::services::worker_start::{StopOnWorkerStartFailure, WORKER_START_STOP};
@@ -492,6 +493,7 @@ async fn start_run(
     history: Vec<Message>,
     prompt: Message,
     budget: TurnBudget,
+    rounds: RoundLimit,
 ) -> rig_agent::agent::StreamingResult {
     // A delegation whose worker never started ends the run (AGE-822), and
     // so does one that came back with a spent budget (AGE-903).
@@ -500,6 +502,8 @@ async fn start_run(
         .tool_concurrency(concurrency)
         .add_hook(StopOnWorkerStartFailure)
         .add_hook(StopOnBudgetExhausted)
+        // A `[swarm.rounds]` cap (AGE-910); a no-op without one.
+        .add_hook(rounds)
         .await
 }
 
@@ -802,9 +806,17 @@ pub async fn stream_prompt(
         delegator.clear_budget_stop();
     }
     let rig_agent = agent.agent.clone();
+    let round_limit = agent.round_limit().clone();
     let concurrency = tool_concurrency(agent);
-    let mut agent_stream =
-        start_run(&rig_agent, concurrency, history, user_message, turn_budget).await;
+    let mut agent_stream = start_run(
+        &rig_agent,
+        concurrency,
+        history,
+        user_message,
+        turn_budget,
+        round_limit.clone(),
+    )
+    .await;
 
     // A caller that does not wire a channel is treated the same as one whose
     // sender already dropped: `recv()` resolves to `None` immediately, which
@@ -892,7 +904,7 @@ pub async fn stream_prompt(
                                     history.push(call);
                                     let budget = turn_budget.continued(calls);
                                     agent_stream =
-                                        start_run(&rig_agent, concurrency, history, result, budget).await;
+                                        start_run(&rig_agent, concurrency, history, result, budget, round_limit.clone()).await;
                                     continue;
                                 }
                             }

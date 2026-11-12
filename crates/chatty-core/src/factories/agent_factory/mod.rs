@@ -239,6 +239,9 @@ pub struct AgentClient {
     /// same broker, so the swarm tree shows. `None` for a role that does not
     /// delegate.
     delegator: Option<crate::tools::invoke_agent_tool::InvokeAgentTool>,
+    /// The spec's `[swarm.rounds]` cap (AGE-910), held across this agent's
+    /// runs; a no-op for every other agent.
+    round_limit: crate::services::round_limit::RoundLimit,
 }
 
 impl AgentClient {
@@ -274,6 +277,11 @@ impl AgentClient {
     /// (AGE-744); `None` for a role that does not delegate.
     pub fn delegator(&self) -> Option<&crate::tools::invoke_agent_tool::InvokeAgentTool> {
         self.delegator.as_ref()
+    }
+
+    /// This agent's `[swarm.rounds]` hook (AGE-910).
+    pub fn round_limit(&self) -> &crate::services::round_limit::RoundLimit {
+        &self.round_limit
     }
 
     /// The tree messages waiting for this agent, taken because its next run
@@ -1647,6 +1655,9 @@ impl AgentClient {
             agent.context_shaper.deliver_mid_run_messages(transport);
         }
         agent.delegator = delegator;
+        agent.round_limit = crate::services::round_limit::RoundLimit::new(
+            role.rounds.clone().filter(|_| role.delegates),
+        );
         agent.plugin_usage = plugins
             .iter()
             .map(|plugin| (plugin.name.clone(), plugin.usage.clone()))
