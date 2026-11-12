@@ -3106,9 +3106,15 @@ fn artifact_rendered_markdown(
                     ElementId::Name(format!("artifact-md-{ix}").into())
                 };
                 inner.child(
-                    TextView::markdown(id, text.clone(), window, cx)
-                        .style(document_text_style())
-                        .selectable(true),
+                    TextView::markdown(
+                        id,
+                        // AGE-1262: no file:// or custom-scheme links.
+                        crate::chatty::views::safe_links::neuter_unsafe_links(text).into_owned(),
+                        window,
+                        cx,
+                    )
+                    .style(document_text_style())
+                    .selectable(true),
                 )
             }
             RenderedPart::Mermaid { source, svg } => {

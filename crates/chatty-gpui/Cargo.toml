@@ -18,6 +18,9 @@ chatty-wasm-runtime = { path = "../chatty-wasm-runtime" }
 # GPUI framework
 gpui.workspace = true
 gpui-component.workspace = true
+# Same parser gpui-component renders with; used to neuter unsafe links (AGE-1262).
+markdown = "1.0.0"
+url = "2.5"
 gpui-component-assets.workspace = true
 
 # Core dependencies (needed directly by GPUI layer)
