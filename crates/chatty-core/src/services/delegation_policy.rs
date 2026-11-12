@@ -113,6 +113,10 @@ impl CallPolicy for SpecPolicy {
         }
     }
 
+    fn root_spec(&self) -> Option<&str> {
+        self.root.as_ref().map(|root| root.agent.name.as_str())
+    }
+
     /// The callee spec's `[budget]` (DP-3): `max_agent_turns` (`0` is no
     /// cap), `max_duration` and `cap_usd`.
     fn budget(&self, callee: &str) -> Remaining {
@@ -181,6 +185,13 @@ mod tests {
 
     fn spec(name: &str) -> AgentSpec {
         AgentSpec::named(name)
+    }
+
+    #[test]
+    fn the_policy_names_the_root_spec() {
+        let policy = SpecPolicy::default().with_root(Some(spec("x")));
+        assert_eq!(policy.root_spec(), Some("x"));
+        assert_eq!(SpecPolicy::default().root_spec(), None);
     }
 
     /// Invariant 1: every combination of listed / not listed × exposed / not
