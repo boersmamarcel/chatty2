@@ -85,6 +85,8 @@ mod tui_swarm;
 mod typed_handoffs;
 #[cfg(test)]
 mod worker_heartbeat;
+#[cfg(test)]
+mod worker_search;
 
 use anyhow::{Context, Result, bail};
 use chatty_protocol_gateway::worker::{InputStores, WorkerConnection, answer_inputs, worker_card};
