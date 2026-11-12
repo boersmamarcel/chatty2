@@ -35,10 +35,24 @@ rm -f "${APPIMAGE_NAME}"
 if ! command -v appimagetool &> /dev/null; then
     echo "appimagetool not found. Downloading..."
     APPIMAGETOOL_APPIMAGE="appimagetool-${ARCH}.AppImage"
+    # The download sits on a moving "continuous" tag and its runtime ships
+    # inside every AppImage, so the bytes are pinned by SHA-256 and a
+    # mismatch stops the build (AGE-1268). The pins are the assets as
+    # published on 2025-07-26; refresh them deliberately when upgrading.
+    case "${ARCH}" in
+        x86_64)  APPIMAGETOOL_SHA256="b90f4a8b18967545fda78a445b27680a1642f1ef9488ced28b65398f2be7add2" ;;
+        aarch64) APPIMAGETOOL_SHA256="a48972e5ae91c944c5a7c80214e7e0a42dd6aa3ae979d8756203512a74ff574d" ;;
+        *) echo "Error: no pinned appimagetool checksum for ${ARCH}"; exit 1 ;;
+    esac
     if [ ! -f "${APPIMAGETOOL_APPIMAGE}" ]; then
         wget "https://github.com/AppImage/AppImageKit/releases/download/continuous/${APPIMAGETOOL_APPIMAGE}"
-        chmod +x "${APPIMAGETOOL_APPIMAGE}"
     fi
+    if ! echo "${APPIMAGETOOL_SHA256}  ${APPIMAGETOOL_APPIMAGE}" | sha256sum -c - ; then
+        echo "Error: ${APPIMAGETOOL_APPIMAGE} does not match its pinned SHA-256; refusing to package with it"
+        rm -f "${APPIMAGETOOL_APPIMAGE}"
+        exit 1
+    fi
+    chmod +x "${APPIMAGETOOL_APPIMAGE}"
     # Extract the AppImage to avoid FUSE requirement in CI environments
     echo "Extracting appimagetool..."
     ./${APPIMAGETOOL_APPIMAGE} --appimage-extract > /dev/null 2>&1
