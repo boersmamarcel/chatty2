@@ -54,6 +54,13 @@ const DESCRIPTION: &str = "List the agents you may delegate to: agent specs this
      delegate a task. Call one with `invoke_agent` — each agent runs its own full agentic loop \
      and returns a result.";
 
+/// What the note says about resumable handles, wherever there is a broker
+/// to keep them (RC-4).
+const HANDLES_NOTE: &str = " Resumable handles (`invoke_agent`'s `handle`) live only as long as \
+     this root process: handles from a run before it started are gone, and calling one by name \
+     starts a fresh conversation. A handle that ended (30 min idle, evicted, or its owner ended) \
+     answers `handle_expired`.";
+
 /// Arguments for listing agents (none).
 #[derive(Deserialize, Serialize)]
 pub struct ListAgentsToolArgs {}
@@ -467,6 +474,12 @@ impl Tool for ListAgentsTool {
              instead."
                 .to_string()
         };
+        // RC-4: handles live in the root process's memory only. A model
+        // resuming a conversation from before a restart learns here that
+        // the handles it named then are gone, before it calls one.
+        if self.lazy_broker.is_some() || self.transport.is_some() {
+            note.push_str(HANDLES_NOTE);
+        }
         // AGE-746: a broker that is configured but failed to start (its
         // gateway socket in use, most often) used to be indistinguishable
         // from one that was simply never turned on. Say so, so the model can
@@ -592,6 +605,25 @@ mod tests {
             "note should carry the real bind error, not a generic message: {}",
             output.note
         );
+    }
+
+    /// RC-4: handles live in the root process's memory, so a root that
+    /// restarted has none of its previous run's; wherever a broker could
+    /// hold handles, the note says so. With no broker there are no handles
+    /// to mention.
+    #[tokio::test]
+    async fn the_note_says_handles_do_not_outlive_the_root_process() {
+        let with_broker = ListAgentsTool::new(vec![])
+            .with_lazy_broker(Arc::new(FailingBroker))
+            .with_local_workers(["coder"]);
+        let note = list(&with_broker).await.note;
+        assert!(
+            note.contains("handles from a run before it started are gone")
+                && note.contains("handle_expired"),
+            "{note}"
+        );
+        let without = list(&ListAgentsTool::new(vec![])).await.note;
+        assert!(!without.contains("handle"), "{without}");
     }
 
     /// A configured remote is labelled as somebody else's, and its key is

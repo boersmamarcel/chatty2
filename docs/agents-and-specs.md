@@ -555,10 +555,31 @@ handle's worktree and branch (`worker_tree::attach`) instead of making a new one
 evidence is that task's commits only (`task_base..HEAD`, `task_base` recorded when the
 worker got the tree), and `InvokeAgentOutput.behind_by` says how many commits the tree's
 branch is behind its base. Calls to one handle queue in arrival order, one run at a time.
-Handles live in the root broker's memory only, keyed by owner and name, and are bound to
-the agent they were first used with; a remote agent refuses one. A plain call names none,
-and its result carries neither `handle` nor `behind_by`. Not yet: expiry, caps, the owner
-and scope rules and `list_agents` listing handles (RC-4, RO-4).
+Handles live in the root broker's memory only, keyed by root conversation and name, and are
+bound to the agent they were first used with; a remote agent refuses one. A plain call names
+none, and its result carries neither `handle` nor `behind_by`.
+
+Lifecycle (RC-4, AGE-653). One broker serves every conversation on the desktop: the root
+names its conversation on its direct handle (`Transport::for_conversation`, from
+`AgentBuildContext.conversation_id`), and a node's calls belong to the conversation of the
+root call its run hangs from, so another conversation never sees or reaches a handle, even
+by name. The owner is whoever started the handle's first task — the root, a node, or another
+handle (a handle's worker calls as its handle, so what it starts outlives the worker); only
+the owner and its ancestors may task it, decided by the broker gate's handle rule (ADR-0023),
+which also records the run's root kind and key, so an `External`-rooted run reaches only its
+key's handles. Anyone else gets the typed `not_owner`. A handle ends after 30 min idle, when
+its owner drops it (`BrokerCalls::drop_handle`; a node names the run it drops from), or when its owner ends (the plain call whose
+worker started it, the owning handle, or the root conversation, `end_conversation`); a ninth
+handle in a conversation, or more than 32 MiB of saved conversations, ends the longest-idle
+one. An ended handle's conversation is deleted and its worktree and branch stay (ADR-0017);
+tasking it is the typed `handle_expired`, rendered to the model, and spawns nothing; the name
+stays ended for the rest of that conversation in this root process (a conversation that ends
+forgets its names). Two callers that pick the same name in one conversation collide: the
+second is `not_owner` unless it is in the first's owner line.
+`list_agents`' note says handles do not outlive the root process. The broker also keeps each
+task it ran, live or finished within 10 min, for the root's A2A `tasks/get`
+(`DirectTransport::tasks_get`), with the handle as the task's `contextId`; the loopback
+`/a2a/{agent}` route still refuses roles (BI-7). `list_agents` lists handles with RO-4.
 
 ### `send_message`
 

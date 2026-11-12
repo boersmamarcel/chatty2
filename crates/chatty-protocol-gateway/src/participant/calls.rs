@@ -156,22 +156,23 @@ use chatty_fabric::wire::{AgentEntry, Opaque, TaskMetadata, WireProgress};
 use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, Asker,
     CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallResult,
-    CallStream, CapturedConversation, ChildCall, ConversationScope, EdgeKind, EdgeLog, EdgeRow,
-    FORWARD_INTERVAL, Handle, HandleStore, InvokeAgentOutcome, InvokeAgentParams, Message,
-    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason,
-    SavedConversation, SendMessageParams, Sender, SwarmBatcher, SwarmItem, Transport, UsagePricer,
-    deadline_grace,
+    CallStream, CapturedConversation, ChildCall, Clock, ConversationScope, EdgeKind, EdgeLog,
+    EdgeRow, FORWARD_INTERVAL, Handle, HandleKey, HandleOwner, HandleParty, HandleStatus,
+    HandleStore, HandleTicket, InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus,
+    NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, RunRoot, SavedConversation,
+    SendMessageParams, Sender, SwarmBatcher, SwarmItem, Transport, UsagePricer, deadline_grace,
 };
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use super::gate::{
-    self, Addressee, Admitter, Callee, Caller, Decision, Delivery, Grant, InvokeTarget, NodeCaller,
-    Owner, PostTo, Refused, Request, Snapshot, SpawnView, Unreadable,
+    self, Addressee, Admitter, BrokerRoot, Callee, Caller, Decision, Delivery, Grant, HandleCheck,
+    InvokeTarget, NodeCaller, Owner, PostTo, Refused, Request, Snapshot, SpawnView, Unreadable,
 };
 use super::hosted::Hosted;
 use super::protocol::{CallStamp, DelegatedTask, TaskState};
+use super::recent_tasks::{RecentTasks, TaskRecord};
 use super::registry::{ParticipantRegistry, ROOT_SCOPE, TaskUpdate};
 use super::spawn_context::{self, Target};
 use super::virtual_agent::VirtualAgent;
@@ -259,6 +260,77 @@ pub struct BrokerCalls {
     /// still alive (RC-3): the caller's stall watchdog hears nothing else
     /// while the call ahead of it runs.
     queued_heartbeat: std::time::Duration,
+    /// The root conversation of each root call in flight, by its root task
+    /// id: the conversation every run nested under it works for (RC-4).
+    scopes: Scopes,
+    /// The tasks this broker ran, live or finished within
+    /// [`RECENT_TASKS`](super::recent_tasks::RECENT_TASKS): what `tasks/get`
+    /// answers (RC-4).
+    tasks: Arc<Mutex<RecentTasks>>,
+    /// What the broker tells the time by (handles' idleness, recent tasks).
+    clock: Clock,
+}
+
+/// Root conversations by root task id.
+type Scopes = Arc<Mutex<HashMap<String, ConversationScope>>>;
+
+/// A root call's entry in [`BrokerCalls::scopes`], removed when the call
+/// ends.
+struct ScopeGuard {
+    scopes: Scopes,
+    root_task_id: String,
+}
+
+impl Drop for ScopeGuard {
+    fn drop(&mut self) {
+        locked(&self.scopes).remove(&self.root_task_id);
+    }
+}
+
+/// A plain call's spawned worker: when its call ends, the handles it owns
+/// end (RC-4).
+struct OwnerGuard {
+    handles: Arc<HandleStore>,
+    scope: ConversationScope,
+    node: String,
+}
+
+impl Drop for OwnerGuard {
+    fn drop(&mut self) {
+        self.handles
+            .owner_ended(&self.scope, &HandleParty::Node(self.node.clone()));
+    }
+}
+
+/// Lock `mutex`, past a poisoning panic.
+fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Marks a task cancelled in the recent tasks when its call is dropped
+/// before the task ended; a task that ended keeps its state.
+struct TaskEnd {
+    tasks: Arc<Mutex<RecentTasks>>,
+    id: String,
+    clock: Clock,
+}
+
+impl Drop for TaskEnd {
+    fn drop(&mut self) {
+        locked(&self.tasks).end(&self.id, TaskState::Canceled, (self.clock)());
+    }
+}
+
+/// What an `agent.invoke` carries about handles and conversations into its
+/// stream (RC-3, RC-4).
+struct CallHandle {
+    /// The caller's root conversation.
+    scope: ConversationScope,
+    /// The call's place on the handle it names; `None` for a plain call, or
+    /// one to a registered participant (refused in the stream).
+    ticket: Option<HandleTicket>,
+    /// A root call's entry in the scopes table.
+    root: Option<ScopeGuard>,
 }
 
 /// [`BrokerCalls`]' default interval between the heartbeats of a call
@@ -814,7 +886,77 @@ impl BrokerCalls {
             hosted: None,
             handles: Arc::default(),
             queued_heartbeat: QUEUED_HEARTBEAT,
+            scopes: Arc::default(),
+            tasks: Arc::default(),
+            clock: Arc::new(std::time::SystemTime::now),
         }
+    }
+
+    /// Tell the time by `clock`: a handle's idleness and how long a
+    /// finished task is answered for (tests move a fake one).
+    #[cfg(test)]
+    pub(crate) fn with_clock(mut self, clock: Clock) -> Self {
+        self.handles = Arc::new(HandleStore::with_clock(clock.clone()));
+        self.clock = clock;
+        self
+    }
+
+    /// The broker's handles (tests read them).
+    #[cfg(test)]
+    pub(crate) fn handles(&self) -> &HandleStore {
+        &self.handles
+    }
+
+    /// The root conversation `scope` ended (RC-4): every handle of it ends,
+    /// its saved conversation deleted.
+    pub fn end_conversation(&self, scope: &ConversationScope) {
+        self.handles.end_conversation(scope);
+    }
+
+    /// End the handle `name` of `peer`'s conversation for its owner (RC-4):
+    /// the gate's handle rule decides, and the handle's saved conversation
+    /// is deleted; its tree stays (ADR-0017). `scope` is the root's
+    /// conversation, for a root `peer`; `run` is the open run a node drops
+    /// it from, which names its conversation, as an `agent.invoke`'s does.
+    pub fn drop_handle(
+        &self,
+        peer: &Peer,
+        scope: Option<&ConversationScope>,
+        run: Option<&str>,
+        name: &str,
+    ) -> Result<(), CallError> {
+        let caller = self.resolve(peer);
+        let request = Request::DropHandle { name, run };
+        match self.gate_in(peer, scope, &caller, &request).outcome {
+            Ok(_) => {
+                let key = HandleKey::new(self.conversation_of(peer, scope, run), name);
+                self.handles.drop_handle(&key);
+                Ok(())
+            }
+            Err(refused) => {
+                let error = refused.to_call_error();
+                self.log_refusal(peer, "handle.drop", &error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    /// A2A `tasks/get` for the root of `scope` (RC-4): the task `id` of
+    /// that conversation, live or finished within
+    /// [`RECENT_TASKS`](super::recent_tasks::RECENT_TASKS), as an A2A
+    /// `Task`; its `contextId` is the handle it ran under. `None` for a
+    /// task this root process never ran for the conversation, or one that
+    /// finished longer ago.
+    pub fn tasks_get(
+        &self,
+        scope: Option<&ConversationScope>,
+        id: &str,
+    ) -> Result<Option<serde_json::Value>, CallError> {
+        self.root_request(&Request::TaskGet { id })?;
+        let scope = self.conversation_of(&Peer::Root, scope, None);
+        Ok(locked(&self.tasks)
+            .get(id, &scope, (self.clock)())
+            .map(|record| record.to_a2a(id)))
     }
 
     /// A hosted broker's call path (HS-4a): `policy` is required, so the
@@ -1108,17 +1250,40 @@ impl BrokerCalls {
     /// refused call spawns, submits and queues nothing, and does not touch
     /// the caller's permit either (PL-S2).
     pub fn call(&self, peer: Peer, request: CallRequest) -> CallStream {
+        self.call_in(peer, None, request)
+    }
+
+    /// [`call`](Self::call) from the root of the conversation `scope`
+    /// (RC-4): its handles are that conversation's. `None` is the broker's
+    /// one default conversation.
+    pub fn call_in(
+        &self,
+        peer: Peer,
+        scope: Option<&ConversationScope>,
+        request: CallRequest,
+    ) -> CallStream {
         let caller = self.resolve(&peer);
-        self.call_as(peer, caller, request)
+        self.call_as_in(peer, scope, caller, request)
     }
 
     /// Run `request` as `caller`, whom `peer`'s transport authenticated:
     /// [`call`](Self::call) for a peer the broker resolves itself, and a
     /// hosted broker's client (HS-4a), which its API resolved.
     pub(crate) fn call_as(&self, peer: Peer, caller: Caller, request: CallRequest) -> CallStream {
+        self.call_as_in(peer, None, caller, request)
+    }
+
+    fn call_as_in(
+        &self,
+        peer: Peer,
+        scope: Option<&ConversationScope>,
+        caller: Caller,
+        request: CallRequest,
+    ) -> CallStream {
         match request {
             CallRequest::InvokeAgent(params) => {
-                let decision = self.gate(&peer, &caller, &Request::Invoke(&params));
+                let (decision, checked) =
+                    self.gate_checked(&peer, scope, &caller, &Request::Invoke(&params));
                 let mut edge = EdgeGuard {
                     log: self.edges.clone(),
                     from: peer.name().to_string(),
@@ -1139,13 +1304,58 @@ impl BrokerCalls {
                     }
                 };
                 edge.root_task_id = Some(stamp.chain.root_task_id.clone());
+                // A root call names the conversation its runs work for
+                // (RC-4); a node's is its run's.
+                let conversation = self.conversation_of(&peer, scope, params.run.as_deref());
+                let root = match &peer {
+                    Peer::Root => {
+                        let root_task_id = stamp.chain.root_task_id.clone();
+                        locked(&self.scopes).insert(root_task_id.clone(), conversation.clone());
+                        Some(ScopeGuard {
+                            scopes: self.scopes.clone(),
+                            root_task_id,
+                        })
+                    }
+                    Peer::Node(_) => None,
+                };
+                // The call joins the handle it names as the gate read it
+                // (RC-4): a free name becomes a handle its caller owns.
+                let ticket = match (checked, &target) {
+                    (
+                        HandleCheck::Named {
+                            name,
+                            status: expected,
+                            ..
+                        },
+                        InvokeTarget::Spawn { .. },
+                    ) => {
+                        let key = HandleKey::new(conversation.clone(), name.as_str());
+                        let owner = self.owner_line(&peer, &conversation);
+                        match self.handles.begin(key, owner, &expected) {
+                            Ok(ticket) => Some(ticket),
+                            Err(_) => {
+                                let error = CallError::Refused(format!(
+                                    "handle '{name}' changed while the call was decided; call again"
+                                ));
+                                edge.refused(&error.to_string());
+                                return refusal_stream(error);
+                            }
+                        }
+                    }
+                    _ => None,
+                };
+                let handle = CallHandle {
+                    scope: conversation,
+                    ticket,
+                    root,
+                };
                 // Released now, before the callee queues for a slot that
                 // may be this very one.
                 let child = match &peer {
                     Peer::Node(name) => self.registry.node_permit(name).map(|p| p.child_call()),
                     Peer::Root => None,
                 };
-                let call = self.invoke(peer, params, edge, stamp, target);
+                let call = self.invoke(peer, params, edge, stamp, target, handle);
                 match child {
                     Some(child) => gated(child, call),
                     None => call,
@@ -1198,11 +1408,109 @@ impl BrokerCalls {
         }
     }
 
+    /// The root conversation `peer` calls for (RC-4): the root's own —
+    /// `scope`, or the broker's default one — or, for a node, the one its
+    /// run `run` hangs from. A run no root call in flight started gets a
+    /// conversation of its own, which shares nothing.
+    fn conversation_of(
+        &self,
+        peer: &Peer,
+        scope: Option<&ConversationScope>,
+        run: Option<&str>,
+    ) -> ConversationScope {
+        let name = match peer {
+            Peer::Root => {
+                return scope
+                    .cloned()
+                    .unwrap_or_else(|| ConversationScope::new(ROOT_SCOPE));
+            }
+            Peer::Node(name) => name,
+        };
+        let root_task_id = self.registry.open_runs_of(name).and_then(|(_, runs)| {
+            runs.into_iter()
+                .find(|open| Some(open.name.as_str()) == run)
+                .map(|open| open.chain.root_task_id)
+        });
+        match root_task_id {
+            Some(id) => locked(&self.scopes)
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| ConversationScope::new(format!("run:{id}"))),
+            None => ConversationScope::new(format!("node:{name}")),
+        }
+    }
+
+    /// Who `peer` is to a handle of `scope` (RC-4): the root, the handle
+    /// whose task it runs, or itself.
+    fn handle_party(&self, peer: &Peer, scope: &ConversationScope) -> HandleParty {
+        match peer {
+            Peer::Root => HandleParty::Root,
+            Peer::Node(name) => match self.handles.served_by(name) {
+                Some(key) if key.scope == *scope => HandleParty::Handle(key.name),
+                _ => HandleParty::Node(name.clone()),
+            },
+        }
+    }
+
+    /// The root the runs of this broker hang from (ADR-0023 § 2): the
+    /// human's own on a local or hosted-root broker; on a typed-root
+    /// broker, the `External` key's owner it was bound to, or a `Remote`
+    /// peer's.
+    fn run_root(&self) -> RunRoot {
+        match self.hosted.as_ref().map(|hosted| &hosted.binding.root) {
+            None | Some(BrokerRoot::Hosted) => RunRoot::Owner,
+            Some(BrokerRoot::Typed {
+                key_owner: Some(key),
+            }) => RunRoot::External { key: key.clone() },
+            Some(BrokerRoot::Typed { key_owner: None }) => RunRoot::Remote,
+        }
+    }
+
+    /// The owner of a handle `peer` starts in `scope`, followed by its
+    /// ancestors (RC-4): a handle's worker by its handle's line, a node by
+    /// the nodes that own it up to the root, each as the handle it runs
+    /// for, if it runs for one.
+    fn owner_line(&self, peer: &Peer, scope: &ConversationScope) -> HandleOwner {
+        let root = self.run_root();
+        let mut party = self.handle_party(peer, scope);
+        let owner = party.clone();
+        let mut ancestors = Vec::new();
+        loop {
+            let up = match &party {
+                HandleParty::Root => break,
+                HandleParty::Handle(name) => {
+                    if let HandleStatus::Live(line) =
+                        self.handles.status(&HandleKey::new(scope.clone(), name))
+                    {
+                        // A handle's line starts at its owner, not at
+                        // itself: all of it is above this one.
+                        ancestors.extend(line.line);
+                    }
+                    break;
+                }
+                HandleParty::Node(name) => match self.registry.node_and_owner(name) {
+                    Some((_, Some(owner))) => {
+                        self.handle_party(&Peer::Node(owner.name().as_str().to_string()), scope)
+                    }
+                    Some((_, None)) | None => HandleParty::Root,
+                },
+            };
+            ancestors.push(up.clone());
+            party = up;
+        }
+        HandleOwner::new(root, owner, ancestors)
+    }
+
     /// What [`decide`](gate::decide) reads for `request` from `peer`: the
     /// policy, the clock, the callee and the sender's owner, copied out of
     /// the registry and the runners. [`Unreadable`] when the registry does
     /// not add up.
-    fn snapshot(&self, peer: &Peer, request: &Request<'_>) -> Result<Snapshot<'_>, Unreadable> {
+    fn snapshot(
+        &self,
+        peer: &Peer,
+        scope: Option<&ConversationScope>,
+        request: &Request<'_>,
+    ) -> Result<Snapshot<'_>, Unreadable> {
         let callee = match request {
             Request::Invoke(params) => self.callee(peer, params)?,
             _ => Callee::None,
@@ -1236,6 +1544,26 @@ impl BrokerCalls {
             }
             _ => None,
         };
+        let named = match request {
+            Request::Invoke(params) => params
+                .handle
+                .as_deref()
+                .map(|name| (name, params.run.as_deref())),
+            Request::DropHandle { name, run } => Some((*name, *run)),
+            _ => None,
+        };
+        let handle = match named {
+            None => HandleCheck::None,
+            Some((name, run)) => {
+                let conversation = self.conversation_of(peer, scope, run);
+                HandleCheck::Named {
+                    name: name.to_string(),
+                    party: self.handle_party(peer, &conversation),
+                    root: self.run_root(),
+                    status: self.handles.status(&HandleKey::new(conversation, name)),
+                }
+            }
+        };
         Ok(Snapshot {
             policy: self.policy.get(),
             now: std::time::SystemTime::now(),
@@ -1245,6 +1573,7 @@ impl BrokerCalls {
             addressee,
             binding: self.hosted.as_ref().map(|hosted| &hosted.binding),
             answer_nonce,
+            handle,
         })
     }
 
@@ -1294,7 +1623,36 @@ impl BrokerCalls {
     /// outcome with the typed caller and the row it matched, before any
     /// effect. An internal error is alarmed.
     fn gate(&self, peer: &Peer, caller: &Caller, request: &Request<'_>) -> Decision {
-        let mut decision = gate::decide(caller, request, &self.snapshot(peer, request));
+        self.gate_in(peer, None, caller, request)
+    }
+
+    /// [`gate`](Self::gate) for a root `peer` calling from the
+    /// conversation `scope` (RC-4).
+    fn gate_in(
+        &self,
+        peer: &Peer,
+        scope: Option<&ConversationScope>,
+        caller: &Caller,
+        request: &Request<'_>,
+    ) -> Decision {
+        self.gate_checked(peer, scope, caller, request).0
+    }
+
+    /// [`gate_in`](Self::gate_in), with the handle the decision read: a
+    /// call that joins a handle joins it as the gate saw it (RC-4).
+    fn gate_checked(
+        &self,
+        peer: &Peer,
+        scope: Option<&ConversationScope>,
+        caller: &Caller,
+        request: &Request<'_>,
+    ) -> (Decision, HandleCheck) {
+        let snapshot = self.snapshot(peer, scope, request);
+        let handle = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.handle.clone())
+            .unwrap_or(HandleCheck::None);
+        let mut decision = gate::decide(caller, request, &snapshot);
         // A hosted broker writes every decision before its effect, and a
         // write that fails refuses (ADR-0023 § 7): an unlogged grant on a
         // hosted broker is an internal error. A local broker's log is the
@@ -1315,7 +1673,7 @@ impl BrokerCalls {
                 warn!(target: "chatty::gate", %caller, row = %decision.row, refused = %refused.to_call_error(), "refused")
             }
         }
-        decision
+        (decision, handle)
     }
 
     /// Log one refusal row for a request that is not an edge between two
@@ -1563,6 +1921,7 @@ impl BrokerCalls {
         mut edge: EdgeGuard,
         stamp: CallStamp,
         target: InvokeTarget,
+        handle: CallHandle,
     ) -> CallStream {
         let registry = self.registry.clone();
         // A worker the call starts gets the context the gate derived or
@@ -1620,12 +1979,20 @@ impl BrokerCalls {
             // (ADR-0021 § 3).
             .with_identity(self.hosted.as_ref().map(Hosted::identity));
         let agent = params.agent;
-        // A call naming a handle (RC-3) queues on it, owned by its caller.
+        // A call naming a handle (RC-3) queues on it; the gate decided it
+        // may (RC-4).
         let handle_name = params.handle;
+        let CallHandle {
+            scope,
+            ticket,
+            root: _root_scope,
+        } = handle;
         let handles = self.handles.clone();
-        let owner = caller.name().to_string();
         let submits = matches!(effect, Effect::Submit(_));
         let queued_heartbeat = self.queued_heartbeat;
+        let tasks = self.tasks.clone();
+        let clock = self.clock.clone();
+        let caller_name = caller.name().to_string();
         // The caller's messages ride on this call's result (delivery point
         // a), taken when the result is made.
         let inbox = self
@@ -1646,9 +2013,12 @@ impl BrokerCalls {
             // A call that has to wait says so once, then heartbeats, so its
             // caller's stall watchdog does not end the turn under it; one
             // that gets the slot at once sends nothing.
-            let mut slot = match handle_name.as_deref() {
-                Some(name) => {
-                    let acquire = handles.slot(&owner, name).lock_owned();
+            // The root call's entry in the scopes table lives as long as
+            // this stream.
+            let _root_scope = _root_scope;
+            let held = match (ticket.as_ref(), handle_name.as_deref()) {
+                (Some(ticket), Some(name)) => {
+                    let acquire = ticket.queue().lock_owned();
                     tokio::pin!(acquire);
                     let mut beat = tokio::time::interval(queued_heartbeat);
                     beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1672,16 +2042,29 @@ impl BrokerCalls {
                         }
                     }
                 }
+                _ => None,
+            };
+            // What the handle holds, now that this call is first in line:
+            // a handle that ended while the call waited spawns nothing.
+            let saved = match ticket.as_ref().map(HandleTicket::saved) {
+                Some(Ok(saved)) => saved,
+                Some(Err(error)) => {
+                    warn!(agent = %agent, %error, "A queued handle call found its handle ended");
+                    edge.root_task_id = None;
+                    edge.refused(&error.to_string());
+                    yield Err(CallError::Handle(error));
+                    return;
+                }
                 None => None,
             };
-            if let (Some(slot), Some(name)) = (slot.as_ref(), handle_name.as_deref()) {
+            if let Some(name) = handle_name.as_deref() {
                 let refused = if submits {
                     Some(format!(
                         "handle '{name}': only an agent the broker starts can be resumed, not \
                          the running participant '{agent}'"
                     ))
                 } else {
-                    match slot.as_ref() {
+                    match saved.as_ref() {
                         Some(saved) if saved.agent != agent => Some(format!(
                             "handle '{name}' holds a conversation with '{}', not '{agent}'",
                             saved.agent
@@ -1736,6 +2119,28 @@ impl BrokerCalls {
                 }
             };
             edge.to = running.participant().to_string();
+            // The worker of a handle's task calls as that handle; a plain
+            // call's spawned worker owns what handles it starts until the
+            // call ends (RC-4).
+            if let Some(ticket) = ticket.as_ref() {
+                ticket.served_by(running.participant());
+            }
+            let _owned = (!submits && ticket.is_none()).then(|| OwnerGuard {
+                handles: handles.clone(),
+                scope: scope.clone(),
+                node: running.participant().to_string(),
+            });
+            // `tasks/get` answers for it from now on (RC-4).
+            locked(&tasks).start(
+                running.task_id(),
+                TaskRecord::new(scope.clone(), &caller_name, &agent, handle_name.clone()),
+            );
+            // A call dropped before its task ended leaves it cancelled.
+            let _task_record = TaskEnd {
+                tasks: tasks.clone(),
+                id: running.task_id().to_string(),
+                clock: clock.clone(),
+            };
             // Where the callee's questions go while this call runs it
             // (EN-2b): before anything is yielded, so a question the worker
             // asks at once finds it.
@@ -1888,6 +2293,7 @@ impl BrokerCalls {
                 // The subtree goes now, not when the caller lets go of the
                 // stream: the worker is reaped, its connection closes, and
                 // every call it made is dropped with it.
+                locked(&tasks).end(running.task_id(), TaskState::Canceled, (clock)());
                 drop(running);
                 report(SwarmItem::Ended { state: TaskState::Canceled.to_string() });
                 edge.write(EdgeKind::Task, "cancelled".to_string());
@@ -1945,42 +2351,44 @@ impl BrokerCalls {
             // tasks said, and the tree it worked in (RC-3).
             let mut saved_as = None;
             let mut behind_by = None;
-            if let (Some(slot), Some(name)) = (slot.as_mut(), handle_name.as_ref()) {
+            if let (Some(ticket), Some(name)) = (ticket.as_ref(), handle_name.as_ref()) {
                 let tree = running.tree();
                 match metadata.as_ref().and_then(CapturedConversation::from_metadata) {
                     Some(CapturedConversation::Messages { messages: turns }) => {
-                        let previous = slot.take();
-                        let conversation = match previous.as_ref() {
+                        let conversation = match saved.as_ref() {
                             Some(previous) => previous.conversation.extended(&turns),
-                            None => SavedConversation { data: turns },
+                            None => SavedConversation::new(turns),
                         };
-                        **slot = Some(Handle {
+                        let kept = ticket.save(Handle {
                             name: name.clone(),
                             agent: agent.clone(),
-                            owner: owner.clone(),
-                            scope: ConversationScope::new(ROOT_SCOPE),
                             conversation,
                             tree: tree
                                 .as_ref()
                                 .map(|info| info.tree.clone())
-                                .or_else(|| previous.and_then(|previous| previous.tree)),
+                                .or_else(|| saved.and_then(|previous| previous.tree)),
                             last_task_base: tree.as_ref().and_then(|info| info.task_base.clone()),
-                            idle_since: std::time::SystemTime::now(),
                         });
-                        saved_as = Some(name.clone());
-                        behind_by = tree.and_then(|info| info.behind_by);
+                        // A handle that ended while its task ran keeps
+                        // nothing, and the result names none (RC-4).
+                        if kept {
+                            saved_as = Some(name.clone());
+                            behind_by = tree.and_then(|info| info.behind_by);
+                        }
                     }
                     // Nothing to resume from: the handle goes rather than
                     // resume a conversation that misses this task.
                     _ => {
                         warn!(agent = %agent, handle = %name, "The task captured no conversation; the handle is dropped");
-                        **slot = None;
+                        ticket.clear();
                     }
                 }
             }
-            // The worker is reaped before the handle's next call may start:
-            // a tuple drops its fields in order.
-            let _reap_then_release = (running, slot);
+            locked(&tasks).end(running.task_id(), state, (clock)());
+            // The worker is reaped before the handle's next call may start,
+            // and the handle is idle from then: a tuple drops its fields in
+            // order.
+            let _reap_then_release = (running, _owned, held, ticket);
             edge.end(state);
             let mut result = outcome(state, response, message, metadata, messages());
             if let CallResult::Invoked(invoked) = &mut result {
@@ -1988,8 +2396,9 @@ impl BrokerCalls {
                 invoked.behind_by = behind_by;
             }
             yield Ok(CallEvent::Result(result));
-            // `running` is dropped here, which reaps a spawned worker, and
-            // then the handle's slot.
+            // `running` is dropped here, which reaps a spawned worker, then
+            // the handles it owned end, if it ran a plain call, and the
+            // handle's queue is let go.
         }
         .boxed()
     }
@@ -2041,6 +2450,7 @@ fn refusal_row(refused: &Refused) -> String {
         Refused::Roster(_)
         | Refused::SpawnContext(_)
         | Refused::Message(_)
+        | Refused::Handle(_)
         | Refused::Caller(_)
         | Refused::Internal(_) => refused.to_call_error().to_string(),
     }
@@ -2169,18 +2579,36 @@ impl Drop for EdgeGuard {
 /// with no socket and no HTTP hop.
 pub struct DirectTransport {
     calls: Arc<BrokerCalls>,
+    /// The root conversation calling through it (RC-4); `None` is the
+    /// broker's one default conversation.
+    scope: Option<ConversationScope>,
 }
 
 impl DirectTransport {
     pub fn new(calls: Arc<BrokerCalls>) -> Self {
-        Self { calls }
+        Self { calls, scope: None }
+    }
+
+    /// A2A `tasks/get` for this root's conversation (RC-4); see
+    /// [`BrokerCalls::tasks_get`].
+    pub fn tasks_get(&self, id: &str) -> Result<Option<serde_json::Value>, CallError> {
+        self.calls.tasks_get(self.scope.as_ref(), id)
     }
 }
 
 #[async_trait::async_trait]
 impl Transport for DirectTransport {
     async fn call(&self, req: CallRequest) -> Result<CallStream, CallError> {
-        Ok(self.calls.call(Peer::Root, req))
+        Ok(self.calls.call_in(Peer::Root, self.scope.as_ref(), req))
+    }
+
+    /// The same broker, for the root of the conversation `scope`: its
+    /// handles are that conversation's alone (RC-4).
+    fn for_conversation(&self, scope: &ConversationScope) -> Option<Arc<dyn Transport>> {
+        Some(Arc::new(Self {
+            calls: self.calls.clone(),
+            scope: Some(scope.clone()),
+        }))
     }
 
     /// The root's answers to a question the broker delivered (EN-2b).
@@ -2879,6 +3307,7 @@ mod tests {
             addressee: Addressee::None,
             binding: None,
             answer_nonce: None,
+            handle: HandleCheck::None,
         });
         match gate::decide(&caller, &Request::Invoke(&params), &snapshot).outcome {
             Ok(Grant::Invoke { stamp, .. }) => Ok(stamp),
@@ -3045,3 +3474,7 @@ mod question_relay_tests;
 #[cfg(all(test, unix))]
 #[path = "gate_broker_tests.rs"]
 mod gate_broker_tests;
+
+#[cfg(test)]
+#[path = "handle_broker_tests.rs"]
+mod handle_broker_tests;
