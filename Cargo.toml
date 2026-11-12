@@ -29,9 +29,12 @@ edition = "2024"
 rust-version = "1.94"
 
 [workspace.dependencies]
-# Core agent dependencies (rig 0.42 crate family — AGE-32 / AGE-26 exact-minor pins)
-rig-core = "=0.42.0"
-rig-agent = { version = "=0.42.0", features = ["derive"] }
+# Core agent dependencies (rig 0.46 crate family — AGE-32 / AGE-26 exact-minor pins)
+rig-core = "=0.46.0"
+rig-agent = { version = "=0.46.0", features = ["derive"] }
+# rig 0.46 ships no HTTP transport in rig-core; chatty's reqwest client reaches
+# the providers through rig-reqwest's `ReqwestClient` (AGE-1151).
+rig-reqwest = "=0.46.0"
 rig-mcp = "=0.2.5"
 # Trace capture for AGE-5 / walking skeleton — pinned now, wired later.
 rig-tap = "=0.3.0"

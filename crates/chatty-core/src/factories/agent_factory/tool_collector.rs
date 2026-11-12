@@ -1,4 +1,4 @@
-use rig_agent::agent::{AgentBuilder, WithBuilderTools};
+use rig_agent::agent::AgentBuilder;
 use rig_agent::tool::Tool;
 
 #[cfg(feature = "math-render")]
@@ -163,10 +163,10 @@ pub(super) struct NativeTools {
 
 /// Register `tool` unless the profile leaves its name out (ADR-0011 C11).
 fn add<T: Tool + 'static>(
-    builder: AgentBuilder<WithBuilderTools>,
+    builder: AgentBuilder,
     profile: Option<&'static ToolProfile>,
     tool: T,
-) -> AgentBuilder<WithBuilderTools> {
+) -> AgentBuilder {
     match profile {
         Some(profile) if !profile.allows(T::NAME) => builder,
         _ => builder.tool(tool),
@@ -176,12 +176,9 @@ fn add<T: Tool + 'static>(
 impl NativeTools {
     /// Register every collected tool on `builder` via typed `.tool()` calls,
     /// skipping whatever this agent's [`ToolProfile`] does not name.
-    pub fn apply_to_builder(self, builder: AgentBuilder) -> AgentBuilder<WithBuilderTools> {
+    pub fn apply_to_builder(self, builder: AgentBuilder) -> AgentBuilder {
         let profile = self.tool_profile;
-        // `dynamic_tools(&[])` is the only public way into the tool-carrying
-        // builder state that registers nothing, and a profile may well drop
-        // whichever tool would otherwise have made that transition.
-        let mut b = builder.dynamic_tools(Vec::new());
+        let mut b = builder;
         b = add(b, profile, self.list_tools);
         b = add(b, profile, self.write_todos_tool);
         b = add(b, profile, self.update_todo_tool);

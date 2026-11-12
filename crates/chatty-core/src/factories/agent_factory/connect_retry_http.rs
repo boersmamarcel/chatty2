@@ -88,7 +88,7 @@ const DEFAULT_BACKOFF: Duration = Duration::from_secs(1);
 /// `Default` is required by rig's completion-model bounds on the HTTP
 /// client type, not used by chatty itself.
 #[derive(Clone, Debug)]
-pub struct ConnectRetryHttpClient<I = reqwest::Client> {
+pub struct ConnectRetryHttpClient<I = rig_reqwest::ReqwestClient> {
     inner: I,
     backoff: Duration,
     /// Where a request refused as over the window is counted (AGE-978).
@@ -196,7 +196,6 @@ pub(crate) fn says_context_overflow(body: &str) -> bool {
 /// window: a 400 (or 413) whose body says so.
 fn is_context_overflow(error: &http_client::Error) -> bool {
     let (status, body) = match error {
-        http_client::Error::InvalidStatusCodeWithMessage(status, body) => (*status, body),
         http_client::Error::InvalidStatusCodeWithDetails { status, body, .. } => (*status, body),
         _ => return false,
     };
@@ -543,7 +542,6 @@ pub(crate) fn lower_output_cap(body: &Bytes, message: &str) -> Option<Bytes> {
 /// The refusal message of a context-overflow error.
 fn overflow_message(error: &http_client::Error) -> &str {
     match error {
-        http_client::Error::InvalidStatusCodeWithMessage(_, body) => body,
         http_client::Error::InvalidStatusCodeWithDetails { body, .. } => body,
         _ => "",
     }
@@ -715,7 +713,7 @@ mod tests {
             .pool_max_idle_per_host(0)
             .build()
             .unwrap();
-        ConnectRetryHttpClient::with_backoff(inner, Duration::from_millis(5))
+        ConnectRetryHttpClient::with_backoff(inner.into(), Duration::from_millis(5))
     }
 
     /// The failure seen in the offline benchmark: the connection dropped
@@ -770,8 +768,9 @@ mod tests {
     const VLLM_OVERFLOW: &str = r#"{"error":{"message":"This model's maximum context length is 32768 tokens. However, you requested 0 output tokens and your prompt contains at least 32769 input tokens, for a total of at least 32769 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=32769)","type":"BadRequestError","param":"input_tokens","code":400}}"#;
 
     fn status_error(status: u16, body: &str) -> http_client::Error {
-        http_client::Error::InvalidStatusCodeWithMessage(
+        http_client::Error::non_success_with_details(
             reqwest::StatusCode::from_u16(status).unwrap(),
+            Default::default(),
             body.to_string(),
         )
     }
@@ -1080,8 +1079,9 @@ mod tests {
     /// A status the server sent back is an answer, not a lost connection.
     #[test]
     fn an_http_status_is_not_a_connection_failure() {
-        let error = http_client::Error::InvalidStatusCodeWithMessage(
+        let error = http_client::Error::non_success_with_details(
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            Default::default(),
             "overloaded".into(),
         );
         assert!(!is_connection_failure(&error));
@@ -1189,8 +1189,9 @@ mod tests {
     }
 
     fn refusal(message: &str) -> http_client::Error {
-        http_client::Error::InvalidStatusCodeWithMessage(
+        http_client::Error::non_success_with_details(
             reqwest::StatusCode::BAD_REQUEST,
+            Default::default(),
             message.to_string(),
         )
     }

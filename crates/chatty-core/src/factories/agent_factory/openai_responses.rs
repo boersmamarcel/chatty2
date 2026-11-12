@@ -4,8 +4,8 @@
 //! (`/responses`): `/chat/completions` rejects a request that carries both
 //! reasoning and tools. So on OpenAI's own API and on Azure OpenAI resources
 //! a request with tools goes to Responses, through rig's OpenAI Responses
-//! client ([`ToolsOnResponses`]); a request without tools keeps chat
-//! completions, so an older Azure deployment without Responses still chats.
+//! client ([`ChatModels`], routed by [`ToolsOnResponses`]); a request without
+//! tools keeps chat completions, so an older Azure deployment without Responses still chats.
 //! OpenAI-compatible servers (vLLM, OpenRouter, Ollama compat) and Azure's
 //! model-inference surface keep chat completions for everything; their base
 //! URL decides, and nothing about them changes.
@@ -23,15 +23,11 @@ use std::future::Future;
 use anyhow::anyhow;
 use bytes::Bytes;
 use reqwest::Url;
-use rig_agent::ModelHandle;
-use rig_core::completion::{
-    CompletionError, CompletionModel, CompletionRequest, CompletionResponse, ProviderCapabilities,
-};
+use rig_agent::agent::{AgentBuilder, AgentHook, HookContext, ModelSelection, ModelSelectionAction};
 use rig_core::http_client::{
     self, HeaderValue, HttpClientExt, LazyBody, MultipartForm, Request, Response,
     StreamingResponse, Uri,
 };
-use rig_core::streaming::StreamingCompletionResponse;
 use rig_core::wasm_compat::WasmCompatSend;
 
 use crate::settings::models::models_store::ModelConfig;
@@ -155,45 +151,98 @@ pub(crate) fn ensure_tools_reachable(
     }
 }
 
-/// A model that sends each request on the wire it needs: a request with
-/// tools to the Responses API, one without (titles, summaries, a plain
-/// chat) to chat completions.
+/// A completion model with its wire and transport erased.
+pub(crate) type CompletionModel = rig_core::DynModel<rig_core::operation::Completion>;
+
+/// The label the chat-completions model is registered under on an agent.
+const CHAT_ROUTE: &str = "chat";
+
+/// The label the Responses model is registered under on an agent.
+const RESPONSES_ROUTE: &str = "responses";
+
+/// The models a chat request can go to: chat completions, and, where the
+/// endpoint is OpenAI's own API or an Azure OpenAI resource, the Responses
+/// API for a request with tools.
 #[derive(Clone, Debug)]
-pub(crate) struct ToolsOnResponses {
-    pub(crate) chat: ModelHandle,
-    pub(crate) responses: ModelHandle,
+pub(crate) struct ChatModels {
+    chat: CompletionModel,
+    responses: Option<CompletionModel>,
 }
 
-impl ToolsOnResponses {
-    fn pick(&self, request: &CompletionRequest) -> &ModelHandle {
-        if request.tools.is_empty() {
-            &self.chat
-        } else {
-            &self.responses
+impl ChatModels {
+    /// Every request on `chat`.
+    pub(crate) fn chat(chat: CompletionModel) -> Self {
+        Self {
+            chat,
+            responses: None,
         }
     }
+
+    /// A request with tools on `responses`, one without on `chat`.
+    pub(crate) fn tools_on_responses(chat: CompletionModel, responses: CompletionModel) -> Self {
+        Self {
+            chat,
+            responses: Some(responses),
+        }
+    }
+
+    /// The model a single request goes to, by whether it carries tools.
+    pub(crate) fn for_request(&self, has_tools: bool) -> &CompletionModel {
+        match &self.responses {
+            Some(responses) if has_tools => responses,
+            _ => &self.chat,
+        }
+    }
+
+    /// An agent builder over these models: chat completions as the default,
+    /// and the Responses model with the [`ToolsOnResponses`] route that
+    /// sends a model call there whenever it carries tools.
+    pub(crate) fn agent_builder(&self) -> AgentBuilder {
+        let builder = Self::defaults(AgentBuilder::named_model(CHAT_ROUTE, self.chat.clone()));
+        match &self.responses {
+            Some(responses) => builder
+                .model_route(RESPONSES_ROUTE, responses.clone())
+                .add_hook(ToolsOnResponses),
+            None => builder,
+        }
+    }
+
+    /// An agent builder for an agent without tools (titles, summaries):
+    /// every call goes to chat completions, as a request without tools did
+    /// before.
+    pub(crate) fn utility_builder(&self) -> AgentBuilder {
+        Self::defaults(AgentBuilder::named_model(CHAT_ROUTE, self.chat.clone()))
+    }
+
+    /// What every chatty agent keeps of rig 0.42's run behaviour: a finish
+    /// reason outside rig's vocabulary (a gateway's own, `guardrail`, …)
+    /// ends the turn as a normal stop, as it did before rig 0.44 made it a
+    /// failure by default (AGE-1151).
+    fn defaults(builder: AgentBuilder) -> AgentBuilder {
+        builder.accept_unknown_finish_reasons(true)
+    }
 }
 
-impl CompletionModel for ToolsOnResponses {
-    fn completion(
-        &self,
-        request: CompletionRequest,
-    ) -> impl Future<Output = Result<CompletionResponse, CompletionError>> + WasmCompatSend {
-        self.pick(&request).completion(request)
-    }
+/// The route that sends each model call on the wire it needs: a call with
+/// tools to the Responses API, one without (the tool-free wrap-up call a
+/// spent turn budget makes) to chat completions. Registered only on an agent
+/// whose [`ChatModels`] have a Responses model.
+///
+/// A chat agent always carries tools, so a call goes without them only when
+/// a completion-call hook narrowed this call's tools to none
+/// ([`RequestPatch::active_tools`](rig_agent::agent::RequestPatch)), which
+/// the selection sees as the merged patch. An agent built without tools (the
+/// utility agent) never has any.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ToolsOnResponses;
 
-    fn stream(
-        &self,
-        request: CompletionRequest,
-    ) -> impl Future<Output = Result<StreamingCompletionResponse, CompletionError>> + WasmCompatSend
-    {
-        self.pick(&request).stream(request)
-    }
-
-    /// The tool-carrying wire's: capabilities describe how tools and
-    /// structured output compose, which only the Responses side sees.
-    fn capabilities(&self) -> ProviderCapabilities {
-        self.responses.capabilities()
+impl AgentHook for ToolsOnResponses {
+    fn on_model_select(&self, _ctx: &HookContext, event: ModelSelection<'_>) -> ModelSelectionAction {
+        let tool_free = event
+            .request_patch
+            .and_then(|patch| patch.active_tools.as_ref())
+            .is_some_and(Vec::is_empty);
+        ModelSelectionAction::select(if tool_free { CHAT_ROUTE } else { RESPONSES_ROUTE })
     }
 }
 
@@ -201,7 +250,7 @@ impl CompletionModel for ToolsOnResponses {
 /// the API key from the bearer header rig writes to Azure's `api-key`
 /// header, and adds the dated preview's `api-version` query parameter.
 #[derive(Clone, Default)]
-pub(crate) struct AzureResponsesHttpClient<I = reqwest::Client> {
+pub(crate) struct AzureResponsesHttpClient<I = rig_reqwest::ReqwestClient> {
     inner: I,
     api_key: Option<String>,
     api_version: Option<String>,
@@ -852,7 +901,7 @@ mod tests {
         assert!(
             history
                 .iter()
-                .any(|m| matches!(m, Message::Assistant { content, .. }
+                .any(|m| matches!(m, Message::Assistant(rig_core::message::AssistantMessage { content, .. })
             if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(_)))))
         );
         assert!(history.iter().any(|m| matches!(m, Message::User { content }

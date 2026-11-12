@@ -8,10 +8,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, anyhow};
-use rig_agent::ModelHandle;
 use rig_agent::agent::AgentBuilder;
-use rig_core::client::CompletionClient;
-use rig_core::providers::azure::AzureOpenAIAuth;
+use rig_core::providers::ollama::OllamaConfig;
+use rig_core::providers::openai::OpenAIConfig;
+use rig_core::providers::openai::wire::{self as openai, Auth};
 
 use crate::auth::AzureTokenCache;
 use crate::services::AgentTaskController;
@@ -28,7 +28,7 @@ use super::connect_retry_http::ConnectRetryHttpClient;
 use super::empty_turn_retry::EmptyTurnRetry;
 use super::mcp_helpers::{build_with_mcp_tools, sanitize_mcp_tools_for_openai};
 use super::openai_responses::{
-    AzureResponsesHttpClient, AzureWire, ToolsOnResponses, azure_wire, ensure_tools_reachable,
+    AzureResponsesHttpClient, AzureWire, ChatModels, CompletionModel, azure_wire, ensure_tools_reachable,
     openai_platform_responses_base,
 };
 use super::prompt_cache_http::PromptCachingHttpClient;
@@ -80,7 +80,7 @@ pub(super) async fn build_provider_agent(
         provider_config,
         context_shaper.window_overflows(),
     )?;
-    let mut builder = AgentBuilder::from_model_handle(model.clone()).preamble(preamble);
+    let mut builder = model.agent_builder().preamble(preamble);
     if model_config.supports_temperature {
         builder = builder.temperature(model_config.temperature as f64);
     }
@@ -113,7 +113,7 @@ pub(super) async fn build_provider_agent(
     let agent = build_with_mcp_tools!(builder, mcp_tools, native_tool_names);
 
     // The tool-less utility agent (AGE-227) shares the chat agent's model.
-    let mut utility = AgentBuilder::from_model_handle(model).preamble(UTILITY_PREAMBLE);
+    let mut utility = model.utility_builder().preamble(UTILITY_PREAMBLE);
     if let Some(params) = utility_params(model_config, &provider) {
         utility = utility.additional_params(params);
     }
@@ -137,8 +137,8 @@ pub(super) async fn build_provider_agent(
 
 /// The completion model for `model_config` on `provider_config`: the
 /// provider's client with chatty's HTTP layers (connect retry, prompt
-/// caching on OpenRouter, the per-request Entra token on Azure), erased to a
-/// [`ModelHandle`].
+/// caching on OpenRouter, the per-request Entra token on Azure), erased to
+/// [`ChatModels`].
 ///
 /// This is the one place a provider client is built. Agents wrap it in an
 /// `AgentBuilder`; a WASM plugin's `llm::complete` sends one request through
@@ -147,7 +147,7 @@ pub(super) async fn build_provider_agent(
 pub(crate) fn completion_model(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
-) -> Result<ModelHandle> {
+) -> Result<ChatModels> {
     completion_model_reporting(model_config, provider_config, WindowOverflows::default())
 }
 
@@ -157,9 +157,9 @@ pub(crate) fn completion_model_reporting(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
     overflows: WindowOverflows,
-) -> Result<ModelHandle> {
+) -> Result<ChatModels> {
     let retrying =
-        || ConnectRetryHttpClient::new(llm_client().clone()).reporting_overflows(overflows.clone());
+        || ConnectRetryHttpClient::new(llm_client().clone().into()).reporting_overflows(overflows.clone());
     let identifier = model_config.model_identifier.as_str();
     // SEC-16 / AGE-756: an OpenAI-compatible base URL carries the API key
     // in a header, so a configured http:// endpoint outside loopback/the
@@ -182,43 +182,43 @@ pub(crate) fn completion_model_reporting(
 
             // Explicit prompt-cache opt-in (AGE-205). Anthropic models behind
             // OpenRouter cache nothing unless the request carries
-            // `cache_control` breakpoints; rig's `with_prompt_caching()` puts
-            // one on the system message (preamble + tools), and the HTTP
-            // layer below adds a moving one on the latest message so the
-            // conversation history caches across turns as well. OpenAI-family
-            // models ignore the markers and keep caching automatically on the
-            // shared prefix.
-            let client = rig_core::providers::openrouter::Client::builder()
-                .api_key(&key)
-                .http_client(PromptCachingHttpClient::new(retrying()))
-                .base_url(openrouter_base_url(provider_config))
-                .build()?;
-            let chat = ModelHandle::new(client.completion_model(identifier).with_prompt_caching());
+            // `cache_control` breakpoints; the HTTP layer below puts one on
+            // the system message (preamble + tools) and a moving one on the
+            // latest message, so the conversation history caches across
+            // turns as well. OpenAI-family models ignore the markers and keep
+            // caching automatically on the shared prefix.
+            let chat = OpenAIConfig::with_key(&openai::OPENROUTER, key.clone())
+                .with_base_url(openrouter_base_url(provider_config))
+                .connect(PromptCachingHttpClient::new(retrying()))
+                .chat(identifier)
+                .erase();
 
             // OpenAI's own API takes a request with tools on Responses, the
             // one wire its reasoning models accept tools on (AGE-858); a
             // request without tools, and every other OpenAI-compatible
             // server, keeps chat completions.
             match openai_platform_responses_base(openrouter_base_url(provider_config)) {
-                Some(base_url) => Ok(ModelHandle::new(ToolsOnResponses {
+                Some(base_url) => Ok(ChatModels::tools_on_responses(
                     chat,
-                    responses: openai_responses_model(&base_url, &key, identifier, retrying())?,
-                })),
-                None => Ok(chat),
+                    openai_responses_model(&base_url, &key, identifier, retrying()),
+                )),
+                None => Ok(ChatModels::chat(chat)),
             }
         }
         ProviderType::Ollama => {
-            let client = rig_core::providers::ollama::Client::builder()
-                .api_key(rig_core::client::Nothing)
-                .base_url(
+            // The daemon's native `/api/chat`, as rig 0.42's Ollama client
+            // sent; rig 0.46's `completion` is its OpenAI-compatible route.
+            let model = OllamaConfig::new()
+                .with_base_url(
                     provider_config
                         .base_url
                         .as_deref()
                         .unwrap_or(DEFAULT_OLLAMA_URL),
                 )
-                .http_client(retrying())
-                .build()?;
-            Ok(ModelHandle::new(client.completion_model(identifier)))
+                .connect(retrying())
+                .native_completion(identifier)
+                .erase();
+            Ok(ChatModels::chat(model))
         }
         ProviderType::AzureOpenAI => {
             azure_completion_model(model_config, provider_config, &retrying)
@@ -248,7 +248,7 @@ fn azure_completion_model(
     model_config: &ModelConfig,
     provider_config: &ProviderConfig,
     retrying: &dyn Fn() -> ConnectRetryHttpClient,
-) -> Result<ModelHandle> {
+) -> Result<ChatModels> {
     let raw_endpoint = provider_config
         .base_url
         .as_deref()
@@ -258,17 +258,17 @@ fn azure_completion_model(
         AzureWire::Responses {
             base_url,
             api_version,
-        } => Ok(ModelHandle::new(ToolsOnResponses {
+        } => Ok(ChatModels::tools_on_responses(
             chat,
-            responses: azure_responses_model(
+            azure_responses_model(
                 model_config,
                 provider_config,
                 base_url,
                 api_version,
                 retrying,
             )?,
-        })),
-        AzureWire::ChatCompletionsOnly => Ok(chat),
+        )),
+        AzureWire::ChatCompletionsOnly => Ok(ChatModels::chat(chat)),
     }
 }
 
@@ -279,7 +279,7 @@ fn azure_chat_model(
     provider_config: &ProviderConfig,
     raw_endpoint: &str,
     retrying: &dyn Fn() -> ConnectRetryHttpClient,
-) -> Result<ModelHandle> {
+) -> Result<CompletionModel> {
     let endpoint = normalize_azure_endpoint(raw_endpoint);
 
     let api_version = model_config
@@ -303,37 +303,28 @@ fn azure_chat_model(
         "Building Azure OpenAI client"
     );
 
-    let client_error = |e: rig_core::http_client::Error| {
-        anyhow!(
-            "Failed to build Azure client with endpoint '{}': {}",
-            endpoint,
-            e
-        )
+    // The deployment is in the URL and the API version a query parameter
+    // (rig's Azure dialect); the two auth methods differ in the header.
+    let config = |key: String| {
+        OpenAIConfig::with_key(&openai::AZURE, key)
+            .with_base_url(endpoint.clone())
+            .with_api_version(api_version)
     };
-
-    // The two auth methods build differently typed clients; both erase to
-    // the same `ModelHandle`.
     match provider_config.azure_auth_method() {
         AzureAuthMethod::EntraId => {
             tracing::info!("Using Entra ID authentication; the token is attached per request");
 
             let cache = shared_azure_token_cache()?;
 
-            // rig writes this placeholder into the bearer header at build time;
-            // `AzureAuthHttpClient` replaces it with a current token on every
-            // request, so an expired token is refreshed without a rebuild.
-            let client = rig_core::providers::azure::Client::builder()
-                .api_key(AzureOpenAIAuth::Token(
-                    AZURE_ENTRA_PLACEHOLDER_TOKEN.to_string(),
-                ))
-                .http_client(AzureAuthHttpClient::new(retrying(), Arc::new(cache)))
-                .azure_endpoint(endpoint.clone())
-                .api_version(api_version)
-                .build()
-                .map_err(client_error)?;
-            Ok(ModelHandle::new(
-                client.completion_model(&model_config.model_identifier),
-            ))
+            // rig writes this placeholder into the bearer header of every
+            // request; `AzureAuthHttpClient` replaces it with a current token,
+            // so an expired token is refreshed without a rebuild.
+            let mut config = config(AZURE_ENTRA_PLACEHOLDER_TOKEN.to_string());
+            config.auth = Auth::Bearer;
+            Ok(config
+                .connect(AzureAuthHttpClient::new(retrying(), Arc::new(cache)))
+                .chat(&model_config.model_identifier)
+                .erase())
         }
         AzureAuthMethod::ApiKey => {
             tracing::info!("Using API Key authentication for Azure OpenAI");
@@ -342,16 +333,10 @@ fn azure_chat_model(
                 .clone()
                 .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
 
-            let client = rig_core::providers::azure::Client::builder()
-                .api_key(AzureOpenAIAuth::ApiKey(key))
-                .azure_endpoint(endpoint.clone())
-                .api_version(api_version)
-                .http_client(retrying())
-                .build()
-                .map_err(client_error)?;
-            Ok(ModelHandle::new(
-                client.completion_model(&model_config.model_identifier),
-            ))
+            Ok(config(key)
+                .connect(retrying())
+                .chat(&model_config.model_identifier)
+                .erase())
         }
     }
 }
@@ -363,13 +348,12 @@ pub(super) fn openai_responses_model(
     key: &str,
     identifier: &str,
     http: ConnectRetryHttpClient,
-) -> Result<ModelHandle> {
-    let client = rig_core::providers::openai::Client::builder()
-        .api_key(key)
-        .http_client(http)
-        .base_url(base_url)
-        .build()?;
-    Ok(ModelHandle::new(client.completion_model(identifier)))
+) -> CompletionModel {
+    OpenAIConfig::new(key.to_string())
+        .with_base_url(base_url)
+        .connect(http)
+        .responses(identifier)
+        .erase()
 }
 
 /// Azure's Responses API through rig's OpenAI Responses client: `base_url`
@@ -382,7 +366,7 @@ fn azure_responses_model(
     base_url: String,
     api_version: Option<String>,
     retrying: &dyn Fn() -> ConnectRetryHttpClient,
-) -> Result<ModelHandle> {
+) -> Result<CompletionModel> {
     tracing::info!(
         base_url = %base_url,
         deployment = %model_config.model_identifier,
@@ -394,31 +378,29 @@ fn azure_responses_model(
     match provider_config.azure_auth_method() {
         AzureAuthMethod::EntraId => {
             let cache = shared_azure_token_cache()?;
-            let client = rig_core::providers::openai::Client::builder()
-                .api_key(AZURE_ENTRA_PLACEHOLDER_TOKEN)
-                .http_client(AzureAuthHttpClient::new(
+            Ok(OpenAIConfig::new(AZURE_ENTRA_PLACEHOLDER_TOKEN)
+                .with_base_url(base_url)
+                .connect(AzureAuthHttpClient::new(
                     AzureResponsesHttpClient::new(retrying(), None, api_version),
                     Arc::new(cache),
                 ))
-                .base_url(base_url)
-                .build()?;
-            Ok(ModelHandle::new(client.completion_model(identifier)))
+                .responses(identifier)
+                .erase())
         }
         AzureAuthMethod::ApiKey => {
             let key = provider_config
                 .api_key
                 .clone()
                 .ok_or_else(|| anyhow!("API key not configured for Azure OpenAI provider"))?;
-            let client = rig_core::providers::openai::Client::builder()
-                .api_key(&key)
-                .http_client(AzureResponsesHttpClient::new(
+            Ok(OpenAIConfig::new(key.clone())
+                .with_base_url(base_url)
+                .connect(AzureResponsesHttpClient::new(
                     retrying(),
-                    Some(key.clone()),
+                    Some(key),
                     api_version,
                 ))
-                .base_url(base_url)
-                .build()?;
-            Ok(ModelHandle::new(client.completion_model(identifier)))
+                .responses(identifier)
+                .erase())
         }
     }
 }
@@ -516,7 +498,7 @@ fn chat_agent_builder(
     context_shaper: ContextShaper,
     request_recorder: RequestRecorder,
     tool_loader: Option<ToolLoader>,
-) -> AgentBuilder<rig_agent::agent::WithBuilderTools> {
+) -> AgentBuilder {
     let builder = native_tools
         .apply_to_builder(builder)
         .add_hook(empty_turn_retry);
@@ -678,9 +660,7 @@ mod tests {
         let model = completion_model(&model_config, &provider_config)
             .expect("client construction does not make a network call");
 
-        let utility = AgentBuilder::from_model_handle(model)
-            .preamble(UTILITY_PREAMBLE)
-            .build();
+        let utility = model.utility_builder().preamble(UTILITY_PREAMBLE).build();
 
         let defs = utility
             .tool_definitions(None)

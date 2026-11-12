@@ -51,7 +51,7 @@ impl BearerTokenSource for NoTokenSource {
 /// HTTP client that sets `Authorization: Bearer <token>` on every request,
 /// with the token fetched from `tokens` at send time.
 #[derive(Clone)]
-pub struct AzureAuthHttpClient<I = reqwest::Client> {
+pub struct AzureAuthHttpClient<I = rig_reqwest::ReqwestClient> {
     inner: I,
     tokens: Arc<dyn BearerTokenSource>,
 }
@@ -78,7 +78,9 @@ impl<I> fmt::Debug for AzureAuthHttpClient<I> {
 /// Replace whatever bearer header rig wrote with the current token.
 fn authorize<B>(req: Request<B>, token: &str) -> http_client::Result<Request<B>> {
     let (mut parts, body) = req.into_parts();
-    http_client::bearer_auth_header(&mut parts.headers, token)?;
+    let mut value = http_client::HeaderValue::from_str(&format!("Bearer {token}"))?;
+    value.set_sensitive(true);
+    parts.headers.insert(reqwest::header::AUTHORIZATION, value);
     Ok(Request::from_parts(parts, body))
 }
 

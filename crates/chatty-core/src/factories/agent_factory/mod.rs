@@ -21,7 +21,6 @@ mod tool_registry;
 
 use anyhow::Result;
 use rig_agent::Agent;
-use rig_agent::completion::Prompt;
 
 use crate::sandbox::{SandboxConfig, SandboxManager};
 use crate::services::context_shaper::ContextShaper;
@@ -248,7 +247,7 @@ impl AgentClient {
     /// (tracing, policy, retries, Rig hooks) that should apply consistently
     /// across title generation, summarization, and other non-streaming calls.
     pub async fn prompt(&self, prompt: &str) -> Result<String> {
-        Ok(self.utility.prompt(prompt).await?)
+        Ok(self.utility.prompt(prompt).await?.output())
     }
 
     pub fn task_controller(&self) -> crate::services::AgentTaskController {
@@ -1739,7 +1738,7 @@ async fn calibrate_context_shaper(
             .iter()
             .map(|definition| {
                 (
-                    definition.name.clone(),
+                    definition.name.to_string(),
                     counter.count(&definition.name)
                         + counter.count(&definition.description)
                         + counter.count(&definition.parameters.to_string()),

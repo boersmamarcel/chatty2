@@ -530,7 +530,11 @@ impl PluginTool {
             ..
         } = self.def.clone();
         let tool = Arc::new(self);
-        DynamicTool::new(name, description, parameters, move |_context, args| {
+        // A manifest names every tool; rig 0.46 refuses an empty name.
+        let name = rig_core::message::ToolName::new(name).unwrap_or_else(|_| {
+            rig_core::message::ToolName::new("unnamed_plugin_tool").expect("a non-empty name")
+        });
+        DynamicTool::new(name, description, parameters, move |args| {
             let tool = Arc::clone(&tool);
             Box::pin(async move {
                 tool.call(args)
