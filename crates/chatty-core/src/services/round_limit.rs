@@ -29,7 +29,8 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use rig_agent::agent::{
-    AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, ToolCall, ToolCallAction,
+    AgentHook, CompletionCallAction, CompletionCallEvent, DispatchAction, DispatchEvent,
+    HookContext,
 };
 use rig_agent::tool::Tool;
 
@@ -126,10 +127,16 @@ impl AgentHook for RoundLimit {
         CompletionCallAction::Continue
     }
 
-    async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        match self.admit(event.tool_name, event.args) {
-            Some(note) => ToolCallAction::Skip(note),
-            None => ToolCallAction::Run,
+    /// rig 0.46 gates a tool call at its dispatch (AGE-1151): a denied
+    /// call never reaches the tool, so no researcher is spawned, and the
+    /// model sees the note verbatim as the call's result.
+    async fn on_dispatch(&self, _ctx: &HookContext, event: DispatchEvent<'_>) -> DispatchAction {
+        let (Some(tool_name), Some(args)) = (event.tool_name(), event.tool_args()) else {
+            return DispatchAction::proceed();
+        };
+        match self.admit(tool_name, args) {
+            Some(note) => DispatchAction::skip(note),
+            None => DispatchAction::proceed(),
         }
     }
 }
