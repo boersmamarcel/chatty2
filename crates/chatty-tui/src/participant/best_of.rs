@@ -209,7 +209,17 @@ async fn verifier_overrides_judge_when_present() {
     let out = best_of(&kit).await;
 
     let verified: Vec<Option<bool>> = out.attempts.iter().map(|a| a.verified).collect();
-    assert_eq!(verified, [Some(false), Some(true), Some(false)]);
+    // An attempt that errored (its worker never started, say) reads `None`
+    // too; the attempts' own words say which it was.
+    assert_eq!(
+        verified,
+        [Some(false), Some(true), Some(false)],
+        "attempts: {:#?}",
+        out.attempts
+            .iter()
+            .map(|a| (&a.agent, a.success, &a.answer))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(out.selected_by, SelectedBy::Verifier);
     assert_eq!(out.chosen, 2);
     assert_eq!(out.answer, "right");
