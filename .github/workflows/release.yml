@@ -65,7 +65,7 @@ jobs:
       checkout_mode: ${{ steps.resolve_tag.outputs.checkout_mode }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve tag name
         id: resolve_tag
@@ -79,7 +79,7 @@ jobs:
         run: bash scripts/release-resolve-tag.sh
 
       - name: Checkout tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Direct dispatch: github.sha is the tag the workflow was run against
           # (never the dispatch input — CodeQL cache-poisoning).
@@ -152,7 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Do not key off github.event_name == workflow_dispatch: reusable
           # calls inherit the caller's event, so that would check out the
@@ -170,7 +170,7 @@ jobs:
         run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Restore cargo registry and build artifacts
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -181,7 +181,7 @@ jobs:
             cargo-release-${{ runner.os }}-
 
       - name: Restore pdfium library
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             crates/chatty-core/libs
@@ -270,7 +270,7 @@ jobs:
           rm -rf "$TMPDIR"
 
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: chatty-linux-*.AppImage
@@ -280,7 +280,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Do not key off github.event_name == workflow_dispatch: reusable
           # calls inherit the caller's event, so that would check out the
@@ -298,7 +298,7 @@ jobs:
         run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Restore cargo registry and build artifacts
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -309,7 +309,7 @@ jobs:
             cargo-release-${{ runner.os }}-
 
       - name: Restore pdfium library
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             crates/chatty-core/libs
@@ -379,7 +379,7 @@ jobs:
           security delete-keychain "$KEYCHAIN_PATH" || true
 
       - name: Upload macOS ARM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: chatty-macos-*.dmg
@@ -389,7 +389,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Do not key off github.event_name == workflow_dispatch: reusable
           # calls inherit the caller's event, so that would check out the
@@ -407,7 +407,7 @@ jobs:
         run: echo "key=$(bash scripts/release-cache-key.sh)" >> "$GITHUB_OUTPUT"
 
       - name: Restore cargo registry and build artifacts
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -418,7 +418,7 @@ jobs:
             cargo-release-${{ runner.os }}-
 
       - name: Restore pdfium library
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             crates/chatty-core/libs
@@ -474,7 +474,7 @@ jobs:
         shell: pwsh
 
       - name: Upload Windows Installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64-setup
           path: scripts/chatty-windows-x86_64.exe
@@ -486,7 +486,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout release_keys.txt
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
           sparse-checkout: crates/chatty-gpui/src/auto_updater/release_keys.txt
@@ -503,7 +503,7 @@ jobs:
           fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -564,7 +564,7 @@ jobs:
           echo "✅ All $ASSET_COUNT assets have checksums"
 
       - name: Upload release assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: release-assets/
@@ -583,14 +583,14 @@ jobs:
     environment: release-signing
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
           sparse-checkout: crates/chatty-gpui/src/auto_updater/release_keys.txt
           sparse-checkout-cone-mode: false
 
       - name: Download checksums.txt
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: release-assets
@@ -631,7 +631,7 @@ jobs:
           exit 1
 
       - name: Upload signature
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: checksums-signature
           path: release-assets/checksums.txt.sig
@@ -650,14 +650,14 @@ jobs:
       contents: write
     steps:
       - name: Download release assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: release-assets
 
       - name: Download signature
         if: ${{ needs.sign-checksums.result == 'success' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: checksums-signature
           path: release-assets
@@ -666,7 +666,7 @@ jobs:
         run: ls -lah release-assets/
 
       - name: Upload assets to release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           tag_name: ${{ needs.validate-version.outputs.tag_name }}
           files: release-assets/*

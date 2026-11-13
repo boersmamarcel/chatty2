@@ -43,12 +43,12 @@ jobs:
         working-directory: chatty2
     steps:
       - name: Checkout chatty2
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: chatty2
 
       - name: Checkout hive (private)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: boersmamarcel/hive
           ref: main
@@ -107,7 +107,7 @@ jobs:
 
       - name: Upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hive-e2e-report
           path: ${{ env.HIVE_E2E_REPORT }}
