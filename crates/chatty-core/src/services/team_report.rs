@@ -34,7 +34,7 @@ use rig_core::completion::message::{Message, ToolResultContent, UserContent};
 use serde_json::Value;
 
 use crate::models::token_usage::{PriceBook, format_cost, price};
-use crate::services::swarm_trace::{SwarmTrace, UsageLine};
+use crate::services::swarm_trace::{SwarmTrace, ToolOutcome, UsageLine};
 
 /// The heading of the footer the host appends.
 pub const COST_HEADING: &str = "## Cost of this run";
@@ -57,6 +57,10 @@ pub const FETCH_TOOL: &str = "fetch";
 pub struct RunTally {
     /// `search_web` calls, every agent in the tree.
     pub searches: usize,
+    /// The backends those searches used (`tavily`, `brave`, `bing`, ...),
+    /// read from the `source` of each result (AGE-1348), sorted. Empty when
+    /// no search returned a result.
+    pub search_backends: Vec<String>,
     /// `fetch` calls, every agent in the tree.
     pub fetches: usize,
     /// Tokens billed to the root, its delegations' included.
@@ -81,6 +85,7 @@ impl RunTally {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TraceTally {
     pub searches: usize,
+    pub search_backends: BTreeSet<String>,
     pub fetches: usize,
     pub billed: Vec<UsageLine>,
 }
@@ -92,7 +97,12 @@ impl TraceTally {
         for id in tree.preorder() {
             for call in &tree.get(id).tool_calls {
                 match call.name.as_str() {
-                    SEARCH_TOOL => self.searches += 1,
+                    SEARCH_TOOL => {
+                        self.searches += 1;
+                        if let ToolOutcome::Done { result } = &call.outcome {
+                            self.search_backends.extend(result_backends(result));
+                        }
+                    }
                     FETCH_TOOL => self.fetches += 1,
                     _ => {}
                 }
@@ -111,12 +121,27 @@ impl TraceTally {
         });
         RunTally {
             searches: self.searches,
+            search_backends: self.search_backends.iter().cloned().collect(),
             fetches: self.fetches,
             tokens,
             usd,
             wall,
         }
     }
+}
+
+/// The backends a `search_web` result names: the `source` of each hit.
+fn result_backends(result: &str) -> BTreeSet<String> {
+    let Ok(value) = serde_json::from_str::<Value>(result) else {
+        return BTreeSet::new();
+    };
+    value["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|hit| hit["source"].as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The footer: spend, searches and fetches, wall time.
@@ -135,10 +160,15 @@ pub fn cost_footer(tally: &RunTally) -> String {
         (secs % 3600) / 60,
         secs % 60
     );
+    let searches = if tally.search_backends.is_empty() {
+        tally.searches.to_string()
+    } else {
+        format!("{} ({})", tally.searches, tally.search_backends.join(", "))
+    };
     format!(
-        "{COST_HEADING}\n\n- Spend: {spend}\n- Web searches: {}\n- Page fetches: {}\n- Wall \
+        "{COST_HEADING}\n\n- Spend: {spend}\n- Web searches: {searches}\n- Page fetches: {}\n- Wall \
          time: {wall}\n\nCounted by the host from the run's trace, not reported by a model.\n",
-        tally.searches, tally.fetches
+        tally.fetches
     )
 }
 
@@ -474,6 +504,7 @@ mod tests {
     fn tally() -> RunTally {
         RunTally {
             searches: 3,
+            search_backends: vec!["tavily".to_string()],
             fetches: 5,
             tokens: 1234,
             usd: Some(0.42),
@@ -571,7 +602,7 @@ mod tests {
         let footer = &finished[finished.find(COST_HEADING).expect("the footer")..];
         for line in [
             "- Spend: $0.42 (1234 tokens)",
-            "- Web searches: 3",
+            "- Web searches: 3 (tavily)",
             "- Page fetches: 5",
             "- Wall time: 1h 02m 03s",
         ] {
@@ -729,5 +760,38 @@ mod tests {
         passes.add_trace(&trace);
         let both = passes.tally(Some(&book), Duration::ZERO);
         assert_eq!((both.searches, both.fetches, both.tokens), (2, 4, 3000));
+    }
+
+    /// AGE-1348: the footer names the backend the searches used, read from
+    /// the results' `source`, once however many searches there were.
+    #[test]
+    fn the_tally_names_the_search_backend() {
+        use crate::session::SessionEvent;
+        let mut trace = SwarmTrace::new();
+        let result = |source: &str| {
+            json!({ "query": "q", "result_count": 1, "results": [
+                { "title": "t", "url": "https://a.example", "snippet": "s", "source": source }
+            ]})
+            .to_string()
+        };
+        for (id, source) in [("1", "tavily"), ("2", "tavily")] {
+            trace.apply(&SessionEvent::ToolCallStarted {
+                id: id.to_string(),
+                name: "search_web".to_string(),
+            });
+            trace.apply(&SessionEvent::ToolCallResult {
+                id: id.to_string(),
+                result: result(source),
+            });
+        }
+        let tally = RunTally::from_trace(&trace, None, Duration::ZERO);
+        assert_eq!(tally.search_backends, ["tavily"]);
+        assert!(cost_footer(&tally).contains("- Web searches: 2 (tavily)"));
+        // No backend known: the count stands alone.
+        let bare = RunTally {
+            search_backends: vec![],
+            ..tally
+        };
+        assert!(cost_footer(&bare).contains("- Web searches: 2\n"));
     }
 }
