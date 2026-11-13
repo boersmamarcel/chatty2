@@ -35,6 +35,8 @@ A pending approval waits five minutes; if you do not answer, the call fails and 
 
 By default the browser and `fetch` reach only `localhost` and workspace-local files; opening it to the public web or your own LAN is an explicit setting ([Agents & tools](./agents-and-tools.md#web-and-the-built-in-browser)). Either way, the same address filter refuses link-local and cloud-metadata addresses, so a page cannot redirect a fetch or a click into your machine's or your cloud provider's internal network. Clicking and typing outside `localhost` and the workspace ask for your approval every time, and the agent never types into a password or card-number field.
 
+Links in model and tool output are clickable only when they are `http`, `https` or `mailto`; any other link, including a relative one, is shown as plain text with its target in a code span. In the terminal app, an approval prompt ignores `y`/`n` for the first 600 ms after it appears, so keys typed ahead cannot answer it by accident.
+
 The agent's standing instructions also draw a hard line around anything it reads from a page: text on a page — including text written to look like a system prompt, a task, or a message addressed to the agent — is treated as the page's content, never as a new instruction. It can report that text back to you; it cannot act on it. That framing is what keeps a malicious or compromised page from hijacking the turn that's looking at it.
 
 ## Secrets
