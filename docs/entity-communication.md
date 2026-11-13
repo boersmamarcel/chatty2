@@ -40,7 +40,7 @@ That's it — no type alias, no field, no setter, no clone chain.
 
 ## Boundary: IntoElement Components Keep Callbacks
 
-GPUI's `EventEmitter` can only be implemented by entities (types created with `cx.new()`). Render-once components (`#[derive(IntoElement)]`) like `ConversationItem` and `ApprovalPromptBar` cannot emit events.
+GPUI's `EventEmitter` can only be implemented by entities (types created with `cx.new()`). Render-once components (`#[derive(IntoElement)]`) like `ConversationItem` cannot emit events.
 
 They accept `Arc<dyn Fn>` callbacks, but these closures route through the parent entity to emit events:
 
