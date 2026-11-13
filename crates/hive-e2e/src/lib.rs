@@ -259,10 +259,19 @@ impl Stack {
         wasm: Vec<u8>,
     ) -> (StatusCode, Value) {
         let assertion = match manifest_name_version(manifest) {
-            Some((name, version)) => Some(
-                self.step_up(publisher, "module_publish", &name, &version)
-                    .await,
-            ),
+            Some((name, version)) => {
+                // hive-registry binds the free terms and the binary's digest
+                // (AGE-1357).
+                use sha2::{Digest, Sha256};
+                let value = format!(
+                    "{version};0;0;sha256={}",
+                    hex::encode(Sha256::digest(&wasm))
+                );
+                Some(
+                    self.step_up(publisher, "module_publish", &name, &value)
+                        .await,
+                )
+            }
             // Not a manifest the registry can read: let it say so.
             None => None,
         };
