@@ -60,6 +60,13 @@ fn result_text(result: &rmcp::model::CallToolResult) -> String {
         .join("\n")
 }
 
+/// `version;0;0;sha256=<hex of the wasm>`: the `module_publish` step-up
+/// value hive-registry binds for a free module (AGE-1357).
+fn module_publish_value(version: &str, wasm: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{version};0;0;sha256={}", hex::encode(Sha256::digest(wasm)))
+}
+
 /// What the tool does with a step-up request's status: publish with the
 /// assertion, or tell the person what to do next.
 #[derive(Debug, PartialEq, Eq)]
@@ -69,11 +76,11 @@ enum StepUpNext {
 }
 
 /// Read a `get_step_up_request` answer for `name`@`version`.
-fn step_up_next(status: &serde_json::Value, name: &str, version: &str) -> StepUpNext {
+fn step_up_next(status: &serde_json::Value, name: &str, value: &str) -> StepUpNext {
     let field = |key: &str| status.get(key).and_then(|v| v.as_str()).unwrap_or_default();
-    if field("action") != "module_publish" || field("target") != name || field("value") != version {
+    if field("action") != "module_publish" || field("target") != name || field("value") != value {
         return StepUpNext::Wait(format!(
-            "That step-up request is not for publishing {name}@{version}. \
+            "That step-up request is not for publishing this exact build of {name}. \
              Call publish_wasm_module again without step_up_request_id to file a new one."
         ));
     }
@@ -83,11 +90,11 @@ fn step_up_next(status: &serde_json::Value, name: &str, version: &str) -> StepUp
     ) {
         ("approved", Some(assertion)) => StepUpNext::Publish(assertion.to_string()),
         ("expired", _) => StepUpNext::Wait(format!(
-            "The approval for publishing {name}@{version} expired. \
+            "The approval for publishing {name} expired. \
              Call publish_wasm_module again without step_up_request_id to file a new one."
         )),
         _ => StepUpNext::Wait(format!(
-            "Publishing {name}@{version} is still waiting for approval. Ask the user to open {} \
+            "Publishing {name} is still waiting for approval. Ask the user to open {} \
              in their browser, sign in again and approve it, then call publish_wasm_module \
              again with the same step_up_request_id.",
             field("page")
@@ -261,6 +268,10 @@ impl Tool for PublishModuleTool {
         // name and version. The first call files it and hands the approval
         // to the person; the second collects the assertion and publishes.
         let (name, version) = manifest_name_version(&args.manifest_toml)?;
+        // The value hive-registry binds for a free module, including the
+        // binary's digest, so the approval covers exactly this file
+        // (AGE-1357).
+        let value = module_publish_value(&version, &wasm_bytes);
         let Some(request_id) = args.step_up_request_id else {
             let filed = self
                 .call_registry(
@@ -268,7 +279,7 @@ impl Tool for PublishModuleTool {
                     serde_json::json!({
                         "action": "module_publish",
                         "target": name,
-                        "value": version,
+                        "value": value,
                     }),
                 )
                 .await?;
@@ -294,7 +305,7 @@ impl Tool for PublishModuleTool {
                 serde_json::json!({ "id": request_id }),
             )
             .await?;
-        let assertion = match step_up_next(&tool_json(&status)?, &name, &version) {
+        let assertion = match step_up_next(&tool_json(&status)?, &name, &value) {
             StepUpNext::Publish(assertion) => assertion,
             StepUpNext::Wait(message) => {
                 return Ok(PublishModuleOutput {
@@ -345,6 +356,13 @@ mod tests {
             ("benford".to_string(), "1.3.0".to_string())
         );
         assert!(manifest_name_version("name = \"x\"").is_err());
+    }
+
+    #[test]
+    fn the_publish_value_binds_the_binary() {
+        let a = module_publish_value("1.0.0", b"\0asm-a");
+        assert!(a.starts_with("1.0.0;0;0;sha256="), "{a}");
+        assert_ne!(a, module_publish_value("1.0.0", b"\0asm-b"));
     }
 
     #[test]

@@ -45,10 +45,16 @@ fn parse_key_list(text: &str) -> Vec<&str> {
 ///   skipped with a log line and the hashes are returned as before.
 /// - signature missing, malformed, or by a key not in the list: `Err`, and
 ///   the caller refuses the update.
+/// - the signature's trusted comment (signed too) must name `tag`, the tag
+///   the release is published under: `release.yml` signs
+///   `chatty <tag> checksums.txt`. An old signed release re-published under
+///   a newer tag is refused, so the updater cannot be rolled back or frozen
+///   on an old version (AGE-1363).
 pub(super) fn trusted_checksums(
     checksums: &str,
     signature: Option<&str>,
     trusted_keys: &[&str],
+    tag: &str,
 ) -> Result<HashMap<String, String>, String> {
     if trusted_keys.is_empty() {
         warn!(
@@ -86,6 +92,15 @@ pub(super) fn trusted_checksums(
         ));
     }
 
+    let expected = format!("chatty {tag} {CHECKSUMS_ASSET}");
+    if signature.trusted_comment().trim() != expected {
+        return Err(format!(
+            "Update refused: {CHECKSUMS_SIGNATURE_ASSET} was signed for \"{}\", \
+             not for release {tag}.",
+            signature.trusted_comment().trim()
+        ));
+    }
+
     info!("Release signature on {CHECKSUMS_ASSET} verified");
     Ok(super::AutoUpdater::parse_checksums(checksums))
 }
@@ -98,6 +113,7 @@ mod tests {
 
     const ASSET: &str = "chatty-linux-x86_64.AppImage";
     const HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const TAG: &str = "v1.2.3";
 
     fn checksums() -> String {
         format!("{HASH}  {ASSET}\n")
@@ -108,7 +124,7 @@ mod tests {
             Some(&key.pk),
             &key.sk,
             Cursor::new(data.as_bytes()),
-            Some("timestamp:0\tfile:checksums.txt"),
+            Some(&format!("chatty {TAG} checksums.txt")),
             None,
         )
         .expect("sign fixture checksums")
@@ -124,7 +140,7 @@ mod tests {
         let key = keypair();
         let pinned = key.pk.to_base64();
 
-        let err = trusted_checksums(&checksums(), None, &[pinned.as_str()])
+        let err = trusted_checksums(&checksums(), None, &[pinned.as_str()], TAG)
             .expect_err("a release without checksums.txt.sig must be refused");
         assert!(err.contains("Update refused"), "{err}");
         assert!(err.contains(CHECKSUMS_SIGNATURE_ASSET), "{err}");
@@ -137,7 +153,7 @@ mod tests {
         let pinned_b64 = pinned.pk.to_base64();
         let signature = sign(&attacker, &checksums());
 
-        let err = trusted_checksums(&checksums(), Some(&signature), &[pinned_b64.as_str()])
+        let err = trusted_checksums(&checksums(), Some(&signature), &[pinned_b64.as_str()], TAG)
             .expect_err("a signature by an unlisted key must be refused");
         assert!(err.contains("trusted Chatty release key"), "{err}");
     }
@@ -151,18 +167,31 @@ mod tests {
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
         let signature = sign(&new, &checksums());
 
-        let hashes = trusted_checksums(&checksums(), Some(&signature), &keys)
+        let hashes = trusted_checksums(&checksums(), Some(&signature), &keys, TAG)
             .expect("a signature by a pinned key is accepted");
         assert_eq!(hashes.get(ASSET).map(String::as_str), Some(HASH));
 
         // The signature covers the exact bytes: one swapped hash breaks it.
         let tampered = checksums().replace(&HASH[..4], "ffff");
-        assert!(trusted_checksums(&tampered, Some(&signature), &keys).is_err());
+        assert!(trusted_checksums(&tampered, Some(&signature), &keys, TAG).is_err());
+    }
+
+    /// AGE-1363: a release's signed checksums re-published under another
+    /// tag are refused, so an old signed release cannot be served as new.
+    #[test]
+    fn signed_checksums_under_another_tag_are_refused() {
+        let key = keypair();
+        let keys = [key.pk.to_base64()];
+        let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+        let signature = sign(&key, &checksums());
+        let err = trusted_checksums(&checksums(), Some(&signature), &keys, "v99.0.0")
+            .expect_err("signed for v1.2.3, served as v99.0.0");
+        assert!(err.contains("not for release v99.0.0"), "{err}");
     }
 
     #[test]
     fn an_empty_key_list_skips_the_check() {
-        let hashes = trusted_checksums(&checksums(), None, &[]).expect("unpinned build");
+        let hashes = trusted_checksums(&checksums(), None, &[], TAG).expect("unpinned build");
         assert_eq!(hashes.get(ASSET).map(String::as_str), Some(HASH));
     }
 
