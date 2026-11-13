@@ -42,9 +42,10 @@ pub use directory::{
 };
 pub use edge_log::{EdgeKind, EdgeLog, EdgeRow, MAX_EDGE_LOG_BYTES, UsagePricer};
 pub use handle::{
-    Clock, HANDLE_IDLE_LIMIT, Handle, HandleChanged, HandleError, HandleKey, HandleOwner,
-    HandleParty, HandleStatus, HandleStore, HandleTicket, MAX_HANDLES_PER_CONVERSATION,
-    MAX_SAVED_BYTES_PER_CONVERSATION, RunRoot, SavedConversation, WorkerTreeRef,
+    Clock, HANDLE_IDLE_LIMIT, Handle, HandleChanged, HandleError, HandleKey, HandleListing,
+    HandleOwner, HandleParty, HandleStatus, HandleStore, HandleTicket,
+    MAX_HANDLES_PER_CONVERSATION, MAX_SAVED_BYTES_PER_CONVERSATION, RunRoot, SavedConversation,
+    WorkerTreeRef,
 };
 pub use handoff::HandoffContract;
 pub use origin::AgentOrigin;
@@ -60,7 +61,7 @@ pub use relay::RelayCounter;
 pub use swarm::{CapturedConversation, FORWARD_INTERVAL, SwarmBatcher, SwarmEvent, SwarmItem};
 pub use task_table::{RunId, TaskEntry, TaskTable, TaskTableError};
 pub use transport::{
-    CANCELLED_BY_USER, CallError, CallEvent, CallRequest, CallResult, CallStream,
+    CANCELLED_BY_USER, CallError, CallEvent, CallRequest, CallResult, CallStream, HandleSnapshot,
     InvokeAgentOutcome, InvokeAgentParams, MessageStatus, RefusalReason, SendMessageParams,
     SpawnContext, Transport, WORKER_START_FAILED, find_worker_start_failure, worker_start_failed,
 };

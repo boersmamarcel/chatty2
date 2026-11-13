@@ -155,6 +155,24 @@ pub enum CallRequest {
     TakeMessages,
 }
 
+/// A resumable handle as the broker reports it to the root's roster (RO-4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandleSnapshot {
+    pub name: String,
+    /// The name of the node that owns it ([`crate::ROOT_NAME`] for the
+    /// root conversation).
+    pub owner: String,
+    /// A call is running or queued on it.
+    pub busy: bool,
+    /// Messages waiting for its next task.
+    pub pending_messages: u32,
+    pub idle_for_s: u64,
+    /// The agent (spec) its workers run as: a resume must name it.
+    pub agent: Option<String>,
+    /// Its worktree and branch, once a task has saved one.
+    pub tree: Option<crate::WorkerTreeRef>,
+}
+
 /// One item of a [`CallStream`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum CallEvent {
@@ -403,6 +421,14 @@ pub trait Transport: Send + Sync {
     /// next task, which the broker prepends them to itself. The default has
     /// nothing waiting.
     fn take_run_messages(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The resumable handles of the root conversation `scope` as the broker
+    /// holds them (RO-4). Only the root's direct handle can read them; a
+    /// worker's transport has none to show.
+    fn handles(&self, scope: &crate::ConversationScope) -> Vec<HandleSnapshot> {
+        let _ = scope;
         Vec::new()
     }
 

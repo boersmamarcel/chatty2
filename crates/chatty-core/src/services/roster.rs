@@ -155,6 +155,9 @@ pub struct HandleInfo {
     pub pending_messages: u32,
     pub behind_by: Option<u32>,
     pub idle_for_s: u64,
+    /// The agent (spec) it runs as, which a call resuming it must name;
+    /// `None` until its first task has saved one.
+    pub agent: Option<String>,
 }
 
 /// One agent a caller can reach.
@@ -535,11 +538,75 @@ impl RosterSource for BrokerNodeSource {
 }
 
 /// The resumable handles a conversation's swarm holds. The root broker
-/// keeps them (`chatty_fabric::HandleStore`, RC-3), but nothing implements
-/// this outside tests until RO-4 wires them in — together with
-/// `invoke_agent` routing an `agent` that names a handle.
+/// keeps them (`chatty_fabric::HandleStore`, RC-3); [`BrokerHandles`] reads
+/// them from it. `invoke_agent` still has to route an `agent` that names a
+/// handle.
+#[async_trait]
 pub trait HandleIndex: Send + Sync {
-    fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)>;
+    async fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)>;
+}
+
+/// The handles of the broker the root talks to: its direct transport, or a
+/// broker started on first use. A transport with no handles to show (a
+/// worker's) lists none.
+pub struct BrokerHandles {
+    transport: Option<Arc<dyn Transport>>,
+    lazy_broker: Option<Arc<dyn LazyBroker>>,
+}
+
+impl BrokerHandles {
+    pub fn new(
+        transport: Option<Arc<dyn Transport>>,
+        lazy_broker: Option<Arc<dyn LazyBroker>>,
+    ) -> Self {
+        Self {
+            transport,
+            lazy_broker,
+        }
+    }
+}
+
+#[async_trait]
+impl HandleIndex for BrokerHandles {
+    async fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)> {
+        let transport = match (&self.transport, &self.lazy_broker) {
+            (Some(transport), _) => transport.clone(),
+            (None, Some(broker)) => match broker.transport().await {
+                Ok(Some(transport)) => transport,
+                _ => return Vec::new(),
+            },
+            (None, None) => return Vec::new(),
+        };
+        let mut rows = Vec::new();
+        for snapshot in transport.handles(scope) {
+            // How far the leader's branch has moved on since the tree was
+            // made: RC-3's count, the one a resume reports.
+            let behind_by = match &snapshot.tree {
+                Some(tree) => {
+                    crate::services::worker_tree::behind_by_of_tree(&tree.path, &tree.branch)
+                        .await
+                        .and_then(|behind| u32::try_from(behind).ok())
+                }
+                None => None,
+            };
+            rows.push((
+                snapshot.name,
+                HandleInfo {
+                    owner: snapshot.owner,
+                    state: if snapshot.busy {
+                        HandleState::Live
+                    } else {
+                        HandleState::Parked
+                    },
+                    pending_messages: snapshot.pending_messages,
+                    behind_by,
+                    idle_for_s: snapshot.idle_for_s,
+                    agent: snapshot.agent,
+                },
+            ));
+        }
+        rows
+    }
 }
 
 /// Resumable handles in the caller's swarm. The default has no index and
@@ -563,8 +630,10 @@ impl RosterSource for HandleSource {
         };
         index
             .handles(scope)
+            .await
             .into_iter()
             .map(|(name, info)| {
+                let entry_name = name.clone();
                 let reach = match info.state {
                     HandleState::Live => Reach::Live,
                     HandleState::Parked => Reach::Idle,
@@ -573,12 +642,25 @@ impl RosterSource for HandleSource {
                     name,
                     Origin::Handle,
                     reach,
-                    RosterCard::local(format!("A resumable handle owned by {}", info.owner)),
+                    RosterCard::local(handle_description(&entry_name, &info)),
                 );
                 entry.handle = Some(info);
                 entry
             })
             .collect()
+    }
+}
+
+/// What a handle's row says: whose it is, and the call that continues it.
+/// A resume must name the agent the handle was started with.
+fn handle_description(handle: &str, info: &HandleInfo) -> String {
+    match &info.agent {
+        Some(agent) => format!(
+            "Resumable handle of `{agent}`, owned by {}: continue it with \
+             `invoke_agent(agent: \"{agent}\", handle: \"{handle}\")`",
+            info.owner
+        ),
+        None => format!("A resumable handle owned by {}", info.owner),
     }
 }
 

@@ -235,6 +235,22 @@ pub struct Handle {
     pub last_task_base: Option<String>,
 }
 
+/// One live handle as a roster row reads it (RO-4): what the store knows
+/// without the pending mail (the broker keeps that apart) and without git.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandleListing {
+    pub name: String,
+    pub owner: HandleOwner,
+    /// A call is running or queued on it.
+    pub busy: bool,
+    /// The agent (spec) its workers run as, once a task has saved one.
+    pub agent: Option<String>,
+    /// Its worktree and branch, once a task has saved one.
+    pub tree: Option<WorkerTreeRef>,
+    /// How long since its last call let go of it.
+    pub idle_for: Duration,
+}
+
 /// The clock a store measures idleness by.
 pub type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
@@ -340,6 +356,32 @@ impl HandleStore {
             .collect();
         names.sort();
         names
+    }
+
+    /// The live handles of `scope`, by name (RO-4). Idle handles end first.
+    pub fn listing(&self, scope: &ConversationScope) -> Vec<HandleListing> {
+        let now = (self.clock)();
+        let mut inner = self.lock();
+        inner.sweep(now);
+        let mut rows: Vec<HandleListing> = inner
+            .live
+            .iter()
+            .filter(|(key, _)| key.scope == *scope)
+            .map(|(key, entry)| HandleListing {
+                name: key.name.clone(),
+                owner: entry.owner.clone(),
+                busy: entry.busy > 0,
+                agent: entry.saved.as_ref().map(|saved| saved.agent.clone()),
+                tree: entry.saved.as_ref().and_then(|saved| saved.tree.clone()),
+                idle_for: if entry.busy > 0 {
+                    Duration::ZERO
+                } else {
+                    now.duration_since(entry.idle_since).unwrap_or_default()
+                },
+            })
+            .collect();
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
     }
 
     /// Join `key`'s queue as a call the gate granted on `expected`: a

@@ -157,10 +157,11 @@ use chatty_fabric::{
     AgentOrigin, Answer, ApprovalRequest, ApprovalVerdict, AskReply, AskRequest, Asker,
     CANCELLED_BY_USER, CallChain, CallError, CallEvent, CallPolicy, CallRequest, CallResult,
     CallStream, CapturedConversation, ChildCall, Clock, ConversationScope, EdgeKind, EdgeLog,
-    EdgeRow, FORWARD_INTERVAL, Handle, HandleKey, HandleOwner, HandleParty, HandleStatus,
-    HandleStore, HandleTicket, InvokeAgentOutcome, InvokeAgentParams, Message, MessageStatus,
-    NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, RunRoot, SavedConversation,
-    SendMessageParams, Sender, SwarmBatcher, SwarmItem, Transport, UsagePricer, deadline_grace,
+    EdgeRow, FORWARD_INTERVAL, Handle, HandleKey, HandleOwner, HandleParty, HandleSnapshot,
+    HandleStatus, HandleStore, HandleTicket, InvokeAgentOutcome, InvokeAgentParams, Message,
+    MessageStatus, NodeId, NodeState, PendingList, ROOT_NAME, Refusal, RefusalReason, RunRoot,
+    SavedConversation, SendMessageParams, Sender, SwarmBatcher, SwarmItem, Transport, UsagePricer,
+    deadline_grace,
 };
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
@@ -912,6 +913,33 @@ impl BrokerCalls {
     #[cfg(test)]
     pub(crate) fn handles(&self) -> &HandleStore {
         &self.handles
+    }
+
+    /// The live handles of `scope` with the messages waiting for each, for
+    /// the roster (RO-4).
+    pub fn handle_rows(&self, scope: &ConversationScope) -> Vec<HandleSnapshot> {
+        let listing = self.handles.listing(scope);
+        let pending = lock(&self.handle_pending);
+        listing
+            .into_iter()
+            .map(|row| {
+                let waiting = pending
+                    .get(&HandleKey::new(scope.clone(), row.name.clone()))
+                    .map_or(0, PendingList::len);
+                HandleSnapshot {
+                    owner: match row.owner.owner() {
+                        HandleParty::Root => ROOT_NAME.to_string(),
+                        HandleParty::Handle(name) | HandleParty::Node(name) => name.clone(),
+                    },
+                    busy: row.busy,
+                    pending_messages: u32::try_from(waiting).unwrap_or(u32::MAX),
+                    idle_for_s: row.idle_for.as_secs(),
+                    agent: row.agent,
+                    tree: row.tree,
+                    name: row.name,
+                }
+            })
+            .collect()
     }
 
     /// The root conversation `scope` ended (RC-4): every handle of it ends,
@@ -2795,6 +2823,12 @@ impl Transport for DirectTransport {
         self.calls.answer_approval(id, verdict)
     }
 
+    /// The handles of the root conversation `scope` (RO-4): the store's
+    /// rows with the mail waiting for each.
+    fn handles(&self, scope: &ConversationScope) -> Vec<HandleSnapshot> {
+        self.calls.handle_rows(scope)
+    }
+
     /// The root's next user turn is starting: its messages, for the turn
     /// to open with (delivery point b).
     fn take_run_messages(&self) -> Vec<String> {
@@ -3175,6 +3209,57 @@ mod tests {
                     "dropped".to_string()
                 ),
             ]
+        );
+    }
+
+    /// RO-4: a handle's roster row counts the messages waiting for it, in
+    /// its own conversation only, and says who owns it and whether a call
+    /// holds it.
+    #[tokio::test]
+    async fn handle_rows_count_waiting_mail() {
+        let (calls, _registry) = broker(None);
+        let scope = ConversationScope::new("conv-a");
+        let key = HandleKey::new(scope.clone(), "fixer");
+        let owner = HandleOwner::new(RunRoot::Owner, HandleParty::Root, Vec::new());
+        let ticket = calls
+            .handles
+            .begin(key.clone(), owner, &HandleStatus::Free)
+            .unwrap();
+        assert!(ticket.save(Handle {
+            name: "fixer".to_string(),
+            agent: "worker".to_string(),
+            conversation: SavedConversation::new(json!([])),
+            tree: None,
+            last_task_base: None,
+        }));
+        drop(ticket);
+        lock(&calls.handle_pending)
+            .entry(key)
+            .or_default()
+            .push(Message {
+                id: "msg-1".to_string(),
+                from: Sender::Root,
+                from_name: "lead-0".to_string(),
+                text: "hello".to_string(),
+            })
+            .unwrap();
+
+        let rows = calls.handle_rows(&scope);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            (
+                rows[0].name.as_str(),
+                rows[0].owner.as_str(),
+                rows[0].busy,
+                rows[0].pending_messages
+            ),
+            ("fixer", ROOT_NAME, false, 1)
+        );
+        assert!(
+            calls
+                .handle_rows(&ConversationScope::new("conv-b"))
+                .is_empty(),
+            "another conversation sees none"
         );
     }
 

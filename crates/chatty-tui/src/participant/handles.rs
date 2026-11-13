@@ -236,6 +236,58 @@ async fn behind_by_reported() {
     assert_eq!(model_sees["behind_by"], 2);
 }
 
+/// RO-4: with a real broker, real workers and a real repository,
+/// `list_agents` shows the root's handle as `idle` (its reach) and
+/// `parked`, with its owner, nothing waiting, and `behind_by: 1` once the
+/// leader's branch moves on. Only that row carries the handle's fields.
+/// (Only a node may message a handle, so the waiting-mail count is tested
+/// at the broker, `handle_rows_count_waiting_mail`, and the whole row in
+/// chatty-core, `handle_rows_show_state`.)
+#[tokio::test]
+async fn handle_rows_show_the_brokers_state() {
+    use chatty_core::tools::list_agents_tool::{ListAgentsTool, ListAgentsToolArgs};
+
+    let kit = two_task_kit().await;
+    call(&kit, "write one.txt", Some(HANDLE)).await;
+    let transport = kit.broker().transport();
+
+    let workspace = kit.workspace();
+    std::fs::write(workspace.join("leader.txt"), "leader\n").unwrap();
+    git(&workspace, &["add", "."]);
+    git(&workspace, &["commit", "-q", "-m", "the leader moves on"]);
+
+    let listed = ListAgentsTool::new(vec![])
+        .with_local_workers([WORKER])
+        .with_transport(transport)
+        .call(&mut ToolContext::new(), ListAgentsToolArgs {})
+        .await
+        .expect("list_agents succeeds");
+    let rows = serde_json::to_value(&listed.agents).unwrap();
+    let row = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == HANDLE)
+        .unwrap_or_else(|| panic!("the handle is listed: {rows}"));
+    assert_eq!(row["origin"], "handle");
+    assert_eq!(row["reach"], "idle");
+    assert_eq!(row["state"], "parked");
+    assert_eq!(row["owner"], chatty_fabric::ROOT_NAME);
+    assert_eq!(row["pending_messages"], 0);
+    assert_eq!(row["behind_by"], 1);
+    for other in rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["name"] != HANDLE)
+    {
+        assert!(
+            other.get("owner").is_none() && other.get("pending_messages").is_none(),
+            "only handle rows carry handle fields: {other}"
+        );
+    }
+}
+
 /// A call naming no handle keeps nothing, and its JSON carries neither key.
 #[tokio::test]
 async fn a_plain_call_keeps_no_handle() {
