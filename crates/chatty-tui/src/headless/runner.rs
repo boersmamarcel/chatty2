@@ -161,6 +161,10 @@ impl HeadlessRunner {
         });
         // Delegated lines are priced at the model they name (AGE-682).
         session.set_price_book(config.models.price_book());
+        // The agent is built per run, so its rounds are per run: recovery and
+        // finalization passes arrive as human turns and must not reset them
+        // (AGE-1188).
+        session.set_rounds_per_user_turn(false);
         let pending_first_turn = config.team.as_ref().and_then(Team::first_turn_instruction);
         let handoff_ledger = config.team.as_ref().and_then(Team::handoff_ledger);
         let team_tally = config

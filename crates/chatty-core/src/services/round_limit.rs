@@ -22,8 +22,10 @@
 //! other agent are never counted or refused.
 //!
 //! The count lives on the agent, not on one rig run, so a headless run's
-//! follow-up passes (each a new run on the same history) share it. One
-//! agent build is one research task.
+//! follow-up passes (each a new run on the same history) share it. A new
+//! user turn starts a new research task: the session calls
+//! [`RoundLimit::reset`] there (AGE-1188), so a desktop conversation, which
+//! builds its agent once, gives every question its own rounds.
 
 use std::sync::Arc;
 
@@ -83,8 +85,14 @@ impl RoundLimit {
         self.rounds.lock().opened
     }
 
+    /// A new user turn: the count starts over. Follow-up passes of the same
+    /// task do not call this.
+    pub fn reset(&self) {
+        *self.rounds.lock() = Rounds::default();
+    }
+
     /// A model call is starting: a new turn.
-    fn next_turn(&self) {
+    pub(crate) fn next_turn(&self) {
         if self.config.is_some() {
             self.rounds.lock().turn += 1;
         }
@@ -92,7 +100,7 @@ impl RoundLimit {
 
     /// Whether a tool call may run: `None` when it may, the refusal note
     /// when it would open a round past the cap.
-    fn admit(&self, tool_name: &str, args: &str) -> Option<String> {
+    pub(crate) fn admit(&self, tool_name: &str, args: &str) -> Option<String> {
         let config = self.config.as_ref()?;
         if tool_name != InvokeAgentTool::NAME {
             return None;

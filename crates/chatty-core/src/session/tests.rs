@@ -14,7 +14,7 @@ use rig_core::completion::Message;
 use rig_core::message::UserContent;
 
 use super::*;
-use crate::factories::agent_factory::{AgentBuildContext, AgentServices};
+use crate::factories::agent_factory::{AgentBuildContext, AgentRole, AgentServices};
 use crate::services::RecoveryAction;
 use crate::services::llm_service::StreamChunk;
 use crate::services::{Scenario, ScriptedItem, assert_golden, clarification_scenario, scenarios};
@@ -69,6 +69,10 @@ async fn session_with_conversation() -> AgentSession {
 /// [`session_with_conversation`] on a given model (its prices decide what a
 /// turn costs, AGE-351).
 async fn session_with_model(model_config: &ModelConfig) -> AgentSession {
+    session_with_role(model_config, AgentRole::default()).await
+}
+
+async fn session_with_role(model_config: &ModelConfig, role: AgentRole) -> AgentSession {
     // Agent construction resolves the MCP repository (for the always-on
     // list_mcp tool); `init_repositories()` resolves paths, picks the secret
     // store (AGE-741) and is a no-op after the first call.
@@ -85,6 +89,7 @@ async fn session_with_model(model_config: &ModelConfig) -> AgentSession {
             pending_approvals: Some(handles.pending_approvals),
             pending_clarifications: Some(handles.pending_clarifications),
             pending_write_approvals: Some(handles.pending_write_approvals),
+            role,
             ..AgentBuildContext::from_services(AgentServices::default())
         },
     )
@@ -475,6 +480,99 @@ async fn recovery_budget_runs_out_per_kind_and_resets_on_a_human_turn() {
         ),
         "a human turn starts a new budget"
     );
+}
+
+/// A lead whose `[swarm.rounds]` allows `max` rounds of one researcher.
+async fn session_with_rounds(max: u32) -> AgentSession {
+    session_with_role(
+        &unpriced_model(),
+        AgentRole {
+            rounds: Some(crate::agent_spec::RoundsSection {
+                agent: "researcher".to_string(),
+                max,
+                notes: None,
+            }),
+            ..AgentRole::default()
+        },
+    )
+    .await
+}
+
+/// Open one round of the lead's researcher, as a model turn would.
+fn open_round(session: &AgentSession) -> Option<String> {
+    let limit = session
+        .conversation()
+        .unwrap()
+        .agent()
+        .round_limit()
+        .clone();
+    limit.next_turn();
+    limit.admit(
+        "invoke_agent",
+        &serde_json::json!({ "agent": "researcher", "prompt": "p" }).to_string(),
+    )
+}
+
+/// AGE-1188: the desktop builds the lead once per conversation, so a second
+/// question in the same chat gets its own rounds.
+#[tokio::test]
+async fn second_user_question_gets_fresh_rounds() {
+    let mut session = session_with_rounds(1).await;
+    session
+        .prepare_turn(TurnInput::text("first"), Arc::new(AtomicBool::new(false)))
+        .expect("turn prepares");
+    assert_eq!(open_round(&session), None);
+    assert!(open_round(&session).is_some(), "the cap holds in a turn");
+    session.finish_turn(None, vec![]);
+
+    session
+        .prepare_turn(TurnInput::text("second"), Arc::new(AtomicBool::new(false)))
+        .expect("turn prepares");
+    assert_eq!(open_round(&session), None, "a new question starts at zero");
+}
+
+/// AGE-1188: an agent-protocol follow-up pass belongs to the user turn
+/// before it, so it shares that turn's rounds.
+#[tokio::test]
+async fn headless_follow_up_pass_shares_rounds() {
+    let mut session = session_with_rounds(1).await;
+    session
+        .prepare_turn(TurnInput::text("first"), Arc::new(AtomicBool::new(false)))
+        .expect("turn prepares");
+    assert_eq!(open_round(&session), None);
+    session.finish_turn(None, vec![]);
+
+    session
+        .prepare_turn(
+            TurnInput::protocol_follow_up("keep going"),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("turn prepares");
+    assert!(
+        open_round(&session).is_some(),
+        "the follow-up shares the count"
+    );
+}
+
+/// AGE-1188: a headless run turns the reset off, so its own recovery and
+/// finalization passes (human-kind turns) keep sharing the count.
+#[tokio::test]
+async fn headless_human_pass_does_not_reset_rounds() {
+    let mut session = session_with_rounds(1).await;
+    session.set_rounds_per_user_turn(false);
+    session
+        .prepare_turn(TurnInput::text("task"), Arc::new(AtomicBool::new(false)))
+        .expect("turn prepares");
+    assert_eq!(open_round(&session), None);
+    session.finish_turn(None, vec![]);
+
+    session
+        .prepare_turn(
+            TurnInput::text("Time to finish: write the answer file."),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .expect("turn prepares");
+    assert!(open_round(&session).is_some(), "the pass shares the count");
 }
 
 /// Two sessions in one process: separate stores, separate turns, and a

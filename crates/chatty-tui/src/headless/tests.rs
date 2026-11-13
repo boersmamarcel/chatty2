@@ -532,6 +532,14 @@ mod runner {
     /// AGE-917: a lone headless agent and a team leader have no human to
     /// approve; a worker's approvals go up its broker, and a run a parent
     /// follows has its parent. The stderr line is printed once.
+    /// AGE-1188: a headless run's own passes arrive as human turns, so the
+    /// runner must keep the session from resetting `[swarm.rounds]` on them.
+    #[tokio::test]
+    async fn the_runner_does_not_reset_rounds_per_user_turn() {
+        let (runner, _event_rx) = test_runner().await;
+        assert!(!runner.session.rounds_per_user_turn());
+    }
+
     #[tokio::test]
     async fn only_a_run_nobody_follows_is_unattended() {
         let (mut runner, _event_rx) = test_runner().await;
