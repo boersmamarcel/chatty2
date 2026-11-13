@@ -1372,30 +1372,25 @@ async fn init_embedding_service(
     let api_key = embed_provider_config.and_then(|p| p.api_key.as_deref());
     let base_url = embed_provider_config.and_then(|p| p.base_url.as_deref());
 
-    // Fetch Entra ID token if the Azure provider uses Entra ID auth
-    let azure_token = if *embed_provider_type
+    let is_azure_entra = *embed_provider_type
         == chatty_core::settings::models::providers_store::ProviderType::AzureOpenAI
         && embed_provider_config.map(|p| p.azure_auth_method())
-            == Some(chatty_core::settings::models::providers_store::AzureAuthMethod::EntraId)
-    {
-        match chatty_core::auth::azure_auth::fetch_entra_id_token().await {
-            Ok(token) => Some(token),
-            Err(e) => {
-                warn!(error = ?e, "Failed to fetch Entra ID token for Azure OpenAI embeddings");
-                None
-            }
-        }
-    } else {
-        None
-    };
+            == Some(chatty_core::settings::models::providers_store::AzureAuthMethod::EntraId);
 
-    let svc = chatty_core::services::embedding_service::try_create_embedding_service(
-        embed_provider_type,
-        embed_model,
-        api_key,
-        base_url,
-        azure_token,
-    );
+    let svc = if is_azure_entra {
+        chatty_core::services::embedding_service::try_create_azure_entra_embedding_service(
+            embed_model,
+            base_url,
+        )
+        .await
+    } else {
+        chatty_core::services::embedding_service::try_create_embedding_service(
+            embed_provider_type,
+            embed_model,
+            api_key,
+            base_url,
+        )
+    };
 
     // Enable vector index on memory service if embedding service is available
     if let (Some(embed_svc), Some(mem_svc)) = (&svc, memory_service) {

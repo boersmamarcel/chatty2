@@ -515,42 +515,26 @@ pub fn purge_memory(cx: &mut App) {
     }
 }
 
-/// Fetch an Entra ID bearer token, initialize the `EmbeddingService`, and wire up
-/// the memory vector index. Called from `cx.spawn()` in both `toggle_embedding` and
+/// Initialize the Entra ID `EmbeddingService` and wire up the memory vector
+/// index. Called from `cx.spawn()` in both `toggle_embedding` and
 /// `reinit_embedding_service` to avoid duplicating the async init logic.
 ///
-/// # Token expiry
-/// The bearer token returned by `fetch_entra_id_token` is valid for ~1 hour.
-/// The `EmbeddingService` holds this token for its lifetime without refreshing it.
-/// TODO: Re-fetch the token on each embedding call or add expiry tracking so that
-/// long-running sessions (>1h) do not start producing authentication errors.
+/// The service asks the shared Azure token cache for a bearer token on every
+/// request, so the ~1h token expiry is handled there (AGE-423).
 async fn init_azure_entra_embedding(
-    provider_type: chatty_core::settings::models::providers_store::ProviderType,
     model_name: String,
     base_url: Option<String>,
     mem_svc: Option<MemoryService>,
     cx: &mut AsyncApp,
 ) {
-    use chatty_core::services::embedding_service::try_create_embedding_service;
+    use chatty_core::services::embedding_service::try_create_azure_entra_embedding_service;
 
     info!(
         "Fetching Entra ID token for Azure OpenAI embeddings — service will be available shortly"
     );
-    let azure_token = match chatty_core::auth::azure_auth::fetch_entra_id_token().await {
-        Ok(token) => Some(token),
-        Err(e) => {
-            warn!(error = ?e, "Failed to fetch Entra ID token for Azure OpenAI embeddings");
-            None
-        }
-    };
-    // api_key is None for Entra ID; the bearer token handles auth
-    if let Some(embed_svc) = try_create_embedding_service(
-        &provider_type,
-        &model_name,
-        None,
-        base_url.as_deref(),
-        azure_token,
-    ) {
+    if let Some(embed_svc) =
+        try_create_azure_entra_embedding_service(&model_name, base_url.as_deref()).await
+    {
         let model_id = embed_svc.model_identifier();
         cx.update(|cx| {
             let skill_service = chatty_core::services::SkillService::new(Some(embed_svc.clone()));
@@ -608,18 +592,10 @@ pub fn toggle_embedding(cx: &mut App) {
 
                 if is_azure_entra {
                     // Entra ID requires async token fetch — spawn a task
-                    let provider_type = provider_type.clone();
                     let model_name = model_name.clone();
                     let mem_svc = cx.try_global::<MemoryService>().cloned();
                     cx.spawn(async move |cx| {
-                        init_azure_entra_embedding(
-                            provider_type,
-                            model_name,
-                            base_url,
-                            mem_svc,
-                            cx,
-                        )
-                        .await;
+                        init_azure_entra_embedding(model_name, base_url, mem_svc, cx).await;
                     })
                     .detach();
                 } else {
@@ -630,7 +606,6 @@ pub fn toggle_embedding(cx: &mut App) {
                         model_name,
                         api_key.as_deref(),
                         base_url.as_deref(),
-                        None,
                     ) {
                         let model_id = embed_svc.model_identifier();
                         let skill_service =
@@ -759,7 +734,7 @@ fn reinit_embedding_service(cx: &mut App) {
         // Entra ID requires async token fetch — spawn a task
         let mem_svc = cx.try_global::<MemoryService>().cloned();
         cx.spawn(async move |cx| {
-            init_azure_entra_embedding(provider_type, model_name, base_url, mem_svc, cx).await;
+            init_azure_entra_embedding(model_name, base_url, mem_svc, cx).await;
         })
         .detach();
     } else if let Some(embed_svc) = try_create_embedding_service(
@@ -767,7 +742,6 @@ fn reinit_embedding_service(cx: &mut App) {
         &model_name,
         api_key.as_deref(), // api_key unused for Entra ID; only used in this API key branch
         base_url.as_deref(),
-        None,
     ) {
         let model_id = embed_svc.model_identifier();
         let skill_service = chatty_core::services::SkillService::new(Some(embed_svc.clone()));
