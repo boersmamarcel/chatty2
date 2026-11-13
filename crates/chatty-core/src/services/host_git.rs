@@ -180,10 +180,9 @@ mod tests {
         assert!(out.status.success());
 
         git(root, &["config", "filter.x.clean", "touch nope"]);
-        let refused = host_git(root)
-            .await
-            .err()
-            .expect("a filter driver is refused");
+        let Err(refused) = host_git(root).await else {
+            panic!("a filter driver is refused");
+        };
         assert!(refused.contains("filter.x.clean"), "{refused}");
     }
 

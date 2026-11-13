@@ -472,7 +472,7 @@ fn result_text(content: &[ToolResultContent]) -> String {
 
 /// `git status --short` in `dir`, or `None` when it is not a git repository
 /// (or git is missing, or slow).
-pub async fn git_status_short(dir: &PathBuf) -> Option<String> {
+pub async fn git_status_short(dir: &std::path::Path) -> Option<String> {
     // Pinned and checked host git (AGE-1362); a refused workspace has no
     // status line in the summary.
     let run = async {

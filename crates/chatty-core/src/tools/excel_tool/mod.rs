@@ -21,7 +21,6 @@ pub enum ExcelToolError {
     WriteError(String),
 }
 
-
 /// The most cells a sheet's bounding box may span before it is read.
 /// calamine turns a sheet into a dense grid from its first to its last cell,
 /// so a 1 KB file with cells at A1 and XFD1048576 asks for 512 GiB and aborts
