@@ -168,6 +168,12 @@ impl Tool for BestOfTool {
         })
     }
 
+    /// Keep the failure text readable: rig's default redacts it to "the tool
+    /// failed", and the run's stop hook (AGE-1132) reads it from the result.
+    fn map_error(&self, error: Self::Error) -> rig_agent::tool::ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
     async fn call(
         &self,
         _context: &mut ToolContext,
@@ -510,6 +516,33 @@ mod tests {
             tool.invoke.budget_stop_headline().as_deref(),
             Some(crate::services::budget_stop::BEST_OF_FAILED)
         );
+    }
+
+    /// The failure the stop hook reads is the real text, not rig's redaction,
+    /// and a later delegation's refusal carries no budget wording.
+    #[test]
+    fn all_failed_text_survives_and_refusals_name_best_of() {
+        use crate::services::budget_stop::{BEST_OF_FAILED, BUDGET_EXHAUSTED};
+        let tool = BestOfTool::new(
+            InvokeAgentTool::new(vec![]),
+            BestOfSection {
+                solvers: vec!["a".into()],
+                judge: "j".into(),
+            },
+        );
+        let mapped = tool.map_error(BestOfError::AllFailed("a: x".into()));
+        let feedback = mapped.model_feedback().unwrap_or_default();
+        assert!(feedback.contains(BEST_OF_FAILED), "{feedback}");
+        let refusal = crate::tools::invoke_agent_tool::InvokeAgentError::BudgetExhausted {
+            agent: "w".into(),
+            headline: BEST_OF_FAILED.into(),
+            partial: String::new(),
+            messages: Vec::new(),
+        }
+        .to_string();
+        assert!(refusal.starts_with(BEST_OF_FAILED), "{refusal}");
+        assert!(!refusal.to_lowercase().contains("budget"), "{refusal}");
+        assert!(!refusal.contains(BUDGET_EXHAUSTED), "{refusal}");
     }
 
     #[test]

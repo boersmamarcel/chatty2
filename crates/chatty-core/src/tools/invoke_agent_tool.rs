@@ -20,7 +20,7 @@ use crate::services::a2a_client::{
     trace_from_status_metadata, usage_from_status_metadata, usage_from_wire,
 };
 use crate::services::budget_stop::{
-    BUDGET_EXHAUSTED, BUDGET_STOP_NOTE, budget_exhausted, find_budget_exhausted, partial_output,
+    BUDGET_EXHAUSTED, budget_exhausted, find_budget_exhausted, partial_output, stop_note, stop_text,
 };
 use crate::services::handoff::{HandoffLedger, HandoffReport};
 use crate::services::lazy_broker::LazyBroker;
@@ -298,13 +298,14 @@ pub enum InvokeAgentError {
     /// The budget is spent (AGE-903): the callee's model endpoint refused a
     /// call (`402 budget_exceeded`/`cap_exceeded`), something under it
     /// did, or this run already stopped on one. Terminal: the model sees
-    /// `budget_exhausted: <headline>`, [`BUDGET_STOP_NOTE`] and what the
+    /// `budget_exhausted: <headline>`, [`BUDGET_STOP_NOTE`](crate::services::budget_stop::BUDGET_STOP_NOTE) and what the
     /// callee had streamed before it stopped, and
     /// [`StopOnBudgetExhausted`](crate::services::budget_stop::StopOnBudgetExhausted)
     /// ends its run without another model call.
     #[error(
-        "{}\n\n{BUDGET_STOP_NOTE}{}{}",
-        budget_exhausted(headline),
+        "{}\n\n{}{}{}",
+        stop_text(headline),
+        stop_note(headline),
         partial_output(agent, partial),
         delivered_after_error(messages)
     )]
@@ -1110,7 +1111,7 @@ impl InvokeAgentTool {
                 // makes the broker reap this callee's subtree (TB-7).
                 headline = self.budget_stopped() => {
                     info!(agent = %agent, "Stopping a running delegation: the budget is spent");
-                    failure = Some(budget_exhausted(&headline));
+                    failure = Some(stop_text(&headline));
                     break;
                 }
             };

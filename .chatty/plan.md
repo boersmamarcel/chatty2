@@ -9,5 +9,5 @@
 
 ## Steps
 1. [x] budget_stop.rs: best_of stop text + tests `best_of_stop_text_names_best_of`, `budget_stop_text_unchanged` (commit: "budget_stop: word a best_of failure as one, not a spent budget")
-2. [ ] invoke_agent_tool.rs seam + best_of AllFailed branch calls it + test `all_failed_stops_the_run`
-3. [ ] checks pass
+2. [x] invoke_agent_tool.rs seam + best_of AllFailed branch calls it + test `all_failed_stops_the_run`
+3. [x] checks pass

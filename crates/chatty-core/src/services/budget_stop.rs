@@ -27,6 +27,7 @@ use rig_agent::agent::{
 };
 use rig_agent::tool::Tool;
 
+use crate::tools::best_of_tool::BestOfTool;
 use crate::tools::invoke_agent_tool::InvokeAgentTool;
 
 /// The typed reason a run stopped on a spent budget. It leads the failed
@@ -48,9 +49,33 @@ pub const BUDGET_STOP: &str = "budget exhausted\n";
 /// spent budget: [`final_message`] words it as a best_of failure.
 pub const BEST_OF_FAILED: &str = "best_of: every attempt failed";
 
+/// What the calling model reads under a failed `best_of`.
+pub const BEST_OF_STOP_NOTE: &str =
+    "best_of failed on every attempt: no agent may start another delegation. Stop here.";
+
 /// `budget_exhausted: <headline>`.
 pub fn budget_exhausted(headline: &str) -> String {
     format!("{BUDGET_EXHAUSTED}: {headline}")
+}
+
+/// What a stopped run's callers read as the reason: `budget_exhausted:
+/// <headline>` for a spent budget, the bare headline for a failed `best_of`
+/// (no budget wording, and no marker a budget-stop reader would match).
+pub fn stop_text(headline: &str) -> String {
+    if headline.starts_with(BEST_OF_FAILED) {
+        headline.to_string()
+    } else {
+        budget_exhausted(headline)
+    }
+}
+
+/// The line after [`stop_text`] telling the model to stop.
+pub fn stop_note(headline: &str) -> &'static str {
+    if headline.starts_with(BEST_OF_FAILED) {
+        BEST_OF_STOP_NOTE
+    } else {
+        BUDGET_STOP_NOTE
+    }
 }
 
 /// "Budget of $X spent", or "Budget spent" when the figure is unknown.
@@ -205,10 +230,22 @@ impl AgentHook for StopOnBudgetExhausted {
         let Some(result) = event.tool_result() else {
             return OutcomeAction::Proceed;
         };
+        let rendered = result.output().render();
+        if event.tool_name() == Some(BestOfTool::NAME) {
+            // Every solver failed (AGE-1132): the run ends here, not at the
+            // model's next try at an answer of its own.
+            if !result.is_success() && rendered.contains(BEST_OF_FAILED) {
+                tracing::warn!("best_of failed on every attempt; ending the run");
+                ctx.scratchpad().update(|stop: &mut BudgetStop| {
+                    stop.headline
+                        .get_or_insert_with(|| BEST_OF_FAILED.to_string());
+                });
+            }
+            return OutcomeAction::Proceed;
+        }
         if event.tool_name() != Some(InvokeAgentTool::NAME) {
             return OutcomeAction::Proceed;
         }
-        let rendered = result.output().render();
         ctx.scratchpad().update(|stop: &mut BudgetStop| {
             if result.is_success() {
                 stop.finished.extend(finished_work(&rendered));
@@ -349,5 +386,76 @@ mod tests {
             final_message("Budget spent", &[("w".into(), "done".into())]),
             "Budget spent. Here is what was finished:\n\n**w**\ndone"
         );
+    }
+
+    /// The run itself ends (AGE-1132): a leader whose `best_of` failed on
+    /// every attempt gets no further model call, and answers with the
+    /// best_of final message.
+    #[tokio::test]
+    async fn a_failed_best_of_ends_the_run_at_the_next_call() {
+        use futures::StreamExt;
+        use rig_agent::agent::AgentBuilder;
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call("t1", BestOfTool::NAME, serde_json::json!({}))
+                    .with_call_id("call_1"),
+                MockStreamEvent::final_response_with_total_tokens(4),
+            ],
+            vec![
+                MockStreamEvent::text("my own answer"),
+                MockStreamEvent::final_response_with_total_tokens(4),
+            ],
+        ]);
+        let agent = AgentBuilder::new(model)
+            .tool(FailedBestOf)
+            .add_hook(StopOnBudgetExhausted)
+            .build();
+        let mut stream = agent.prompt("task").max_turns(4).stream();
+        let mut reason = None;
+        while let Some(item) = stream.next().await {
+            if let Err(rig_agent::completion::PromptError::Cancelled { reason: r, .. }) = item {
+                reason = Some(r);
+            }
+        }
+        let reason = reason.expect("the run was stopped by the hook");
+        assert_eq!(
+            reason,
+            format!("{BUDGET_STOP}{}", final_message(BEST_OF_FAILED, &[]))
+        );
+        assert!(!reason.contains("my own answer"));
+    }
+
+    /// A `best_of` that failed on every attempt, as the tool errors.
+    struct FailedBestOf;
+
+    impl Tool for FailedBestOf {
+        const NAME: &'static str = BestOfTool::NAME;
+        type Error = crate::tools::best_of_tool::BestOfError;
+        type Args = serde_json::Value;
+        type Output = String;
+
+        fn description(&self) -> String {
+            "fails".to_string()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+
+        fn map_error(&self, error: Self::Error) -> rig_agent::tool::ToolExecutionError {
+            crate::tools::map_tool_error(Self::NAME, error)
+        }
+
+        async fn call(
+            &self,
+            _context: &mut rig_agent::tool::ToolContext,
+            _args: Self::Args,
+        ) -> Result<Self::Output, Self::Error> {
+            Err(crate::tools::best_of_tool::BestOfError::AllFailed(
+                "a: x".into(),
+            ))
+        }
     }
 }
