@@ -558,6 +558,53 @@ mod tests {
     }
 
     #[test]
+    fn empty_depends_on_is_no_dependency() {
+        for empty in ["depends-on:", "depends-on:   "] {
+            let answer = TWO_ITEMS.replacen("depends-on: div-tests", empty, 1);
+            let parsed = parse_items(&answer).unwrap();
+            assert!(parsed.items[1].depends_on.is_empty(), "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn empty_conflict_keys_is_an_empty_list() {
+        for empty in ["conflict-keys:", "conflict-keys:   "] {
+            let answer = TWO_ITEMS.replacen("conflict-keys: tests/test_calc.sh", empty, 1);
+            let parsed = parse_items(&answer).unwrap();
+            assert!(parsed.items[0].conflict_keys.is_empty(), "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn comma_only_depends_on_is_still_bad() {
+        for value in ["depends-on: ,", "depends-on: , ,"] {
+            let answer = TWO_ITEMS.replacen("depends-on: div-tests", value, 1);
+            assert!(matches!(
+                parse_items(&answer),
+                Err(ParseItemsError::BadHeader { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn a_repeated_empty_header_is_still_bad() {
+        let answer = TWO_ITEMS.replacen("depends-on: div-tests", "depends-on:\ndepends-on:", 1);
+        assert!(matches!(
+            parse_items(&answer),
+            Err(ParseItemsError::BadHeader { .. })
+        ));
+        let answer = TWO_ITEMS.replacen(
+            "conflict-keys: tests/test_calc.sh",
+            "conflict-keys:\nconflict-keys:",
+            1,
+        );
+        assert!(matches!(
+            parse_items(&answer),
+            Err(ParseItemsError::BadHeader { .. })
+        ));
+    }
+
+    #[test]
     fn ids_are_unique_and_dependencies_stay_in_the_answer() {
         let answer = TWO_ITEMS.replacen("ITEM mod-tests", "ITEM div-tests", 1);
         assert_eq!(
