@@ -64,6 +64,13 @@ pub struct VersionInfo {
     pub published_at: DateTime<Utc>,
     pub signature: Option<String>,
     pub publisher_public_key: Option<String>,
+    /// What the version costs per call, in micro-credits; the registry's
+    /// answer here is the only source of a fee.
+    #[serde(default)]
+    pub fee_micros: Option<i64>,
+    /// The version's pricing model (`free` or a paid one).
+    #[serde(default)]
+    pub pricing_model: Option<String>,
 }
 
 /// A paginated list of versions.
@@ -272,15 +279,6 @@ pub struct CreditBalance {
     pub lifetime_consumed_tokens: i64,
 }
 
-/// Pricing configuration for a module.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModulePricingInfo {
-    pub module_name: String,
-    pub price_per_call: String,
-    pub free_tier_calls: i32,
-    pub updated_at: DateTime<Utc>,
-}
-
 /// `GET /api/usage/me/modules`: the signed-in user's usage per module.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MyModuleUsageList {
@@ -293,48 +291,6 @@ pub struct MyModuleUsageList {
 pub struct MyModuleUsage {
     pub module_name: String,
     pub total_invocations: i64,
-}
-
-// ── Billing session (Phase 3b) ─────────────────────────────────────────────
-
-/// Request to acquire a billing session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcquireSessionRequest {
-    pub module_name: String,
-    pub module_version: String,
-    pub estimated_tokens: i64,
-}
-
-/// Response from acquire-session — includes signed JWT.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcquireSessionResponse {
-    /// Unique session ID (UUID).
-    pub session_id: String,
-    /// Hive-signed JWT containing session claims.
-    pub token: String,
-    /// User's current balance after reservation.
-    pub balance_tokens: i64,
-    /// Tokens reserved for this session.
-    pub reserved_tokens: i64,
-    /// Module's pricing model.
-    pub pricing_model: String,
-}
-
-/// Request to settle a billing session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SettleSessionRequest {
-    pub session_id: String,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-}
-
-/// Response from settle-session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SettleSessionResponse {
-    pub session_id: String,
-    pub tokens_deducted: i64,
-    pub tokens_released: i64,
-    pub balance_after: i64,
 }
 
 // ── Query parameters ───────────────────────────────────────────────────────

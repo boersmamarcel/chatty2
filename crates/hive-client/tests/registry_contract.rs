@@ -182,6 +182,23 @@ async fn list_versions() {
 }
 
 #[tokio::test]
+async fn a_versions_fee_comes_from_the_versions_response() {
+    let server = MockServer::start().await;
+    let mut body = recorded("versions");
+    body["items"][0]["fee_micros"] = json!(25_000);
+    body["items"][0]["pricing_model"] = json!("per_call");
+    Mock::given(method("GET"))
+        .and(path("/api/modules/echo/versions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    let versions = anonymous(&server).list_versions("echo").await.unwrap();
+    let v = &versions.items[0];
+    assert_eq!(v.fee_micros, Some(25_000));
+    assert_eq!(v.pricing_model.as_deref(), Some("per_call"));
+}
+
+#[tokio::test]
 async fn list_categories() {
     let server = MockServer::start().await;
     serve(&server, "GET", "/api/categories", "categories").await;
@@ -368,7 +385,7 @@ async fn download_certified_by_another_root_or_for_another_module_is_refused() {
     }
 }
 
-// ── Credits, usage, billing sessions ──────────────────────────────────────
+// ── Credits ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn credit_balance() {
@@ -376,98 +393,4 @@ async fn credit_balance() {
     serve_authed(&server, "GET", "/api/credits/balance", "credits_balance").await;
     let balance = signed_in(&server).get_credit_balance().await.unwrap();
     assert_eq!(balance.balance_tokens, 0);
-}
-
-#[tokio::test]
-async fn module_pricing() {
-    let server = MockServer::start().await;
-    serve(
-        &server,
-        "GET",
-        "/api/modules/paid-module/pricing",
-        "module_pricing",
-    )
-    .await;
-    let pricing = anonymous(&server)
-        .get_module_pricing("paid-module")
-        .await
-        .unwrap();
-    assert_eq!(pricing.module_name, "paid-module");
-    assert_eq!(pricing.price_per_call, "0.0100");
-}
-
-#[tokio::test]
-async fn acquire_and_settle_a_billing_session() {
-    use base64::Engine;
-    use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
-    use ed25519_dalek::Signer;
-
-    let server = MockServer::start().await;
-    // The recorded token is scrubbed; the client now verifies it (CX-0b),
-    // so the double serves a real EdDSA one under a root-certified key.
-    let (root, session_key) = (
-        ed25519_dalek::SigningKey::from_bytes(&[1; 32]),
-        ed25519_dalek::SigningKey::from_bytes(&[2; 32]),
-    );
-    let session_hex = hex::encode(session_key.verifying_key().to_bytes());
-    Mock::given(method("GET"))
-        .and(path("/.well-known/hive-session-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "public_key": session_hex,
-            "signature": BASE64.encode(
-                root.sign(&hive_client::session_key::certificate_message(&session_hex))
-                    .to_bytes()
-            ),
-        })))
-        .mount(&server)
-        .await;
-    let now = Utc::now().timestamp();
-    let input = format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(r#"{"alg":"EdDSA","typ":"JWT"}"#),
-        URL_SAFE_NO_PAD.encode(
-            json!({
-                "sid": "e96ad058-bbba-47a4-9f8f-738b85e97861", "uid": "u",
-                "mod": "paid-module", "ver": "1.0.0", "res": 100, "bal": 0,
-                "iat": now, "exp": now + 300,
-            })
-            .to_string()
-        )
-    );
-    let token = format!(
-        "{input}.{}",
-        URL_SAFE_NO_PAD.encode(session_key.sign(input.as_bytes()).to_bytes())
-    );
-    let mut acquired = recorded("acquire_session");
-    acquired["token"] = json!(token);
-    Mock::given(method("POST"))
-        .and(path("/api/credits/acquire-session"))
-        .and(header("authorization", format!("Bearer {TOKEN}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(acquired))
-        .expect(1)
-        .mount(&server)
-        .await;
-    serve_authed(
-        &server,
-        "POST",
-        "/api/credits/settle-session",
-        "settle_session",
-    )
-    .await;
-    let client =
-        signed_in(&server).with_local_root_key(&hex::encode(root.verifying_key().to_bytes()));
-    let session = client
-        .acquire_session("paid-module", "1.0.0", 100)
-        .await
-        .unwrap();
-    assert_eq!(session.reserved_tokens, 100);
-    let settled = client
-        .settle_session(&session.session_id, 1, 1)
-        .await
-        .unwrap();
-    assert_eq!(settled.session_id, session.session_id);
-    assert_eq!(
-        settled.tokens_deducted + settled.tokens_released,
-        session.reserved_tokens
-    );
 }

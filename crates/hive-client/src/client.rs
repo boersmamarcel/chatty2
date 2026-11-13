@@ -11,7 +11,7 @@ use crate::{
     error::ClientError,
     models::{
         AgentSpecList, BegunDownload, CategoryList, CreditBalance, DownloadResult, ListParams,
-        ModuleList, ModuleMetadata, ModulePricingInfo, PublishedSpec, TokenPair, VersionList,
+        ModuleList, ModuleMetadata, PublishedSpec, TokenPair, VersionList,
     },
     secure_url::ensure_secure_url,
     session::{HiveSession, send_authed},
@@ -480,104 +480,12 @@ impl HiveRegistryClient {
             .await
     }
 
-    /// Get pricing configuration for a module.
-    pub async fn get_module_pricing(&self, name: &str) -> Result<ModulePricingInfo, ClientError> {
-        self.get_json::<ModulePricingInfo>(
-            &format!("/api/modules/{}/pricing", urlencoded(name)),
-            &(),
-        )
-        .await
-    }
-
     /// The signed-in user's recorded calls per module: what a publisher's
     /// free tier is counted against.
     pub async fn get_my_modules_usage(
         &self,
     ) -> Result<crate::models::MyModuleUsageList, ClientError> {
         self.get_json("/api/usage/me/modules", &()).await
-    }
-
-    // ── Billing sessions (Phase 3b) ────────────────────────────────────────
-
-    /// Acquire a billing session before module invocation.
-    ///
-    /// Reserves credits for the estimated usage and returns a signed JWT
-    /// that the module can verify.
-    pub async fn acquire_session(
-        &self,
-        module_name: &str,
-        module_version: &str,
-        estimated_tokens: i64,
-    ) -> Result<crate::models::AcquireSessionResponse, ClientError> {
-        let url = format!("{}/api/credits/acquire-session", self.base_url);
-
-        let body = crate::models::AcquireSessionRequest {
-            module_name: module_name.to_string(),
-            module_version: module_version.to_string(),
-            estimated_tokens,
-        };
-
-        let response = self
-            .send_authed(|| self.http.post(&url).json(&body))
-            .await?;
-        let status = response.status();
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized);
-        }
-        if !status.is_success() {
-            return Err(Self::api_error(response).await);
-        }
-
-        let session = response
-            .json::<crate::models::AcquireSessionResponse>()
-            .await
-            .map_err(ClientError::from)?;
-        // Fail closed: a token that does not verify under the registry's
-        // certified session key, or that is for another module, is never
-        // handed to a module (CX-0b).
-        let claims: crate::session_key::BillingClaims = self.verify_token(&session.token).await?;
-        if claims.module_name != module_name || claims.ver != module_version {
-            return Err(ClientError::Token(
-                crate::session_key::TokenError::Malformed("the token is for another module"),
-            ));
-        }
-        Ok(session)
-    }
-
-    /// Settle a billing session after module execution.
-    ///
-    /// Reports actual usage and releases unused reserved credits.
-    pub async fn settle_session(
-        &self,
-        session_id: &str,
-        input_tokens: i64,
-        output_tokens: i64,
-    ) -> Result<crate::models::SettleSessionResponse, ClientError> {
-        let url = format!("{}/api/credits/settle-session", self.base_url);
-
-        let body = crate::models::SettleSessionRequest {
-            session_id: session_id.to_string(),
-            input_tokens,
-            output_tokens,
-        };
-
-        let response = self
-            .send_authed(|| self.http.post(&url).json(&body))
-            .await?;
-        let status = response.status();
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized);
-        }
-        if !status.is_success() {
-            return Err(Self::api_error(response).await);
-        }
-
-        response
-            .json::<crate::models::SettleSessionResponse>()
-            .await
-            .map_err(ClientError::from)
     }
 
     // ── Registry tokens (CX-0b) ────────────────────────────────────────────

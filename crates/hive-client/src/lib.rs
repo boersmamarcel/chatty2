@@ -59,7 +59,6 @@
 
 pub mod cache;
 pub mod client;
-pub mod credit_guard;
 pub mod error;
 pub mod metering;
 pub mod models;
@@ -70,7 +69,6 @@ pub mod trust;
 pub mod verify;
 
 pub use client::HiveRegistryClient;
-pub use credit_guard::{Admission, CreditGuard, CreditRefusal, InsufficientFunds};
 pub use error::ClientError;
 pub use metering::{CallUsage, ModuleMeter};
 pub use models::{

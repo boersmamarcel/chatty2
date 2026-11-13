@@ -51,21 +51,12 @@ fn billing_claims(module: &str) -> Value {
     })
 }
 
-/// A registry double serving `cert` and answering acquire-session with
-/// `token`.
-async fn registry(cert: Value, token: &str) -> MockServer {
+/// A registry double serving `cert` as its session key.
+async fn registry(cert: Value) -> MockServer {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/.well-known/hive-session-key"))
         .respond_with(ResponseTemplate::new(200).set_body_json(cert))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/credits/acquire-session"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "session_id": "s-1", "token": token, "balance_tokens": 900,
-            "reserved_tokens": 100, "pricing_model": "paid",
-        })))
         .mount(&server)
         .await;
     server
@@ -87,28 +78,21 @@ fn signed_in(server: &MockServer, root: &SigningKey) -> HiveRegistryClient {
 }
 
 #[tokio::test]
-async fn a_billing_token_verifies_under_the_session_key_the_root_certifies() {
+async fn a_token_verifies_under_the_session_key_the_root_certifies() {
     let (root, session_key) = (key(1), key(2));
     let token = jwt("EdDSA", &billing_claims("paid-mod"), &session_key);
-    let server = registry(certificate(&root, &session_key), &token).await;
+    let server = registry(certificate(&root, &session_key)).await;
     let client = signed_in(&server, &root);
 
-    let session = client
-        .acquire_session("paid-mod", "1.0.0", 100)
+    let claims: Value = client
+        .verify_token(&token)
         .await
-        .expect("a genuine billing token is accepted");
-    assert_eq!(session.token, token);
+        .expect("a genuine token is accepted");
+    assert_eq!(claims["mod"], "paid-mod");
     assert_eq!(
         client.session_key().await.unwrap(),
         session_key.verifying_key()
     );
-
-    // A genuine token for another module is not handed over either.
-    let err = client
-        .acquire_session("other-mod", "1.0.0", 100)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, ClientError::Token(_)), "{err}");
 }
 
 #[tokio::test]
@@ -117,9 +101,9 @@ async fn hs256_and_uncertified_keys_are_refused() {
 
     // HS256 is gone: the token's `alg` alone refuses it.
     let hs256 = jwt("HS256", &billing_claims("m"), &session_key);
-    let server = registry(certificate(&root, &session_key), &hs256).await;
+    let server = registry(certificate(&root, &session_key)).await;
     let err = signed_in(&server, &root)
-        .acquire_session("m", "1.0.0", 100)
+        .verify_token::<Value>(&hs256)
         .await
         .unwrap_err();
     assert!(
@@ -130,9 +114,9 @@ async fn hs256_and_uncertified_keys_are_refused() {
     // A key the registry certifies itself (not the trusted root) is refused,
     // so a token it signed is never accepted.
     let token = jwt("EdDSA", &billing_claims("m"), &impostor);
-    let server = registry(certificate(&impostor, &impostor), &token).await;
+    let server = registry(certificate(&impostor, &impostor)).await;
     let err = signed_in(&server, &root)
-        .acquire_session("m", "1.0.0", 100)
+        .verify_token::<Value>(&token)
         .await
         .unwrap_err();
     assert!(
@@ -141,9 +125,9 @@ async fn hs256_and_uncertified_keys_are_refused() {
     );
 
     // A token signed by another key under a genuine certificate.
-    let server = registry(certificate(&root, &session_key), &token).await;
+    let server = registry(certificate(&root, &session_key)).await;
     let err = signed_in(&server, &root)
-        .acquire_session("m", "1.0.0", 100)
+        .verify_token::<Value>(&token)
         .await
         .unwrap_err();
     assert!(
