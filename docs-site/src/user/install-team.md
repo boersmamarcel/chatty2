@@ -24,7 +24,7 @@ Each team shows:
 Click **Install team**. Chatty then:
 
 1. fetches the leader's spec and each member's;
-2. checks each spec's signature chain against the registry root keys built into Chatty, and that it is the name and version asked for. A spec that was changed after signing, or signed by a key the registry never certified, stops the install;
+2. checks each spec's signature chain against the registry root keys built into Chatty, and that it is the name and version asked for. A spec that was changed after signing, or signed by a key the registry never certified, stops the install. A spec that grants a plugin access to a folder outside the plugin's own (`file:<root>`) is refused too; the plain `file` grant is kept;
 3. downloads each locked plugin through the same signed install path as **Install** on the Plugins tab, and checks that its bytes have the SHA-256 the lock pins;
 4. writes the specs to your global agents folder (`~/.local/share/chatty/agents/` on Linux, `~/Library/Application Support/chatty/agents/` on macOS);
 5. adds the leader to your roster.
