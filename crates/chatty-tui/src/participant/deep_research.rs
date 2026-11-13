@@ -335,7 +335,7 @@ const SQ2_QUOTE: &str = "originally 300 metres";
 fn report_text(extra: &str) -> String {
     format!(
         "# The Eiffel Tower's height\n\nIt is 330 m tall [1]({SQ1_URL}), up from 300 m \
-         [2]({SQ2_URL}).{extra}\n\n## Gaps and disagreements\n\n- What SQ1 left open\n"
+         [2]({SQ2_URL}).{extra}\n\n## Gaps and disagreements\n\nOpen:\n- What SQ1 left open\n"
     )
 }
 
@@ -496,6 +496,12 @@ async fn deep_research_round_trip_produces_cited_report() {
     assert!(citations_outside_notes(&report, &run.notes).is_empty());
     assert!(!report.contains(CITATION_CHECK_HEADING), "{report}");
     assert!(report.contains("Gaps and disagreements"));
+    // AGE-1341: the writer put the list right after its line; the host
+    // finished it with a blank line before, so Markdown renders a list.
+    assert!(
+        report.contains("Open:\n\n- What SQ1 left open"),
+        "a blank line before the list: {report}"
+    );
     let footer = &report[report.find(COST_HEADING).expect("the cost footer")..];
     assert!(footer.contains("- Web searches: 0"), "{footer}");
     assert!(footer.contains("- Page fetches: 1"), "{footer}");
