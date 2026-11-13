@@ -35,12 +35,16 @@ jobs:
 
       - name: Sanitize PR metadata
         id: meta
+        # The title goes in through the environment, never pasted into the
+        # script, so `$(...)` or quotes in it are data (AGE-1270).
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          TITLE=$(echo "${{ github.event.pull_request.title }}" | tr -cd '[:print:]' | cut -c1-200)
+          TITLE=$(printf '%s' "$PR_TITLE" | tr -cd '[:print:]' | cut -c1-200)
           echo "title=$TITLE" >> "$GITHUB_OUTPUT"
 
       - name: Check UI sync
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@8a29bc6f0ae11a363721054b6739feba6adabe57 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: >-

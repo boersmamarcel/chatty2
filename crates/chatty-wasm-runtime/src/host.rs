@@ -316,19 +316,37 @@ const DEADLINE_EXCEEDED: &str = "deadline exceeded";
 
 /// [`StoreLimits`] plus a flag set whenever a memory grow is refused, so a
 /// trap that follows can be reported as `memory limit`.
+///
+/// `StoreLimits::memory_size` caps each linear memory on its own, so a module
+/// with several memories could use a multiple of the cap, and tables were not
+/// capped at all (AGE-1287). This limiter also keeps the total of all
+/// memories under the cap and bounds table size.
 pub(crate) struct GuestLimiter {
     inner: StoreLimits,
+    /// The cap on all linear memories together, in bytes.
+    max_memory_bytes: usize,
+    /// Bytes of linear memory granted so far, across all memories.
+    memory_total: usize,
     /// A memory grow was refused during the current call.
     pub(crate) memory_denied: bool,
 }
 
+/// Elements one table may hold. Function tables of real modules hold a few
+/// thousand entries; a `table.grow` of millions is only a way to eat host
+/// memory outside the linear-memory cap (AGE-1287).
+const MAX_TABLE_ELEMENTS: usize = 100_000;
+
 impl GuestLimiter {
     fn new(max_memory_bytes: u64) -> Self {
+        let max_memory_bytes = usize::try_from(max_memory_bytes).unwrap_or(usize::MAX);
         let inner = wasmtime::StoreLimitsBuilder::new()
-            .memory_size(usize::try_from(max_memory_bytes).unwrap_or(usize::MAX))
+            .memory_size(max_memory_bytes)
+            .table_elements(MAX_TABLE_ELEMENTS)
             .build();
         Self {
             inner,
+            max_memory_bytes,
+            memory_total: 0,
             memory_denied: false,
         }
     }
@@ -341,8 +359,15 @@ impl ResourceLimiter for GuestLimiter {
         desired: usize,
         maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        let allowed = self.inner.memory_growing(current, desired, maximum)?;
-        if !allowed {
+        let total = self
+            .memory_total
+            .saturating_sub(current)
+            .saturating_add(desired);
+        let allowed = total <= self.max_memory_bytes
+            && self.inner.memory_growing(current, desired, maximum)?;
+        if allowed {
+            self.memory_total = total;
+        } else {
             self.memory_denied = true;
         }
         Ok(allowed)
@@ -817,6 +842,27 @@ fn read_inside_root(root: &Path, relative: &Path, cap: u64) -> Result<Vec<u8>, S
 
 #[cfg(test)]
 mod tests {
+    /// AGE-1287: the memory cap holds across several memories, and a table
+    /// cannot grow past its element cap.
+    #[test]
+    fn guest_limiter_caps_total_memory_and_tables() {
+        use wasmtime::ResourceLimiter;
+        let mut limiter = super::GuestLimiter::new(100);
+        assert!(limiter.memory_growing(0, 60, None).unwrap());
+        assert!(
+            !limiter.memory_growing(0, 60, None).unwrap(),
+            "a second memory must count against the same cap"
+        );
+        assert!(limiter.memory_denied);
+        assert!(limiter.memory_growing(0, 40, None).unwrap());
+        assert!(
+            !limiter
+                .table_growing(0, super::MAX_TABLE_ELEMENTS + 1, None)
+                .unwrap()
+        );
+        assert!(limiter.table_growing(0, 1000, None).unwrap());
+    }
+
     use super::*;
 
     // A simple mock LLM provider for testing.

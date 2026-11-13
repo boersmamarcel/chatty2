@@ -87,12 +87,18 @@ pub fn reveal_path_in_os(path: &Path, cx: &App) {
     } else {
         resolved
     };
+    // Absolute, so a name starting with `-` is never read as an option.
+    let target = std::fs::canonicalize(&target).unwrap_or(target);
 
+    // On macOS `open <dir>` launches a directory ending in `.app` (an
+    // agent-written bundle runs without a Gatekeeper prompt). `open -R`
+    // only selects the item in Finder, for files and bundles alike, so
+    // Reveal never launches anything (AGE-1276).
+    #[cfg(target_os = "macos")]
+    let result = Command::new("open").arg("-R").arg(&target).spawn();
+
+    #[cfg(not(target_os = "macos"))]
     let result = if target.is_dir() {
-        #[cfg(target_os = "macos")]
-        {
-            Command::new("open").arg(&target).spawn()
-        }
         #[cfg(target_os = "windows")]
         {
             Command::new("explorer").arg(&target).spawn()
@@ -102,10 +108,6 @@ pub fn reveal_path_in_os(path: &Path, cx: &App) {
             Command::new("xdg-open").arg(&target).spawn()
         }
     } else {
-        #[cfg(target_os = "macos")]
-        {
-            Command::new("open").arg("-R").arg(&target).spawn()
-        }
         #[cfg(target_os = "windows")]
         {
             Command::new("explorer")

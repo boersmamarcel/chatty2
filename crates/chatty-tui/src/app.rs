@@ -547,7 +547,13 @@ fn handle_key_event(
     }
 
     // If there's a pending approval, handle y/n first
-    if engine.pending_approval.is_some() {
+    if let Some(pending) = engine.pending_approval.as_ref() {
+        // Type-ahead guard (AGE-1277): a y/n that arrives before the prompt
+        // has been on screen for a moment was meant for the draft, not for
+        // this command.
+        if !pending.is_armed() {
+            return KeyAction::None;
+        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 engine.approve();

@@ -47,10 +47,16 @@ impl FullWorld {
         }
     }
 
+    /// Resolve a Typst file id to a real path inside the base directory.
+    ///
+    /// The joined path is canonicalized, so a symlink in the workspace that
+    /// points outside it (e.g. to `~/.ssh`) is refused rather than read
+    /// (AGE-1289). Returns `None` for a missing file or one outside the base.
     fn resolve_path(&self, id: FileId) -> Option<PathBuf> {
-        let base = self.base_dir.as_deref()?;
+        let base = self.base_dir.as_deref()?.canonicalize().ok()?;
         let rel = id.vpath().get_without_slash();
-        Some(base.join(rel))
+        let real = base.join(rel).canonicalize().ok()?;
+        real.starts_with(&base).then_some(real)
     }
 }
 
@@ -177,6 +183,26 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("Typst compilation failed") || err.contains("unknown variable"));
+    }
+
+    /// AGE-1289: `read()` works inside the base directory but refuses a
+    /// symlink that points outside it.
+    #[cfg(unix)]
+    #[test]
+    fn test_read_refuses_symlink_out_of_base() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "TOPSECRET").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        std::fs::write(base.path().join("inside.txt"), "hello").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), base.path().join("k"))
+            .unwrap();
+
+        let ok =
+            TypstCompilerService::compile_to_pdf("#raw(read(\"inside.txt\"))", Some(base.path()));
+        assert!(ok.is_ok(), "in-base read failed: {:?}", ok.err());
+
+        let escaped = TypstCompilerService::compile_to_pdf("#raw(read(\"k\"))", Some(base.path()));
+        assert!(escaped.is_err(), "symlink out of the base was read");
     }
 
     #[test]

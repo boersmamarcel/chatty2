@@ -376,7 +376,8 @@ impl SwarmNodeTranscript {
                 .child(
                     TextView::markdown(
                         ElementId::NamedInteger("agent-chat-text".into(), ix as u64),
-                        text.clone(),
+                        // AGE-1262: no file:// or custom-scheme links.
+                        crate::chatty::views::safe_links::neuter_unsafe_links(text).into_owned(),
                         window,
                         cx,
                     )

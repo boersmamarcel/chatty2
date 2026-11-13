@@ -51,7 +51,9 @@ impl RenderOnce for MarkdownContent {
             .into(),
         );
 
-        TextView::markdown(id, self.content, window, cx).selectable(true)
+        // Links in model output open only http(s)/mailto (AGE-1262).
+        let content = super::safe_links::neuter_unsafe_links(&self.content).into_owned();
+        TextView::markdown(id, content, window, cx).selectable(true)
     }
 }
 

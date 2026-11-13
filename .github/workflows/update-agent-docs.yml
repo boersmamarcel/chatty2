@@ -48,7 +48,7 @@ jobs:
           echo "author=$SAFE_AUTHOR" >> $GITHUB_OUTPUT
 
       - name: Update agent docs with Claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@8a29bc6f0ae11a363721054b6739feba6adabe57 # v1
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ steps.meta.outputs.title }}

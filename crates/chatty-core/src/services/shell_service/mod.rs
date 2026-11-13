@@ -1206,6 +1206,12 @@ impl ShellSession {
         // Bind workspace at its original path so existing path references work
         if let Some(workspace) = workspace_dir {
             args.extend(["--bind", workspace, workspace].map(String::from));
+            // A plain repository's git config and hooks are host code:
+            // read-only inside the sandbox (AGE-1288).
+            for path in worktree_git::plain_repo_host_code(std::path::Path::new(workspace)) {
+                let path = path.to_string_lossy().into_owned();
+                args.extend(["--ro-bind".to_string(), path.clone(), path]);
+            }
             // A linked worktree's git lives outside it (AGE-757).
             if let Some(git) = worktree_git::worktree_git(std::path::Path::new(workspace)) {
                 let groups = [
@@ -1260,8 +1266,10 @@ impl ShellSession {
     ) -> Result<String> {
         let workspace_write_rule = if let Some(workspace) = workspace_dir {
             let safe_workspace = Self::escape_sandbox_path(workspace)?;
+            // A plain repository's git config and hooks are host code: the
+            // later deny wins over the workspace allow (AGE-1288).
             format!(
-                "\n                (allow file-write* (subpath \"{}\"))",
+                "\n                (allow file-write* (subpath \"{0}\"))\n                (deny file-write* (literal \"{0}/.git/config\") (literal \"{0}/.git/config.worktree\") (subpath \"{0}/.git/hooks\"))",
                 safe_workspace
             )
         } else {
@@ -2018,3 +2026,4 @@ fn shell_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests;
 mod worktree_git;
+pub(crate) use worktree_git::plain_repo_host_code;
