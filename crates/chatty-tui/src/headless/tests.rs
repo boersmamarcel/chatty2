@@ -1628,6 +1628,111 @@ mod runner {
     }
 
     // -------------------------------------------------------------------
+    // A failed write of the answer file (AGE-1345).
+    // -------------------------------------------------------------------
+
+    /// Whether a worker's `write_file` of `path` that errored with `error`
+    /// ends its run, with `answer` (if any) already in the shared workspace.
+    async fn failed_write_ends_run(path: &str, error: &str, answer: Option<&str>) -> bool {
+        failed_call_ends_run("write_file", path, error, answer).await
+    }
+
+    async fn failed_call_ends_run(
+        tool: &str,
+        path: &str,
+        error: &str,
+        answer: Option<&str>,
+    ) -> bool {
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let (mut worker, _event_rx) = test_runner().await;
+        worker.execution_settings.workspace_dir =
+            Some(workspace.path().to_string_lossy().into_owned());
+        worker.set_fabric_transport(std::sync::Arc::new(NoCalls), "root".to_string());
+        assert!(worker.is_worker());
+        if let Some(answer) = answer {
+            std::fs::write(workspace.path().join("answer.txt"), answer).unwrap();
+        }
+        worker.transcript.start_assistant();
+        for event in [
+            AppEvent::ToolCallStarted {
+                id: "call_1".into(),
+                name: tool.into(),
+            },
+            AppEvent::ToolCallInput {
+                id: "call_1".into(),
+                arguments: format!(r#"{{"path":"{path}","content":"42\n"}}"#),
+            },
+            AppEvent::ToolCallError {
+                id: "call_1".into(),
+                error: error.into(),
+            },
+        ] {
+            worker.handle_event(event);
+        }
+        failed_answer_write_ends_run(&worker, true, "call_1")
+    }
+
+    /// The `best_of` race: a sibling's write landed first and this worker's
+    /// own write of the answer file errored. The answer is there; the
+    /// worker stops instead of spending another model round.
+    #[tokio::test]
+    async fn a_workers_failed_write_stops_when_the_answer_file_is_there() {
+        assert!(
+            failed_write_ends_run("answer.txt", "Error: write_file: File exists", Some("42")).await
+        );
+    }
+
+    /// A command's error is never the race: it gets its grace turn.
+    #[tokio::test]
+    async fn a_failed_command_naming_the_answer_file_does_not_stop_a_worker() {
+        assert!(
+            !failed_call_ends_run(
+                "shell_execute",
+                "answer.txt",
+                "Error: File exists",
+                Some("42")
+            )
+            .await
+        );
+    }
+
+    /// An error on some other file is just an error.
+    #[tokio::test]
+    async fn a_failed_write_of_another_file_does_not_stop_a_worker() {
+        assert!(
+            !failed_write_ends_run("notes.md", "Error: write_file: File exists", Some("42")).await
+        );
+    }
+
+    /// No answer was written (permission denied, say): stopping would end
+    /// the worker with nothing, so it goes on.
+    #[tokio::test]
+    async fn a_workers_failed_write_goes_on_when_no_answer_file_exists() {
+        assert!(
+            !failed_write_ends_run("answer.txt", "Error: write_file: Permission denied", None)
+                .await
+        );
+    }
+
+    /// A refused write (outside the workspace, a symlink at the target)
+    /// wrote nothing, so a file a sibling left is not this worker's answer
+    /// and it goes on.
+    #[tokio::test]
+    async fn a_workers_refused_write_does_not_stop_it_on_a_siblings_file() {
+        for error in [
+            "Error: access denied: path /etc/answer.txt is outside the workspace",
+            "Error: write_file: not a regular file (a symlink?); refusing to write through it",
+            "Error: edit_file: old string not found in answer.txt",
+            "Error: write_file: No space left on device (os error 28)",
+        ] {
+            assert!(
+                !failed_write_ends_run("answer.txt", error, Some("41")).await,
+                "{error}"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
     // Busy without progress: nudge once, then a tool-free last pass.
     // -------------------------------------------------------------------
 

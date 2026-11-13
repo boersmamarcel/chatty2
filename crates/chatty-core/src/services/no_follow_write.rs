@@ -10,7 +10,8 @@
 //! - [`write_no_follow`]: `symlink_metadata` on the target refuses a symlink
 //!   (dangling or not) or any other non-regular file; a new file is created
 //!   with `create_new`, which fails on any existing entry, a symlink
-//!   included; an existing regular file is replaced by renaming a fresh
+//!   included (a writer that loses that race replaces the winner's file
+//!   instead, AGE-1345); an existing regular file is replaced by renaming a fresh
 //!   `create_new` sibling over it, which swaps the directory entry rather
 //!   than writing through it.
 //! - [`append_no_follow`]: the same pre-check, then on unix an open with
@@ -22,6 +23,7 @@
 
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The error for a target that is a symlink, directory or other non-regular
 /// file. Path-free, so callers can wrap it in their own message.
@@ -77,9 +79,18 @@ pub(crate) fn write_no_follow(target: &Path, bytes: &[u8]) -> io::Result<bool> {
         Ok(file)
     };
 
-    let Some(meta) = regular_file_or_absent(target)? else {
-        create_new(target)?;
-        return Ok(false);
+    let meta = match regular_file_or_absent(target)? {
+        Some(meta) => meta,
+        None => match create_new(target) {
+            Ok(_) => return Ok(false),
+            // Another writer created the target after the check above
+            // (AGE-1345). Replace its file like any existing one; the same
+            // check refuses a symlink that took the name.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                regular_file_or_absent(target)?.ok_or(e)?
+            }
+            Err(e) => return Err(e),
+        },
     };
 
     let parent = target
@@ -92,8 +103,12 @@ pub(crate) fn write_no_follow(target: &Path, bytes: &[u8]) -> io::Result<bool> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
+    // The counter keeps concurrent writers in one process apart when the
+    // clock reads the same nanosecond for both.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = parent.join(format!(
-        ".{}.chatty-{}-{nanos}.tmp",
+        ".{}.chatty-{}-{nanos}-{seq}.tmp",
         name.to_string_lossy(),
         std::process::id()
     ));
@@ -199,6 +214,40 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
         assert!(write_no_follow(&target, b"x").is_err());
         assert!(append_no_follow(&target, b"x").is_err());
+    }
+
+    /// Writers that all see the target absent race on `create_new`; the
+    /// losers must replace the winner's file, not fail with "File exists"
+    /// (AGE-1345). The last write wins and no temp file is left behind.
+    #[test]
+    fn concurrent_writers_to_a_new_file_all_succeed() {
+        const WRITERS: usize = 8;
+        for round in 0..200 {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("answer.txt");
+            let barrier = std::sync::Barrier::new(WRITERS);
+            let results: Vec<io::Result<bool>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..WRITERS)
+                    .map(|i| {
+                        let (target, barrier) = (&target, &barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            write_no_follow(target, format!("writer {i}").as_bytes())
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for result in &results {
+                assert!(result.is_ok(), "round {round}: {result:?}");
+            }
+            let content = std::fs::read_to_string(&target).unwrap();
+            assert!(
+                (0..WRITERS).any(|i| content == format!("writer {i}")),
+                "round {round}: one writer's content, whole: {content:?}"
+            );
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        }
     }
 
     #[cfg(unix)]
