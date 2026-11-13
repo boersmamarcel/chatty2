@@ -33,9 +33,9 @@ use crate::agent_spec::{AgentSpec, load_agent_spec_from};
 use crate::services::delegation_policy::{self, may_call};
 use crate::services::lazy_broker::LazyBroker;
 use crate::services::roster::{
-    self, BrokerNodeSource, CardFetch, DirectorySource, HandleIndex, HandleSource, HandleState,
-    HostedSource, LazyBrokerCards, LiveCards, LocalSpecSource, NodeTable, Origin, Reach,
-    RemoteSource, Roster, RosterEntry, RosterSource, TransportCards,
+    self, BrokerHandles, BrokerNodeSource, CardFetch, DirectorySource, HandleIndex, HandleSource,
+    HandleState, HostedSource, LazyBrokerCards, LiveCards, LocalSpecSource, NodeTable, Origin,
+    Reach, RemoteSource, Roster, RosterEntry, RosterSource, TransportCards,
 };
 use crate::settings::models::a2a_store::A2aAgentConfig;
 use crate::tools::ToolError;
@@ -257,10 +257,16 @@ impl ListAgentsTool {
 
     fn roster(&self, specs: &BTreeMap<String, AgentSpec>) -> Roster {
         let mut sources: Vec<Arc<dyn RosterSource>> = Vec::new();
-        sources.push(Arc::new(match &self.handles {
-            Some(index) => HandleSource::new(index.clone()),
-            None => HandleSource::default(),
-        }));
+        sources.push(Arc::new(
+            match (&self.handles, &self.transport, &self.lazy_broker) {
+                (Some(index), _, _) => HandleSource::new(index.clone()),
+                (None, None, None) => HandleSource::default(),
+                (None, transport, lazy_broker) => HandleSource::new(Arc::new(BrokerHandles::new(
+                    transport.clone(),
+                    lazy_broker.clone(),
+                ))),
+            },
+        ));
         match (&self.nodes, &self.cards) {
             (Some(table), Some(cards)) => {
                 sources.push(Arc::new(DirectorySource::new(table.clone(), cards.clone())))
@@ -286,11 +292,17 @@ impl ListAgentsTool {
         entry: &RosterEntry,
         specs: &'a BTreeMap<String, AgentSpec>,
     ) -> std::borrow::Cow<'a, AgentSpec> {
-        let name = match entry.origin {
-            Origin::Node => node_spec(&entry.name).unwrap_or(&entry.name),
+        // A handle is called as the agent it was started with: the broker
+        // refuses a resume naming another.
+        let name = match (&entry.origin, &entry.handle) {
+            (Origin::Node, _) => node_spec(&entry.name).unwrap_or(&entry.name),
+            (Origin::Handle, Some(info)) => info.agent.as_deref().unwrap_or(&entry.name),
             _ => &entry.name,
         };
-        let local = matches!(entry.origin, Origin::LocalSpec | Origin::Node);
+        let local = matches!(
+            entry.origin,
+            Origin::LocalSpec | Origin::Node | Origin::Handle
+        );
         match specs.get(name).filter(|_| local) {
             Some(spec) => std::borrow::Cow::Borrowed(spec),
             None => std::borrow::Cow::Owned(AgentSpec::named(name)),
@@ -326,8 +338,9 @@ pub fn caller_policy(
 /// one needs broker work that does not exist yet), so a call by that name
 /// reaches the remote. A local spec with the name still outranks the
 /// remote, as `invoke_agent` dispatches it (AGE-1131). A handle outranks it
-/// here too, but `invoke_agent` cannot address handles yet: RO-4 must route
-/// handle names before handles are wired in, or the two tools disagree again.
+/// here too, and a call reaches it as `invoke_agent(agent: <its agent>,
+/// handle: <its name>)`: its row says so, and the policy check judges it as
+/// that agent.
 fn remote_over_uncallable_node(entries: Vec<RosterEntry>) -> Vec<RosterEntry> {
     let mut settled: Vec<RosterEntry> = Vec::with_capacity(entries.len());
     let mut group: Vec<RosterEntry> = Vec::new();
@@ -803,8 +816,9 @@ mod tests {
     /// One conversation's resumable handles.
     struct Handles;
 
+    #[async_trait::async_trait]
     impl HandleIndex for Handles {
-        fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)> {
+        async fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)> {
             vec![(
                 format!("{scope}-handle"),
                 HandleInfo {
@@ -813,6 +827,7 @@ mod tests {
                     pending_messages: 2,
                     behind_by: Some(1),
                     idle_for_s: 60,
+                    agent: Some("local-coder".to_string()),
                 },
             )]
         }
@@ -1087,5 +1102,133 @@ mod tests {
         ) -> Result<chatty_fabric::CallStream, chatty_fabric::CallError> {
             Err(chatty_fabric::CallError::Disconnected("gone".into()))
         }
+    }
+
+    // ── Handle rows (RO-4) ───────────────────────────────────────────────────
+
+    /// A broker that reports `handles` and no agents.
+    struct WithHandles(Vec<chatty_fabric::HandleSnapshot>);
+
+    #[async_trait::async_trait]
+    impl Transport for WithHandles {
+        async fn call(
+            &self,
+            _req: CallRequest,
+        ) -> Result<chatty_fabric::CallStream, chatty_fabric::CallError> {
+            use futures::StreamExt;
+            Ok(
+                futures::stream::iter([Ok(CallEvent::Result(CallResult::Agents(Vec::new())))])
+                    .boxed(),
+            )
+        }
+
+        fn handles(&self, _scope: &ConversationScope) -> Vec<chatty_fabric::HandleSnapshot> {
+            self.0.clone()
+        }
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// RO-4, `handle_rows_show_state`: a handle that has had one task, has a
+    /// message waiting and whose leader's branch has one new commit is listed
+    /// as `idle`, with its owner, `pending_messages: 1` and `behind_by: 1`.
+    /// The other origins' rows carry none of it.
+    #[tokio::test]
+    async fn handle_rows_show_state() {
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"]);
+        git(repo.path(), &["config", "user.email", "t@example.com"]);
+        git(repo.path(), &["config", "user.name", "T"]);
+        std::fs::write(repo.path().join("README"), "hi").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-q", "-m", "init"]);
+        let root = repo.path().to_string_lossy().to_string();
+
+        // The handle's one task: its tree, with the task's commit in it.
+        let task =
+            crate::services::worker_tree::create_with_commit_hook(&root, "fixer-0", None, None)
+                .await
+                .unwrap()
+                .unwrap();
+        std::fs::write(task.cwd.join("one.rs"), "// one\n").unwrap();
+        (task.evidence)().await.expect("the task committed");
+        // The leader's branch moves on by one commit.
+        std::fs::write(repo.path().join("leader.rs"), "// leader\n").unwrap();
+        git(repo.path(), &["add", "."]);
+        git(repo.path(), &["commit", "-q", "-m", "the leader moves on"]);
+
+        let broker = Arc::new(WithHandles(vec![chatty_fabric::HandleSnapshot {
+            name: "fixer".to_string(),
+            owner: "lead-0".to_string(),
+            busy: false,
+            pending_messages: 1,
+            idle_for_s: 42,
+            agent: Some("local-coder".to_string()),
+            tree: Some(chatty_fabric::WorkerTreeRef {
+                path: task.cwd.clone(),
+                branch: task.branch.clone(),
+            }),
+        }]));
+        let tool = ListAgentsTool::new(vec![make_agent("remote", "https://example.com/a2a", true)])
+            .with_transport(broker);
+
+        let output = list(&tool).await;
+        let row = serde_json::to_value(find(&output, "fixer")).unwrap();
+        assert_eq!(row["origin"], "handle");
+        assert_eq!(row["reach"], "idle");
+        assert_eq!(row["state"], "parked");
+        assert_eq!(row["owner"], "lead-0");
+        assert_eq!(row["pending_messages"], 1);
+        assert_eq!(row["behind_by"], 1);
+        assert_eq!(
+            find(&output, "fixer").description,
+            "Resumable handle of `local-coder`, owned by lead-0: continue it with \
+             `invoke_agent(agent: \"local-coder\", handle: \"fixer\")`"
+        );
+        let remote = serde_json::to_value(find(&output, "remote")).unwrap();
+        assert!(
+            remote.get("owner").is_none()
+                && remote.get("state").is_none()
+                && remote.get("pending_messages").is_none()
+                && remote.get("behind_by").is_none(),
+            "{remote}"
+        );
+    }
+
+    /// RO-4: a handle is called as the agent it was started with, so the
+    /// delegation policy judges its row as that agent, not as the handle's
+    /// name: a caller allowed `local-*` sees `fixer` (a `local-coder`'s
+    /// handle); one allowed only `other-*` does not.
+    #[tokio::test]
+    async fn a_handle_row_is_judged_as_its_agent() {
+        let broker = Arc::new(WithHandles(vec![chatty_fabric::HandleSnapshot {
+            name: "fixer".to_string(),
+            owner: "root".to_string(),
+            busy: false,
+            pending_messages: 0,
+            idle_for_s: 1,
+            agent: Some("local-coder".to_string()),
+            tree: None,
+        }]));
+        let seen_by = |delegates_to: &str| {
+            let mut caller = AgentSpec::named("triage");
+            caller.swarm.delegates_to = vec![delegates_to.to_string()];
+            ListAgentsTool::new(vec![])
+                .with_transport(broker.clone())
+                .with_caller(Some(caller))
+        };
+        assert_eq!(names(&list(&seen_by("local-*")).await), ["fixer"]);
+        assert!(names(&list(&seen_by("other-*")).await).is_empty());
     }
 }

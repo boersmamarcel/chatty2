@@ -348,6 +348,16 @@ async fn behind_by(workspace_root: &str, branch: &str, base: Option<&str>) -> Op
     }
 }
 
+/// [`behind_by`] for a handle's tree at `tree_path`
+/// (`<workspace>/.chatty/worktrees/<name>`) on `branch`, measured against
+/// the branch its workspace is on: how far the leader has moved on since
+/// the tree was made (RO-4). `None` when the path is not such a tree or
+/// there is nothing to measure against.
+pub async fn behind_by_of_tree(tree_path: &std::path::Path, branch: &str) -> Option<u64> {
+    let workspace = tree_path.ancestors().nth(3)?;
+    behind_by(&workspace.to_string_lossy(), branch, None).await
+}
+
 /// What runs when the worker's process exits, given whether its task
 /// succeeded.
 ///

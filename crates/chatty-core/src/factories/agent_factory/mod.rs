@@ -1386,6 +1386,12 @@ impl AgentClient {
         if let Some(broker) = lazy_broker.clone() {
             list_agents_tool = list_agents_tool.with_lazy_broker(broker);
         }
+        // ... and lists the resumable handles of this conversation only
+        // (RC-4, RO-4), the scope `invoke_agent` names to the broker.
+        if let Some(id) = conversation_id.as_deref() {
+            list_agents_tool =
+                list_agents_tool.with_scope(chatty_fabric::ConversationScope::new(id));
+        }
         // A delegated worker reads its broker's directory over the
         // connection the broker made, never over loopback (ADR-0020, BI-4).
         if let Some(transport) = fabric_transport.clone() {

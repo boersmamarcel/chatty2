@@ -105,8 +105,9 @@ fn remote(name: &str, enabled: bool) -> A2aAgentConfig {
 /// A conversation's resumable handles, standing in for RC-3's index.
 struct Handles(Vec<(String, HandleInfo)>);
 
+#[async_trait::async_trait]
 impl HandleIndex for Handles {
-    fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)> {
+    async fn handles(&self, scope: &ConversationScope) -> Vec<(String, HandleInfo)> {
         if scope.as_str() == SCOPE {
             self.0.clone()
         } else {
@@ -122,6 +123,7 @@ fn parked(owner: &str) -> HandleInfo {
         pending_messages: 2,
         behind_by: Some(1),
         idle_for_s: 120,
+        agent: Some("local-coder".to_string()),
     }
 }
 
