@@ -196,13 +196,12 @@ async fn is_git_repository(workspace_root: &Path) -> bool {
 
 /// Run a read-only git command in the workspace, returning trimmed stdout.
 async fn run_git(workspace_root: &Path, args: &[&str]) -> Option<String> {
-    let output = tokio::process::Command::new("git")
-        .args(crate::services::git_service::HOST_GIT_HARDENING)
-        .args(args)
-        .current_dir(workspace_root)
-        .output()
+    // Pinned and checked host git (AGE-1362).
+    let mut git = crate::services::host_git::host_git(workspace_root)
         .await
+        .map_err(|why| debug!(%why, "host git refused while resolving pull request"))
         .ok()?;
+    let output = git.args(args).output().await.ok()?;
 
     if !output.status.success() {
         debug!(args = ?args, "git command failed while resolving pull request");
