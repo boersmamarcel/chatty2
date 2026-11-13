@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main (script only; PR content is never checked out)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           sparse-checkout: scripts/update-next-queued-pr.sh

@@ -59,7 +59,7 @@ jobs:
       reason: ${{ steps.pick.outputs.reason }}
     steps:
       - name: Checkout triage script from main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           sparse-checkout: |
@@ -133,7 +133,7 @@ jobs:
           echo "PR #$PR is on $branch at $sha"
 
       - name: Checkout the PR head commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.pr.outputs.sha }}
           persist-credentials: false
@@ -185,7 +185,7 @@ jobs:
 
       - name: Install Node
         if: env.REASON == 'ci-failed' || steps.merge.outputs.conflicted != ''
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -304,7 +304,7 @@ jobs:
           wc -c /tmp/nurse-out/nurse.patch
 
       - name: Upload the patch
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nurse-patch
           path: /tmp/nurse-out
@@ -333,14 +333,14 @@ jobs:
       GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
     steps:
       - name: Checkout the PR head commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.work.outputs.sha }}
           persist-credentials: false
           fetch-depth: 0
 
       - name: Download the patch
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nurse-patch
           path: /tmp/nurse-out
