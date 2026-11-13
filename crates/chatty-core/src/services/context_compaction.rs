@@ -473,17 +473,13 @@ fn result_text(content: &[ToolResultContent]) -> String {
 /// `git status --short` in `dir`, or `None` when it is not a git repository
 /// (or git is missing, or slow).
 pub async fn git_status_short(dir: &PathBuf) -> Option<String> {
-    let run = tokio::process::Command::new("git")
-        .args(crate::services::git_service::HOST_GIT_HARDENING)
-        .arg("-C")
-        .arg(dir)
-        .args(["status", "--short"])
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(GIT_STATUS_TIMEOUT, run)
-        .await
-        .ok()?
-        .ok()?;
+    // Pinned and checked host git (AGE-1362); a refused workspace has no
+    // status line in the summary.
+    let run = async {
+        let mut git = crate::services::host_git::host_git(dir).await.ok()?;
+        git.args(["status", "--short"]).output().await.ok()
+    };
+    let output = tokio::time::timeout(GIT_STATUS_TIMEOUT, run).await.ok()??;
     if !output.status.success() {
         return None;
     }
