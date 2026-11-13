@@ -196,6 +196,7 @@ impl Tool for BestOfTool {
                     .iter()
                     .map(|a| format!("{}: {}", a.agent, a.answer))
                     .collect();
+                self.invoke.stop_on_best_of_failure();
                 return Err(BestOfError::AllFailed(errors.join("; ")));
             }
             Plan::Decided(n, by) => (n, by, None, None),
@@ -481,6 +482,34 @@ mod tests {
             response: answer.to_string(),
             trace: None,
         }
+    }
+
+    /// AGE-1132: every solver failing stops the leader's run.
+    #[tokio::test]
+    async fn all_failed_stops_the_run() {
+        // No remote agents: every delegation fails, so every solver does.
+        // The judge is never reached.
+        let tool = BestOfTool::new(
+            InvokeAgentTool::new(vec![]),
+            BestOfSection {
+                solvers: vec!["a".into(), "b".into()],
+                judge: "j".into(),
+            },
+        );
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                BestOfArgs {
+                    task: "t".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BestOfError::AllFailed(_)));
+        assert_eq!(
+            tool.invoke.budget_stop_headline().as_deref(),
+            Some(crate::services::budget_stop::BEST_OF_FAILED)
+        );
     }
 
     #[test]

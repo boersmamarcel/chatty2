@@ -449,6 +449,19 @@ impl InvokeAgentTool {
         });
     }
 
+    /// Stop this run because every `best_of` attempt failed (AGE-1132):
+    /// the leader ends its run with the best_of failure text. Applies to
+    /// every leader that calls `best_of`.
+    pub(crate) fn stop_on_best_of_failure(&self) {
+        self.stop_on_budget(crate::services::budget_stop::BEST_OF_FAILED);
+    }
+
+    /// The headline this run was stopped with, if it was.
+    #[cfg(test)]
+    pub(crate) fn budget_stop_headline(&self) -> Option<String> {
+        self.budget_stop.borrow().clone()
+    }
+
     /// Resolves with the headline once this run stops on a spent budget.
     async fn budget_stopped(&self) -> String {
         let mut stop = self.budget_stop.subscribe();
