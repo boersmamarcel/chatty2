@@ -47,7 +47,7 @@ jobs:
 
       - name: Detect compile-relevant changes
         if: github.event_name != 'merge_group'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
         id: filter
         with:
           filters: |
@@ -116,14 +116,14 @@ jobs:
 
       - name: Install Rust toolchain
         if: needs.changes.outputs.rust == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
           targets: wasm32-wasip2
 
       - name: Cache cargo registry and build artifacts
         if: needs.changes.outputs.rust == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           # v1 retires a cache that a *cancelled* main run saved five minutes
           # into a fresh-key compile (2026-09-03, "Adds chrome support"). An
@@ -179,7 +179,7 @@ jobs:
       # cargo-binstall fetches its prebuilt binary instead of compiling it.
       - name: Install cargo-binstall
         if: needs.changes.outputs.rust == 'true'
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@5885714d0a40a14b2535c6ffc051fd8e49aa9665 # main
 
       - name: Install cargo-generate
         if: needs.changes.outputs.rust == 'true'
@@ -286,11 +286,11 @@ jobs:
 
       - name: Install Rust toolchain
         if: needs.changes.outputs.rust == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo registry and build artifacts
         if: needs.changes.outputs.rust == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
           shared-key: windows-ci
@@ -337,11 +337,11 @@ jobs:
 
       - name: Install Rust toolchain
         if: needs.changes.outputs.rust == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache cargo registry and build artifacts
         if: needs.changes.outputs.rust == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
           shared-key: linux-fabric-goldens
@@ -410,7 +410,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Compute release cache key
         id: cache_key

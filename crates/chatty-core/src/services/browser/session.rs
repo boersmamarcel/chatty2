@@ -233,6 +233,9 @@ pub struct BrowserSession {
     /// because which page is active must be read *under* it (AGE-458), or a
     /// tab activated between the read and the lock leaves the cast behind.
     screencast: tokio::sync::Mutex<Option<Screencast>>,
+    /// The open-web policy's network guard (AGE-1290), alive as long as the
+    /// browser that uses it.
+    _proxy: Option<super::egress_proxy::GuardedProxy>,
     /// Who is driving (AGE-156). Agent by default; every fresh session
     /// starts here regardless of what a previous, now-dead session had.
     control: ControlLock,
@@ -279,6 +282,28 @@ impl BrowserSession {
         // Lane A is headless. The viewport work (AGE-155) reads frames over CDP
         // rather than showing an OS window, so this stays headless there too.
         builder = builder.new_headless_mode();
+
+        // Under the open-web policy every non-loopback request goes through
+        // a proxy that resolves and checks the host itself, so the address
+        // checked is the address Chrome connects to (AGE-1290).
+        let proxy = match &policy {
+            NavigationPolicy::Open {
+                allow_private_network_access,
+                ..
+            } => {
+                let proxy = super::egress_proxy::GuardedProxy::start(*allow_private_network_access)
+                    .await
+                    .map_err(|e| {
+                        BrowserError::Launch(format!(
+                            "cannot start the browser's network guard: {e}"
+                        ))
+                    })?;
+                let server = proxy.proxy_server_arg();
+                builder = builder.arg(("proxy-server", server.as_str()));
+                Some(proxy)
+            }
+            _ => None,
+        };
 
         let user_data = match &profile {
             BrowserProfile::Ephemeral => {
@@ -376,6 +401,7 @@ impl BrowserSession {
             control: ControlLock::new(),
             current_url: watch::channel(String::from("about:blank")).0,
             _user_data: user_data,
+            _proxy: proxy,
         });
 
         let watcher = targets::spawn_watcher(&session, created, destroyed);

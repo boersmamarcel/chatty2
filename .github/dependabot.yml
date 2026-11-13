@@ -1,0 +1,11 @@
+# Keeps the commit-SHA pins on GitHub Actions current (AGE-1273). Monthly
+# and grouped into one PR, so it adds at most one CI run a month.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]

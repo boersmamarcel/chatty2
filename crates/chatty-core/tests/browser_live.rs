@@ -1920,3 +1920,29 @@ async fn typing_replaces_a_field_and_refuses_credentials() {
 
     manager.shutdown().await;
 }
+
+/// AGE-1290: under the open-web policy Chrome reaches the internet through
+/// the guarded proxy, for HTTPS (CONNECT) and plain HTTP alike. Needs
+/// network access.
+#[tokio::test]
+#[ignore = "launches a real browser and needs internet access"]
+async fn open_web_pages_load_through_the_guarded_proxy() {
+    let dir = fixture_workspace();
+    let workspace = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    let manager = std::sync::Arc::new(BrowserManager::open_web(Some(workspace), false));
+    let artifacts = artifacts();
+    let (navigate, snapshot, ..) = build_browser_tools(manager.clone(), artifacts.clone(), None);
+    let cx = &mut ToolContext::new();
+    for url in ["https://example.com/", "http://example.com/"] {
+        navigate
+            .call(cx, NavigateArgs { url: url.into() })
+            .await
+            .unwrap_or_else(|e| panic!("navigate {url}: {e}"));
+        let snap = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+        assert!(
+            snap.tree.contains("Example Domain"),
+            "{url} did not load through the proxy:\n{}",
+            snap.tree
+        );
+    }
+}

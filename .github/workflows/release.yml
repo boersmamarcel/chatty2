@@ -160,7 +160,7 @@ jobs:
           ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       # Key from scripts/release-cache-key.sh; written per platform by
       # ci.yml's warm-release-cache job on main.
@@ -288,7 +288,7 @@ jobs:
           ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       # Key from scripts/release-cache-key.sh; written per platform by
       # ci.yml's warm-release-cache job on main.
@@ -397,7 +397,7 @@ jobs:
           ref: ${{ needs.validate-version.outputs.checkout_mode == 'git_ref' && needs.validate-version.outputs.git_ref || github.sha }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       # Key from scripts/release-cache-key.sh; written per platform by
       # ci.yml's warm-release-cache job on main.
