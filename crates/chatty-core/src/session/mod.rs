@@ -219,6 +219,10 @@ pub struct AgentSession {
     /// Stream-error recovery attempts per kind across the turns of one task;
     /// reset by a human turn (AGE-273).
     recovery_attempts: HashMap<StreamErrorKind, usize>,
+    /// Whether a user turn starts the agent's rounds over (AGE-1188). On for
+    /// the desktop and interactive TUI, which build one agent per
+    /// conversation; a headless run turns it off, as its agent is one run.
+    rounds_per_user_turn: bool,
     /// The turn's agents — who ran under whom, their tool calls, spend,
     /// status and captured conversations — persisted on the turn's trace
     /// by `finish_turn` for the full-run export (AGE-859).
@@ -254,6 +258,7 @@ impl AgentSession {
             side_usages: Vec::new(),
             price_book: PriceBook::default(),
             recovery_attempts: HashMap::new(),
+            rounds_per_user_turn: true,
             swarm: SwarmTrace::new(),
             report_liveness: false,
             delegation_call: UNTAGGED_CALL,
@@ -299,6 +304,20 @@ impl AgentSession {
     /// rebuild; tools carry their own copy from their build context).
     pub fn set_config(&mut self, config: AgentSessionConfig) {
         self.config = config;
+    }
+
+    /// Whether a user turn resets the agent's `[swarm.rounds]` count
+    /// (default `true`). A headless run turns it off: its agent is built per
+    /// run, and its own recovery and finalization passes arrive as human
+    /// turns, which must keep sharing the count (AGE-1188).
+    pub fn set_rounds_per_user_turn(&mut self, per_user_turn: bool) {
+        self.rounds_per_user_turn = per_user_turn;
+    }
+
+    /// Whether a user turn resets the agent's rounds count (see
+    /// [`set_rounds_per_user_turn`](Self::set_rounds_per_user_turn)).
+    pub fn rounds_per_user_turn(&self) -> bool {
+        self.rounds_per_user_turn
     }
 
     pub fn approval_handles(&self) -> ApprovalHandles {
@@ -487,7 +506,8 @@ impl AgentSession {
     ///
     /// Does to the session and its conversation exactly what
     /// [`prepare_turn`](Self::prepare_turn) does — commits the user message,
-    /// resets the per-task protocol state, arms the cancel flag — and none of
+    /// resets the per-task protocol state, arms the cancel flag (the rounds
+    /// count is not reset: a hosted turn runs on the server's agent) — and none of
     /// what it does for the stream, which the server opens. That leaves the
     /// session turn-active, so [`apply`](Self::apply) and
     /// [`finish_turn`](Self::finish_turn) treat the server's events exactly
@@ -618,6 +638,11 @@ impl AgentSession {
         // recovery budget is per task the same way.
         if kind != TurnKind::ProtocolFollowUp {
             task_controller.reset();
+            // The round count is per user question too (AGE-1188): the
+            // desktop builds the agent once per conversation.
+            if self.rounds_per_user_turn {
+                agent.round_limit().reset();
+            }
             self.recovery_attempts.clear();
         }
 
