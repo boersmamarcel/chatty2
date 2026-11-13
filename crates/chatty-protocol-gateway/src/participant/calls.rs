@@ -273,6 +273,10 @@ pub struct BrokerCalls {
     tasks: Arc<Mutex<RecentTasks>>,
     /// What the broker tells the time by (handles' idleness, recent tasks).
     clock: Clock,
+    /// Runs after the idle check and before the push of a message to a
+    /// handle, inside the pending lock (tests interleave a clear there).
+    #[cfg(test)]
+    before_handle_push: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 /// Root conversations by root task id.
@@ -881,6 +885,8 @@ impl BrokerCalls {
             edges,
             pending: Arc::default(),
             handle_pending: Arc::default(),
+            #[cfg(test)]
+            before_handle_push: Mutex::default(),
             next_message: AtomicU64::new(0),
             policy: Policy::LocalPermissive(LocalPermissive::new()),
             pricer: None,
@@ -1516,6 +1522,17 @@ impl BrokerCalls {
     /// conversation, and `peer` is its owner or one of the owner's
     /// ancestors ([`HandleOwner::admits`]). Only a node has handles to
     /// message.
+    ///
+    /// The scopes are the union over every run `peer` has open, not the
+    /// posting run's: `SendMessageParams` does not name the run, so the
+    /// broker cannot tell which conversation the post is for. An optional
+    /// `run` field, like `InvokeAgentParams.run`, would be wire compatible
+    /// but costs a schema golden change, and newer workers talking to an
+    /// older broker would be refused by its `deny_unknown_fields`.
+    ///
+    /// The gap: with same-named handles in two conversations, `find_map`
+    /// can route a message of one conversation into the other's handle,
+    /// against `docs/agents-and-specs.md:563-565`. Deferred to AGE-1349.
     fn idle_handle_of(&self, peer: &Peer, name: &str) -> Option<HandleKey> {
         let Peer::Node(node) = peer else {
             return None;
@@ -1882,13 +1899,25 @@ impl BrokerCalls {
                 .entry(recipient)
                 .or_default()
                 .push(message),
-            None => match self.idle_handle_of(peer, &params.to) {
-                Some(key) => lock(&self.handle_pending)
-                    .entry(key)
-                    .or_default()
-                    .push(message),
-                None => Err(RefusalReason::NotOnTree),
-            },
+            None => {
+                // The check and the push are one step under the pending
+                // lock, so a clear (which needs it) cannot land between
+                // them and leave the message on a freed key. Lock order:
+                // `handle_pending`, then the handle store's and the
+                // registry's locks (taken by `idle_handle_of`); nothing
+                // takes them the other way round, and nothing awaits here.
+                let mut pending = lock(&self.handle_pending);
+                match self.idle_handle_of(peer, &params.to) {
+                    Some(key) => {
+                        #[cfg(test)]
+                        if let Some(hook) = locked(&self.before_handle_push).as_ref() {
+                            hook();
+                        }
+                        pending.entry(key).or_default().push(message)
+                    }
+                    None => Err(RefusalReason::NotOnTree),
+                }
+            }
         };
         match pushed {
             Ok(()) => MessageStatus::Pending { id },
@@ -3210,6 +3239,64 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// AGE-1346: a clear that races the check and the push (the task
+    /// captured no conversation, cleared the mail and freed the name) must
+    /// not leave the message on a freed key for a later handle of that
+    /// name. The hook frees the handle in place and starts the mail clear
+    /// on another thread, which needs the pending lock: held across check
+    /// and push, it waits until the push is in and drops the message with
+    /// one `dropped` row. Without the lock the clear runs first and the
+    /// message stays on the freed key.
+    #[tokio::test]
+    async fn handle_mail_is_not_left_on_a_key_freed_between_check_and_push() {
+        let data = tempfile::tempdir().unwrap();
+        let log = EdgeLog::open(data.path()).unwrap();
+        let path = log.path();
+        let (calls, registry) = broker(Some(Arc::new(Mutex::new(log))));
+        let lead = registry.admit_running("lead", None);
+        let key = HandleKey::new(ConversationScope::new(format!("node:{lead}")), "fixer");
+        let owner = HandleOwner::new(RunRoot::Owner, HandleParty::Node(lead.clone()), Vec::new());
+        let ticket = calls
+            .handles
+            .begin(key.clone(), owner, &HandleStatus::Free)
+            .unwrap();
+        assert!(ticket.save(Handle {
+            name: "fixer".to_string(),
+            agent: "worker".to_string(),
+            conversation: SavedConversation::new(json!([])),
+            tree: None,
+            last_task_base: None,
+        }));
+        drop(ticket);
+        let clear = Arc::new(Mutex::new(None));
+        let hook_calls = calls.clone();
+        let hook_key = key.clone();
+        let hook_clear = clear.clone();
+        *locked(&calls.before_handle_push) = Some(Box::new(move || {
+            hook_calls.handles.drop_handle(&hook_key);
+            let (calls, key) = (hook_calls.clone(), hook_key.clone());
+            *locked(&hook_clear) = Some(std::thread::spawn(move || {
+                drop_handle_mail(&calls.handle_pending, &calls.edges, &key);
+            }));
+            // Time for an unguarded clear to finish first.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }));
+
+        let status = send(&calls, node(&lead), "fixer", "hello").await;
+
+        locked(&clear).take().unwrap().join().unwrap();
+        assert_eq!(status, MessageStatus::Pending { id: "msg-1".into() });
+        assert!(
+            lock(&calls.handle_pending).is_empty(),
+            "nothing waits on the freed key"
+        );
+        let dropped = rows(&path)
+            .into_iter()
+            .filter(|row| row.4 == "dropped")
+            .count();
+        assert_eq!(dropped, 1);
     }
 
     /// RO-4: a handle's roster row counts the messages waiting for it, in
