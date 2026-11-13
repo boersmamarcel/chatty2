@@ -19,7 +19,9 @@ that states a fact ends with its source as a Markdown link, [n](url), to a URL f
 exactly as the note has it, and says only what that note's claim and quote say. Cite no other \
 URL. Where notes disagree, say so and give each side with its source; never average them or \
 pick one silently. End with a section "Gaps and disagreements": the open sub-questions, the \
-notes' open questions, and every disagreement. Add nothing from your own knowledge, and write \
+notes' open questions, and every disagreement. Leave a blank line before every list (bullets or numbers) and every table, including after a \
+line that ends in a colon; without it Markdown folds the list into the paragraph above. \
+Add nothing from your own knowledge, and write \
 no cost section: the host adds one.
 
 When you are sent a checker's findings, fix or remove exactly the claims it flags and keep the \

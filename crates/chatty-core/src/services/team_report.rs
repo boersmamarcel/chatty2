@@ -224,6 +224,103 @@ pub fn note_in_result(result: &str) -> Option<Value> {
     handoff["claims"].is_array().then(|| handoff.clone())
 }
 
+/// Whether `line` opens a list item: `- `, `* `, `+ ` or `<digits>. `,
+/// after any indentation.
+///
+/// A number counts when it is one to nine digits followed by ". ", as in
+/// CommonMark. Whether it may interrupt a paragraph is decided by
+/// [`normalize_lists`].
+fn list_marker(line: &str) -> Option<ListMarker> {
+    let rest = line.trim_start();
+    if let Some(after) = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "))
+    {
+        return (!after.trim().is_empty()).then_some(ListMarker::Bullet);
+    }
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    if (1..=9).contains(&digits) && rest[digits..].starts_with(". ") {
+        let number: u64 = rest[..digits].parse().ok()?;
+        return Some(ListMarker::Numbered(number));
+    }
+    None
+}
+
+enum ListMarker {
+    Bullet,
+    Numbered(u64),
+}
+
+/// Put a blank line before a list that directly follows a line of text.
+///
+/// pandoc (and renderers that follow it) fold such bullets into the paragraph above, so
+/// "Disagreements:\n- a" renders as one run-on block. A list item (see
+/// [`list_marker`]) that directly follows a non-blank line that is not
+/// itself a list item (or a continuation of one) gets a blank line before
+/// it. A numbered item interrupts a paragraph only when its number is 1,
+/// as in CommonMark, so "1990. A year" inside a paragraph is left alone.
+/// Fenced code blocks (``` or ~~~), tables, headings and lists that are
+/// already correct are untouched; the result is a fixed point.
+pub fn normalize_lists(md: &str) -> String {
+    let mut out = String::with_capacity(md.len() + 16);
+    let mut fence: Option<(char, usize)> = None;
+    // The previous line, when it is text a list would fold into.
+    let mut prev_text = false;
+    // Inside a list: later non-blank lines continue the item, not start text.
+    let mut in_list = false;
+    for (i, line) in md.split('\n').enumerate() {
+        let trimmed = line.trim_start();
+        let run = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'));
+        let run_len = run.map_or(0, |c| trimmed.chars().take_while(|x| *x == c).count());
+        let mut is_text = false;
+        let mut blank_before = false;
+        if let Some((ch, len)) = fence {
+            if run == Some(ch) && run_len >= len && trimmed[run_len..].trim().is_empty() {
+                fence = None;
+            }
+        } else if run_len >= 3 {
+            fence = Some((run.unwrap_or('`'), run_len));
+            in_list = false;
+        } else if line.trim().is_empty() {
+            in_list = false;
+        } else {
+            match list_marker(line) {
+                Some(marker) => {
+                    let interrupts = match marker {
+                        ListMarker::Bullet => true,
+                        ListMarker::Numbered(n) => n == 1,
+                    };
+                    if interrupts {
+                        blank_before = prev_text && !in_list;
+                        in_list = true;
+                    } else {
+                        // "1990. A year" in a paragraph is text.
+                        is_text = !in_list;
+                    }
+                }
+                None => {
+                    let is_table = trimmed.starts_with('|');
+                    let indented = line.starts_with(' ') || line.starts_with('\t');
+                    if !(in_list && indented) {
+                        in_list = false;
+                    }
+                    is_text = !is_table && !trimmed.starts_with('#');
+                }
+            }
+        }
+        prev_text = is_text;
+        if i > 0 {
+            out.push('\n');
+        }
+        if blank_before {
+            out.push('\n');
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// The finished report: `written` (the team's file, `None` when it wrote
 /// none) or, failing that, the leader's last answer as a partial report;
 /// then the citation check when a cited URL is in no note; then the cost.
@@ -234,7 +331,7 @@ pub fn finish(
     tally: &RunTally,
 ) -> String {
     let mut report = match written.filter(|text| !text.trim().is_empty()) {
-        Some(text) => text.trim_end().to_string(),
+        Some(text) => normalize_lists(text.trim_end()),
         None => {
             let mut partial = format!(
                 "{PARTIAL_HEADING}\n\nThe team ended before its report was written. What it \
@@ -382,6 +479,49 @@ mod tests {
             usd: Some(0.42),
             wall: Duration::from_secs(3723),
         }
+    }
+
+    #[test]
+    fn a_list_after_text_gets_a_blank_line() {
+        assert_eq!(normalize_lists("Text:\n- a\n- b"), "Text:\n\n- a\n- b");
+        assert_eq!(normalize_lists("Text:\n* a\n+ b"), "Text:\n\n* a\n+ b");
+        assert_eq!(
+            normalize_lists("Steps:\n1. a\n2. b\nAfter:\n- c"),
+            "Steps:\n\n1. a\n2. b\nAfter:\n\n- c"
+        );
+    }
+
+    #[test]
+    fn correct_markdown_is_unchanged_and_the_fix_is_idempotent() {
+        let fine =
+            "# T\n\nText:\n\n- a\n  - nested\n- b\n\n1. x\n2. y\n\n## H\n- list under a heading\n";
+        assert_eq!(normalize_lists(fine), fine);
+        let once = normalize_lists("Disagreements:\n- a\n  more\n- b\n1. c\n");
+        assert_eq!(normalize_lists(&once), once);
+        assert_eq!(normalize_lists(""), "");
+        assert_eq!(normalize_lists("x\n"), "x\n");
+    }
+
+    #[test]
+    fn code_fences_and_tables_are_left_alone() {
+        let fenced = "Code:\n\n```\nx\n- y\n```\n\n~~~\nz\n1. w\n~~~\n";
+        assert_eq!(normalize_lists(fenced), fenced);
+        let table = "| a | b |\n|---|---|\n| - x | 1. y |\n- after a table\n";
+        assert_eq!(normalize_lists(table), table);
+        // A list after the fence closes is still fixed.
+        assert_eq!(
+            normalize_lists("```\nx\n```\nText\n- a"),
+            "```\nx\n```\nText\n\n- a"
+        );
+    }
+
+    /// A number other than 1 does not interrupt a paragraph in CommonMark,
+    /// so "1990. A year" in running text is text, not a list.
+    #[test]
+    fn a_year_in_a_paragraph_is_not_a_list_item() {
+        let text = "It began in\n1990. A year of change.";
+        assert_eq!(normalize_lists(text), text);
+        assert_eq!(normalize_lists("Text\n1. a"), "Text\n\n1. a");
     }
 
     #[test]
