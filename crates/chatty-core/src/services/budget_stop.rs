@@ -43,7 +43,7 @@ pub const BUDGET_STOP_NOTE: &str = "The budget is spent: no agent may make anoth
 /// The reason [`StopOnBudgetExhausted`] stops a run with, ahead of the
 /// final message; `llm_service` ends such a run normally with the message
 /// as its text.
-pub const BUDGET_STOP: &str = "budget exhausted\n";
+pub const BUDGET_STOP: &str = "budget spent\n";
 
 /// The headline a failed `best_of` stops the run with (AGE-1132). It is not a
 /// spent budget: [`final_message`] words it as a best_of failure.
@@ -386,6 +386,21 @@ mod tests {
             final_message("Budget spent", &[("w".into(), "done".into())]),
             "Budget spent. Here is what was finished:\n\n**w**\ndone"
         );
+        assert_eq!(BUDGET_STOP, "budget exhausted\n");
+        assert_eq!(BUDGET_EXHAUSTED, "budget_exhausted");
+        assert_eq!(
+            BUDGET_STOP_NOTE,
+            "The budget is spent: no agent may make another model call \
+             or delegation. Stop here."
+        );
+        assert_eq!(budget_line(Some(1.0)), "Budget of $1.00 spent");
+        assert_eq!(budget_line(None), "Budget spent");
+        let headline = "Budget of $1.00 spent; x";
+        assert_eq!(
+            stop_text(headline),
+            "budget_exhausted: Budget of $1.00 spent; x"
+        );
+        assert_eq!(stop_note(headline), BUDGET_STOP_NOTE);
     }
 
     /// The run itself ends (AGE-1132): a leader whose `best_of` failed on
