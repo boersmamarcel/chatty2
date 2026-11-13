@@ -2768,6 +2768,7 @@ async fn no_mid_run_delivery() {
                 .call(CallRequest::SendMessage(SendMessageParams {
                     to: "root".to_string(),
                     text: TEXT.to_string(),
+                    run: None,
                 }))
                 .await
                 .expect("the call goes out");

@@ -48,7 +48,7 @@
 //! (connect-then-build). The read half routes each `call_*` reply to the
 //! call it names; the write half interleaves `call` frames with the task's
 //! progress.
-//! Every `agent.invoke` it writes names the task's run — the `taskId` of
+//! Every `agent.invoke` and `mailbox.post` it writes names the task's run — the `taskId` of
 //! the `task.run` it serves — which is the run the broker decides the call
 //! under (ADR-0023 § 1, GT-0b).
 
@@ -59,7 +59,7 @@ use anyhow::{Context, Result};
 use chatty_core::services::fabric_transport::{CallReplies, Outbound, SocketTransport};
 use chatty_core::services::{StreamError, StreamErrorKind};
 use chatty_core::session::SessionEvent;
-use chatty_fabric::{AskReply, CallRequest, InvokeAgentParams, Transport};
+use chatty_fabric::{AskReply, CallRequest, InvokeAgentParams, SendMessageParams, Transport};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -329,16 +329,19 @@ where
         .await
 }
 
-/// `request`, made from the run named `run`: an `agent.invoke` names it.
+/// `request`, made from the run named `run`: an `agent.invoke` and a
+/// `mailbox.post` name it.
 fn from_run(request: CallRequest, run: &str) -> CallRequest {
     match request {
         CallRequest::InvokeAgent(params) => CallRequest::InvokeAgent(InvokeAgentParams {
             run: Some(run.to_string()),
             ..params
         }),
-        other @ (CallRequest::ListAgents
-        | CallRequest::SendMessage(_)
-        | CallRequest::TakeMessages) => other,
+        CallRequest::SendMessage(params) => CallRequest::SendMessage(SendMessageParams {
+            run: Some(run.to_string()),
+            ..params
+        }),
+        other @ (CallRequest::ListAgents | CallRequest::TakeMessages) => other,
     }
 }
 

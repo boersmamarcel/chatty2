@@ -91,6 +91,15 @@ pub struct SpawnContext {
 pub struct SendMessageParams {
     pub to: String,
     pub text: String,
+    /// The run the post is made from (AGE-1349): the `taskId` of the
+    /// `task.run` the posting worker is serving, as on
+    /// [`InvokeAgentParams::run`]. It says which conversation a message to
+    /// a handle is for, when the node has runs in several. A worker's
+    /// connection fills it in; the broker refuses one that is not an open
+    /// run of the posting node. Absent from an older worker, whose post
+    /// the broker reads under the node's whole scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
 }
 
 /// What a `send_message` call returns: its result. Serialises as

@@ -220,6 +220,7 @@ async fn chainless_node_is_external() {
                 CallRequest::SendMessage(SendMessageParams {
                     to: ROOT_NAME.to_string(),
                     text: "hi".to_string(),
+                    run: None,
                 }),
             )
             .collect()
@@ -854,7 +855,11 @@ async fn message_rows_name_the_siblings_a_relay_request_names() {
             calls
                 .call(
                     peer,
-                    CallRequest::SendMessage(SendMessageParams { to, text }),
+                    CallRequest::SendMessage(SendMessageParams {
+                        to,
+                        text,
+                        run: None,
+                    }),
                 )
                 .collect::<Vec<_>>()
                 .await
