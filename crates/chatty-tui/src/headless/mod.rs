@@ -539,6 +539,11 @@ pub async fn run_headless(
                     refused = tool_result_is_policy_refusal(tc);
                     progress = loop_guard.on_tool_progress(&tc.name, &tc.input);
                 }
+                if failed_answer_write_ends_run(&engine, answer_file_required, &id_str) {
+                    eprintln!("Answer file exists after a failed write of it; stopping stream.");
+                    engine.stop_stream();
+                    continue;
+                }
                 // The grace turn follows a command of this run's own that wrote
                 // the file, so the file is this run's.
                 if answer_file_grace_turn
@@ -1056,6 +1061,35 @@ fn stops_on_answer_file(
         && !engine.is_team_leader()
         && (own_write || !engine.is_worker())
         && answer_file_exists(engine)
+}
+
+/// Whether an errored tool call ends the turn because it lost the race to
+/// write the task's answer file (AGE-1345).
+///
+/// `best_of` solvers share one workspace. `write_no_follow` now replaces a
+/// file a sibling created first, so the race no longer errors; this is the
+/// safety net for a write path that does not go through it and still fails
+/// with "File exists" (os error 17) while the sibling's answer is in place.
+/// Only that error stops the worker. Any other failure (bad arguments, an
+/// edit that matched nothing, EACCES, ENOSPC, a denial) wrote nothing, and
+/// stopping would end a `best_of` solver with no answer in its reply. A
+/// command tool's error is never the race: it gets its grace turn instead.
+fn failed_answer_write_ends_run(
+    engine: &HeadlessRunner,
+    answer_file_required: bool,
+    call_id: &str,
+) -> bool {
+    let Some(tc) = engine.transcript.tool_call(call_id) else {
+        return false;
+    };
+    let lost_race = tc
+        .output
+        .as_deref()
+        .is_some_and(|out| out.contains("File exists") || out.contains("os error 17"));
+    tc.input.contains(ANSWER_FILE_NAME)
+        && !COMMAND_TOOLS.contains(&tc.name.as_str())
+        && lost_race
+        && stops_on_answer_file(engine, answer_file_required, true)
 }
 
 /// The file name every answer-file candidate has.

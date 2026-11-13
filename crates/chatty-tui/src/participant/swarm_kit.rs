@@ -206,31 +206,6 @@ impl SwarmKit {
         .await
     }
 
-    /// As [`start_with_endpoint_budget`](Self::start_with_endpoint_budget),
-    /// with the workspace a git repository so every worker gets a
-    /// `git worktree` of its own: parallel workers that write the same
-    /// relative path (`answer.txt`) do not collide (BI-5).
-    pub async fn start_in_repo_with_endpoint_budget(
-        budget: usize,
-        roster: Vec<AgentDef>,
-        sse: Script,
-        ndjson: Script,
-    ) -> Self {
-        Self::start_opts(
-            None,
-            roster,
-            sse,
-            ndjson,
-            true,
-            false,
-            budget,
-            None,
-            None,
-            KitExtras::default(),
-        )
-        .await
-    }
-
     /// As [`start`](Self::start), with the root running as `leader` — a
     /// `--team` leader, an `--agent <spec>` root — whose own calls the
     /// broker checks against its spec (AGE-745).
