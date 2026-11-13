@@ -13,7 +13,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use chrono::{TimeDelta, Utc};
 use ed25519_dalek::{Signer, SigningKey};
-use hive_client::models::{ListParams, UsageEvent};
+use hive_client::models::ListParams;
 use hive_client::verify::{
     Capabilities, HEADER_CERTIFICATE, HEADER_CERTIFICATE_SIGNATURE, HEADER_MANIFEST,
     HEADER_MANIFEST_SIGNATURE, PublisherCertificate, SignedManifest,
@@ -394,35 +394,6 @@ async fn module_pricing() {
         .unwrap();
     assert_eq!(pricing.module_name, "paid-module");
     assert_eq!(pricing.price_per_call, "0.0100");
-}
-
-#[tokio::test]
-async fn report_usage() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/usage/report"))
-        .and(header("authorization", format!("Bearer {TOKEN}")))
-        .and(body_partial_json(
-            json!({ "events": [{ "idempotency_key": "k1", "module_name": "echo" }] }),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(recorded("usage_report")))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let event = UsageEvent {
-        idempotency_key: "k1".to_string(),
-        module_name: "echo".to_string(),
-        module_version: "0.1.0".to_string(),
-        event_type: "invocation".to_string(),
-        input_tokens: Some(3),
-        output_tokens: Some(2),
-        fuel_consumed: None,
-        execution_ms: Some(1),
-        metadata: None,
-        occurred_at: Utc::now(),
-    };
-    let response = signed_in(&server).report_usage(vec![event]).await.unwrap();
-    assert_eq!((response.accepted, response.duplicates), (1, 0));
 }
 
 #[tokio::test]

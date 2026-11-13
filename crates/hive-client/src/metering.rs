@@ -3,18 +3,13 @@
 //! agent spec loaded it as a plugin, is admitted by [`ModuleMeter::admit`]
 //! before it runs and reported by [`ModuleMeter::record`] after it answers.
 //!
-//! A paid module needs both halves: a [`CreditGuard`] to admit the call and
-//! a [`UsageCollector`] to report it (its reporting is
-//! [`ReportingPolicy::Required`](crate::usage::ReportingPolicy::Required)).
-//! A meter without them refuses every paid call rather than run it unbilled.
-//! Free modules always run; their calls are reported when a collector is
-//! attached (analytics, opt-out).
+//! Paid artifacts are hosted-only (ADR-0024), so the desktop runs free
+//! modules only: a paid module is always refused and a free one runs.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::credit_guard::{Admission, CreditGuard};
-use crate::usage::UsageCollector;
 
 /// What one finished call cost, as the runtime measured it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -25,14 +20,11 @@ pub struct CallUsage {
     pub execution_ms: Option<u32>,
 }
 
-/// Admits and reports module calls: which modules are paid, and the guard
-/// and collector that bill them.
+/// Admits module calls: which modules are paid, and so refused.
 #[derive(Default)]
 pub struct ModuleMeter {
     paid: HashSet<String>,
     guard: Option<Arc<CreditGuard>>,
-    usage: Option<Arc<UsageCollector>>,
-    flush_on_record: bool,
 }
 
 impl std::fmt::Debug for ModuleMeter {
@@ -40,8 +32,6 @@ impl std::fmt::Debug for ModuleMeter {
         f.debug_struct("ModuleMeter")
             .field("paid", &self.paid)
             .field("guard", &self.guard.is_some())
-            .field("usage", &self.usage.is_some())
-            .field("flush_on_record", &self.flush_on_record)
             .finish()
     }
 }
@@ -62,20 +52,6 @@ impl ModuleMeter {
         self
     }
 
-    /// Report calls to `usage`.
-    pub fn with_usage_collector(mut self, usage: Arc<UsageCollector>) -> Self {
-        self.usage = Some(usage);
-        self
-    }
-
-    /// Flush the collector after every recorded paid call, for a process
-    /// too short-lived to wait for the background flush (a delegated worker).
-    /// What does not go out stays in the offline queue the next flush reads.
-    pub fn flushing_each_call(mut self) -> Self {
-        self.flush_on_record = true;
-        self
-    }
-
     /// Whether `module` is a paid module.
     pub fn is_paid(&self, module: &str) -> bool {
         self.paid.contains(module)
@@ -89,30 +65,6 @@ impl ModuleMeter {
             return Err("paid modules run hosted".to_string());
         }
         Ok(None)
-    }
-
-    /// Report one successful call to `module` at `version`, if a collector
-    /// is attached.
-    pub async fn record(&self, module: &str, version: &str, usage: CallUsage) {
-        let Some(collector) = self.usage.as_ref() else {
-            return;
-        };
-        collector
-            .record_invocation(
-                module,
-                version,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.fuel_consumed,
-                usage.execution_ms,
-            )
-            .await;
-        if self.flush_on_record
-            && self.is_paid(module)
-            && let Err(e) = collector.flush().await
-        {
-            tracing::warn!(module, error = %e, "usage flush failed; the call stays queued");
-        }
     }
 }
 

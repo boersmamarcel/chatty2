@@ -1,14 +1,11 @@
 //! The Hive session keeps a one-hour access token alive (AGE-609): it
 //! refreshes before expiry and after a 401, shares one refresh between
-//! concurrent callers, signs out when the refresh token is rejected, and
-//! usage events survive a 401.
+//! concurrent callers, and signs out when the refresh token is rejected.
 
 use std::sync::Arc;
 
 use chrono::{TimeDelta, Utc};
-use hive_client::{
-    HiveRegistryClient, HiveSession, SessionState, TokenPair, UsageCollector, UsageCollectorConfig,
-};
+use hive_client::{HiveRegistryClient, HiveSession, SessionState, TokenPair};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -194,60 +191,4 @@ async fn a_rotated_refresh_token_signs_out_without_looping() {
     assert!(second.is_err());
     assert_eq!(*states.borrow(), SessionState::Revoked);
     assert_eq!(session.access_token().await, None);
-}
-
-#[tokio::test]
-async fn usage_events_survive_a_401() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/api/usage/report"))
-        .and(header("authorization", "Bearer old"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/auth/refresh"))
-        .respond_with(ResponseTemplate::new(401))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/api/usage/report"))
-        .and(header("authorization", "Bearer new"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({ "accepted": 1, "duplicates": 0 })),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-    let queue_dir = tempfile::tempdir().unwrap();
-    let session = Arc::new(HiveSession::new(
-        server.uri(),
-        Some(pair("old", "r1", TimeDelta::hours(1))),
-    ));
-    let collector = UsageCollector::new(
-        server.uri(),
-        UsageCollectorConfig {
-            queue_dir: queue_dir.path().to_path_buf(),
-            ..Default::default()
-        },
-    );
-    collector.set_session(Arc::clone(&session)).await;
-    collector
-        .record_invocation("m", "1.0.0", Some(1), Some(2), None, None)
-        .await;
-
-    assert!(
-        collector.flush().await.is_err(),
-        "401: the user is signed out"
-    );
-    session
-        .sign_in(pair("new", "r2", TimeDelta::hours(1)))
-        .await;
-    let report = collector.flush().await.unwrap();
-
-    assert_eq!(report.accepted, 1);
-    let sent = server.received_requests().await.unwrap();
-    let last: Value = serde_json::from_slice(&sent.last().unwrap().body).unwrap();
-    assert_eq!(last["events"].as_array().unwrap().len(), 1);
-    assert_eq!(last["events"][0]["module_name"], "m");
 }

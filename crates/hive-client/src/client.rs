@@ -472,35 +472,6 @@ impl HiveRegistryClient {
             .await
     }
 
-    // ── Usage reporting ────────────────────────────────────────────────────
-
-    /// Report a batch of usage events to the registry.
-    pub async fn report_usage(
-        &self,
-        events: Vec<crate::models::UsageEvent>,
-    ) -> Result<crate::models::UsageReportResponse, ClientError> {
-        let url = format!("{}/api/usage/report", self.base_url);
-
-        let body = crate::models::UsageReportRequest { events };
-
-        let response = self
-            .send_authed(|| self.http.post(&url).json(&body))
-            .await?;
-        let status = response.status();
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized);
-        }
-        if !status.is_success() {
-            return Err(Self::api_error(response).await);
-        }
-
-        response
-            .json::<crate::models::UsageReportResponse>()
-            .await
-            .map_err(ClientError::from)
-    }
-
     // ── Credits ─────────────────────────────────────────────────────────────
 
     /// Get the authenticated user's credit balance.

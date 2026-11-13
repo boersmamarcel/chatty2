@@ -240,44 +240,6 @@ pub struct CategoryList {
 
 // ── Usage tracking ─────────────────────────────────────────────────────────
 
-/// A single usage event to report to the registry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageEvent {
-    pub idempotency_key: String,
-    pub module_name: String,
-    pub module_version: String,
-    #[serde(default = "default_event_type")]
-    pub event_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fuel_consumed: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub execution_ms: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    pub occurred_at: DateTime<Utc>,
-}
-
-fn default_event_type() -> String {
-    "invocation".to_string()
-}
-
-/// Batch of usage events sent to the registry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageReportRequest {
-    pub events: Vec<UsageEvent>,
-}
-
-/// Response from the usage report endpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageReportResponse {
-    pub accepted: usize,
-    pub duplicates: usize,
-}
-
 /// Summary of usage for a module over a time period.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageSummary {

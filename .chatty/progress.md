@@ -1,1 +1,2 @@
 - 2026-11-14 step 1: added admit tests (paid test failed first with the old "usage reporting is required" message), `ModuleMeter::admit` now refuses paid modules with `paid modules run hosted`.
+- 2026-11-14 step 2: removed UsageCollector(+Config), usage.rs, report_usage, UsageEvent/UsageReportRequest/Response, ModuleMeter collector parts and record(), usage_batching.rs, usage_report fixture, usage test in token_refresh/registry_contract. CallUsage kept (gateway imports it). Freed disk by deleting target/debug/incremental (build cache).

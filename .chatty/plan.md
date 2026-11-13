@@ -8,8 +8,8 @@
 - Only files under crates/hive-client/ (plus these .chatty state files) change
 
 ## Steps
-1. [x] Add `paid_module_is_refused_on_desktop` and `free_module_still_runs`; change `admit` (commit: "hive-client: refuse paid modules in ModuleMeter::admit")
-2. [ ] Remove usage collector, `report_usage`, usage.rs, usage_batching.rs, usage_report fixture (commit: pending)
+1. [x] Add `paid_module_is_refused_on_desktop` and `free_module_still_runs`; change `admit` (commit: 6a4c30c2)
+2. [x] Remove usage collector, `report_usage`, usage.rs, usage_batching.rs, usage_report fixture (commit: this commit "hive-client: remove usage reporting")
 3. [ ] Remove pricing and session calls, fixtures, CreditGuard if unused, unused types (commit: pending)
 4. [ ] Update remaining tests and README (commit: pending)
 5. [ ] Run all check commands (commit: pending)
