@@ -11,5 +11,5 @@
 1. [x] Add `paid_module_is_refused_on_desktop` and `free_module_still_runs`; change `admit` (commit: 6a4c30c2)
 2. [x] Remove usage collector, `report_usage`, usage.rs, usage_batching.rs, usage_report fixture (commit: afeda5d0)
 3. [x] Remove pricing and session calls, fixtures, CreditGuard if unused, unused types (commit: 3617d89c)
-4. [x] Update remaining tests and README (commit: this commit "hive-client: README says paid modules run hosted")
-5. [ ] Run all check commands (commit: pending)
+4. [x] Update remaining tests and README (commit: 52321b4c)
+5. [x] Run all check commands (commit: this commit "hive-client: record final check results")
