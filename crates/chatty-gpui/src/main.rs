@@ -404,28 +404,24 @@ fn main() {
                 let api_key = provider_config.as_ref().and_then(|p| p.api_key.clone());
                 let base_url = provider_config.as_ref().and_then(|p| p.base_url.clone());
 
-                // Fetch Entra ID token if the Azure provider uses Entra ID auth
-                let azure_token = if embed_provider_type == settings::models::providers_store::ProviderType::AzureOpenAI
-                    && provider_config.as_ref().map(|p| p.azure_auth_method()) == Some(settings::models::providers_store::AzureAuthMethod::EntraId)
-                {
-                    match chatty_core::auth::azure_auth::fetch_entra_id_token().await {
-                        Ok(token) => Some(token),
-                        Err(e) => {
-                            warn!(error = ?e, "Failed to fetch Entra ID token for Azure OpenAI embeddings");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
+                let is_azure_entra = embed_provider_type == settings::models::providers_store::ProviderType::AzureOpenAI
+                    && provider_config.as_ref().map(|p| p.azure_auth_method()) == Some(settings::models::providers_store::AzureAuthMethod::EntraId);
 
-                if let Some(embed_svc) = chatty_core::services::embedding_service::try_create_embedding_service(
-                    &embed_provider_type,
-                    &embed_model,
-                    api_key.as_deref(),
-                    base_url.as_deref(),
-                    azure_token,
-                ) {
+                let embed_svc = if is_azure_entra {
+                    chatty_core::services::embedding_service::try_create_azure_entra_embedding_service(
+                        &embed_model,
+                        base_url.as_deref(),
+                    )
+                    .await
+                } else {
+                    chatty_core::services::embedding_service::try_create_embedding_service(
+                        &embed_provider_type,
+                        &embed_model,
+                        api_key.as_deref(),
+                        base_url.as_deref(),
+                    )
+                };
+                if let Some(embed_svc) = embed_svc {
                     // Enable vector index on memory service
                     let mem_svc = cx
                         .update(|cx| {

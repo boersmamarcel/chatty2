@@ -1,4 +1,4 @@
-mod azure_auth_http;
+pub(crate) mod azure_auth_http;
 mod build_context;
 #[cfg(test)]
 mod cache_breakpoint_probe;
@@ -10,6 +10,7 @@ mod output_cap;
 mod preamble_builder;
 mod prompt_cache_http;
 mod provider_builder;
+pub(crate) use provider_builder::{AZURE_ENTRA_PLACEHOLDER_TOKEN, shared_azure_token_cache};
 mod request_recorder;
 #[cfg(test)]
 mod tool_block_determinism;
