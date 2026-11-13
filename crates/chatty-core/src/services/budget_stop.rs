@@ -44,6 +44,10 @@ pub const BUDGET_STOP_NOTE: &str = "The budget is spent: no agent may make anoth
 /// as its text.
 pub const BUDGET_STOP: &str = "budget exhausted\n";
 
+/// The headline a failed `best_of` stops the run with (AGE-1132). It is not a
+/// spent budget: [`final_message`] words it as a best_of failure.
+pub const BEST_OF_FAILED: &str = "best_of: every attempt failed";
+
 /// `budget_exhausted: <headline>`.
 pub fn budget_exhausted(headline: &str) -> String {
     format!("{BUDGET_EXHAUSTED}: {headline}")
@@ -133,8 +137,13 @@ pub fn find_budget_exhausted(text: &str) -> Option<String> {
 /// the headline, then each delegation's work — the finished ones' answers
 /// and the stopped ones' partial output — in the order they came back.
 pub fn final_message(headline: &str, finished: &[(String, String)]) -> String {
-    let mut message = format!("{headline}. Here is what was finished:");
-    if finished.is_empty() {
+    let best_of = headline.starts_with(BEST_OF_FAILED);
+    let mut message = if best_of {
+        format!("{headline}. best_of failed on every attempt; no answer was produced.")
+    } else {
+        format!("{headline}. Here is what was finished:")
+    };
+    if finished.is_empty() && !best_of {
         message.push_str("\n\nNothing was finished before the budget ran out.");
     }
     for (agent, work) in finished {
@@ -315,6 +324,30 @@ mod tests {
                 "Error: invoke_agent: Agent 'remote' reported failure: {remote}"
             )),
             None
+        );
+    }
+
+    /// A best_of stop says best_of failed and that no answer was produced,
+    /// and never claims a budget is spent.
+    #[test]
+    fn best_of_stop_text_names_best_of() {
+        let message = final_message(BEST_OF_FAILED, &[]);
+        assert!(message.contains("best_of"), "{message}");
+        assert!(message.contains("no answer was produced"), "{message}");
+        assert!(!message.to_lowercase().contains("budget"), "{message}");
+    }
+
+    /// The budget stop's own text is pinned.
+    #[test]
+    fn budget_stop_text_unchanged() {
+        assert_eq!(
+            final_message("Budget of $1.00 spent; x", &[]),
+            "Budget of $1.00 spent; x. Here is what was finished:\n\n\
+             Nothing was finished before the budget ran out."
+        );
+        assert_eq!(
+            final_message("Budget spent", &[("w".into(), "done".into())]),
+            "Budget spent. Here is what was finished:\n\n**w**\ndone"
         );
     }
 }
