@@ -787,6 +787,12 @@
     "SendMessageParams": {
       "additionalProperties": false,
       "properties": {
+        "run": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "text": {
           "type": "string"
         },

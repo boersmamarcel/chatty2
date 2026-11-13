@@ -94,6 +94,7 @@ pub async fn post_as_root(
         .call(CallRequest::SendMessage(SendMessageParams {
             to: to.to_string(),
             text,
+            run: None,
         }))
         .await?;
     while let Some(event) = stream.next().await {

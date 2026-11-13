@@ -611,6 +611,7 @@ fn calls_map_to_requests_and_back() {
             request: CallRequest::SendMessage(SendMessageParams {
                 to: "lead".into(),
                 text: "hi".into(),
+                run: None,
             }),
         },
     );
