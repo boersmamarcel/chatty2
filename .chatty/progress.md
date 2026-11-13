@@ -1,0 +1,1 @@
+- 2026-11-14 step 1: added admit tests (paid test failed first with the old "usage reporting is required" message), `ModuleMeter::admit` now refuses paid modules with `paid modules run hosted`.

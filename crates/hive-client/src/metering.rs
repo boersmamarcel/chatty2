@@ -81,31 +81,14 @@ impl ModuleMeter {
         self.paid.contains(module)
     }
 
-    /// Whether the call to `module` may run: always for a free module; for
-    /// a paid one only with a collector to report it and the guard's
-    /// admission (free tier, then credits). The error is the reason, as the
-    /// caller shows it.
+    /// Whether the call to `module` may run: always for a free module; a
+    /// paid module is refused, because paid artifacts run hosted only
+    /// (ADR-0024). The error is the reason, as the caller shows it.
     pub async fn admit(&self, module: &str) -> Result<Option<Admission>, String> {
-        if !self.is_paid(module) {
-            return Ok(None);
+        if self.is_paid(module) {
+            return Err("paid modules run hosted".to_string());
         }
-        if self.usage.is_none() {
-            return Err(format!(
-                "usage reporting is required for paid module '{module}' but no usage collector \
-                 is configured"
-            ));
-        }
-        let Some(guard) = self.guard.as_ref() else {
-            return Err(format!(
-                "paid module '{module}' needs a credit check, and none is configured: sign in \
-                 to Hive in chatty"
-            ));
-        };
-        guard
-            .admit(module)
-            .await
-            .map(Some)
-            .map_err(|e| e.to_string())
+        Ok(None)
     }
 
     /// Report one successful call to `module` at `version`, if a collector
@@ -130,5 +113,25 @@ impl ModuleMeter {
         {
             tracing::warn!(module, error = %e, "usage flush failed; the call stays queued");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meter() -> ModuleMeter {
+        ModuleMeter::new(HashSet::from(["paid-mod".to_string()]))
+    }
+
+    #[tokio::test]
+    async fn paid_module_is_refused_on_desktop() {
+        let refused = meter().admit("paid-mod").await;
+        assert_eq!(refused.unwrap_err(), "paid modules run hosted");
+    }
+
+    #[tokio::test]
+    async fn free_module_still_runs() {
+        assert!(meter().admit("free-mod").await.is_ok());
     }
 }
