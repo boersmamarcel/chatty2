@@ -323,9 +323,10 @@ fn map_item(item: MultiTurnStreamItem, semantics: UsageSemantics) -> Vec<StreamC
             }
         }
         MultiTurnStreamItem::CompletionCall(call) => {
-            let call_usage = normalize_usage(semantics, call.call_index as u32 + 1, &call.usage);
-            log_call_usage(&call_usage);
-            vec![StreamChunk::ApiCallUsage(call_usage)]
+            let api_call_usage =
+                normalize_usage(semantics, call.call_index as u32 + 1, &call.usage);
+            log_call_usage(&api_call_usage);
+            vec![StreamChunk::ApiCallUsage(api_call_usage)]
         }
         MultiTurnStreamItem::FinalResponse(final_response) => {
             let usage = normalize_usage(semantics, 0, &final_response.usage());
