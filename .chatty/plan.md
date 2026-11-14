@@ -10,3 +10,4 @@
 2. [x] invoke_agent_tool.rs: reuse stop_on_budget (pub(crate)) + test accessor (17d85e1f)
 3. [x] best_of_tool.rs: call stop before AllFailed, test (17d85e1f)
 4. [x] run checks, record plan/progress
+5. [x] fix round 1: record decision, narrow best_of branch + tests, doc comment

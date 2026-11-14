@@ -47,7 +47,15 @@ pub const BUDGET_STOP: &str = "budget exhausted\n";
 
 /// The headline `best_of` stops its leader's run with when every attempt
 /// failed (AGE-1132). Not a budget stop: it only shares the stop channel.
+///
+/// Decision (AGE-1132, criterion 4): the stop applies to every leader
+/// holding the `InvokeAgentTool`, not only a `best_of` one. The channel
+/// belongs to the tool and cannot be limited to a single caller cleanly,
+/// and `best_of` is the only caller that sets it.
 pub const BEST_OF_FAILED_HEADLINE: &str = "best_of_failed: every attempt failed";
+
+/// The text of `BestOfError::AllFailed` a rendered `best_of` result carries.
+const BEST_OF_ALL_FAILED_TEXT: &str = "best_of: every attempt failed";
 
 /// The headline prefix [`final_message`] answers with [`BEST_OF_STOP`].
 const BEST_OF_FAILED_PREFIX: &str = "best_of_failed:";
@@ -212,8 +220,9 @@ impl AgentHook for StopOnBudgetExhausted {
         };
         if event.tool_name() == Some(BestOfTool::NAME) {
             // Every attempt failed: end the run instead of letting the
-            // leader answer from its own knowledge (AGE-1132).
-            if !result.is_success() {
+            // leader answer from its own knowledge (AGE-1132). Any other
+            // best_of failure leaves the run to the leader.
+            if !result.is_success() && result.output().render().contains(BEST_OF_ALL_FAILED_TEXT) {
                 ctx.scratchpad().update(|stop: &mut BudgetStop| {
                     stop.headline
                         .get_or_insert_with(|| BEST_OF_FAILED_HEADLINE.to_string());
@@ -339,6 +348,63 @@ mod tests {
             find_budget_exhausted(&format!(
                 "Error: invoke_agent: Agent 'remote' reported failure: {remote}"
             )),
+            None
+        );
+    }
+
+    /// Run `StopOnBudgetExhausted` over a failed `best_of` result with
+    /// `message`; the text its next model call is stopped with, if any.
+    async fn best_of_failure_stop(message: &str) -> Option<String> {
+        use rig_agent::test_utils::HookTestHarness;
+        use rig_agent::tool::{ToolErrorKind, ToolExecutionError, ToolResult};
+        use rig_core::effect::{Answered, EffectId, EffectKind};
+
+        let harness = HookTestHarness::new().with_hook(StopOnBudgetExhausted);
+        let kind = EffectKind::ToolCall {
+            name: BestOfTool::NAME.to_string(),
+            args: "{}".to_string(),
+        };
+        let outcome = Ok(Answered::ToolResult {
+            result: ToolResult::failed(ToolExecutionError::new(ToolErrorKind::Provider, message)),
+        });
+        let event = OutcomeEvent {
+            id: EffectId::from_raw(1),
+            kind: &kind,
+            outcome: &outcome,
+            turn: 1,
+            call_id: None,
+            context: None,
+        };
+        StopOnBudgetExhausted
+            .on_outcome(harness.context(), event)
+            .await;
+        let prompt = rig_core::message::Message::user("go on");
+        let call = CompletionCallEvent {
+            prompt: &prompt,
+            history: &[],
+            turn: 2,
+        };
+        match StopOnBudgetExhausted
+            .on_completion_call(harness.context(), call)
+            .await
+        {
+            CompletionCallAction::Stop(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_all_failed_best_of_result_stops_the_run() {
+        let text = best_of_failure_stop("Error: best_of: best_of: every attempt failed: a: boom")
+            .await
+            .expect("the run stops");
+        assert!(text.contains(BEST_OF_STOP), "{text}");
+    }
+
+    #[tokio::test]
+    async fn another_best_of_error_does_not_stop_the_run() {
+        assert_eq!(
+            best_of_failure_stop("Error: best_of: bad arguments").await,
             None
         );
     }
