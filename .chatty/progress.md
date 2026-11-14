@@ -1,0 +1,1 @@
+- 2026-11-14: step 1 done. Meter is now ModuleMeter::new(paid_modules) only; removed CreditGuard, UsageCollector wiring, HiveRegistryClient and session handling (they only fed those).

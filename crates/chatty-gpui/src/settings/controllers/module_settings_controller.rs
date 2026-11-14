@@ -9,15 +9,12 @@ use crate::settings::models::{
 use anyhow::{Context, Result};
 #[cfg(unix)]
 use chatty_core::agent_spec::load_roster;
-use chatty_core::hive::{
-    CreditGuard, HiveRegistryClient, ModuleMeter, UsageCollector, UsageCollectorConfig,
-};
+use chatty_core::hive::ModuleMeter;
 use chatty_core::services::plugin_llm::PluginLlmProvider;
 #[cfg(unix)]
 use chatty_core::services::virtual_agents::resolve_virtual_agents;
 use chatty_core::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
 use chatty_core::settings::models::extensions_store::ExtensionsModel;
-use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use chatty_core::settings::models::models_store::{ModelsModel, resolve_model_query};
 use chatty_core::settings::models::providers_store::ProviderModel;
 use chatty_module_registry::{ModuleGrants, ModuleManifest, ModuleRegistry};
@@ -494,55 +491,15 @@ pub fn refresh_runtime(cx: &mut App) {
                     let shared = Arc::new(tokio::sync::RwLock::new(registry));
                     let mut gateway = ProtocolGateway::new(shared);
 
-                    // Attach the module meter (credit guard, usage reporting)
-                    let hive_settings_result = cx.update(|cx| {
-                        let hive = cx.global::<HiveSettingsModel>();
-                        let paid_modules =
-                            cx.global::<ExtensionsModel>().paid_wasm_modules();
-                        let session = super::extensions_controller::hive_session(cx);
-                        (hive.clone(), session, paid_modules)
-                    });
+                    // Attach the module meter. Paid modules are hosted-only:
+                    // with no credit guard or collector the meter refuses them.
+                    let paid_modules_result =
+                        cx.update(|cx| cx.global::<ExtensionsModel>().paid_wasm_modules());
 
                     if settings.enabled
-                        && let Ok((hive_settings, session, paid_modules)) = hive_settings_result
+                        && let Ok(paid_modules) = paid_modules_result
                     {
-                        // Authenticate as the signed-in user, if any
-                        let mut hive_client = HiveRegistryClient::new(&hive_settings.registry_url);
-                        if let Some(ref session) = session {
-                            hive_client = hive_client.with_session(Arc::clone(session));
-                        }
-                        let hive_client = Arc::new(hive_client);
-
-                        // Wire CreditGuard for pre-invocation balance checks
-                        let credit_guard =
-                            Arc::new(CreditGuard::with_default_ttl(Arc::clone(&hive_client)));
-
-                        // One `UsageCollector` per process (PL-H9, AGE-612):
-                        // `refresh_runtime` runs on every settings change, so
-                        // a fresh collector here would also leak a fresh
-                        // background flush task racing every earlier one
-                        // over the same queue file. `global` reuses the
-                        // process's one instance instead.
-                        let usage_config = UsageCollectorConfig::default();
-                        let usage_collector =
-                            UsageCollector::global(&hive_settings.registry_url, usage_config);
-                        if let Some(session) = session {
-                            let uc = Arc::clone(&usage_collector);
-                            tokio::spawn(async move { uc.set_session(session).await });
-                        }
-                        // Start the periodic flush task — idempotent, so
-                        // this is a no-op after the first call. Without it
-                        // (ever), events accumulate in memory but are never
-                        // sent to the registry, so dashboard analytics never
-                        // increment.
-                        usage_collector.start_background_flush();
-
-                        // The same meter a worker's spec plugins are
-                        // called through (AGE-837), on the desktop's own
-                        // session.
-                        let meter = ModuleMeter::new(paid_modules)
-                            .with_credit_guard(credit_guard)
-                            .with_usage_collector(usage_collector);
+                        let meter = ModuleMeter::new(paid_modules);
                         gateway = gateway.with_meter(Arc::new(meter));
                     }
 
