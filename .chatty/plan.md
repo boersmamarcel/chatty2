@@ -7,6 +7,6 @@ Acceptance criteria:
 - only crates/chatty-core/src/coding.rs changes (plus these state files)
 
 Steps:
-1. [ ] write failing tests
-2. [ ] fix parse_items
-3. [ ] run checks (cargo test -p chatty-core --lib coding; clippy; fmt)
+1. [x] write failing tests (faff9cd8)
+2. [x] fix parse_items (see commit below)
+3. [x] run checks (cargo test -p chatty-core --lib coding; clippy; fmt)

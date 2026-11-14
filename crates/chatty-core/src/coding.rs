@@ -305,6 +305,11 @@ fn item_of(id: String, body: &[&str]) -> Result<Item, ParseItemsError> {
             line: line.trim().to_string(),
         };
         let list = || -> Result<Vec<String>, ParseItemsError> {
+            // An empty value is a present header with no entries; a value of
+            // only separators (`,`) is still malformed.
+            if value.trim().is_empty() {
+                return Ok(Vec::new());
+            }
             let list: Vec<String> = value
                 .split(',')
                 .map(|v| v.trim().trim_matches('`').to_string())
