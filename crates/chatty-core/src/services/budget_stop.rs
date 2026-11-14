@@ -27,6 +27,7 @@ use rig_agent::agent::{
 };
 use rig_agent::tool::Tool;
 
+use crate::tools::best_of_tool::BestOfTool;
 use crate::tools::invoke_agent_tool::InvokeAgentTool;
 
 /// The typed reason a run stopped on a spent budget. It leads the failed
@@ -43,6 +44,16 @@ pub const BUDGET_STOP_NOTE: &str = "The budget is spent: no agent may make anoth
 /// final message; `llm_service` ends such a run normally with the message
 /// as its text.
 pub const BUDGET_STOP: &str = "budget exhausted\n";
+
+/// The headline `best_of` stops its leader's run with when every attempt
+/// failed (AGE-1132). Not a budget stop: it only shares the stop channel.
+pub const BEST_OF_FAILED_HEADLINE: &str = "best_of_failed: every attempt failed";
+
+/// The headline prefix [`final_message`] answers with [`BEST_OF_STOP`].
+const BEST_OF_FAILED_PREFIX: &str = "best_of_failed:";
+
+/// What a run whose `best_of` failed on every attempt answers with.
+pub const BEST_OF_STOP: &str = "best_of failed on every attempt, so no answer was produced.";
 
 /// `budget_exhausted: <headline>`.
 pub fn budget_exhausted(headline: &str) -> String {
@@ -133,6 +144,9 @@ pub fn find_budget_exhausted(text: &str) -> Option<String> {
 /// the headline, then each delegation's work — the finished ones' answers
 /// and the stopped ones' partial output — in the order they came back.
 pub fn final_message(headline: &str, finished: &[(String, String)]) -> String {
+    if headline.starts_with(BEST_OF_FAILED_PREFIX) {
+        return BEST_OF_STOP.to_string();
+    }
     let mut message = format!("{headline}. Here is what was finished:");
     if finished.is_empty() {
         message.push_str("\n\nNothing was finished before the budget ran out.");
@@ -196,6 +210,17 @@ impl AgentHook for StopOnBudgetExhausted {
         let Some(result) = event.tool_result() else {
             return OutcomeAction::Proceed;
         };
+        if event.tool_name() == Some(BestOfTool::NAME) {
+            // Every attempt failed: end the run instead of letting the
+            // leader answer from its own knowledge (AGE-1132).
+            if !result.is_success() {
+                ctx.scratchpad().update(|stop: &mut BudgetStop| {
+                    stop.headline
+                        .get_or_insert_with(|| BEST_OF_FAILED_HEADLINE.to_string());
+                });
+            }
+            return OutcomeAction::Proceed;
+        }
         if event.tool_name() != Some(InvokeAgentTool::NAME) {
             return OutcomeAction::Proceed;
         }
@@ -316,5 +341,14 @@ mod tests {
             )),
             None
         );
+    }
+
+    #[test]
+    fn best_of_stop_text_names_best_of() {
+        let message = final_message("best_of_failed: every attempt failed", &[]);
+        assert!(message.contains("best_of"), "{message}");
+        assert!(message.contains("no answer was produced"), "{message}");
+        assert!(!message.contains("Budget"), "{message}");
+        assert!(!message.to_lowercase().contains("budget"), "{message}");
     }
 }
