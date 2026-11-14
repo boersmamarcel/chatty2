@@ -34,8 +34,8 @@ use chatty_fabric::{CallPolicy, EdgeLog, Transport, UsagePricer};
 #[derive(Clone)]
 pub struct GatewayState {
     pub registry: Arc<RwLock<ModuleRegistry>>,
-    /// Admits and reports every module call: the same meter a spec's
-    /// plugins are called through (AGE-837).
+    /// Admits every module call: the same meter a spec's plugins are
+    /// called through (AGE-837). The gateway does not report usage.
     pub meter: Arc<ModuleMeter>,
     /// Processes registered over the participant socket (ADR-0011), served
     /// at `/a2a/{name}` and consulted first.
@@ -216,8 +216,8 @@ impl ProtocolGateway {
         &self.token
     }
 
-    /// Admit and report module calls through `meter`: which modules are
-    /// paid, and the credit guard and usage collector that bill them.
+    /// Admit module calls through `meter`: which modules are paid, and the
+    /// credit guard that gates them.
     pub fn with_meter(mut self, meter: Arc<ModuleMeter>) -> Self {
         self.meter = meter;
         self

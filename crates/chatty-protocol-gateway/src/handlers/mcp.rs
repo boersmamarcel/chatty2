@@ -166,24 +166,20 @@ async fn handle_tools_call(
         caller: None,
     };
 
-    // Credits (or a free call) and usage reporting, for paid modules only.
+    // Credits (or a free call), for paid modules only.
     if let Err(e) = module_call::admit(state, module_name).await {
         return json_rpc_error(StatusCode::OK, id, -32000, e);
     }
 
     let mut module = module.lock().await;
     let result = module.invoke_tool(call).await;
-    let metrics = module.last_invocation_metrics();
     drop(module);
 
     match result {
-        Ok(result) => {
-            module_call::record_usage(state, module_name, metrics);
-            json_rpc_ok(
-                id,
-                json!({ "content": [{ "type": "text", "text": result.content }] }),
-            )
-        }
+        Ok(result) => json_rpc_ok(
+            id,
+            json!({ "content": [{ "type": "text", "text": result.content }] }),
+        ),
         Err(e) => json_rpc_error(
             module_call::failure_status(&e),
             id,
