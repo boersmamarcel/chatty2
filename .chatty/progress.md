@@ -1,0 +1,1 @@
+- 2026-11-14: Replaced metering tests in plugin_tool.rs. clippy + fmt pass. Tests NOT run: wasm32-wasip2 target absent, no network/rustup, so echo.wasm could not be built.
