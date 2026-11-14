@@ -9,3 +9,4 @@
 - on_outcome: the best_of branch only sets the headline when the rendered result contains `best_of: every attempt failed`.
 - Tests: an_all_failed_best_of_result_stops_the_run, another_best_of_error_does_not_stop_the_run.
 - invoke_agent_tool.rs: stop_on_budget doc mentions the best_of_failed: stop.
+- 2026-11-14: restored the stop_on_budget(BEST_OF_FAILED_HEADLINE) call in best_of_tool.rs, removed by stray mutation commit 22bd9561.
