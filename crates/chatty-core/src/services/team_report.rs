@@ -25,16 +25,70 @@
 //! The run's answer then opens with the report's own opening
 //! ([`answer_from_report`]), read from the file rather than recalled by
 //! the lead (AGE-1295).
+//!
+//! # The host hook
+//!
+//! Every host that runs a team calls the hook once, after the leader's
+//! last turn has ended, however it ended (AGE-1433), so `chatty-tui
+//! --headless` and a hosted chatty-server finish a report the same way. It
+//! comes in two forms:
+//!
+//! - [`finish_team_run`] reads no file. The host hands it the report text
+//!   the team wrote (if it has it) and any notes it kept; the notes the
+//!   leader's conversation carries are read from the `invoke_agent`
+//!   results, checked against the team's handoff schemas
+//!   ([`team_notes`]). This is the form for a host whose members share no
+//!   filesystem (hosted: each member runs in its own VM).
+//! - [`finish_team_run_in_workspace`] is that, for a host whose team
+//!   shares one workspace (`chatty-tui --headless`): it reads the report
+//!   and the kept notes from the workspace and writes the finished report
+//!   back.
+//!
+//! A team whose leader keeps notes (`[swarm.rounds] notes`, as
+//! deep-research does) sees only `note` references in its `invoke_agent`
+//! results, so a host without a shared workspace must pass those notes as
+//! `kept_notes`. Otherwise the citation check lists every cited URL as
+//! unbacked.
+//!
+//! ```no_run
+//! # use std::time::Instant;
+//! # use chatty_core::services::team::Team;
+//! # use chatty_core::services::team_report::{TeamRunEnd, TraceTally, finish_team_run};
+//! # fn host(team: &Team, tally: &TraceTally,
+//! #         messages: &[rig_core::completion::message::Message], started: Instant,
+//! #         search: Option<&chatty_core::settings::models::search_settings::SearchSettingsModel>,
+//! #         book: &chatty_core::models::token_usage::PriceBook, writer_report: Option<&str>) {
+//! // `tally` has had every turn's swarm trace added (`TraceTally::add_trace`).
+//! let end = TeamRunEnd {
+//!     team,
+//!     answer: "the run's answer so far",
+//!     reply: "the lead's last reply",
+//!     messages,
+//!     tally,
+//!     price_book: Some(book),
+//!     search_settings: search,
+//!     wall: started.elapsed(),
+//! };
+//! if let Some(done) = finish_team_run(&end, writer_report, Vec::new()) {
+//!     // `done.report`: the finished report, to store or show.
+//!     // `done.answer`: the run's answer when the team wrote its report.
+//! }
+//! # }
+//! ```
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rig_core::completion::message::{Message, ToolResultContent, UserContent};
 use serde_json::Value;
 
 use crate::models::token_usage::{PriceBook, format_cost, price};
+use crate::services::research_notes::read_notes;
 use crate::services::swarm_trace::{SwarmTrace, ToolOutcome, UsageLine};
+use crate::services::team::Team;
+use crate::settings::models::search_settings::SearchSettingsModel;
+use crate::tools::SearchWebTool;
 
 /// The heading of the footer the host appends.
 pub const COST_HEADING: &str = "## Cost of this run";
@@ -61,6 +115,11 @@ pub struct RunTally {
     /// read from the `source` of each result (AGE-1348), sorted. Empty when
     /// no search returned a result.
     pub search_backends: Vec<String>,
+    /// The backend the run's resolved search settings serve `search_web`
+    /// with (`tavily`, `brave`, or `keyless` when no provider has a key;
+    /// [`search_backend`], AGE-1433). The footer names it ahead of
+    /// `search_backends`; `None` when the host did not say.
+    pub search_backend: Option<String>,
     /// `fetch` calls, every agent in the tree.
     pub fetches: usize,
     /// Tokens billed to the root, its delegations' included.
@@ -122,6 +181,7 @@ impl TraceTally {
         RunTally {
             searches: self.searches,
             search_backends: self.search_backends.iter().cloned().collect(),
+            search_backend: None,
             fetches: self.fetches,
             tokens,
             usd,
@@ -144,6 +204,14 @@ fn result_backends(result: &str) -> BTreeSet<String> {
         .collect()
 }
 
+/// The backend `search_web` runs on under `settings`, the run's resolved
+/// search settings (as handed to `AgentServices::search_settings`):
+/// `tavily`, `brave`, or `keyless`. Read from the settings the way the tool
+/// itself is built from them, never from what a model wrote (AGE-1433).
+pub fn search_backend(settings: Option<&SearchSettingsModel>) -> &'static str {
+    SearchWebTool::from_settings(settings).backend()
+}
+
 /// The footer: spend, searches and fetches, wall time.
 pub fn cost_footer(tally: &RunTally) -> String {
     let spend = match tally.usd {
@@ -160,10 +228,10 @@ pub fn cost_footer(tally: &RunTally) -> String {
         (secs % 3600) / 60,
         secs % 60
     );
-    let searches = if tally.search_backends.is_empty() {
-        tally.searches.to_string()
-    } else {
-        format!("{} ({})", tally.searches, tally.search_backends.join(", "))
+    let searches = match &tally.search_backend {
+        Some(backend) => format!("{} ({backend})", tally.searches),
+        None if tally.search_backends.is_empty() => tally.searches.to_string(),
+        None => format!("{} ({})", tally.searches, tally.search_backends.join(", ")),
     };
     format!(
         "{COST_HEADING}\n\n- Spend: {spend}\n- Web searches: {searches}\n- Page fetches: {}\n- Wall \
@@ -485,6 +553,163 @@ pub fn finish_file(
     Ok(path)
 }
 
+/// A team run whose leader's last turn has ended, as a host hands it to
+/// [`finish_team_run`] or [`finish_team_run_in_workspace`].
+pub struct TeamRunEnd<'a> {
+    /// The team the run ran as (`load_team`): its `team.json` `report`
+    /// names the report, its `handoffs` the schemas notes are checked with.
+    pub team: &'a Team,
+    /// The run's answer: kept as a partial report when the team wrote none.
+    pub answer: &'a str,
+    /// The lead's last reply (its checker verdict, open sub-questions),
+    /// appended to the report's opening in the run's answer.
+    pub reply: &'a str,
+    /// The leader's conversation: the notes its `invoke_agent` results
+    /// carry count ([`team_notes`]).
+    pub messages: &'a [Message],
+    /// Every turn's web calls and bill ([`TraceTally::add_trace`]).
+    pub tally: &'a TraceTally,
+    /// Prices the bill; `None` reports tokens only.
+    pub price_book: Option<&'a PriceBook>,
+    /// The run's resolved search settings, the ones its agents were built
+    /// with; the footer names their backend ([`search_backend`]).
+    pub search_settings: Option<&'a SearchSettingsModel>,
+    /// The run's wall time.
+    pub wall: Duration,
+}
+
+/// A report [`finish_team_run`] finished.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinishedTeamReport {
+    /// The report's name as `team.json` gives it (a workspace path).
+    pub relative: String,
+    /// The finished report: the team's (or a partial one), the citation
+    /// check, the cost footer.
+    pub report: String,
+    /// The run's answer when the team wrote its report: the report's
+    /// opening, its name, then the lead's reply. `None` for a partial
+    /// report: the run's answer stands.
+    pub answer: Option<String>,
+}
+
+/// The notes a team run produced: `kept` (the ones the host kept, e.g. in
+/// the workspace), then the ones the leader's `invoke_agent` results carry.
+///
+/// A result's note is its typed `handoff` when it has one. A result
+/// without one (a host whose workers send no handoff metadata) counts when
+/// it succeeded, holds no `note` reference (that note is already kept), and
+/// its `response` passes the team's handoff schema for its `agent`
+/// ([`handoff::check`](crate::services::handoff::check)): the team's own
+/// rule, applied here rather than trusted.
+pub fn team_notes(team: &Team, messages: &[Message], kept: Vec<Value>) -> Vec<Value> {
+    use crate::services::handoff::{HandoffOutcome, check};
+    let mut notes = kept;
+    for result in tool_result_texts(messages) {
+        if let Some(note) = note_in_result(result) {
+            notes.push(note);
+            continue;
+        }
+        let Ok(output) = serde_json::from_str::<Value>(result) else {
+            continue;
+        };
+        if output["success"] != Value::Bool(true) || output.get("note").is_some() {
+            continue;
+        }
+        let (Some(agent), Some(response)) = (output["agent"].as_str(), output["response"].as_str())
+        else {
+            continue;
+        };
+        let Some(contract) = team.handoffs.get(agent) else {
+            continue;
+        };
+        if let HandoffOutcome::Valid(value) = check(contract, response)
+            && crate::services::research_notes::is_note(&value)
+        {
+            notes.push(value);
+        }
+    }
+    notes
+}
+
+/// The text of every tool result in `messages`, in order.
+fn tool_result_texts(messages: &[Message]) -> impl Iterator<Item = &str> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content } => Some(content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|item| match item {
+            UserContent::ToolResult(result) => Some(result.content.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            ToolResultContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+}
+
+/// The host hook (AGE-1433), reading no file: finish a team run's report
+/// after the leader's last turn has ended, however it ended.
+///
+/// `written` is the report the team wrote, when the host has it (`None`:
+/// a partial report from the run's answer and the notes). `kept_notes` are
+/// the notes the host kept outside the conversation; the conversation's own
+/// are added ([`team_notes`]). The result has the citation check, a
+/// partial report when the team wrote none, and the cost footer naming the
+/// search backend. `None` when the team names no report. Calls no model.
+pub fn finish_team_run(
+    end: &TeamRunEnd<'_>,
+    written: Option<&str>,
+    kept_notes: Vec<Value>,
+) -> Option<FinishedTeamReport> {
+    let relative = end.team.file.report.as_deref()?;
+    let notes = team_notes(end.team, end.messages, kept_notes);
+    let tally = RunTally {
+        search_backend: Some(search_backend(end.search_settings).to_string()),
+        ..end.tally.tally(end.price_book, end.wall)
+    };
+    let report = finish(written, end.answer, &notes, &tally);
+    let answer = answer_from_report(&report, relative, end.reply);
+    Some(FinishedTeamReport {
+        relative: relative.to_string(),
+        report,
+        answer,
+    })
+}
+
+/// [`finish_team_run`] for a team that shares `workspace`: the report is
+/// read from the file `team.json` names, the kept notes from the leader's
+/// `[swarm.rounds] notes` directory, and the finished report is written
+/// back (its directory too). Returns the finished report with the file's
+/// path; `None` when the team names no report, an error when the file
+/// cannot be written.
+pub fn finish_team_run_in_workspace(
+    end: &TeamRunEnd<'_>,
+    workspace: &Path,
+) -> Option<std::io::Result<(PathBuf, FinishedTeamReport)>> {
+    let relative = end.team.file.report.as_deref()?;
+    let path = workspace.join(relative);
+    let written = std::fs::read_to_string(&path).ok();
+    let kept = end
+        .team
+        .leader
+        .swarm
+        .rounds
+        .as_ref()
+        .and_then(|rounds| rounds.notes.as_deref())
+        .map(|dir| read_notes(workspace, dir))
+        .unwrap_or_default();
+    let done = finish_team_run(end, written.as_deref(), kept)?;
+    let wrote = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, &done.report));
+    Some(wrote.map(|()| (path, done)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +730,7 @@ mod tests {
         RunTally {
             searches: 3,
             search_backends: vec!["tavily".to_string()],
+            search_backend: None,
             fetches: 5,
             tokens: 1234,
             usd: Some(0.42),
@@ -793,5 +1019,305 @@ mod tests {
             ..tally
         };
         assert!(cost_footer(&bare).contains("- Web searches: 2\n"));
+    }
+
+    fn search(provider: &str) -> SearchSettingsModel {
+        use crate::settings::models::search_settings::SearchProvider;
+        let mut settings = SearchSettingsModel::default();
+        match provider {
+            "tavily" => {
+                settings.active_provider = SearchProvider::Tavily;
+                settings.tavily_api_key = Some("tvly-test".into());
+            }
+            "brave" => {
+                settings.active_provider = SearchProvider::Brave;
+                settings.brave_api_key = Some("brave-test".into());
+            }
+            _ => {}
+        }
+        settings
+    }
+
+    /// AGE-1433: the footer names the backend the run's resolved search
+    /// settings serve `search_web` with, ahead of what the results say.
+    #[test]
+    fn the_footer_names_the_backend_from_the_search_settings() {
+        assert_eq!(search_backend(Some(&search("tavily"))), "tavily");
+        assert_eq!(search_backend(Some(&search("brave"))), "brave");
+        assert_eq!(search_backend(Some(&search("none"))), "keyless");
+        assert_eq!(search_backend(None), "keyless");
+        let footer = cost_footer(&RunTally {
+            searches: 16,
+            // A result's `source` never outranks the settings.
+            search_backends: vec!["duckduckgo".into()],
+            search_backend: Some(search_backend(Some(&search("brave"))).into()),
+            ..tally()
+        });
+        assert!(footer.contains("- Web searches: 16 (brave)\n"), "{footer}");
+        let none = cost_footer(&RunTally {
+            searches: 0,
+            search_backends: vec![],
+            search_backend: Some("keyless".into()),
+            ..tally()
+        });
+        assert!(none.contains("- Web searches: 0 (keyless)\n"), "{none}");
+    }
+
+    /// A fake deep-research run's end, in `workspace`: one note kept by the
+    /// host, one still in the lead's history, a report the writer wrote
+    /// (or none), sixteen Tavily searches.
+    fn fake_run(workspace: &Path, report: Option<&str>) -> (Team, Vec<Message>, TraceTally) {
+        use rig_core::completion::message::{CallId, ToolResult};
+        let team = crate::services::team::load_team("deep-research", None, None)
+            .expect("the preset loads");
+        let dir = workspace.join("research-notes");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("1-1.json"),
+            note(&["https://a.example/1"]).to_string(),
+        )
+        .unwrap();
+        if let Some(report) = report {
+            std::fs::write(workspace.join("research-report.md"), report).unwrap();
+        }
+        let result = json!({ "agent": "deep-research-web-researcher", "response": "x",
+                             "success": true, "handoff": note(&["https://b.example/2"]) });
+        let messages = vec![Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: CallId::from_wire("1"),
+                name: crate::testing::tool_name("invoke_agent"),
+                content: vec![ToolResultContent::text(result.to_string())],
+                is_error: false,
+            })],
+        }];
+        let tally = TraceTally {
+            searches: 16,
+            search_backends: ["tavily".to_string()].into(),
+            fetches: 4,
+            billed: vec![],
+        };
+        (team, messages, tally)
+    }
+
+    /// What `chatty-tui --headless` did before AGE-1433, inline in its
+    /// runner: read the notes, finish the file, answer from the report.
+    fn finish_as_the_tui_did(
+        team: &Team,
+        workspace: &Path,
+        messages: &[Message],
+        tally: &TraceTally,
+        wall: Duration,
+    ) -> Option<String> {
+        let relative = team.file.report.as_deref()?;
+        let mut notes = team
+            .leader
+            .swarm
+            .rounds
+            .as_ref()
+            .and_then(|rounds| rounds.notes.as_deref())
+            .map(|dir| read_notes(workspace, dir))
+            .unwrap_or_default();
+        notes.extend(notes_in_history(messages));
+        let tally = tally.tally(None, wall);
+        let path = finish_file(workspace, relative, ANSWER, &notes, &tally).ok()?;
+        let report = std::fs::read_to_string(&path).ok()?;
+        answer_from_report(&report, relative, REPLY)
+    }
+
+    const ANSWER: &str = "Budget spent. What was finished: the tower is 330 m.";
+    const REPLY: &str = "Checker: PASS.";
+    const WRITTEN: &str = "# The Eiffel Tower\n\n## Short answer\n\nIt is 330 m \
+                           [1](https://a.example/1), was 312 m [2](https://b.example/2).\n\
+                           Also https://made-up.example/x.\n\n## Detail\n\nMore.\n";
+
+    fn end<'a>(
+        team: &'a Team,
+        messages: &'a [Message],
+        tally: &'a TraceTally,
+        search: &'a SearchSettingsModel,
+    ) -> TeamRunEnd<'a> {
+        TeamRunEnd {
+            team,
+            answer: ANSWER,
+            reply: REPLY,
+            messages,
+            tally,
+            price_book: None,
+            search_settings: Some(search),
+            wall: Duration::from_secs(3723),
+        }
+    }
+
+    /// The finished file and answer for a fake run in `workspace`, from
+    /// `finish_team_run_in_workspace`.
+    fn finish_with_the_hook(workspace: &Path, report: Option<&str>) -> (String, Option<String>) {
+        let (team, messages, tally) = fake_run(workspace, report);
+        let search = search("tavily");
+        let (path, done) =
+            finish_team_run_in_workspace(&end(&team, &messages, &tally, &search), workspace)
+                .expect("the team names a report")
+                .expect("written");
+        assert_eq!(done.relative, "research-report.md");
+        assert_eq!(path, workspace.join("research-report.md"));
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(file, done.report);
+        (file, done.answer)
+    }
+
+    /// A researcher's `invoke_agent` result as a host whose workers send no
+    /// handoff metadata gives it: the note only in the response's `json`.
+    fn bare_result(agent: &str, response: &str, success: bool) -> Message {
+        use rig_core::completion::message::{CallId, ToolResult};
+        let output = json!({ "agent": agent, "response": response, "success": success });
+        Message::User {
+            content: vec![UserContent::ToolResult(ToolResult {
+                call: CallId::from_wire("h"),
+                name: crate::testing::tool_name("invoke_agent"),
+                content: vec![ToolResultContent::text(output.to_string())],
+                is_error: false,
+            })],
+        }
+    }
+
+    /// AGE-1433, hosted: no shared filesystem. The report comes in as text,
+    /// the notes from the results' responses, each checked against the
+    /// team's handoff schema; nothing is read from or written to disk.
+    #[test]
+    fn the_host_hook_needs_no_shared_filesystem() {
+        let team = crate::services::team::load_team("deep-research", None, None)
+            .expect("the preset loads");
+        let researcher = "deep-research-web-researcher";
+        let valid = format!("Done.\n```json\n{}\n```", note(&["https://a.example/1"]));
+        let off_schema = "Done.\n```json\n{\"claims\": [{\"url\": \"https://b.example/2\"}]}\n```";
+        let messages = vec![
+            bare_result(researcher, &valid, true),
+            // Fails the team's schema: not a note.
+            bare_result(researcher, off_schema, true),
+            // A failed delegation's text is not a note.
+            bare_result(
+                researcher,
+                &valid.replace("a.example/1", "c.example/3"),
+                false,
+            ),
+            // No contract for the writer: its text is never a note.
+            bare_result(
+                "deep-research-writer",
+                &valid.replace("a.example/1", "d.example/4"),
+                true,
+            ),
+        ];
+        let notes = team_notes(&team, &messages, vec![]);
+        assert_eq!(notes, [note(&["https://a.example/1"])]);
+
+        let tally = TraceTally {
+            searches: 16,
+            ..TraceTally::default()
+        };
+        let search = search("tavily");
+        let done = finish_team_run(
+            &end(&team, &messages, &tally, &search),
+            Some(WRITTEN),
+            vec![],
+        )
+        .expect("the team names a report");
+        assert!(
+            done.report.starts_with("# The Eiffel Tower"),
+            "{}",
+            done.report
+        );
+        let check = &done.report[done.report.find(CITATION_CHECK_HEADING).expect("a check")..];
+        assert!(check.contains("- https://b.example/2"), "{check}");
+        assert!(!check.contains("a.example"), "{check}");
+        assert!(check.contains("- Web searches: 16 (tavily)\n"), "{check}");
+        assert!(done.answer.expect("an opening").ends_with(REPLY));
+
+        // The writer's file never reached the host: a partial report with
+        // the notes the results carried.
+        let partial = finish_team_run(&end(&team, &messages, &tally, &search), None, vec![])
+            .expect("the team names a report");
+        assert!(partial.report.starts_with(PARTIAL_HEADING));
+        assert!(partial.report.contains("(https://a.example/1)"));
+        assert_eq!(partial.answer, None);
+    }
+
+    /// AGE-1433 golden: the chatty-core hook finishes a fake team run
+    /// exactly as the TUI's runner did: the same file, the same answer.
+    #[test]
+    fn the_host_hook_finishes_a_report_as_the_tui_did() {
+        let hook = tempfile::tempdir().unwrap();
+        let (file, answer) = finish_with_the_hook(hook.path(), Some(WRITTEN));
+
+        let tui = tempfile::tempdir().unwrap();
+        let (team, messages, tally) = fake_run(tui.path(), Some(WRITTEN));
+        let tui_answer = finish_as_the_tui_did(
+            &team,
+            tui.path(),
+            &messages,
+            &tally,
+            Duration::from_secs(3723),
+        );
+        let tui_file = std::fs::read_to_string(tui.path().join("research-report.md")).unwrap();
+        assert_eq!(file, tui_file);
+        assert_eq!(answer, tui_answer);
+
+        assert_eq!(
+            file,
+            "# The Eiffel Tower\n\n## Short answer\n\nIt is 330 m [1](https://a.example/1), \
+             was 312 m [2](https://b.example/2).\nAlso https://made-up.example/x.\n\n## Detail\n\n\
+             More.\n\n## Citation check\n\nThese URLs are cited but are in no researcher's note, \
+             so nothing in this run backs them:\n\n- https://made-up.example/x\n\n\n\
+             ## Cost of this run\n\n- Spend: 0 tokens (not priced: a model has no prices)\n\
+             - Web searches: 16 (tavily)\n- Page fetches: 4\n- Wall time: 1h 02m 03s\n\n\
+             Counted by the host from the run's trace, not reported by a model.\n"
+        );
+        assert_eq!(
+            answer.as_deref(),
+            Some(
+                "# The Eiffel Tower\n\n## Short answer\n\nIt is 330 m [1](https://a.example/1), \
+                 was 312 m [2](https://b.example/2).\nAlso https://made-up.example/x.\n\n\
+                 The full report: research-report.md\n\nChecker: PASS."
+            )
+        );
+    }
+
+    /// AGE-1433 golden: no report written, the hook keeps the run's answer
+    /// and every note as a partial report, as the TUI did, and leaves the
+    /// run's answer standing.
+    #[test]
+    fn the_host_hook_keeps_a_partial_report_as_the_tui_did() {
+        let hook = tempfile::tempdir().unwrap();
+        let (file, answer) = finish_with_the_hook(hook.path(), None);
+        let tui = tempfile::tempdir().unwrap();
+        let (team, messages, tally) = fake_run(tui.path(), None);
+        let tui_answer = finish_as_the_tui_did(
+            &team,
+            tui.path(),
+            &messages,
+            &tally,
+            Duration::from_secs(3723),
+        );
+        let tui_file = std::fs::read_to_string(tui.path().join("research-report.md")).unwrap();
+        assert_eq!((&file, &answer), (&tui_file, &tui_answer));
+        assert_eq!(answer, None);
+        assert!(file.starts_with(PARTIAL_HEADING), "{file}");
+        assert!(file.contains(ANSWER), "{file}");
+        let notes = &file[file.find(NOTES_HEADING).expect("the notes")..];
+        assert!(notes.contains("(https://a.example/1)"), "{file}");
+        assert!(notes.contains("(https://b.example/2)"), "{file}");
+        assert!(file.contains("- Web searches: 16 (tavily)\n"), "{file}");
+    }
+
+    /// A team that names no report gets nothing from the hook.
+    #[test]
+    fn the_host_hook_leaves_a_team_without_a_report_alone() {
+        let workspace = tempfile::tempdir().unwrap();
+        let team =
+            crate::services::team::load_team("crosscheck", None, None).expect("the preset loads");
+        let tally = TraceTally::default();
+        let search = SearchSettingsModel::default();
+        let end = end(&team, &[], &tally, &search);
+        assert!(finish_team_run(&end, Some(WRITTEN), vec![]).is_none());
+        assert!(finish_team_run_in_workspace(&end, workspace.path()).is_none());
+        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
     }
 }
