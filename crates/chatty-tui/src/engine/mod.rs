@@ -521,19 +521,15 @@ pub struct ChatEngine {
 /// This process's plugin meter, installed once at start-up.
 static PLUGIN_METER: OnceLock<Arc<ModuleMeter>> = OnceLock::new();
 
-/// Build this process's plugin meter from the installed extensions and the
-/// Hive sign-in (AGE-837): a spec's paid plugin is admitted and reported
-/// exactly like a call through the desktop's gateway. Later calls are
-/// no-ops.
+/// Build this process's plugin meter from the installed extensions: a
+/// spec's paid plugin is refused (paid artifacts are hosted-only, ADR-0024).
+/// Later calls are no-ops.
 pub(crate) async fn install_plugin_meter() {
     if PLUGIN_METER.get().is_some() {
         return;
     }
-    let (extensions, hive) = tokio::join!(
-        chatty_core::extensions_repository().load(),
-        chatty_core::hive_settings_repository().load(),
-    );
-    let meter = borrowed_meter(&extensions.unwrap_or_default(), &hive.unwrap_or_default()).await;
+    let extensions = chatty_core::extensions_repository().load().await;
+    let meter = borrowed_meter(&extensions.unwrap_or_default()).await;
     let _ = PLUGIN_METER.set(Arc::new(meter));
 }
 

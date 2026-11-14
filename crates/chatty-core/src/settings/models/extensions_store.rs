@@ -85,7 +85,8 @@ pub struct ExtensionsModel {
 
 impl ExtensionsModel {
     /// The module names of the installed Hive WASM modules priced `paid`:
-    /// the modules a [`ModuleMeter`](hive_client::ModuleMeter) bills.
+    /// the modules a [`ModuleMeter`](hive_client::ModuleMeter) refuses on
+    /// desktop: paid artifacts are hosted-only (ADR-0024).
     pub fn paid_wasm_modules(&self) -> std::collections::HashSet<String> {
         self.extensions
             .iter()
