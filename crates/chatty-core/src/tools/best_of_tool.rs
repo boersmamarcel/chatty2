@@ -196,8 +196,6 @@ impl Tool for BestOfTool {
                     .iter()
                     .map(|a| format!("{}: {}", a.agent, a.answer))
                     .collect();
-                self.invoke
-                    .stop_on_budget(crate::services::budget_stop::BEST_OF_FAILED_HEADLINE);
                 return Err(BestOfError::AllFailed(errors.join("; ")));
             }
             Plan::Decided(n, by) => (n, by, None, None),
