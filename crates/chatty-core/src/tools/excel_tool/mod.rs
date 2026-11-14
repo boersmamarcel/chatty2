@@ -96,6 +96,64 @@ mod tests {
         assert!(super::check_sheet_size(&mut wb, "S").is_ok());
     }
 
+    /// RUSTSEC-2026-0436 / AGE-949: malformed OLE2 (CFB) containers used to
+    /// panic or allocate without bound in calamine's own CFB parser. Each header below
+    /// is a few hundred bytes; calamine 0.38 must return an error for all of
+    /// them, never panic or abort.
+    #[test]
+    fn malformed_ole2_xls_is_an_error_not_a_panic() {
+        const MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        let header = |patch: &dyn Fn(&mut Vec<u8>)| {
+            let mut h = vec![0u8; 512];
+            h[..8].copy_from_slice(&MAGIC);
+            h[0x18..0x1A].copy_from_slice(&0x003Eu16.to_le_bytes()); // minor version
+            h[0x1A..0x1C].copy_from_slice(&0x0003u16.to_le_bytes()); // major version 3
+            h[0x1C..0x1E].copy_from_slice(&0xFFFEu16.to_le_bytes()); // little endian
+            h[0x1E..0x20].copy_from_slice(&9u16.to_le_bytes()); // 512-byte sectors
+            h[0x20..0x22].copy_from_slice(&6u16.to_le_bytes()); // 64-byte mini sectors
+            patch(&mut h);
+            h
+        };
+        let cases: Vec<(&str, Vec<u8>)> = vec![
+            ("magic only", MAGIC.to_vec()),
+            ("truncated header", header(&|h| h.truncate(100))),
+            (
+                "huge FAT sector count",
+                header(&|h| h[0x2C..0x30].copy_from_slice(&u32::MAX.to_le_bytes())),
+            ),
+            (
+                "huge DIFAT chain",
+                header(&|h| {
+                    h[0x44..0x48].copy_from_slice(&0u32.to_le_bytes());
+                    h[0x48..0x4C].copy_from_slice(&u32::MAX.to_le_bytes());
+                }),
+            ),
+            (
+                "huge sector shift",
+                header(&|h| h[0x1E..0x20].copy_from_slice(&0xFFFFu16.to_le_bytes())),
+            ),
+            (
+                "huge mini FAT count",
+                header(&|h| {
+                    h[0x40..0x44].copy_from_slice(&u32::MAX.to_le_bytes());
+                    h[0x3C..0x40].copy_from_slice(&0u32.to_le_bytes());
+                }),
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in cases {
+            let path = dir.path().join("bad.xls");
+            std::fs::write(&path, &bytes).unwrap();
+            let outcome =
+                std::panic::catch_unwind(|| calamine::open_workbook_auto(&path).map(|_| ()));
+            match outcome {
+                Ok(Err(_)) => {}
+                Ok(Ok(())) => panic!("case '{name}': malformed OLE2 opened as a workbook"),
+                Err(_) => panic!("case '{name}': calamine panicked on malformed OLE2"),
+            }
+        }
+    }
+
     use super::edit::EditExcelArgs;
     use super::parsing::*;
     use super::write::{
