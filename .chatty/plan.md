@@ -8,5 +8,5 @@ Acceptance criteria:
 
 Steps:
 1. [x] write failing tests (faff9cd8)
-2. [x] fix parse_items (see commit below)
-3. [x] run checks (cargo test -p chatty-core --lib coding; clippy; fmt)
+2. [x] fix parse_items (addff0ed)
+3. [x] run checks (cargo test -p chatty-core --lib coding; clippy; fmt) (addff0ed)
