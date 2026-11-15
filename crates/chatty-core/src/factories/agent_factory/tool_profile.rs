@@ -14,8 +14,8 @@
 
 use super::tool_registry::ToolAvailability;
 
-/// The read-only set every profile starts from: look at the tree, read files,
-/// search, read the git history (`git_diff` takes a `base..head` range, so a
+/// The read-only set every profile starts from: look at the tree, read files and
+/// images, search, read the git history (`git_diff` takes a `base..head` range, so a
 /// reviewer reads a worker's branch without a shell; AGE-404), and ask the
 /// leader.
 const READ_SET: &[&str] = &[
@@ -26,6 +26,9 @@ const READ_SET: &[&str] = &[
     "git_status",
     "git_log",
     "git_diff",
+    // Looking at an image (a screenshot, a chart) with its own model's eyes;
+    // the tool exists only for a model that takes images (AGE-1460).
+    "view_image",
     "read_skill",
     // Every profile keeps it: dropping it would cut the input-required chain
     // that parks a worker's question on its leader (AGE-306).
@@ -177,6 +180,7 @@ pub(super) fn narrow_availability(
             &["search_code", "find_files", "find_definition"],
         ),
         add_attachment: keep(tools.add_attachment, &["add_attachment"]),
+        view_image: keep(tools.view_image, &["view_image"]),
         excel_read: keep(tools.excel_read, &["read_excel"]),
         excel_write: keep(tools.excel_write, &["write_excel", "edit_excel"]),
         docx_read: keep(tools.docx_read, &["read_docx"]),
@@ -355,6 +359,7 @@ mod tests {
             git: true,
             search: true,
             add_attachment: true,
+            view_image: true,
             excel_read: true,
             excel_write: true,
             docx_read: true,

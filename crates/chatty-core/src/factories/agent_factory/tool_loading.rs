@@ -95,6 +95,7 @@ const GROUPS: &[GroupSpec] = &[
             "find_definition",
             "doc_retriever",
             "add_attachment",
+            "view_image",
         ],
     },
     GroupSpec {

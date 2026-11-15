@@ -246,6 +246,14 @@ impl ListToolsTool {
             });
         }
 
+        if tools.view_image {
+            native_tools.push(ToolInfo {
+                name: "view_image".to_string(),
+                description: "Look at an image file in the workspace yourself: the image is shown to you in the result. Use it on screenshots, charts and diagrams you or a tool produced, and say what you saw. PNG, JPEG, GIF, WebP; maximum 3 MB.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         if tools.excel_read {
             native_tools.push(ToolInfo {
                 name: "read_excel".to_string(),
@@ -513,6 +521,7 @@ impl Tool for ListToolsTool {
                          - Filesystem tools: read_file, final_answer, write_file, list_directory, optional doc_retriever, etc.\n\
                          - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit, git_merge\n\
                          - add_attachment: Display images or PDFs inline in chat responses\n\
+                         - view_image: Look at an image file yourself (screenshots, charts, diagrams)\n\
                          - PDF tools: pdf_info, pdf_extract_text, pdf_to_image\n\
                          - Data query tools: file_structure_detector, profile_data, query_data, describe_data (workspace/data map and SQL/profile CSV/JSON/Parquet via DuckDB)\n\
                          - MCP tools: External tools from connected servers\n\
@@ -594,6 +603,7 @@ mod tests {
             git: false,
             search: false,
             add_attachment: false,
+            view_image: false,
             excel_read: false,
             excel_write: false,
             docx_read: false,
@@ -631,6 +641,7 @@ mod tests {
             git: true,
             search: true,
             add_attachment: true,
+            view_image: true,
             excel_read: true,
             excel_write: true,
             docx_read: true,
@@ -784,6 +795,7 @@ mod tests {
             "find_files",
             "find_definition",
             "add_attachment",
+            "view_image",
             "read_excel",
             "write_excel",
             "edit_excel",

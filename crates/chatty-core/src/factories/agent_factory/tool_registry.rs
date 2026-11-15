@@ -15,6 +15,8 @@ pub struct ToolAvailability {
     pub git: bool,
     pub search: bool,
     pub add_attachment: bool,
+    /// `view_image`: the agent looks at an image itself (needs a model that takes images).
+    pub view_image: bool,
     pub excel_read: bool,
     pub excel_write: bool,
     pub docx_read: bool,
@@ -124,6 +126,9 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.add_attachment {
         names.insert(String::from("add_attachment"));
+    }
+    if tools.view_image {
+        names.insert(String::from("view_image"));
     }
     if tools.excel_read {
         names.insert(String::from("read_excel"));
@@ -410,6 +415,7 @@ mod tests {
         let cases = [
             ("fetch", "fetch"),
             ("add_attachment", "add_attachment"),
+            ("view_image", "view_image"),
             ("compile_typst", "compile_typst"),
             ("execute_code", "execute_code"),
             ("search_web", "search_web"),
@@ -427,6 +433,7 @@ mod tests {
             match flag {
                 "fetch" => tools.fetch = true,
                 "add_attachment" => tools.add_attachment = true,
+                "view_image" => tools.view_image = true,
                 "compile_typst" => tools.compile_typst = true,
                 "execute_code" => tools.execute_code = true,
                 "search_web" => tools.search_web = true,
@@ -480,6 +487,7 @@ mod tests {
             git: true,
             search: true,
             add_attachment: true,
+            view_image: true,
             excel_read: true,
             excel_write: true,
             docx_read: true,
