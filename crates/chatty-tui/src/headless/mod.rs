@@ -87,12 +87,13 @@ fn text_overflow_recovery_prompt(answer_file_required: bool) -> &'static str {
 }
 /// Sent on the same history after the stall watchdog ended a turn: the
 /// provider went quiet, not the task, so the model picks up where it was.
-/// rig hands back a turn's tool round-trips only when the turn finishes,
-/// so a stalled turn keeps its text but not its tool calls and results;
-/// the prompt says so, or the model trusts results it can no longer see.
-const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. Its tool \
-     calls and their results are not in the history, but files it wrote are still on disk. \
-     Continue the task from where you left off: check the current state before redoing work.";
+/// A stalled turn keeps the tool calls that got their results (AGE-1438);
+/// a call still running when it stalled is not in the history, so the
+/// prompt says to check the current state rather than trust it either way.
+const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. The tool \
+     calls that finished and their results are in the history above; a call still running when \
+     it stalled is not, and files it wrote are still on disk. Continue the task from where you \
+     left off: check the current state before redoing work.";
 /// Sent on the same history after a provider error (a dropped connection,
 /// an HTTP error status, a malformed tool call) ended a turn the model had
 /// already said something in. The failed run's tool round-trips were
@@ -684,9 +685,11 @@ pub async fn run_headless(
                     }
                     tokio::time::sleep(delay).await;
                     if let Some(message) = engine.take_rolled_back_message() {
-                        // The turn failed before the model said anything, so
-                        // it was rolled back with its prompt: send that
-                        // same message again.
+                        // The turn failed before the model said anything
+                        // and was rolled back with its prompt: send that
+                        // same message again. A stall or a connection
+                        // failure keeps its turn instead (AGE-1438), and is
+                        // resumed by the prompts below.
                         engine.send_recovery_prompt(message);
                     } else if error.kind == StreamErrorKind::Stalled {
                         engine.send_recovery_prompt(format!(

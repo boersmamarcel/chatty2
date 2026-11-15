@@ -996,6 +996,7 @@ impl HeadlessRunner {
             }
             AppEvent::StreamError(error) => {
                 self.transcript.mark_error(&error.to_string());
+                self.session.note_turn_error(&error);
                 self.finish_turn();
                 self.usage.checkpoint();
                 self.drain_mailbox(TurnEnd::Error);
