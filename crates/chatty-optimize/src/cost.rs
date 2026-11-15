@@ -1,7 +1,7 @@
 //! Cost model sheet scaffolding (AGE-25).
 //!
 //! Unit prices **must** come from `ModelConfig.cost_per_million_*` — never hand-entered.
-//! Pilot token measurement via `rig-tap` waits on AGE-5 / the AGE-22 walking skeleton.
+//! Pilot token measurement waits on AGE-5 / the AGE-22 walking skeleton (trace capture is not wired yet).
 
 use serde::{Deserialize, Serialize};
 
