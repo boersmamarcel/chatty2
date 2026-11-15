@@ -155,6 +155,7 @@ mod map_tool_error_tests {
 }
 
 pub mod add_attachment_tool;
+pub mod view_image_tool;
 pub mod agent_todo_tool;
 pub mod ask_user_tool;
 pub mod best_of_tool;
@@ -214,6 +215,7 @@ pub mod typst_tool;
 pub mod worker_progress;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
+pub use view_image_tool::ViewImageTool;
 pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
 pub use ask_user_tool::AskUserTool;
 pub use browser_use_tool::BrowserUseTool;

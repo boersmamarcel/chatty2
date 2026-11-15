@@ -102,6 +102,12 @@ pub(super) fn build_preamble(
     if tools.add_attachment {
         tool_sections.push("- **add_attachment** (display image or PDF inline)".to_string());
     }
+    if tools.view_image {
+        tool_sections.push(
+            "- **view_image** (look at a screenshot, chart or diagram yourself; say what you see)"
+                .to_string(),
+        );
+    }
     // Chart tool is always available (no filesystem/service dependencies)
     if allows("create_chart") {
         tool_sections
