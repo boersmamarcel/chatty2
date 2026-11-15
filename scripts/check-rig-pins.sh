@@ -17,8 +17,6 @@ check_pin() {
 
 check_pin rig-core
 check_pin rig-agent
-check_pin rig-mcp
-check_pin rig-tap
 
 if [ "$fail" -eq 0 ]; then
   echo "rig-pin check: OK"

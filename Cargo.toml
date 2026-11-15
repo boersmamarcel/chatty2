@@ -35,9 +35,6 @@ rig-agent = { version = "=0.46.0", features = ["derive"] }
 # rig 0.46 ships no HTTP transport in rig-core; chatty's reqwest client reaches
 # the providers through rig-reqwest's `ReqwestClient` (AGE-1151).
 rig-reqwest = "=0.46.0"
-rig-mcp = "=0.2.5"
-# Trace capture for AGE-5 / walking skeleton — pinned now, wired later.
-rig-tap = "=0.3.0"
 # chatty's MCP client and its rig tool adapter (chatty-core tools/mcp_tool_adapter.rs).
 # rig-agent's own `rmcp` feature is off: it requires rmcp ^2, and rmcp < 3.9
 # carries RUSTSEC-2026-0457 (OAuth SSRF) and RUSTSEC-2026-0462 (unbounded
