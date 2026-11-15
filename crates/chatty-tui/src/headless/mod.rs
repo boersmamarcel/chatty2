@@ -26,6 +26,7 @@
 use anyhow::Result;
 use chatty_core::services::agent_loop_guard::{PROGRESS_WINDOW_TOOL_CALLS, ProgressCheck};
 use chatty_core::services::budget_stop::find_budget_exhausted;
+use chatty_core::services::handoff::HandoffStep;
 use chatty_core::services::resume_brief::SessionOutcome;
 use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
@@ -284,8 +285,9 @@ pub async fn run_headless(
     // a turn the model itself ended is read by `announces_untaken_step`.
     let mut last_call_text = String::new();
     let mut announced_step_nudges = 0usize;
-    // A worker's handoff is sent back once when it fails its schema (TD-2).
-    let mut handoff_sent_back = false;
+    // A worker's handoff is sent back once when it fails its schema (TD-2,
+    // AGE-1437: chatty-core's finisher decides).
+    let mut handoff = engine.handoff_finisher();
     // A delegation came back with a spent budget (AGE-903): the turn ends
     // on its own with the final message, and nothing follows it — no
     // finalization pass, nudge or follow-up is sent, each being a paid call.
@@ -801,10 +803,9 @@ pub async fn run_headless(
                 // last model call's text does not match it (TD-2,
                 // AGE-693). A second miss fails the task, which the frame
                 // mapper decides from the same text.
-                if !handoff_sent_back
-                    && let Some(prompt) = engine.handoff_follow_up(&final_call_text)
+                if let Some(finisher) = handoff.as_mut()
+                    && let HandoffStep::SendBack(prompt) = finisher.step(&final_call_text)
                 {
-                    handoff_sent_back = true;
                     eprintln!("The handoff does not match its schema; sending it back once.");
                     engine.send_handoff_follow_up(prompt);
                     continue;
