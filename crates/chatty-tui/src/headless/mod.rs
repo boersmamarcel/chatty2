@@ -25,15 +25,13 @@
 
 use anyhow::Result;
 use chatty_core::services::agent_loop_guard::{PROGRESS_WINDOW_TOOL_CALLS, ProgressCheck};
-use chatty_core::services::budget_stop::find_budget_exhausted;
+use chatty_core::services::budget_stop::{can_budget_stop, find_budget_exhausted};
 use chatty_core::services::resume_brief::SessionOutcome;
 use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
     is_agent_todo_tool,
 };
-use chatty_core::tools::invoke_agent_tool::InvokeAgentTool;
 use chatty_fabric::deadline_grace;
-use rig_agent::tool::Tool;
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -530,7 +528,7 @@ pub async fn run_headless(
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
-                    if budget_stop.is_some() && tc.name == InvokeAgentTool::NAME {
+                    if tool_error_is_budget_stop(&tc.name, budget_stop.as_deref()) {
                         // The run's own hook ends the turn with its final
                         // message; nothing here may stop it for another pass.
                         budget_stopped = true;
@@ -1169,6 +1167,13 @@ use announced_step::{ANNOUNCED_STEP_NUDGE, MAX_ANNOUNCED_STEP_NUDGES, announces_
 use answer_file::*;
 use recovery::*;
 use tool_format::*;
+
+/// Whether a failed `tool` call whose error carries `budget_stop` (the
+/// typed headline, if any) ends the run: only `invoke_agent`, `search_web`
+/// and `fetch` can carry one (AGE-1439).
+fn tool_error_is_budget_stop(tool: &str, budget_stop: Option<&str>) -> bool {
+    budget_stop.is_some() && can_budget_stop(tool)
+}
 
 #[cfg(test)]
 mod tests;

@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
-use rig_agent::tool::Tool;
 use rig_core::completion::Message;
 use rig_core::message::{
     AssistantContent, CallId, ProviderCallId, Text, ToolCall, ToolFunction, ToolName,
@@ -23,14 +22,14 @@ use rig_core::message::{
 };
 
 use crate::models::token_usage::{ApiCallUsage, TokenUsage};
-use crate::services::budget_stop::find_budget_exhausted;
+use crate::services::budget_stop::{can_budget_stop, find_budget_exhausted};
 use crate::services::llm_service::{StreamChunk, is_cut_off_without_answer};
 use crate::services::{
     AgentLoopGuard, AgentTaskController, ChunkAction, HeartbeatThrottle, RecoveryAction,
     StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
     heartbeat_interval,
 };
-use crate::tools::invoke_agent_tool::{InvokeAgentProgress, InvokeAgentTool};
+use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
 use super::SessionEvent;
 
@@ -559,8 +558,10 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
                 self.on_tool_completed(&id);
             }
             StreamChunk::ToolCallError { id, error } => {
-                if self.pending_tool_names.get(&id).map(String::as_str)
-                    == Some(InvokeAgentTool::NAME)
+                if self
+                    .pending_tool_names
+                    .get(&id)
+                    .is_some_and(|name| can_budget_stop(name))
                     && find_budget_exhausted(&error).is_some()
                 {
                     self.budget_stopped = true;
@@ -740,6 +741,41 @@ mod tests {
             id: id.to_string(),
             result: "ok".to_string(),
         }
+    }
+
+    /// AGE-1439: a `search_web` error that is a typed budget stop ends the
+    /// turn like an `invoke_agent` one; another tool's, or another
+    /// `search_web` error, does not.
+    #[test]
+    fn a_search_web_budget_error_marks_the_turn_budget_stopped() {
+        let stopped = |name: &str, error: &str| {
+            let mut handler = SessionStreamHandler::new(
+                |_| {},
+                AgentTaskController::new(),
+                Arc::new(AtomicBool::new(false)),
+                test_policy(),
+            );
+            handler.on_chunk(Ok(started("c1", name))).unwrap();
+            handler
+                .on_chunk(Ok(StreamChunk::ToolCallError {
+                    id: "c1".into(),
+                    error: error.into(),
+                }))
+                .unwrap();
+            handler.budget_stopped
+        };
+        let typed =
+            "Error: search_web: budget_exhausted: Budget spent; the endpoint refused the call";
+        assert!(stopped("search_web", typed));
+        assert!(stopped("fetch", &typed.replace("search_web", "fetch")));
+        assert!(!stopped(
+            "read_file",
+            &typed.replace("search_web", "read_file")
+        ));
+        assert!(!stopped(
+            "search_web",
+            "Error: search_web: Tavily API returned 402 Payment Required: {}"
+        ));
     }
 
     /// AGE-932: a model busy thinking or writing a tool call's arguments

@@ -2643,3 +2643,15 @@ fn the_text_overflow_nudge_names_final_answer_only_where_it_exists() {
     assert!(!worker.contains("final_answer"), "{worker}");
     assert!(worker.contains("no tool call is needed"), "{worker}");
 }
+
+/// AGE-1439: a typed budget stop ends the run from `invoke_agent`,
+/// `search_web` and `fetch` errors only.
+#[test]
+fn a_budget_stop_from_search_web_or_fetch_ends_the_run() {
+    let headline = Some("Budget spent");
+    for tool in ["invoke_agent", "search_web", "fetch"] {
+        assert!(tool_error_is_budget_stop(tool, headline), "{tool}");
+    }
+    assert!(!tool_error_is_budget_stop("read_file", headline));
+    assert!(!tool_error_is_budget_stop("search_web", None));
+}
