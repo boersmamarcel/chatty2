@@ -656,7 +656,7 @@ impl TaskMapper {
                     // task fails with it, whatever the run then says
                     // (AGE-903).
                     if self.budget_failure.is_none()
-                        && self.trace[index].name == "invoke_agent"
+                        && budget_stop::can_budget_stop(&self.trace[index].name)
                         && let Some(headline) = budget_stop::find_budget_exhausted(error)
                     {
                         self.budget_failure = Some(budget_stop::budget_exhausted(&headline));
@@ -1841,6 +1841,38 @@ mod tests {
         assert!(trace.contains("### write_file (ok)"), "{trace}");
         assert!(trace.contains(r#"input: {"path":"out.txt"}"#), "{trace}");
         assert!(trace.contains("output: wrote 2 bytes"), "{trace}");
+    }
+
+    /// AGE-1439: a `search_web` or `fetch` call refused on a spent budget
+    /// fails the task with the typed text, as an `invoke_agent` stop does;
+    /// another tool's error, or a plain `search_web` error, does not.
+    #[test]
+    fn a_tool_budget_refusal_fails_the_task_with_the_typed_text() {
+        let terminal = |name: &str, error: &str| {
+            let mut mapper = TaskMapper::new("task-1");
+            mapper.map(&tool_started("c1", name));
+            mapper.map(&SessionEvent::ToolCallError {
+                id: "c1".into(),
+                error: error.into(),
+            });
+            status_of(&mapper.terminal())
+        };
+        let typed =
+            "budget_exhausted: Budget spent; the endpoint refused the call (budget_exceeded)";
+        for name in ["search_web", "fetch", "invoke_agent"] {
+            assert_eq!(
+                terminal(name, &format!("Error: {name}: {typed}")),
+                (TaskState::Failed, Some(typed.to_string())),
+                "{name}"
+            );
+        }
+        let (state, _) = terminal("read_file", &format!("Error: read_file: {typed}"));
+        assert_ne!(state, TaskState::Failed);
+        let (state, _) = terminal(
+            "search_web",
+            "Error: search_web: Tavily API returned 402: {}",
+        );
+        assert_ne!(state, TaskState::Failed);
     }
 
     #[test]
