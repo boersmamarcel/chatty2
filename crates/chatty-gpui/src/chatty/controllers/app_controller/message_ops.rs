@@ -892,10 +892,12 @@ impl ChattyApp {
                         if conversation_id != "__pending__" =>
                     {
                         // Pending streams have no conversation yet — only UI
-                        // reset (done above). An errored turn is committed or
-                        // rolled back under the same rule as a stopped one, so
-                        // the session's turn is closed and no user message is
-                        // left dangling.
+                        // reset (done above). An errored turn is finalized
+                        // like a stopped one, so the session's turn is closed:
+                        // a stall or a connection failure keeps the turn with
+                        // a fixed note as its reply (AGE-1438), any other
+                        // error rolls an empty turn back as before, so no
+                        // user message is left dangling either way.
                         self.finalize_stopped_stream(
                             conversation_id,
                             status,
@@ -1354,18 +1356,20 @@ impl ChattyApp {
 
         // Finish the turn on the session under the one shared empty-turn
         // rule (AGE-243 / D4) — an empty assistant message would cause LLM
-        // API errors (400 Bad Request) on the next request. The session
-        // prices the usage at the barrier (AGE-351).
-        let (assistant_history_index, rolled_back_text) =
+        // API errors (400 Bad Request) on the next request — except that a
+        // stall or a connection failure keeps its turn, with a fixed note as
+        // the reply when it had no text (AGE-1438). The session prices the
+        // usage at the barrier (AGE-351).
+        let (assistant_history_index, rolled_back_text, kept_note) =
             cx.update_global::<ConversationsStore, _>(|store, _cx| {
                 let Some(session) = store.get_session_mut(&conv_id) else {
-                    return (None, None);
+                    return (None, None, None);
                 };
                 if let Some(usage) = token_usage {
                     session.record_turn_usage(usage);
                 }
                 match session.finish_turn(trace_json, Vec::new()) {
-                    None => (None, None),
+                    None => (None, None, None),
                     Some(TurnOutcome::DroppedAndRolledBack(text)) => {
                         // No content was received before the turn ended. The
                         // user message that triggered this stream was rolled
@@ -1377,7 +1381,7 @@ impl ChattyApp {
                             conv_id = %conv_id,
                             "Stream ended with no content — skipped empty assistant message"
                         );
-                        (None, Some(text))
+                        (None, Some(text), None)
                     }
                     Some(TurnOutcome::Persisted) => {
                         let idx = session
@@ -1385,8 +1389,13 @@ impl ChattyApp {
                             .map(|conv| conv.message_count())
                             .unwrap_or(0)
                             .saturating_sub(1);
+                        // A kept failed turn's reply is a fixed note the
+                        // stream never carried; the view has to be told.
+                        let kept_note = session
+                            .conversation()
+                            .and_then(|conv| conv.kept_failed_turn_note());
                         debug!(conv_id = %conv_id, "Partial response saved to conversation after stop");
-                        (Some(idx), None)
+                        (Some(idx), None, kept_note)
                     }
                 }
             });
@@ -1398,6 +1407,14 @@ impl ChattyApp {
                 view.chat_input_state().update(cx, |input, _cx| {
                     input.restore_draft_text(text);
                 });
+            });
+        }
+
+        if let Some(note) = kept_note {
+            chat_view.update(cx, |view, cx| {
+                if view.conversation_id().map(|s| s.as_str()) == Some(conv_id.as_str()) {
+                    view.show_kept_failed_turn_note(&note, cx);
+                }
             });
         }
 

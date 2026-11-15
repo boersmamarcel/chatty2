@@ -474,6 +474,57 @@ impl Conversation {
         outcome
     }
 
+    /// [`finalize_turn`](Self::finalize_turn) for a turn a stall or a
+    /// connection failure ended (AGE-1438; see
+    /// [`kept_failed_turn_note`](crate::services::kept_failed_turn_note)).
+    /// Its round-trips are persisted as on any turn, and so is the user
+    /// message of a turn that produced nothing, so a "continue" has the task
+    /// and the work in context. A turn with no text of its own gets `note`
+    /// as its reply, so the history still alternates and never ends on an
+    /// empty assistant text, which some providers reject. `note` is a fixed
+    /// sentence, never the error's own text: that can carry a provider's
+    /// raw body or a request URL, and the history is saved, shown and sent
+    /// back to the provider. Always `Persisted`, except when there is
+    /// nothing at all to keep.
+    pub fn finalize_failed_turn(
+        &mut self,
+        text: String,
+        artifacts: Vec<PathBuf>,
+        trace: Option<serde_json::Value>,
+        note: &str,
+    ) -> TurnOutcome {
+        let outcome = finalize_failed_turn_state(
+            &mut self.entries,
+            self.streaming_turn_messages.take(),
+            text,
+            artifacts,
+            trace,
+            note,
+        );
+        self.updated_at = SystemTime::now();
+        outcome
+    }
+
+    /// The last entry's text when it is the fixed note a kept failed turn was
+    /// persisted with (AGE-1438), for a frontend whose live view has to
+    /// show it: the stream never carried it.
+    pub fn kept_failed_turn_note(&self) -> Option<String> {
+        let entry = self.entries.last()?;
+        let Message::Assistant(rig_core::message::AssistantMessage { content, .. }) =
+            &entry.message
+        else {
+            return None;
+        };
+        let text: String = content
+            .iter()
+            .filter_map(|c| match c {
+                AssistantContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        crate::services::is_kept_failed_turn_note(&text).then_some(text)
+    }
+
     /// Keep rig's record of the turn in flight until the turn is finalized.
     pub fn set_streaming_turn_messages(&mut self, messages: Option<Vec<Message>>) {
         self.streaming_turn_messages = messages;
@@ -1284,6 +1335,32 @@ fn finalize_turn_state(
         entries.pop();
     }
     TurnOutcome::DroppedAndRolledBack(rolled_back_text)
+}
+
+/// The logic behind `Conversation::finalize_failed_turn`: a failed turn
+/// with no text is persisted with `note` as its text,
+/// whenever there is something to keep — its round-trips, its trace, or the
+/// user message that started it. The rest is `finalize_turn_state`'s.
+fn finalize_failed_turn_state(
+    entries: &mut Vec<MessageEntry>,
+    turn_messages: Option<Vec<Message>>,
+    text: String,
+    artifacts: Vec<PathBuf>,
+    trace: Option<serde_json::Value>,
+    note: &str,
+) -> TurnOutcome {
+    let something_to_keep = trace.is_some()
+        || turn_messages.is_some()
+        || matches!(
+            entries.last().map(|e| &e.message),
+            Some(Message::User { .. })
+        );
+    let text = if text.trim().is_empty() && something_to_keep {
+        note.to_string()
+    } else {
+        text
+    };
+    finalize_turn_state(entries, turn_messages, text, artifacts, trace)
 }
 
 /// The plain-text parts of a user message, joined with blank lines between

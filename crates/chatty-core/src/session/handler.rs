@@ -27,7 +27,7 @@ use crate::services::llm_service::{StreamChunk, is_cut_off_without_answer};
 use crate::services::{
     AgentLoopGuard, AgentTaskController, ChunkAction, HeartbeatThrottle, RecoveryAction,
     StreamChunkHandler, StreamError, StreamErrorKind, StreamSurface, decide_recovery,
-    heartbeat_interval,
+    heartbeat_interval, kept_failed_turn_note,
 };
 use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 
@@ -478,6 +478,24 @@ impl<F: FnMut(SessionEvent)> SessionStreamHandler<F> {
             RecoveryAction::Stop => {}
         }
     }
+
+    /// The turn's round-trips as they streamed by, as its `TurnMessages`,
+    /// when rig handed back no record of its own: a cancelled turn
+    /// (AGE-864), or one a stall or a connection failure ended (AGE-1438) —
+    /// the stall watchdog drops the stream, and a provider error carries
+    /// the run's messages only when its last request was recorded
+    /// (`failed_run_messages`). A tool call whose result
+    /// never arrived is left out, its call with it, so the history the next
+    /// request is built from answers every call it holds.
+    fn emit_seen_round_trips(&mut self) {
+        let seen = std::mem::take(&mut self.seen);
+        if !self.turn_messages_seen
+            && let Some(messages) = seen.finish()
+        {
+            self.turn_messages_seen = true;
+            (self.emit)(SessionEvent::TurnMessages(messages));
+        }
+    }
 }
 
 impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
@@ -659,6 +677,11 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
             }
             StreamChunk::Error(error) => {
                 self.on_stream_error(&error);
+                // A stall or a connection failure keeps the round-trips the
+                // turn completed (AGE-1438); other errors roll back as before.
+                if kept_failed_turn_note(error.kind).is_some() {
+                    self.emit_seen_round_trips();
+                }
                 // Every terminal error sends what the turn's calls spent so
                 // far, a budget stop included (AGE-903).
                 self.emit_calls_usage();
@@ -681,12 +704,7 @@ impl<F: FnMut(SessionEvent)> StreamChunkHandler for SessionStreamHandler<F> {
     /// is persisted all the same, from what streamed by (AGE-864), ahead of
     /// the `Cancelled` that makes the owner finish the turn.
     fn on_cancelled(&mut self) {
-        let seen = std::mem::take(&mut self.seen);
-        if !self.turn_messages_seen
-            && let Some(messages) = seen.finish()
-        {
-            (self.emit)(SessionEvent::TurnMessages(messages));
-        }
+        self.emit_seen_round_trips();
         self.emit_calls_usage();
         (self.emit)(SessionEvent::Cancelled);
     }
@@ -1108,6 +1126,80 @@ mod tests {
             .filter(|e| matches!(e, SessionEvent::TurnMessages(_)))
             .count();
         assert_eq!(records, 1);
+    }
+
+    /// A stream error after rig's record of the turn (a provider error's
+    /// `failed_run_messages`): rig's record wins, nothing is rebuilt and
+    /// nothing is sent twice (AGE-1438).
+    #[test]
+    fn rigs_record_wins_over_the_rebuilt_one_on_an_error() {
+        let mut events = Vec::new();
+        let mut handler = SessionStreamHandler::new(
+            |event| events.push(event),
+            AgentTaskController::new(),
+            Arc::new(AtomicBool::new(false)),
+            test_policy(),
+        );
+        handler.on_chunk(Ok(started("a", "read_file"))).unwrap();
+        handler.on_chunk(Ok(result("a"))).unwrap();
+        let rig = vec![Message::assistant("rig")];
+        handler
+            .on_chunk(Ok(StreamChunk::TurnMessages(rig.clone())))
+            .unwrap();
+        handler
+            .on_chunk(Ok(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::Transport,
+                "error sending request",
+            ))))
+            .unwrap();
+        handler.on_stream_ended();
+        drop(handler);
+        let records: Vec<&Vec<Message>> = events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::TurnMessages(messages) => Some(messages),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(records, [&rig], "{events:?}");
+    }
+
+    /// Without rig's record, a stall or a connection failure sends the
+    /// round-trips the turn completed, ahead of its `Error`; any other
+    /// error sends none, and the turn rolls back as before (AGE-1438).
+    #[test]
+    fn only_a_kept_error_sends_the_rebuilt_record() {
+        for (kind, kept) in [
+            (StreamErrorKind::Stalled, true),
+            (StreamErrorKind::Transport, true),
+            (StreamErrorKind::Auth, false),
+            (StreamErrorKind::ProviderStatus(500), false),
+            (StreamErrorKind::Other, false),
+        ] {
+            let mut events = Vec::new();
+            let mut handler = SessionStreamHandler::new(
+                |event| events.push(event),
+                AgentTaskController::new(),
+                Arc::new(AtomicBool::new(false)),
+                test_policy(),
+            );
+            handler.on_chunk(Ok(started("a", "read_file"))).unwrap();
+            handler.on_chunk(Ok(result("a"))).unwrap();
+            handler
+                .on_chunk(Ok(StreamChunk::Error(StreamError::new(kind, "boom"))))
+                .unwrap();
+            handler.on_stream_ended();
+            drop(handler);
+            let record_at = events
+                .iter()
+                .position(|e| matches!(e, SessionEvent::TurnMessages(_)));
+            let error_at = events
+                .iter()
+                .position(|e| matches!(e, SessionEvent::Error(_)))
+                .unwrap();
+            assert_eq!(record_at.is_some(), kept, "{kind:?}: {events:?}");
+            assert!(record_at.is_none_or(|at| at < error_at), "{events:?}");
+        }
     }
 
     /// AGE-485: three parallel tool calls, the first two identical (name and
