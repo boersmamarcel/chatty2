@@ -295,7 +295,7 @@ async fn final_message_without_model_call_when_refused() {
     );
     assert!(
         error.contains(
-            "What 'kit-lead' finished:\nBudget of $10.00 spent; the model endpoint refused the \
+            "What 'kit-lead' finished:\nBudget of $10.00 spent; the endpoint refused the \
              call (cap_exceeded). Here is what was finished:\n\n**kit-worker**\n\
              The README's title is Chatty."
         ),

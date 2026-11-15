@@ -1,3 +1,4 @@
+use crate::services::budget_stop::endpoint_refusal;
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
@@ -467,6 +468,10 @@ impl FetchTool {
             .map_err(|e| ToolError::OperationFailed(format!("Extract request failed: {e}")))?;
         let status = response.status();
         if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            if let Some(refusal) = endpoint_refusal(status.as_u16(), &body) {
+                return Err(ToolError::OperationFailed(refusal));
+            }
             return Err(ToolError::OperationFailed(format!(
                 "The managed extract service returned {}",
                 status.as_u16()

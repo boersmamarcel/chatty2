@@ -1,3 +1,4 @@
+use crate::services::budget_stop::endpoint_refusal;
 use base64::Engine as _;
 #[cfg(test)]
 use rig_agent::tool::tool_definition;
@@ -453,6 +454,9 @@ impl SearchWebTool {
         let response = self.send("Tavily", builder).await?;
 
         if !is_success(response.status) {
+            if let Some(refusal) = endpoint_refusal(response.status, &response.body) {
+                return Err(ToolError::OperationFailed(refusal));
+            }
             return Err(ToolError::OperationFailed(format!(
                 "Tavily API returned {}: {}",
                 status_text(response.status),
@@ -495,6 +499,9 @@ impl SearchWebTool {
         let response = self.send("Brave", builder).await?;
 
         if !is_success(response.status) {
+            if let Some(refusal) = endpoint_refusal(response.status, &response.body) {
+                return Err(ToolError::OperationFailed(refusal));
+            }
             return Err(ToolError::OperationFailed(format!(
                 "Brave Search API returned {}: {}",
                 status_text(response.status),
@@ -1509,6 +1516,14 @@ mod tests {
     async fn capturing_server(
         body: &'static str,
     ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        capturing_server_with_status("200 OK", body).await
+    }
+
+    /// [`capturing_server`] answering with `status` (`"402 Payment Required"`).
+    async fn capturing_server_with_status(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1519,7 +1534,7 @@ mod tests {
             let n = socket.read(&mut buf).await.unwrap();
             let _ = tx.send(String::from_utf8_lossy(&buf[..n]).to_string());
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
@@ -1651,6 +1666,43 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.results[0].source, "tavily");
+    }
+
+    /// The typed stop text of a managed `402` is the one a model endpoint's
+    /// refusal gets, and a non-budget `402` stays the plain tool error
+    /// (AGE-1439).
+    #[tokio::test]
+    async fn a_managed_402_budget_or_credit_refusal_is_the_typed_stop() {
+        use crate::services::budget_stop::find_budget_exhausted;
+        for body in [
+            r#"{"error":{"code":"budget_exceeded","message":"spent"},"budget_usd":2.5}"#,
+            r#"{"error":"credit_required"}"#,
+            r#"{"error":"cap_exceeded","cap_usd":10.0}"#,
+        ] {
+            let (base, _rx) = capturing_server_with_status("402 Payment Required", body).await;
+            let tool =
+                SearchWebTool::new(SearchProvider::Tavily, "t".into(), 5).with_endpoint(base);
+            let err = tool
+                .search_tavily("q", 5, "t")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.starts_with("budget_exhausted: "), "{body}: {err}");
+            let wrapped = format!("Error: search_web: {err}");
+            assert!(find_budget_exhausted(&wrapped).is_some(), "{wrapped}");
+        }
+        let (base, _rx) =
+            capturing_server_with_status("402 Payment Required", r#"{"error":"other"}"#).await;
+        let tool = SearchWebTool::new(SearchProvider::Tavily, "t".into(), 5).with_endpoint(base);
+        let err = tool
+            .search_tavily("q", 5, "t")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("Tavily API returned 402 Payment Required: "),
+            "{err}"
+        );
     }
 
     #[tokio::test]
