@@ -102,6 +102,11 @@ const MEMORY: &[&str] = &["remember", "save_skill", "search_memory"];
 /// a group back on.
 const WEB: &[&str] = &["search_web", "fetch"];
 
+/// Showing an image file to the user (AGE-1502): a hosted worker's image
+/// rides back to its caller's chat. Offered only where the host builds the
+/// tool (it needs a place to queue the file).
+const ATTACH: &[&str] = &["add_attachment"];
+
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
 /// shares one guest image with `math-render` compiled in, so the profile is
 /// what keeps the compiler away from the roles that have no use for it.
@@ -240,7 +245,8 @@ pub static COORDINATOR: ToolProfile = ToolProfile {
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
     groups: &[
-        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, CALCULATE, MEMORY, MESSAGES,
+        READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, CALCULATE, MEMORY, ATTACH,
+        MESSAGES,
     ],
 };
 
@@ -474,6 +480,11 @@ mod tests {
         assert!(CODER.allows("git_commit"));
         assert!(CODER.allows("git_merge"));
         assert!(CODER.allows("execute_code"));
+        assert!(
+            CODER.allows("add_attachment"),
+            "a coder shows its screenshot to the user (AGE-1502)"
+        );
+        assert!(CODER.narrow(&everything()).add_attachment);
 
         assert!(REVIEWER.allows("shell_execute"), "it runs the tests");
         assert!(REVIEWER.allows("git_diff"));
