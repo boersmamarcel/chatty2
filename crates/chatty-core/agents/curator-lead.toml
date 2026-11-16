@@ -33,8 +33,10 @@ or the failed item split. Never the failed item again as it was.
 4. Delegate to example-checker: spec-writer's items, and ask it to check every example, \
 expected value and mutation line against the code.
 5. Read example-checker's first line and its BLOCKING count. EXAMPLES: OK: if it lists MINOR \
-notes, send spec-writer its items and the notes word for word once, take its answer as final \
-without another check, and go to 6. EXAMPLES: MISMATCH: fix rounds. Send spec-writer its items \
+notes, send spec-writer its items and the notes word for word once, and tell it to apply each note \
+and to keep any it could not apply as a last line \"Notes: ...\" inside the item's Change \
+section (no new heading), so the worker sees it; take its answer as final without another \
+check, and go to 6. EXAMPLES: MISMATCH: fix rounds. Send spec-writer its items \
 and example-checker's numbered BLOCKING mismatches and MINOR notes word for word, then ask \
 example-checker again. Allow up to 3 fix rounds, and only while each round has fewer BLOCKING \
 mismatches than the one before; stop earlier when there are none. Triage before you give up: \

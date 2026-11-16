@@ -2118,6 +2118,7 @@ cap_usd = 2.0
             "Allow up to 3 fix rounds",
             "fewer BLOCKING mismatches than the one before",
             "never escalate over line numbers, wording or paths alone",
+            "inside the item's Change section (no new heading)",
             "one search of your own",
             "NOTHING FOUND, reply REJECT",
             "already checked out at /workspace",
