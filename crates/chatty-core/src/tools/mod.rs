@@ -155,7 +155,6 @@ mod map_tool_error_tests {
 }
 
 pub mod add_attachment_tool;
-pub mod view_image_tool;
 pub mod agent_todo_tool;
 pub mod ask_user_tool;
 pub mod best_of_tool;
@@ -212,10 +211,10 @@ pub mod terminal_run_tool;
 pub mod test_helpers;
 #[cfg(feature = "math-render")]
 pub mod typst_tool;
+pub mod view_image_tool;
 pub mod worker_progress;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
-pub use view_image_tool::ViewImageTool;
 pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
 pub use ask_user_tool::AskUserTool;
 pub use browser_use_tool::BrowserUseTool;
@@ -269,6 +268,7 @@ pub use terminal_read_tool::TerminalReadTool;
 pub use terminal_run_tool::TerminalRunTool;
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
+pub use view_image_tool::ViewImageTool;
 pub use worker_progress::{progress_text_for_event, worker_executable};
 
 /// Guard tests: no node of a built-in tool's parameter schema leaves Gemini
