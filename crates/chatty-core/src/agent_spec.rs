@@ -1906,6 +1906,103 @@ cap_usd = 2.0
         }
     }
 
+    /// AGE-1523: a worker step is a cargo build in a VM, so the coding team
+    /// iterates with the fast checks (`cargo check -p`, the changed tests in
+    /// their own target) and runs the final ones (clippy --all-targets, the
+    /// suite) once, in the tester. The curation team writes the item's Check
+    /// commands as an Iterate and a Final list for that. No preset tells a
+    /// worker to run a bare `cargo test <name>`, which builds and links every
+    /// test binary of the workspace for one test.
+    #[test]
+    fn the_coding_team_iterates_with_fast_checks_and_runs_the_final_ones_once() {
+        let preamble = |name: &str| {
+            load_agent_spec_from(name, None, None)
+                .unwrap()
+                .spec
+                .agent
+                .preamble
+                .unwrap()
+        };
+        let expect = |name: &str, phrases: &[&str]| {
+            let text = preamble(name);
+            for phrase in phrases {
+                assert!(text.contains(phrase), "{name}: {phrase:?} in {text}");
+            }
+        };
+        expect(
+            "coder",
+            &[
+                "Iterate check commands",
+                "cargo check -p <crate>",
+                "cargo test -p <crate> --lib <name>",
+                "cargo test -p <crate> --test <file> <name>",
+                "Never a bare cargo test <name>",
+                "clippy --all-targets or the whole test suite while you iterate",
+                "the tester runs the final checks after you",
+                "cargo fmt --all before you commit",
+            ],
+        );
+        expect(
+            "tester",
+            &[
+                "When the task gives check commands, run those",
+                "its Final commands when it splits them into Iterate and Final",
+                "`cargo test -p <crate> --lib <test name>`",
+                "Never a bare `cargo test <test name>`",
+            ],
+        );
+        expect(
+            "code-reviewer",
+            &[
+                "cargo test -p <crate> --lib <name>",
+                "Never a bare cargo test <name>",
+                "do not run clippy or the whole suite again",
+            ],
+        );
+        expect(
+            "coding-lead",
+            &[
+                "Iterate check commands (the fast ones; never its Final ones)",
+                "with the task's Check commands word for word (its Final ones",
+                "run that test in its own test target",
+            ],
+        );
+        expect(
+            "spec-writer",
+            &[
+                "in two lists under this one heading",
+                "A line Iterate:",
+                "cargo check -p <crate>",
+                "A line Final:",
+                "run once at the end",
+                "cargo clippy -p <crate> --all-targets -- -D warnings",
+                "cargo fmt --all --check",
+            ],
+        );
+        expect("scout", &["cargo check -p <crate>", "--test <file>"]);
+        expect("example-checker", &["never a bare cargo test <name>"]);
+        // Every `cargo test <...>` with no package left in these presets is one
+        // they warn against.
+        for name in [
+            "coder",
+            "tester",
+            "code-reviewer",
+            "coding-lead",
+            "scout",
+            "example-checker",
+            "spec-writer",
+        ] {
+            let text = preamble(name);
+            for (at, _) in text.match_indices("cargo test <") {
+                let before = &text[..at];
+                assert!(
+                    before.ends_with("bare ") || before.ends_with("bare `"),
+                    "{name} runs a bare cargo test at {at}: {text}"
+                );
+            }
+        }
+    }
+
     /// AGE-957: the tester runs the repository's own checks — from
     /// `.chatty/checks`, else the README, else a well-known default — with
     /// the shell, changes nothing, and answers `TESTS: PASS` or

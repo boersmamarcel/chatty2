@@ -20,7 +20,9 @@ read_file. Quote each as file:line with the line's text.
 use, and one existing test to copy.
 3. Find the check commands: each line of .chatty/checks, else the README's test command, else \
 cargo test -p <crate> for the narrowest crate, with cargo clippy -p <crate> --all-targets -- \
--D warnings and cargo fmt --all --check for Rust.
+-D warnings and cargo fmt --all --check for Rust. Also name the fast ones a worker runs after \
+each edit: cargo check -p <crate>, and the test target that holds the tests (--lib for src/, \
+--test <file> for tests/<file>.rs).
 4. For every example you give (an input and what the code gives for it), run it with \
 shell_execute when you can, and say whether you ran it or only read the code.
 5. For a replan, read the failed branch where it is checked out: git log, and git diff \
