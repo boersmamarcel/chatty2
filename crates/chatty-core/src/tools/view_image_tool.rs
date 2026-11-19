@@ -148,7 +148,12 @@ mod tests {
         let output = image_output("shots/a.png", PNG, Some("is text cut off?")).unwrap();
         let content = output.as_content();
         assert_eq!(content.len(), 2);
-        assert!(content[0].as_text().unwrap().contains("Looking for: is text cut off?"));
+        assert!(
+            content[0]
+                .as_text()
+                .unwrap()
+                .contains("Looking for: is text cut off?")
+        );
         match &content[1] {
             ToolResultContent::Image(image) => {
                 assert_eq!(image.media_type, Some(ImageMediaType::PNG));
@@ -162,7 +167,9 @@ mod tests {
         assert!(image_output("fake.png", b"not an image at all", None).is_err());
         let jpeg = image_output("a.txt", b"\xff\xd8\xff\xe0jpeg", None).unwrap();
         match &jpeg.as_content()[1] {
-            ToolResultContent::Image(image) => assert_eq!(image.media_type, Some(ImageMediaType::JPEG)),
+            ToolResultContent::Image(image) => {
+                assert_eq!(image.media_type, Some(ImageMediaType::JPEG))
+            }
             other => panic!("expected an image, got {other:?}"),
         }
     }
@@ -170,9 +177,19 @@ mod tests {
     #[test]
     fn the_note_is_optional() {
         let output = image_output("a.png", PNG, None).unwrap();
-        assert!(!output.as_content()[0].as_text().unwrap().contains("Looking for"));
+        assert!(
+            !output.as_content()[0]
+                .as_text()
+                .unwrap()
+                .contains("Looking for")
+        );
         let output = image_output("a.png", PNG, Some("   ")).unwrap();
-        assert!(!output.as_content()[0].as_text().unwrap().contains("Looking for"));
+        assert!(
+            !output.as_content()[0]
+                .as_text()
+                .unwrap()
+                .contains("Looking for")
+        );
     }
 
     #[test]
