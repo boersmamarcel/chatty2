@@ -1307,6 +1307,7 @@ impl ChatEngine {
             AppEvent::StreamError(error) => {
                 error!(error = %error, "Stream error");
                 self.transcript.mark_error(&error.to_string());
+                self.session.note_turn_error(&error);
                 self.finalize_partial_response();
                 self.ended_as = Some(TurnEnd::Error);
                 EngineAction::Redraw

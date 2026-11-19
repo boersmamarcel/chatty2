@@ -72,7 +72,8 @@ impl TurnMapper {
             }
             SessionEvent::ToolCallInput { id, arguments } => {
                 let name = self.names.get(id).cloned().unwrap_or_default();
-                let subject = verb::subject_for(arguments);
+                let subject =
+                    chatty_core::presentation::tool_verb::subject_for(&name, arguments, "");
                 self.subjects.insert(id.clone(), subject.clone());
                 let raw_input = serde_json::from_str::<serde_json::Value>(arguments)
                     .unwrap_or_else(|_| serde_json::Value::String(arguments.clone()));
@@ -157,7 +158,7 @@ pub(super) fn plan_update(snapshot: &AgentTaskSnapshot) -> SessionUpdate {
 /// The terminal's tool-row wording (`Reading README.md`, `Ran cargo test`),
 /// or the tool's own name for a tool that table does not know.
 fn title(name: &str, subject: &str, state: &ToolCallState) -> String {
-    let head = verb::verb_for(name, state).unwrap_or_else(|| name.to_string());
+    let head = verb::known_row_verb(name, state).unwrap_or_else(|| name.to_string());
     if subject.is_empty() {
         head
     } else {

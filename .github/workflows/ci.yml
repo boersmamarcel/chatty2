@@ -36,7 +36,7 @@ jobs:
       rust: ${{ github.event_name == 'merge_group' || steps.filter.outputs.rust == 'true' }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 2
 
@@ -47,7 +47,7 @@ jobs:
 
       - name: Detect compile-relevant changes
         if: github.event_name != 'merge_group'
-        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -112,7 +112,7 @@ jobs:
 
       - name: Checkout repository
         if: needs.changes.outputs.rust == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         if: needs.changes.outputs.rust == 'true'
@@ -223,7 +223,7 @@ jobs:
       # PL-U3.)
       - name: Install Node 22 (MCP Inspector for the gateway conformance suite)
         if: needs.changes.outputs.rust == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -282,7 +282,7 @@ jobs:
 
       - name: Checkout repository
         if: needs.changes.outputs.rust == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         if: needs.changes.outputs.rust == 'true'
@@ -317,7 +317,7 @@ jobs:
       GOLDENS: crates/chatty-tui/src/participant/goldens/pre_fabric
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # HEAD^1 is the base on a PR merge ref, a merge group and a push.
           fetch-depth: 2
@@ -407,7 +407,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -419,7 +419,7 @@ jobs:
 
       - name: Check for an existing release cache
         id: lookup
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             ~/.cargo/registry
@@ -465,7 +465,7 @@ jobs:
       # a half-built target/ can never be saved under this key.
       - name: Save release cache
         if: steps.lookup.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             ~/.cargo/registry

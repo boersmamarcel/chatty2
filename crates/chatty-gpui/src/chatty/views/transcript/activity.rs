@@ -7,60 +7,12 @@ use gpui_component::collapsible::Collapsible as CollapsibleEl;
 use gpui_component::tag::Tag;
 use gpui_component::{ActiveTheme, Icon, IconName, Sizable};
 
+use chatty_core::presentation::tool_verb::count_diff_lines;
+pub use chatty_core::presentation::tool_verb::{ToolKind, classify_tool};
+
 use super::OpenArtifact;
 use super::tool_row::{OpenRun, ToolRow};
 use super::verb::tool_row_label;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolKind {
-    Edit,
-    Explore,
-    Search,
-    External,
-    Command,
-    /// A browser control handoff between the user and the agent (AGE-156):
-    /// not something the agent did, so it must not be counted as one of
-    /// its edits, searches or explorations.
-    Handoff,
-}
-
-pub fn classify_tool(name: &str) -> ToolKind {
-    let n = name.to_ascii_lowercase();
-    if n == "browser_take_control" || n == "browser_release_control" {
-        return ToolKind::Handoff;
-    }
-    if n == "terminal_read" {
-        // A read of the user's terminal, not a file explored or a command run.
-        return ToolKind::External;
-    }
-    if n == "terminal_run" {
-        // A command run in the user's terminal (AGE-584).
-        return ToolKind::Command;
-    }
-    if chatty_core::tools::plugin_tool::plugin_tool_display_name(name).is_some() {
-        // A spec's plugin tool (PL-U2) counts as a tool, whatever its name.
-        return ToolKind::External;
-    }
-    if n.contains("todo") || n == "verify_completion" {
-        // Agent plan tools are Plan blocks, not edits.
-        return ToolKind::Explore;
-    }
-    if n.contains("diff") || n.contains("edit") || n.contains("write") || n.contains("apply") {
-        ToolKind::Edit
-    } else if n.contains("search") || n.contains("grep") || n.contains("glob") {
-        ToolKind::Search
-    } else if n.contains("web") || n.contains("fetch") || n.contains("http") || n.contains("mcp") {
-        ToolKind::External
-    } else if n.contains("bash")
-        || n.contains("shell")
-        || n.contains("exec")
-        || n.contains("command")
-    {
-        ToolKind::Command
-    } else {
-        ToolKind::Explore
-    }
-}
 
 /// Counted sentence: edits → explore → searches → external → commands, then
 /// how many of those calls failed.
@@ -205,22 +157,6 @@ pub fn live_headline(tool: &ToolCallBlock) -> String {
         None,
     )
     .headline()
-}
-
-fn count_diff_lines(output: &str) -> (usize, usize) {
-    let mut added = 0;
-    let mut removed = 0;
-    for line in output.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
-    }
-    (added, removed)
 }
 
 type ActivityToggle = Rc<dyn Fn(&mut App)>;
@@ -414,7 +350,7 @@ impl RenderOnce for ActivityGroup {
 mod tests {
     // Not `super::*`: that would drag in `gpui::test`, which shadows the
     // built-in `#[test]` attribute.
-    use super::{RunTally, ToolKind, classify_tool, live_headline, phase_label};
+    use super::{RunTally, classify_tool, live_headline, phase_label};
     use chatty_core::models::message_types::{ToolCallBlock, ToolCallState, ToolSource};
 
     #[test]
@@ -444,8 +380,6 @@ mod tests {
         assert_eq!(phase_label(classify_tool("search_code")), "Searching");
         assert_eq!(phase_label(classify_tool("apply_diff")), "Editing");
         assert_eq!(phase_label(classify_tool("shell_execute")), "Running");
-        assert_eq!(classify_tool("terminal_read"), ToolKind::External);
-        assert_eq!(classify_tool("terminal_run"), ToolKind::Command);
     }
 
     #[test]
@@ -484,14 +418,6 @@ mod tests {
             clean.phrase_spans(),
             vec![(Some("explored"), " 1 file".to_string())]
         );
-    }
-
-    #[test]
-    fn browser_handoffs_are_their_own_kind() {
-        assert_eq!(classify_tool("browser_take_control"), ToolKind::Handoff);
-        assert_eq!(classify_tool("browser_release_control"), ToolKind::Handoff);
-        // The real browser tools are unaffected.
-        assert_eq!(classify_tool("browser_navigate"), ToolKind::Explore);
     }
 
     #[test]

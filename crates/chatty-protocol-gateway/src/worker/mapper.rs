@@ -155,8 +155,10 @@
 //! the role and errors under [`HANDOFF_INVALID_METADATA_KEY`]. The one
 //! re-prompt the worker gets in between is its runner's (it reaches the
 //! mapper as a `FollowUp`, which is how the invalid answers are counted
-//! under [`HANDOFF_INVALID_COUNT_METADATA_KEY`]). A task without a schema
-//! keeps none of this, so its frames are the bytes they always were.
+//! under [`HANDOFF_INVALID_COUNT_METADATA_KEY`]). The check, the count and
+//! the keys are chatty-core's [`HandoffFinisher`], which the mapper only
+//! observes with (AGE-1437). A task without a schema keeps none of this, so
+//! its frames are the bytes they always were.
 
 use crate::participant::{ParticipantFrame, TaskState};
 use base64::Engine as _;
@@ -168,14 +170,14 @@ use chatty_core::models::token_usage::TokenUsage;
 use chatty_core::models::write_approval_store::{WriteApprovalDecision, WriteApprovalStore};
 use chatty_core::services::a2a_client::wire_usage;
 use chatty_core::services::budget_stop;
-use chatty_core::services::handoff::{self, HandoffContract, HandoffOutcome};
+use chatty_core::services::handoff::{self, HandoffContract, HandoffFinisher, HandoffResult};
 use chatty_core::services::turn_budget;
 use chatty_core::services::{HeartbeatThrottle, heartbeat_interval};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
 use chatty_fabric::wire::{
-    ARTIFACT_CAP_BYTES, HandoffInvalid, Opaque, TaskMetadata, WireArtifact, WorkerSwarmItem,
+    ARTIFACT_CAP_BYTES, Opaque, TaskMetadata, WireArtifact, WorkerSwarmItem,
 };
 use chatty_fabric::{Answer, ApprovalKind, ApprovalRequest, ApprovalVerdict, AskRequest, Question};
 use serde_json::Value;
@@ -446,13 +448,13 @@ pub struct TaskMapper {
     /// is on. Untouched otherwise, so it never allocates for the common
     /// case.
     captured_messages: Vec<Value>,
-    /// The schema the task's final answer must match (TD-2).
-    handoff: Option<HandoffContract>,
+    /// The schema the task's final answer must match (TD-2), and the
+    /// handoff re-prompts the runner sent, each an invalid answer
+    /// (chatty-core's finisher, AGE-1437).
+    handoff: Option<HandoffFinisher>,
     /// The text of the latest model call, since its last tool event: what
     /// the handoff is read from. Kept only when there is a schema.
     final_text: String,
-    /// The handoff re-prompts the runner sent, each an invalid answer.
-    handoff_follow_ups: u32,
     /// Whether the broker asked for `event` frames (TB-1). Off by default.
     swarm_events: bool,
     /// The approvals sent as `human.approve` and not yet answered, by the
@@ -495,7 +497,6 @@ impl TaskMapper {
             captured_messages: Vec::new(),
             handoff: None,
             final_text: String::new(),
-            handoff_follow_ups: 0,
             swarm_events: false,
             approvals: HashMap::new(),
             last_approval: 0,
@@ -582,16 +583,16 @@ impl TaskMapper {
     /// Check the task's final answer against `handoff` (TD-2, AGE-693).
     /// `None`, the default, keeps the frames exactly what they were.
     pub fn with_handoff(mut self, handoff: Option<HandoffContract>) -> Self {
-        self.handoff = handoff;
+        self.handoff = handoff.map(HandoffFinisher::new);
         self
     }
 
     /// Follow the last model call's text and count the handoff re-prompts,
     /// when the task has a schema.
     fn record_handoff_event(&mut self, event: &SessionEvent) {
-        if self.handoff.is_none() {
+        let Some(finisher) = self.handoff.as_mut() else {
             return;
-        }
+        };
         match event {
             SessionEvent::Text(text) => self.final_text.push_str(text),
             SessionEvent::TurnStarted
@@ -599,17 +600,18 @@ impl TaskMapper {
             | SessionEvent::ToolCallResult { .. }
             | SessionEvent::ToolCallError { .. } => self.final_text.clear(),
             SessionEvent::FollowUp(prompt) if handoff::is_follow_up(prompt) => {
-                self.handoff_follow_ups += 1;
+                finisher.note_sent_back();
             }
             _ => {}
         }
     }
 
-    /// How the final answer measured up, for a task with a schema that
-    /// completed. A failed or cancelled task is not read.
-    fn handoff_outcome(&self) -> Option<HandoffOutcome> {
-        let contract = self.handoff.as_ref()?;
-        (self.state == TaskState::Completed).then(|| handoff::check(contract, &self.final_text))
+    /// How the handoff ended, for a task with a schema. The final answer
+    /// of a failed or cancelled task is not read.
+    fn handoff_result(&self) -> Option<HandoffResult> {
+        let finisher = self.handoff.as_ref()?;
+        let completed = self.state == TaskState::Completed;
+        Some(finisher.result(completed.then_some(self.final_text.as_str())))
     }
 
     /// Turn on conversation capture for this task (RC-0, AGE-649). Off by
@@ -654,7 +656,7 @@ impl TaskMapper {
                     // task fails with it, whatever the run then says
                     // (AGE-903).
                     if self.budget_failure.is_none()
-                        && self.trace[index].name == "invoke_agent"
+                        && budget_stop::can_budget_stop(&self.trace[index].name)
                         && let Some(headline) = budget_stop::find_budget_exhausted(error)
                     {
                         self.budget_failure = Some(budget_stop::budget_exhausted(&headline));
@@ -843,17 +845,10 @@ impl TaskMapper {
 
     /// The single terminal status for the whole delegation.
     pub fn terminal(&self) -> ParticipantFrame {
-        let handoff = self.handoff_outcome();
-        let (state, message) = match (&handoff, self.handoff.as_ref()) {
-            (Some(HandoffOutcome::Invalid { errors }), Some(contract)) => (
-                TaskState::Failed,
-                Some(format!(
-                    "handoff_invalid: {}: {}",
-                    contract.role,
-                    errors.join("; ")
-                )),
-            ),
-            _ => match self.start_failure.as_ref().or(self.budget_failure.as_ref()) {
+        let handoff = self.handoff_result();
+        let (state, message) = match handoff.as_ref().and_then(HandoffResult::failure_message) {
+            Some(failure) => (TaskState::Failed, Some(failure)),
+            None => match self.start_failure.as_ref().or(self.budget_failure.as_ref()) {
                 Some(failure) => (TaskState::Failed, Some(failure.clone())),
                 None => (self.state, self.failure.clone()),
             },
@@ -866,45 +861,20 @@ impl TaskMapper {
         }
     }
 
-    /// The handoff keys for the terminal status: the valid handoff, or the
-    /// role and errors of an invalid one, and how many answers failed.
-    fn handoff_metadata(&self, outcome: Option<HandoffOutcome>, metadata: &mut TaskMetadata) {
-        let Some(contract) = self.handoff.as_ref() else {
-            return;
-        };
-        let mut invalid = self.handoff_follow_ups;
-        match outcome {
-            Some(HandoffOutcome::Valid(value)) => {
-                metadata.handoff = Opaque::from_value(&value)
-                    .map_err(|e| warn!(error = %e, "The handoff does not fit the terminal status"))
-                    .ok();
-            }
-            Some(HandoffOutcome::Invalid { errors }) => {
-                invalid += 1;
-                metadata.handoff_invalid = Some(HandoffInvalid {
-                    role: contract.role.clone(),
-                    errors,
-                });
-            }
-            None => {}
-        }
-        if invalid > 0 {
-            metadata.handoff_invalid_count = Some(invalid);
-        }
-    }
-
     /// Everything that rides on the terminal status's `metadata`: usage
     /// (ADR-0011) and, when this task made any tool calls, the compacted
     /// trace (AGE-467), the captured conversation (RC-0) and the handoff
     /// keys (TD-2). `None` when none has anything to report.
-    fn terminal_metadata(&self, handoff: Option<HandoffOutcome>) -> Option<TaskMetadata> {
+    fn terminal_metadata(&self, handoff: Option<HandoffResult>) -> Option<TaskMetadata> {
         let mut metadata = TaskMetadata {
             usage: (!self.usage.is_empty()).then(|| wire_usage(&self.usage)),
             trace: compact_trace(&self.trace),
             ..TaskMetadata::default()
         };
         self.conversation_metadata(&mut metadata);
-        self.handoff_metadata(handoff, &mut metadata);
+        if let Some(handoff) = handoff {
+            handoff.write_metadata(&mut metadata);
+        }
         metadata.artifacts = read_artifacts(&self.artifacts);
         (!metadata.is_empty()).then_some(metadata)
     }
@@ -1871,6 +1841,38 @@ mod tests {
         assert!(trace.contains("### write_file (ok)"), "{trace}");
         assert!(trace.contains(r#"input: {"path":"out.txt"}"#), "{trace}");
         assert!(trace.contains("output: wrote 2 bytes"), "{trace}");
+    }
+
+    /// AGE-1439: a `search_web` or `fetch` call refused on a spent budget
+    /// fails the task with the typed text, as an `invoke_agent` stop does;
+    /// another tool's error, or a plain `search_web` error, does not.
+    #[test]
+    fn a_tool_budget_refusal_fails_the_task_with_the_typed_text() {
+        let terminal = |name: &str, error: &str| {
+            let mut mapper = TaskMapper::new("task-1");
+            mapper.map(&tool_started("c1", name));
+            mapper.map(&SessionEvent::ToolCallError {
+                id: "c1".into(),
+                error: error.into(),
+            });
+            status_of(&mapper.terminal())
+        };
+        let typed =
+            "budget_exhausted: Budget spent; the endpoint refused the call (budget_exceeded)";
+        for name in ["search_web", "fetch", "invoke_agent"] {
+            assert_eq!(
+                terminal(name, &format!("Error: {name}: {typed}")),
+                (TaskState::Failed, Some(typed.to_string())),
+                "{name}"
+            );
+        }
+        let (state, _) = terminal("read_file", &format!("Error: read_file: {typed}"));
+        assert_ne!(state, TaskState::Failed);
+        let (state, _) = terminal(
+            "search_web",
+            "Error: search_web: Tavily API returned 402: {}",
+        );
+        assert_ne!(state, TaskState::Failed);
     }
 
     #[test]
