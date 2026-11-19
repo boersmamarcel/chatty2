@@ -176,44 +176,6 @@ impl ContextStatus {
     }
 }
 
-// ── ContextPressureEvent ──────────────────────────────────────────────────────
-
-/// Emitted (via GPUI's event system) when context utilization crosses a threshold.
-///
-/// Subscribe in `app_controller.rs` to show warnings, block agent loops,
-/// or trigger automatic summarization.
-///
-/// # Example
-/// ```rust,ignore
-/// cx.subscribe(&notifier, |_, _, event: &ContextPressureEvent, _cx| {
-///     match event {
-///         ContextPressureEvent::CriticalPressure { utilization, .. } => {
-///             warn!(%utilization, "Context window critically full");
-///         }
-///         _ => {}
-///     }
-/// }).detach();
-/// ```
-// The GPUI EventEmitter subscription is not yet wired up.
-#[derive(Clone, Debug)]
-pub enum ContextPressureEvent {
-    /// Utilization crossed the high threshold on the way up (default: 70 %).
-    /// Informational — no action required, but the user should be aware.
-    HighPressure {
-        utilization: f64,
-        estimated_tokens: usize,
-        conversation_id: String,
-    },
-
-    /// Utilization crossed the critical threshold (default: 90 %).
-    /// Action needed — consider summarization before the next message.
-    CriticalPressure {
-        utilization: f64,
-        estimated_tokens: usize,
-        conversation_id: String,
-    },
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

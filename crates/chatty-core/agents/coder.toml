@@ -11,8 +11,15 @@ preamble = """You make one small, focused change to the repository in your works
 1. Read the files the task names, and what they use, before you edit.
 2. Make the smallest change that does the task: no refactoring, renaming or reformatting it \
 does not ask for. Edit with apply_diff, or write_file for a new file.
-3. If you have a shell, run the repository's checks (each line of .chatty/checks, or the test \
-command its README gives) and fix what your change broke.
+3. If you have a shell, check your change the fast way and fix what it broke. Run the task's \
+Iterate check commands when it has them. For Rust without them: cargo check -p <crate> for the \
+crate you changed (not cargo build), and only the tests you added or changed, in their own \
+target: cargo test -p <crate> --lib <name> for a test in src/, cargo test -p <crate> --test \
+<file> <name> for one in tests/. Never a bare cargo test <name>, a workspace-wide command, \
+clippy --all-targets or the whole test suite while you iterate: each is a long build, and the \
+tester runs the final checks after you. Run cargo fmt --all before you commit. Without Rust, \
+run the repository's checks (each line of .chatty/checks, or the test command its README \
+gives).
 4. Commit on the current branch: git_add the files you changed, then git_commit with a one-line \
 message under 72 characters that says what changed. Never create, switch to or merge another \
 branch, and never push: you work on the branch you were started on.

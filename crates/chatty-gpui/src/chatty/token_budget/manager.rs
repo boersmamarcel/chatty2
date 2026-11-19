@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 
 use super::cache::{CachedTokenCounts, build_tool_hint};
 use super::counter::TokenCounter;
-use super::snapshot::{ContextPressureEvent, TokenBudgetSnapshot};
+use super::snapshot::{ContextStatus, TokenBudgetSnapshot};
 
 // ── GlobalTokenBudget ─────────────────────────────────────────────────────────
 
@@ -234,9 +234,9 @@ pub async fn compute_snapshot_background(
 /// Evaluate the snapshot's utilization against the configured thresholds and log
 /// a warning when pressure is High or Critical.
 ///
-/// This is a lightweight synchronous helper called after `compute_snapshot_background`
-/// returns. Full GPUI `EventEmitter` integration (for the conversation manager to
-/// subscribe and take action) is wired in Phase 11.
+/// Log-only: it returns nothing and changes nothing the model sees. It is a
+/// lightweight synchronous helper called after `compute_snapshot_background`
+/// returns.
 ///
 /// # Arguments
 /// * `snapshot`    — The freshly-computed snapshot.
@@ -245,40 +245,39 @@ pub async fn compute_snapshot_background(
 pub fn check_pressure(
     snapshot: &TokenBudgetSnapshot,
     settings: Option<&crate::settings::models::token_tracking_settings::TokenTrackingSettings>,
-) -> Option<ContextPressureEvent> {
-    let high_threshold = settings.map(|s| s.high_threshold).unwrap_or(0.70);
-    let critical_threshold = settings.map(|s| s.critical_threshold).unwrap_or(0.90);
-
+) {
     let u = snapshot.utilization();
-
-    if u >= critical_threshold {
-        let event = ContextPressureEvent::CriticalPressure {
-            utilization: u,
-            estimated_tokens: snapshot.estimated_total(),
-            conversation_id: snapshot.conversation_id.clone(),
-        };
-        warn!(
+    match classify_pressure(u, settings) {
+        Some(ContextStatus::Critical) => warn!(
             utilization = format!("{:.1}%", u * 100.0),
             estimated_tokens = snapshot.estimated_total(),
             effective_budget = snapshot.effective_budget(),
             conversation_id = %snapshot.conversation_id,
             "Context window CRITICAL — consider summarizing the conversation"
-        );
-        Some(event)
-    } else if u >= high_threshold {
-        let event = ContextPressureEvent::HighPressure {
-            utilization: u,
-            estimated_tokens: snapshot.estimated_total(),
-            conversation_id: snapshot.conversation_id.clone(),
-        };
-        info!(
+        ),
+        Some(_) => info!(
             utilization = format!("{:.1}%", u * 100.0),
             estimated_tokens = snapshot.estimated_total(),
             effective_budget = snapshot.effective_budget(),
             conversation_id = %snapshot.conversation_id,
             "Context window high — approaching limit"
-        );
-        Some(event)
+        ),
+        None => {}
+    }
+}
+
+/// Map a utilization to `High`/`Critical` against the configured thresholds
+/// (defaults 0.70 / 0.90), or `None` below the high threshold.
+fn classify_pressure(
+    utilization: f64,
+    settings: Option<&crate::settings::models::token_tracking_settings::TokenTrackingSettings>,
+) -> Option<ContextStatus> {
+    let high_threshold = settings.map(|s| s.high_threshold).unwrap_or(0.70);
+    let critical_threshold = settings.map(|s| s.critical_threshold).unwrap_or(0.90);
+    if utilization >= critical_threshold {
+        Some(ContextStatus::Critical)
+    } else if utilization >= high_threshold {
+        Some(ContextStatus::High)
     } else {
         None
     }
@@ -493,7 +492,7 @@ mod tests {
             conversation_id: "c".to_string(),
         };
         // 30% utilization — well below 70% high threshold
-        assert!(check_pressure(&snap, None).is_none());
+        assert!(classify_pressure(snap.utilization(), None).is_none());
     }
 
     #[test]
@@ -510,11 +509,8 @@ mod tests {
             actual_output_tokens: None,
             conversation_id: "c".to_string(),
         };
-        let event = check_pressure(&snap, None);
-        assert!(matches!(
-            event,
-            Some(ContextPressureEvent::HighPressure { .. })
-        ));
+        let event = classify_pressure(snap.utilization(), None);
+        assert!(matches!(event, Some(ContextStatus::High)));
     }
 
     #[test]
@@ -531,11 +527,8 @@ mod tests {
             actual_output_tokens: None,
             conversation_id: "c".to_string(),
         };
-        let event = check_pressure(&snap, None);
-        assert!(matches!(
-            event,
-            Some(ContextPressureEvent::CriticalPressure { .. })
-        ));
+        let event = classify_pressure(snap.utilization(), None);
+        assert!(matches!(event, Some(ContextStatus::Critical)));
     }
 
     #[tokio::test]

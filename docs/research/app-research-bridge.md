@@ -136,7 +136,7 @@ patch in after the stream completes.
 |---------|-----|-----------|
 | Token tracking | [token-tracking.md](../token-tracking.md) | `token_budget/`, `GlobalTokenBudget` |
 | Response reserve | — | `TokenTrackingSettings.response_reserve` (default 4096) |
-| Summarization | [context-compaction.md](../context-compaction.md) | `summarizer.rs` — `summarize_oldest_half` ships (`/compact`, desktop auto-summarise); only the secondary-model variant `summarize_with_model` is still a stub |
+| Summarization | [context-compaction.md](../context-compaction.md) | `summarizer.rs` — `summarize_oldest_half` ships (`/compact`, desktop auto-summarise); `TokenTrackingSettings.summarization_model_id` is stored but not read, so summaries always use the conversation's model |
 
 **Research touchpoints**
 

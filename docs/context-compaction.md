@@ -184,9 +184,8 @@ It is reached from two places:
   and runs the summariser in the background. See
   [token-tracking.md](token-tracking.md) for how the snapshot is computed.
 
-`TokenTrackingSettings.summarization_model_id` is stored but not honoured:
-`summarize_with_model` is a stub that always errors, so summaries always use the
-conversation's model.
+`TokenTrackingSettings.summarization_model_id` is stored but not read, so
+summaries always use the conversation's model.
 
 > [!WARNING]
 > The midpoint cut ignores exchange boundaries. Tool turns are persisted as rig

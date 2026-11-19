@@ -966,7 +966,6 @@ mod tests {
                 .iter()
                 .find_map(|item| match item {
                     chatty_core::models::message_types::TraceItem::ToolCall(tc) => Some(tc),
-                    #[allow(unreachable_patterns)]
                     _ => None,
                 })
                 .expect("a tool call block was recorded");

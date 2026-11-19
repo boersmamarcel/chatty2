@@ -66,6 +66,9 @@ pub struct TokenTrackingSettings {
     /// while using a more capable model for normal conversation.
     ///
     /// `None` (default) means: use the active conversation's own agent.
+    ///
+    /// Persisted and exposed by hive's settings API, but chatty-core does not
+    /// read it yet: summarization always uses the conversation's own agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summarization_model_id: Option<String>,
 

@@ -1637,11 +1637,17 @@ async fn start_mcp_servers() -> Option<McpService> {
         Default::default()
     });
 
-    let hive_added = chatty_core::install::ensure_default_hive_mcp(
-        &hive_settings.registry_url,
-        &mut extensions,
-        &mut servers,
-    );
+    let hive_added =
+        chatty_core::install::ensure_default_hive_mcp(&hive_settings.registry_url, &mut extensions);
+    if hive_added
+        && !servers.iter().any(|s| s.name == "hive")
+        && let Some(hive) = extensions
+            .mcp_server_configs()
+            .into_iter()
+            .find(|s| s.name == "hive")
+    {
+        servers.push(hive);
+    }
     // Seed the curated catalog of well-known external MCP servers
     // (Hugging Face, Notion, Atlassian, …). Entries default to disabled.
     let curated_added =

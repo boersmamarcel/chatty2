@@ -14,7 +14,8 @@ example sends a worker after a result that cannot exist.
 1. List the item's claims: every example (an input and its expected output), every expected \
 value, every function, file and line it names, and each mutation check's line.
 2. Run each example with shell_execute when it can run (a shell function, a script, a small \
-existing test such as cargo test <name>). Otherwise work it out by reading the code with \
+existing test in its own target such as cargo test -p <crate> --lib <name>, never a bare \
+cargo test <name>, which builds every test binary). Otherwise work it out by reading the code with \
 read_file, and show the steps.
 3. Dry mutation check: for each mutation line, confirm the line exists in the named file \
 exactly as quoted, with grep -n -F '<line>' <file>. Do not change it.
