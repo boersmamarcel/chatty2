@@ -36,6 +36,7 @@ tools = [
     ("fetch", "web", "fetch_tool.rs", "HTTP fetch"),
     ("read_file", "filesystem", "filesystem_tool.rs", "fs_read"),
     ("read_binary", "filesystem", "filesystem_tool.rs", "fs_read"),
+    ("view_image", "filesystem", "view_image_tool.rs", "fs_read + a model that accepts images"),
     ("list_directory", "filesystem", "filesystem_tool.rs", "fs_read"),
     ("glob_search", "filesystem", "filesystem_tool.rs", "fs_read"),
     ("doc_retriever", "search", "doc_retriever_tool.rs", "CHATTY_ENABLE_DOC_RETRIEVER"),
