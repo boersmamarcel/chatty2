@@ -212,7 +212,6 @@ pub mod test_helpers;
 #[cfg(feature = "math-render")]
 pub mod typst_tool;
 pub mod view_image_tool;
-pub mod view_image_tool;
 pub mod worker_progress;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
@@ -269,7 +268,6 @@ pub use terminal_read_tool::TerminalReadTool;
 pub use terminal_run_tool::TerminalRunTool;
 #[cfg(feature = "math-render")]
 pub use typst_tool::CompileTypstTool;
-pub use view_image_tool::ViewImageTool;
 pub use view_image_tool::ViewImageTool;
 pub use worker_progress::{progress_text_for_event, worker_executable};
 
