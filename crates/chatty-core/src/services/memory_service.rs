@@ -812,27 +812,59 @@ mod tests {
     /// when multiple `MemoryService` instances run in parallel test threads.
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Run `scenario` under `SERIAL`, retrying it on a fresh directory when
+    /// tantivy reports `LockBusy` (AGE-510).
+    ///
+    /// `SERIAL` only orders the memory tests among themselves. Tantivy's
+    /// `IndexWriter` lock is a `flock` on a file in the index directory, and a
+    /// `flock` is released only when *every* duplicate of the descriptor is
+    /// closed. Other tests in this binary (shell_service, which spawns many
+    /// subprocesses) fork at any time; between `fork` and `exec` the child
+    /// holds a copy of every open descriptor, including the lock file that
+    /// memvid's `commit` has just dropped its own handle to. Re-acquiring the
+    /// writer lock in that window fails with `LockBusy` although no second
+    /// writer exists. The window is a few milliseconds, so a retry clears it.
+    async fn retry_on_fork_lock_race<F, Fut>(mut scenario: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        const ATTEMPTS: usize = 20;
+        let _guard = SERIAL.lock().await;
+        for attempt in 1..=ATTEMPTS {
+            match scenario().await {
+                Ok(()) => return,
+                Err(e) if attempt < ATTEMPTS && format!("{e:#}").contains("LockBusy") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => panic!("{e:#}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_remember_and_search_within_session() {
-        let _guard = SERIAL.lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+        retry_on_fork_lock_race(|| async {
+            let dir = tempfile::tempdir()?;
+            let svc = MemoryService::open_or_create(dir.path()).await?;
 
-        svc.remember(
-            "The user's favorite color is blue",
-            Some("Favorite color"),
-            &[],
-        )
-        .await
-        .unwrap();
+            svc.remember(
+                "The user's favorite color is blue",
+                Some("Favorite color"),
+                &[],
+            )
+            .await?;
 
-        let hits = svc.search("favorite color", None).await.unwrap();
-        assert!(!hits.is_empty(), "Should find the stored memory");
-        assert!(
-            hits[0].text.contains("blue"),
-            "Hit text should contain 'blue', got: {}",
-            hits[0].text
-        );
+            let hits = svc.search("favorite color", None).await?;
+            assert!(!hits.is_empty(), "Should find the stored memory");
+            assert!(
+                hits[0].text.contains("blue"),
+                "Hit text should contain 'blue', got: {}",
+                hits[0].text
+            );
+            Ok(())
+        })
+        .await;
     }
 
     /// BM25 lexical search requires word overlap — "fruits" won't find "bananas".
@@ -840,26 +872,29 @@ mod tests {
     /// similarity search), only keyword matches work.
     #[tokio::test]
     async fn test_lex_only_requires_keyword_overlap() {
-        let _guard = SERIAL.lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+        retry_on_fork_lock_race(|| async {
+            let dir = tempfile::tempdir()?;
+            let svc = MemoryService::open_or_create(dir.path()).await?;
 
-        svc.remember("I like bananas", None, &[]).await.unwrap();
+            svc.remember("I like bananas", None, &[]).await?;
 
-        // Exact keyword match → should find it
-        let hits = svc.search("bananas", None).await.unwrap();
-        assert!(!hits.is_empty(), "Exact keyword 'bananas' should match");
+            // Exact keyword match → should find it
+            let hits = svc.search("bananas", None).await?;
+            assert!(!hits.is_empty(), "Exact keyword 'bananas' should match");
 
-        // Partial keyword match → should find it (the word "like" appears)
-        let hits = svc.search("like", None).await.unwrap();
-        assert!(!hits.is_empty(), "Keyword 'like' should match");
+            // Partial keyword match → should find it (the word "like" appears)
+            let hits = svc.search("like", None).await?;
+            assert!(!hits.is_empty(), "Keyword 'like' should match");
 
-        // Semantic query with no word overlap → BM25 cannot match
-        let hits = svc.search("fruits", None).await.unwrap();
-        assert!(
-            hits.is_empty(),
-            "BM25 cannot match 'fruits' to 'bananas' — needs vec feature for semantic search"
-        );
+            // Semantic query with no word overlap → BM25 cannot match
+            let hits = svc.search("fruits", None).await?;
+            assert!(
+                hits.is_empty(),
+                "BM25 cannot match 'fruits' to 'bananas' — needs vec feature for semantic search"
+            );
+            Ok(())
+        })
+        .await;
     }
 
     /// A structurally valid PDF whose Catalog holds an array nested `depth`
@@ -892,19 +927,22 @@ mod tests {
     /// process aborts with SIGABRT.
     #[tokio::test]
     async fn test_remember_crafted_pdf_does_not_reach_pdf_parser() {
-        let _guard = SERIAL.lock().await;
-        let dir = tempfile::tempdir().unwrap();
-        let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
+        retry_on_fork_lock_race(|| async {
+            let dir = tempfile::tempdir()?;
+            let svc = MemoryService::open_or_create(dir.path()).await?;
 
-        let pdf = crafted_nested_array_pdf(1_000);
-        assert!(pdf.starts_with("%PDF"));
+            let pdf = crafted_nested_array_pdf(1_000);
+            assert!(pdf.starts_with("%PDF"));
 
-        svc.remember(&pdf, Some("crafted pdf"), &[]).await.unwrap();
+            svc.remember(&pdf, Some("crafted pdf"), &[]).await?;
 
-        // Stored verbatim as text and still findable by a word it contains.
-        let hits = svc.search("Catalog", None).await.unwrap();
-        assert!(!hits.is_empty(), "the PDF-shaped text should be stored");
-        assert!(hits[0].text.starts_with("%PDF"), "got: {}", hits[0].text);
+            // Stored verbatim as text and still findable by a word it contains.
+            let hits = svc.search("Catalog", None).await?;
+            assert!(!hits.is_empty(), "the PDF-shaped text should be stored");
+            assert!(hits[0].text.starts_with("%PDF"), "got: {}", hits[0].text);
+            Ok(())
+        })
+        .await;
     }
 
     /// Both remember paths (`handle_remember` and
@@ -924,42 +962,44 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_persists_across_reopen() {
-        let _guard = SERIAL.lock().await;
-        let dir = tempfile::tempdir().unwrap();
+        retry_on_fork_lock_race(|| async {
+            let dir = tempfile::tempdir()?;
 
-        // Session 1: store a memory
-        {
-            let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
-            svc.remember(
-                "The project uses PostgreSQL for the database",
-                Some("Database choice"),
-                &[("project", "chatty")],
-            )
-            .await
-            .unwrap();
-        }
-        // MemoryService is dropped here, simulating app shutdown
+            // Session 1: store a memory
+            {
+                let svc = MemoryService::open_or_create(dir.path()).await?;
+                svc.remember(
+                    "The project uses PostgreSQL for the database",
+                    Some("Database choice"),
+                    &[("project", "chatty")],
+                )
+                .await?;
+            }
+            // MemoryService is dropped here, simulating app shutdown
 
-        // Verify the .mv2 file exists on disk
-        let mv2_path = dir.path().join("memory.mv2");
-        assert!(
-            mv2_path.exists(),
-            "memory.mv2 should exist after remember+commit"
-        );
-
-        // Session 2: reopen and search
-        {
-            let svc = MemoryService::open_or_create(dir.path()).await.unwrap();
-            let hits = svc.search("database", None).await.unwrap();
+            // Verify the .mv2 file exists on disk
+            let mv2_path = dir.path().join("memory.mv2");
             assert!(
-                !hits.is_empty(),
-                "Should find memory from previous session, but got 0 results"
+                mv2_path.exists(),
+                "memory.mv2 should exist after remember+commit"
             );
-            assert!(
-                hits[0].text.contains("PostgreSQL"),
-                "Hit should contain 'PostgreSQL', got: {}",
-                hits[0].text
-            );
-        }
+
+            // Session 2: reopen and search
+            {
+                let svc = MemoryService::open_or_create(dir.path()).await?;
+                let hits = svc.search("database", None).await?;
+                assert!(
+                    !hits.is_empty(),
+                    "Should find memory from previous session, but got 0 results"
+                );
+                assert!(
+                    hits[0].text.contains("PostgreSQL"),
+                    "Hit should contain 'PostgreSQL', got: {}",
+                    hits[0].text
+                );
+            }
+            Ok(())
+        })
+        .await;
     }
 }
