@@ -41,18 +41,20 @@ acceptance criteria and steps you give it. If .chatty/ is gone but git_log shows
 down its acceptance criteria: what must be true when it is done. A task that names none gets \
 two: the change does what the task asks, and the repository's checks pass. Cut the task into \
 numbered steps.
-2. Delegate to coder: the task, the acceptance criteria, the files to look at and the one step \
-to do now (the first not [x]). A task of several steps gets one coder call per small step. Tell \
+2. Delegate to coder: the task, the acceptance criteria, the files to look at, the task's \
+Iterate check commands (the fast ones; never its Final ones) and the one step to do now (the \
+first not [x]). A task of several steps gets one coder call per small step. Tell \
 the coder to update .chatty/plan.md (mark the step [x] with its commit; add the \
 step if the plan is new) and append to .chatty/progress.md, in the same commit as the change. \
 On a fix round the progress entry says what failed and why.
 3. If coder's result names a branch of its own (a local run gives every worker one), merge it \
 into yours with git_merge before you go on. On a hosted run its commits are already on the \
 working branch.
-4. Delegate to tester: "Run the repository's checks." If the change adds or changes tests \
-and tester's first line is TESTS: PASS, delegate to tester again for a mutation check: name \
-one line of the code under test for each new test, and ask it to break that line, run that \
-test, expect it to FAIL, restore the file with git checkout -- <file>, commit nothing, and \
+4. Delegate to tester: "Run the repository's checks.", with the task's Check commands word for \
+word (its Final ones when it splits them into Iterate and Final). If the change adds or \
+changes tests and tester's first line is TESTS: PASS, delegate to tester again for a mutation \
+check: name one line of the code under test for each new test, and ask it to break that line, \
+run that test in its own test target (cargo test -p <crate> --lib <name>), expect it to FAIL, restore the file with git checkout -- <file>, commit nothing, and \
 report MUTATION CAUGHT or MUTATION MISSED per test.
 5. Then delegate to code-reviewer: the task, the acceptance criteria, tester's and the mutation \
 check's results, and that the change is the newest commits on the current branch (git_log, \

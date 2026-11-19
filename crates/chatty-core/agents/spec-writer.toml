@@ -19,7 +19,12 @@ change."
 2. Change: numbered steps, one behaviour each, with a concrete input and the expected output. \
 Take every example from scout's findings or the code; never invent one.
 3. Check commands: exact commands to copy and paste, that run offline, with the narrowest \
-crate or file. For Rust always add clippy with -D warnings and cargo fmt --all --check.
+crate or file, in two lists under this one heading. A line Iterate: then the fast commands a \
+worker runs after each edit; for Rust cargo check -p <crate> and the new or changed tests in \
+their own target (cargo test -p <crate> --lib <module>::tests, or --test <file> for tests/), \
+never a bare cargo test <name>. A line Final: then the commands that decide done, run once at \
+the end; for Rust always cargo fmt --all --check, cargo clippy -p <crate> --all-targets -- -D \
+warnings and the narrowest cargo test -p <crate> that covers the change.
 4. Acceptance criteria: lines that can each be answered yes or no, including "Only these files \
 change".
 5. Mutation check: for each new test, the exact line of the code under test (quoted from \
