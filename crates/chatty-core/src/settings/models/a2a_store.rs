@@ -96,6 +96,7 @@ impl A2aAgentsModel {
     }
 
     /// Look up an enabled agent by name.
+    #[cfg(test)]
     pub fn find_enabled(&self, name: &str) -> Option<&A2aAgentConfig> {
         self.agents.iter().find(|a| a.enabled && a.name == name)
     }
@@ -108,11 +109,13 @@ impl A2aAgentsModel {
     }
 
     /// Set the connection status for a given agent.
+    #[cfg(test)]
     pub fn set_status(&mut self, agent_name: String, status: A2aAgentStatus) {
         self.statuses.insert(agent_name, status);
     }
 
     /// Remove the status entry for a given agent (e.g. on delete).
+    #[cfg(test)]
     pub fn remove_status(&mut self, agent_name: &str) {
         self.statuses.remove(agent_name);
     }

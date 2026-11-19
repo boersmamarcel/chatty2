@@ -163,8 +163,8 @@ Key derived values:
 | `utilization()` | `estimated_total / effective_budget` (clamped 0–1) |
 | `estimation_delta()` | `actual_input - estimated_total` (signed; `Some` only when actuals present) |
 
-`check_pressure(snapshot, settings)` turns a snapshot into a `ContextPressureEvent`
-(`HighPressure` at `high_threshold`, `CriticalPressure` at `critical_threshold`).
+`check_pressure(snapshot, settings)` only logs and returns nothing: at info when
+utilization reaches `high_threshold`, at warn when it reaches `critical_threshold`.
 
 ## `TokenCounter` — accuracy notes
 

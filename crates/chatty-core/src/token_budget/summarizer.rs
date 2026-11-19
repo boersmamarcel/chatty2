@@ -124,28 +124,6 @@ pub async fn summarize_oldest_half(
     })
 }
 
-/// Summarize using a specific model ID rather than the active conversation's model.
-///
-/// Useful when `TokenTrackingSettings.summarization_model_id` is set to a cheaper/faster
-/// model (e.g. `"qwen3:8b"` locally, or `"gpt-4o-mini"` for cloud users).
-///
-/// Currently unimplemented — the plumbing for looking up a secondary agent by model ID
-/// requires access to provider configs and the MCP service, which is easier to wire
-/// in `app_controller.rs`. This stub exists so the settings field has a clear call site.
-///
-/// # Errors
-/// Always returns an error in the current version. Replace with a real implementation
-/// when the secondary-model path is wired up.
-pub async fn summarize_with_model(
-    _model_id: &str,
-    _history: &[Message],
-) -> Result<SummarizationResult> {
-    anyhow::bail!(
-        "summarize_with_model is not yet implemented. \
-         Use summarize_oldest_half() with the conversation's own agent for now."
-    )
-}
-
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Render a slice of messages as a plain-text transcript suitable for inclusion

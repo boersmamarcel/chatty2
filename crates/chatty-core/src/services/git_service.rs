@@ -670,6 +670,11 @@ impl GitService {
     /// guard against destroying work no commit has captured yet. Removal is a
     /// separate step *after* a successful merge, never part of a worker's exit
     /// path; see [`Self::commit_all`].
+    ///
+    /// Test-only until the leader-merge step that will call it exists: the
+    /// `force = false` default and the refusal it relies on are exercised by
+    /// the tests below, and kept so that step starts from the safe design.
+    #[cfg(test)]
     pub async fn worktree_remove(&self, name: &str, force: bool) -> Result<String> {
         Self::validate_worktree_name(name)?;
 
@@ -794,6 +799,7 @@ impl GitService {
     }
 
     /// List the repository's worktrees, including the main one.
+    #[cfg(test)]
     pub async fn worktree_list(&self) -> Result<Vec<GitWorktree>> {
         let output = self.run_git(&["worktree", "list", "--porcelain"]).await?;
         Ok(Self::parse_worktree_list(&output))
@@ -804,6 +810,7 @@ impl GitService {
     /// Records are separated by a blank line; `worktree <path>` opens one and
     /// `branch refs/heads/<name>` names its branch. A detached worktree has a
     /// `detached` line and no branch.
+    #[cfg(test)]
     fn parse_worktree_list(output: &str) -> Vec<GitWorktree> {
         let mut out = Vec::new();
         let mut path: Option<String> = None;

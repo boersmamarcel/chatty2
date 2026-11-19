@@ -48,11 +48,6 @@ impl HiveRegistryClient {
         Self::with_timeout_inner(base_url, std::time::Duration::from_secs(30))
     }
 
-    /// Create a new client with a custom HTTP timeout.
-    pub fn with_timeout(base_url: impl Into<String>, timeout: std::time::Duration) -> Self {
-        Self::with_timeout_inner(base_url, timeout)
-    }
-
     /// The root keys come from [`trust::trusted_roots_from_env`]: the
     /// compiled production list, or `CHATTY_HIVE_ROOT_KEY` alone for a local
     /// registry.

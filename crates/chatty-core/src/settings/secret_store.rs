@@ -269,15 +269,12 @@ impl SecretStore for KeychainSecretStore {
 ///   owner-only `secrets.json` file, with one warning line;
 /// - `keychain`: the OS keychain or an error, never the file;
 /// - `file`: the file, without touching the keychain.
-pub fn select_secret_store(config_dir: &Path) -> SecretResult<Arc<dyn SecretStore>> {
-    select_secret_store_with_timeout(config_dir, None)
-}
-
-/// [`select_secret_store`] for a run without a human (`--headless`, `--pipe`,
-/// a participant, ACP): the keychain probe gets `timeout` (`None` waits as
-/// long as it takes, which interactive hosts need for an unlock prompt), and
-/// a fallback to the file is also printed once on stderr, because those runs
-/// install no log subscriber (AGE-914).
+///
+/// A `timeout` of `None` waits as long as the keychain takes, which
+/// interactive hosts need for an unlock prompt. With `Some`, for a run
+/// without a human (`--headless`, `--pipe`, a participant, ACP), the probe
+/// gets that long, and a fallback to the file is also printed once on
+/// stderr, because those runs install no log subscriber (AGE-914).
 pub fn select_secret_store_with_timeout(
     config_dir: &Path,
     timeout: Option<std::time::Duration>,
