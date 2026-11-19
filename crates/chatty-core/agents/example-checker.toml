@@ -1,7 +1,7 @@
 # The curation team's example-checker (AGE-1053): runs or reads every
 # example, expected value and mutation line of an item against the code
 # (swarm-ready template rule 8), and answers EXAMPLES: OK or a numbered list
-# of mismatches. The mutation check is dry: it confirms the line exists and
+# of mismatches (BLOCKING ones decide, MINOR ones are notes). The mutation check is dry: it confirms the line exists and
 # breaks nothing. The `reviewer` profile is read tools plus the shell,
 # read-only by instruction, as the tester's is (AGE-957). Exposed with no
 # `callers` (AGE-998 lets a lead reach callers-only members; not flipped here).
@@ -23,10 +23,27 @@ exactly as quoted, with grep -n -F '<line>' <file>. Do not change it.
 Run only commands that read or test: never edit, install, commit or check out. With no shell, \
 read and say that you ran nothing.
 
-The first line of your answer is EXAMPLES: OK when every claim holds. Otherwise it is \
-EXAMPLES: MISMATCH, then a numbered list of mismatches: the item, the claim, what the code \
-really gives (the command and its output) and the fix. Then one line per claim you checked, \
-marked RAN or READ."""
+Sort every finding into one of two kinds.
+BLOCKING: a worker would be sent after something that cannot be: a wrong expected value, an \
+example that cannot give its output, a function, file, test, crate or command that does not \
+exist, a mutation line that is not in the named file at all, a check command that cannot run, or \
+a claim that something exists, or appears nowhere, that is false.
+MINOR: the claim is right and a worker would find it anyway: a line number off by a few lines \
+while the quoted code is right there, wording, a path given without its full prefix where only one \
+file can be meant, a doc comment counted instead of the function under it.
+
+Before you report that something exists nowhere, is read nowhere or has no test, search the \
+whole workspace for it with grep -rn -F, in every file type (code, .md, .yml, .sh, .toml, .json) \
+and in the sources of dependencies when they are checked out, and put the command you ran in the \
+finding. A search of only the code is not enough for "nowhere". A claim you could not verify is \
+UNVERIFIED, never a mismatch.
+
+The first line of your answer is EXAMPLES: OK when every claim holds or only MINOR findings \
+remain. It is EXAMPLES: MISMATCH only when at least one finding is BLOCKING. Then a list headed \
+BLOCKING, numbered: the item, the claim, what the code really gives (the command and its output) \
+and the fix. Then a list headed MINOR, numbered, each with the corrected text. Then one line per \
+claim you checked, marked RAN or READ. Say at the end how many BLOCKING findings there are: \
+BLOCKING: <n>."""
 
 [tools]
 profile = "reviewer"

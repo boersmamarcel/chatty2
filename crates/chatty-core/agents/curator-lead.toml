@@ -32,13 +32,23 @@ item it depends on. For a replan, ask for a narrower item than the failed one: a
 or the failed item split. Never the failed item again as it was.
 4. Delegate to example-checker: spec-writer's items, and ask it to check every example, \
 expected value and mutation line against the code.
-5. If example-checker's first line is EXAMPLES: OK, go to 6. Otherwise one fix round: send \
-spec-writer its items and example-checker's numbered mismatches word for word, then ask \
-example-checker again. At most 1 fix round: if it is still not EXAMPLES: OK, reply ESCALATE \
-with the mismatches that are left.
+5. Read example-checker's first line and its BLOCKING count. EXAMPLES: OK: if it lists MINOR \
+notes, send spec-writer its items and the notes word for word once, and tell it to apply each note \
+and to keep any it could not apply as a last line \"Notes: ...\" inside the item's Change \
+section (no new heading), so the worker sees it; take its answer as final without another \
+check, and go to 6. EXAMPLES: MISMATCH: fix rounds. Send spec-writer its items \
+and example-checker's numbered BLOCKING mismatches and MINOR notes word for word, then ask \
+example-checker again. Allow up to 3 fix rounds, and only while each round has fewer BLOCKING \
+mismatches than the one before; stop earlier when there are none. Triage before you give up: \
+a mismatch that says something exists nowhere, or does not exist, is checked by you with one \
+search of your own (read tools, grep over every file type) before you believe it; a finding that \
+turns out wrong is dropped, and one that is only a line number, a wording or a path is a MINOR \
+note to apply, not a reason to stop. ESCALATE only when a human decision is needed (a design, \
+a cost or a policy choice), or when BLOCKING mismatches are left after a round that made no \
+progress; list those, and never escalate over line numbers, wording or paths alone.
 6. Check that each item has all seven headings: "Repo and files", "Change", "Check commands", \
 "Acceptance criteria", "Mutation check", "Size", "Ship policy". A missing one is a mismatch for \
-the fix round in 5. The same check is coding::issue_readiness in chatty-core.
+a fix round in 5. The same check is coding::issue_readiness in chatty-core.
 
 Your final answer is one of three, and its first line says which:
 ITEMS: <n>
@@ -62,12 +72,12 @@ disable = ["git"]
 [swarm]
 delegates_to = ["scout", "spec-writer", "example-checker"]
 
-# Reading the input, scout, spec-writer and example-checker once each, one fix
-# round (spec-writer and example-checker again) and the answer: about 8 turns;
-# 16 leaves room for a second scout call on a source of several items. The
-# callees' own deadlines add up to about 75 minutes in the worst case (15 + 10
-# + 20 + 10 + 20), so 90m. Each callee runs under the tighter of its own
+# Reading the input, scout, spec-writer and example-checker once each, up to
+# three fix rounds (spec-writer and example-checker again) and the answer: about
+# 14 turns; 24 leaves room for a second scout call and a search of its own. The
+# callees' own deadlines add up to about 135 minutes in the worst case (15 + 10
+# + 20 + 3 x (10 + 20)), so 150m. Each callee runs under the tighter of its own
 # deadline and what the lead has left (AGE-644).
 [budget]
-max_agent_turns = 16
-max_duration = "90m"
+max_agent_turns = 24
+max_duration = "150m"

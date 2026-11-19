@@ -2047,8 +2047,8 @@ cap_usd = 2.0
             ["scout", "spec-writer", "example-checker"]
         );
         assert_eq!(lead.tools.profile.as_deref(), Some("coordinator"));
-        assert_eq!(lead.budget.max_agent_turns, Some(16));
-        assert_eq!(lead.max_duration(), Some(Duration::from_secs(90 * 60)));
+        assert_eq!(lead.budget.max_agent_turns, Some(24));
+        assert_eq!(lead.max_duration(), Some(Duration::from_secs(150 * 60)));
         for name in CURATION_TEAM {
             let spec = load_agent_spec_from(name, None, None).unwrap().spec;
             assert!(spec.swarm.exposed && spec.swarm.callers.is_none(), "{name}");
@@ -2115,7 +2115,11 @@ cap_usd = 2.0
             "3. Delegate to spec-writer",
             "4. Delegate to example-checker",
             "EXAMPLES: OK",
-            "At most 1 fix round",
+            "Allow up to 3 fix rounds",
+            "fewer BLOCKING mismatches than the one before",
+            "never escalate over line numbers, wording or paths alone",
+            "inside the item's Change section (no new heading)",
+            "one search of your own",
             "NOTHING FOUND, reply REJECT",
             "already checked out at /workspace",
             "coding::issue_readiness",
@@ -2139,8 +2143,20 @@ cap_usd = 2.0
         let at = |phrase: &str| lead.find(phrase).unwrap();
         assert!(at("2. Delegate to scout") < at("3. Delegate to spec-writer"));
         assert!(at("3. Delegate to spec-writer") < at("4. Delegate to example-checker"));
-        assert!(at("4. Delegate to example-checker") < at("At most 1 fix round"));
+        assert!(at("4. Delegate to example-checker") < at("Allow up to 3 fix rounds"));
 
+        // The checker separates what stops a worker from what is only a note, and checks an
+        // absence claim across every file type before it reports one.
+        let checker = preamble("example-checker");
+        for phrase in [
+            "EXAMPLES: OK when every claim holds or only MINOR findings",
+            "EXAMPLES: MISMATCH only when at least one finding is BLOCKING",
+            "BLOCKING: <n>",
+            "grep -rn -F",
+            "UNVERIFIED, never a mismatch",
+        ] {
+            assert!(checker.contains(phrase), "{phrase:?} in {checker}");
+        }
         // The grammar the preamble describes is the one parse_items reads.
         let answer = "ITEMS: 2\nPARTIAL WORK: SOUND\n--- ITEM a ---\nship: auto\n\nbody\n\
                       --- END ITEM ---\n--- ITEM b ---\ndepends-on: a\nconflict-keys: x.rs\n\
@@ -2192,7 +2208,7 @@ cap_usd = 2.0
             "Do not change it",
             "never edit, install, commit or check out",
             "EXAMPLES: OK",
-            "EXAMPLES: MISMATCH, then a numbered list of mismatches",
+            "EXAMPLES: MISMATCH only when at least one finding is BLOCKING",
             "RAN or READ",
         ] {
             assert!(checker.contains(phrase), "{phrase:?} in {checker}");
