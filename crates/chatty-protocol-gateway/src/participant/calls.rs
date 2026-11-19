@@ -3720,6 +3720,7 @@ mod tests {
                     prompt: "Take your time.".to_string(),
                     handle: None,
                     include_trace: false,
+                    files: None,
                     spawn_context: None,
                     remaining: Remaining {
                         seconds: Some(30),
@@ -3802,6 +3803,7 @@ mod tests {
             prompt: "go".to_string(),
             handle: None,
             include_trace: false,
+            files: None,
             spawn_context: None,
             remaining: Remaining::default(),
             run: node.map(|_| "task-1".to_string()),

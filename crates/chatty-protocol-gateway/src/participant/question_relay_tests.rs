@@ -198,6 +198,7 @@ fn root_call(calls: &BrokerCalls) -> CallStream {
             prompt: "go".into(),
             handle: None,
             include_trace: false,
+            files: None,
             spawn_context: None,
             remaining: Default::default(),
             run: None,

@@ -2240,6 +2240,7 @@ async fn spawn_context_is_clamped() {
                         prompt: "hi".to_string(),
                         handle: None,
                         include_trace: false,
+                        files: None,
                         spawn_context: Some(Box::new(context)),
                         remaining: Default::default(),
                         run: None,

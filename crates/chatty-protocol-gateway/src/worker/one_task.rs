@@ -545,6 +545,7 @@ mod tests {
             prompt: "go".to_string(),
             handle: None,
             include_trace: false,
+            files: None,
             spawn_context: None,
             remaining: Default::default(),
             run: None,

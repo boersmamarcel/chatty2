@@ -176,6 +176,7 @@ fn invoke(agent: &str) -> CallRequest {
         prompt: "count the invoices".to_string(),
         handle: None,
         include_trace: false,
+        files: None,
         spawn_context: None,
         remaining: Default::default(),
         run: None,

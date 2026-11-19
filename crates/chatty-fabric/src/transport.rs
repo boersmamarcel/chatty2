@@ -49,6 +49,13 @@ pub struct InvokeAgentParams {
     /// connection fills it in for the one task it serves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
+    /// Narrow what the callee gets of the caller's input files (files
+    /// design § 6): `None` (absent on the wire) leaves the callee the
+    /// caller's resources as before, `Some([])` gives it no files, and
+    /// names give it just that subset. The host applies it; the fabric
+    /// only carries it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
 }
 
 /// What a spawned worker starts from: where its tree goes, what its branch
@@ -523,6 +530,7 @@ mod tests {
                     prompt: "hi".into(),
                     handle: None,
                     include_trace: false,
+                    files: None,
                     spawn_context: None,
                     remaining: Default::default(),
                     run: None,
