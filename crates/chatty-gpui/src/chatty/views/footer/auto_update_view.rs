@@ -56,6 +56,7 @@ impl AutoUpdateView {
 }
 
 impl RenderOnce for AutoUpdateView {
+    // Returns the concrete `AnyElement` rather than the trait's `impl IntoElement`.
     #[allow(refining_impl_trait)]
     fn render(self, _window: &mut Window, cx: &mut App) -> AnyElement {
         let updater = cx.global::<AutoUpdater>();

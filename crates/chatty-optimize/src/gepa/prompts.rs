@@ -8,7 +8,6 @@ pub fn reflection_meta_prompt() -> &'static str {
 }
 
 /// Stable name matching RESERVED.md symbol for CI attestation later.
-#[allow(non_upper_case_globals)]
 pub static REFLECTION_META_PROMPT: &str = "";
 
 #[cfg(test)]

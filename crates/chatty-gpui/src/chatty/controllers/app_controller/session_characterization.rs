@@ -45,7 +45,6 @@ use super::*;
 // that `#[gpui::test]` expands into — expanding it forever. Re-import the real
 // one, as the sibling test modules in this crate do.
 use crate::chatty::models::{StreamManager, StreamManagerEvent};
-#[allow(unused_imports)]
 use core::prelude::rust_2021::test;
 
 fn goldens_dir() -> PathBuf {

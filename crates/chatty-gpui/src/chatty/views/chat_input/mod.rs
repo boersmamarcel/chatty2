@@ -30,18 +30,15 @@ mod slash;
 // Re-export the public surface for external callers and the unit-test
 // module so the `chat_input::*` namespace is unchanged after the
 // directory split.
-#[allow(unused_imports)] // load_files_for_dir is part of the public API
-pub use at_mention::load_files_for_dir;
 #[cfg(test)]
 pub use at_mention::{apply_at_to_input, at_menu_items_for, at_query_from};
 pub use pr_status_bar_view::PrStatusBarView;
+pub use slash::AgentPickerEntry;
 pub use slash::SkillEntry;
 #[cfg(test)]
 pub use slash::slash_menu_items_for;
-#[allow(unused_imports)] // SlashMenuItem is part of the public API
-pub use slash::{AgentPickerEntry, SlashMenuItem};
 #[cfg(test)]
-pub use slash::{agent_menu_items, slash_menu_items, slash_menu_items_with_skills};
+pub use slash::{SlashMenuItem, agent_menu_items, slash_menu_items, slash_menu_items_with_skills};
 
 use gpui::*;
 use gpui_component::input::InputState;
