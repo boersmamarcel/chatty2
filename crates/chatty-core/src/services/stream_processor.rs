@@ -51,6 +51,38 @@ pub enum StreamErrorKind {
     Other,
 }
 
+/// The reply a turn that `kind` ended keeps in the history in place of its
+/// own (AGE-1438), or `None` when such a turn is not kept.
+///
+/// Only a stall and a connection-level failure keep their turn — its
+/// completed tool round-trips and its user message — so a "continue" on the
+/// same history has the task and the work in context: the provider went
+/// quiet or unreachable mid-task, and nothing about the request was wrong.
+/// Every other error (auth, rate limit, a provider status, a spent budget,
+/// an empty completion, a stream that never started, `Other`) rolls the
+/// turn back under the empty-turn rule as before (AGE-243). A fixed
+/// sentence per kind, never the error's own text, which can carry a raw
+/// provider body or a request URL; that text goes to the log only.
+pub fn kept_failed_turn_note(kind: StreamErrorKind) -> Option<&'static str> {
+    match kind {
+        StreamErrorKind::Stalled => {
+            Some("[This response ended early: the model stopped responding.]")
+        }
+        StreamErrorKind::Transport => {
+            Some("[This response ended early: the connection to the model failed.]")
+        }
+        _ => None,
+    }
+}
+
+/// Whether `text` is one of the [`kept_failed_turn_note`] replies.
+pub fn is_kept_failed_turn_note(text: &str) -> bool {
+    [StreamErrorKind::Stalled, StreamErrorKind::Transport]
+        .into_iter()
+        .filter_map(kept_failed_turn_note)
+        .any(|note| note == text)
+}
+
 /// A stream-ending error, classified once in core so every surface makes the
 /// same recovery decision from `kind` instead of matching on `message`
 /// (AGE-244 / D5). `message` stays around for display and logging.

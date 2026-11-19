@@ -16,8 +16,6 @@
 //! not a browser's, and is served. The MCP transport spec asks servers to
 //! validate `Origin` for this reason.
 
-use std::net::IpAddr;
-
 use axum::{
     Json,
     extract::Request,
@@ -79,8 +77,7 @@ fn is_loopback_authority(authority: &str) -> bool {
             None => authority,
         }
     };
-    host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    hive_client::net::is_loopback_host(host)
 }
 
 /// `:<digits>`, the port suffix of an authority.

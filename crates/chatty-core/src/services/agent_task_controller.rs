@@ -423,7 +423,7 @@ fn snapshot(state: &AgentTaskState) -> AgentTaskSnapshot {
 ///
 /// These render as the plan card, not as individual tool calls (AGE-342).
 pub fn is_agent_todo_tool(name: &str) -> bool {
-    name.contains("todo") || name == "verify_completion"
+    matches!(name, "write_todos" | "update_todo" | "verify_completion")
 }
 
 /// The plan snapshot a todo tool returned alongside its model-directed

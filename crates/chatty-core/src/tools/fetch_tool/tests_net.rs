@@ -543,6 +543,14 @@ async fn fetch_connects_only_to_the_checked_address() {
 /// A fake extract endpoint: answers every request with `body` and logs
 /// the raw requests it got.
 async fn fake_extract(body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+    fake_extract_with_status("200 OK", body).await
+}
+
+/// [`fake_extract`] answering with `status` (`"402 Payment Required"`).
+async fn fake_extract_with_status(
+    status: &'static str,
+    body: &'static str,
+) -> (String, Arc<Mutex<Vec<String>>>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!(
@@ -585,7 +593,7 @@ async fn fake_extract(body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
                     .unwrap()
                     .push(String::from_utf8_lossy(&raw).into_owned());
                 let reply = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(reply.as_bytes()).await;
@@ -658,6 +666,42 @@ async fn hosted_fetch_uses_managed_extract() {
             .await
             .is_err(),
         "no direct connection to the page's host"
+    );
+}
+
+/// A managed extract `402` budget or credit refusal is the typed stop; any
+/// other failure keeps its plain text (AGE-1439).
+#[tokio::test]
+async fn hosted_fetch_402_budget_or_credit_refusal_is_the_typed_stop() {
+    for body in [
+        r#"{"error":{"code":"budget_exceeded"},"budget_usd":2.5}"#,
+        r#"{"error":"credit_required"}"#,
+    ] {
+        let (base, _) = fake_extract_with_status("402 Payment Required", body).await;
+        let tool = FetchTool::new(None).with_managed_extract(&base, "t");
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                fetch_args("https://example.invalid/p"),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("budget_exhausted: "), "{body}: {err}");
+    }
+    let (base, _) = fake_extract_with_status("402 Payment Required", r#"{"error":"other"}"#).await;
+    let tool = FetchTool::new(None).with_managed_extract(&base, "t");
+    let err = tool
+        .call(
+            &mut ToolContext::new(),
+            fetch_args("https://example.invalid/p"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("The managed extract service returned 402"),
+        "{err}"
     );
 }
 

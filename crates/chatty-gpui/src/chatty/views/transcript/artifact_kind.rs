@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+use chatty_core::services::is_agent_todo_tool;
+
 pub fn is_tabular_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -278,53 +280,7 @@ pub fn attachment_image_path(
     }
 }
 
-/// Pull a file path out of a tool's JSON-ish input or output.
-///
-/// Keys checked (longest first so `output_path` wins over the `path` substring):
-/// `output_path`, `saved_path`, `file_path`, `filename`, `path`.
-pub fn tool_file_path(input: &str) -> Option<PathBuf> {
-    // Prefer structured JSON when present.
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(input) {
-        for key in [
-            "output_path",
-            "saved_path",
-            "save_path",
-            "file_path",
-            "filename",
-            "path",
-        ] {
-            if let Some(v) = json.get(key).and_then(|v| v.as_str()) {
-                let trimmed = v.trim();
-                if !trimmed.is_empty() {
-                    return Some(PathBuf::from(trimmed));
-                }
-            }
-        }
-    }
-    // Fallback: substring scan (longest keys first).
-    for key in [
-        "output_path",
-        "saved_path",
-        "save_path",
-        "file_path",
-        "filename",
-        "path",
-    ] {
-        if let Some(idx) = input.find(key)
-            && let Some(rest) = input.get(idx + key.len()..)
-        {
-            let trimmed = rest.trim_start_matches([' ', ':', '=', '"', '\'']);
-            let end = trimmed
-                .find(|c: char| c == '"' || c == '\'' || c.is_whitespace() || c == ',')
-                .unwrap_or(trimmed.len());
-            let path = &trimmed[..end];
-            if !path.is_empty() {
-                return Some(PathBuf::from(path));
-            }
-        }
-    }
-    None
-}
+pub use chatty_core::presentation::tool_verb::tool_file_path;
 
 /// Write/create tools, Typst PDF compile, PDF tools that name a `.pdf` path,
 /// and `read_pptx` on a `.pptx`.
@@ -337,7 +293,7 @@ pub fn tool_file_path(input: &str) -> Option<PathBuf> {
 /// Plan block and must not auto-open the document panel.
 pub fn is_produced_file_tool(tool_name: &str, input: &str) -> bool {
     let name = tool_name.to_ascii_lowercase();
-    if name.contains("todo") || name == "verify_completion" {
+    if is_agent_todo_tool(&name) {
         return false;
     }
     // Directory creation is an activity-row event, not a document artifact.

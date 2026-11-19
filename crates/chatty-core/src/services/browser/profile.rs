@@ -102,21 +102,11 @@ impl NavigationPolicy {
 
 /// Hostnames that count as loopback for Lane A.
 fn is_loopback_host(host: &str) -> bool {
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-        return true;
-    }
-    // RFC 6761 reserves the whole `.localhost` TLD for loopback.
-    if let Some(prefix) = host.strip_suffix(".localhost")
-        && !prefix.is_empty()
-    {
-        return true;
-    }
-    // The rest of 127.0.0.0/8 is loopback too (dev servers sometimes bind it).
-    if let Ok(std::net::IpAddr::V4(ip)) = host.parse::<std::net::IpAddr>() {
-        return ip.is_loopback();
-    }
-    false
+    use hive_client::net;
+    // `host_str()` is lowercase already; `*.localhost` is the RFC 6761 TLD.
+    // `localhost.` and IPv4-mapped IPv6 are deliberately not loopback here.
+    let host = net::strip_ip_brackets(host);
+    net::is_loopback_host(host) || net::is_localhost_subdomain(host)
 }
 
 fn check_local_only(url: &str, workspace: Option<&Path>) -> Result<(), BrowserError> {

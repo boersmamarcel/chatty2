@@ -19,7 +19,7 @@ use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::models::token_usage::ConversationTokenUsage;
 use chatty_core::repositories::ConversationData;
 use chatty_core::services::StreamSurface;
-use chatty_core::services::handoff::{self, HandoffContract, HandoffLedger, HandoffOutcome};
+use chatty_core::services::handoff::{HandoffContract, HandoffFinisher, HandoffLedger};
 use chatty_core::services::run_budget::RunBudget;
 use chatty_core::services::spend_gate::LocalSpendGate;
 use chatty_core::services::team::Team;
@@ -297,15 +297,10 @@ impl HeadlessRunner {
         self.handoff = contract;
     }
 
-    /// The follow-up a final answer whose last model call said
-    /// `final_call_text` needs: the schema errors, when this worker has a
-    /// contract and the answer does not meet it.
-    pub(super) fn handoff_follow_up(&self, final_call_text: &str) -> Option<String> {
-        let contract = self.handoff.as_ref()?;
-        match handoff::check(contract, final_call_text) {
-            HandoffOutcome::Valid(_) => None,
-            HandoffOutcome::Invalid { errors } => Some(handoff::follow_up(contract, &errors)),
-        }
+    /// A fresh finisher for one run, when this worker has a contract: it
+    /// checks the final answer and sends it back once (AGE-1437).
+    pub(super) fn handoff_finisher(&self) -> Option<HandoffFinisher> {
+        self.handoff.clone().map(HandoffFinisher::new)
     }
 
     /// Send the handoff back once (TD-2): the observer — the worker's frame
@@ -996,6 +991,7 @@ impl HeadlessRunner {
             }
             AppEvent::StreamError(error) => {
                 self.transcript.mark_error(&error.to_string());
+                self.session.note_turn_error(&error);
                 self.finish_turn();
                 self.usage.checkpoint();
                 self.drain_mailbox(TurnEnd::Error);
