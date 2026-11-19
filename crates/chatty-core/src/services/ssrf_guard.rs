@@ -164,7 +164,7 @@ pub fn a2a_peer(host: &str, ip: IpAddr) -> bool {
     if is_link_local_ip(&ip) {
         return false;
     }
-    if host.eq_ignore_ascii_case("localhost") {
+    if hive_client::net::is_localhost_name(host) {
         return ip.is_loopback();
     }
     if ip_literal(host).is_some() {
@@ -193,7 +193,7 @@ pub fn a2a_peer_with_bypass(allow_private_network: bool) -> AddressPolicy {
         if is_link_local_ip(&ip) {
             return false;
         }
-        if host.eq_ignore_ascii_case("localhost") {
+        if hive_client::net::is_localhost_name(host) {
             return ip.is_loopback();
         }
         if ip_literal(host).is_some() {
@@ -224,7 +224,7 @@ pub fn a2a_peer_with_bypass(allow_private_network: bool) -> AddressPolicy {
 /// What the configured host resolves to never makes loopback reachable.
 pub fn mcp_oauth_endpoint(server_url: &str, server_on_lan: bool) -> AddressPolicy {
     let (server_loopback, server_lan) = match parse_host(server_url) {
-        Ok(host) if host.eq_ignore_ascii_case("localhost") => (true, false),
+        Ok(host) if hive_client::net::is_localhost_name(&host) => (true, false),
         Ok(host) => match ip_literal(&host) {
             Some(ip) => (is_loopback_ip(&ip), is_lan_ip(&ip)),
             None => (false, false),
@@ -281,12 +281,7 @@ pub async fn mcp_server_on_lan(server_url: &str, lookup: &dyn HostLookup) -> boo
 
 /// Loopback, including through an IPv4-mapped IPv6 address.
 fn is_loopback_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_loopback(),
-        IpAddr::V6(v6) => {
-            v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
-        }
-    }
+    hive_client::net::is_loopback_ip_or_mapped(ip)
 }
 
 /// A private-LAN address: RFC-1918, CGN `100.64.0.0/10`, or IPv6 ULA
@@ -417,8 +412,9 @@ fn is_blocked_ip(ip: &IpAddr, allow_private_network_access: bool) -> bool {
 
 /// Check if a hostname string is a known-blocked name (case-insensitive).
 pub fn is_blocked_hostname(host: &str) -> bool {
-    let h = host.to_lowercase();
-    h == "localhost"
+    // A trailing dot is the same name (`localhost.`, `x.internal.`) (AGE-1325).
+    let h = host.trim_end_matches('.').to_lowercase();
+    hive_client::net::is_localhost_name(&h)
         || h == "metadata.google.internal"  // GCP metadata
         || h.ends_with(".internal")
         || h.ends_with(".local")
@@ -489,6 +485,20 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blocked_hostname_ignores_a_trailing_dot_and_case() {
+        for name in [
+            "localhost.",
+            "LOCALHOST.",
+            "metadata.google.internal.",
+            "db.internal.",
+            "x.local.",
+        ] {
+            assert!(is_blocked_hostname(name), "{name}");
+        }
+        assert!(!is_blocked_hostname("example.com."));
+    }
 
     #[test]
     fn is_private_ip_loopback() {
