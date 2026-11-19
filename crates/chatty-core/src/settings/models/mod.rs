@@ -17,7 +17,6 @@ pub use execution_settings::{ExecutionSettingsModel, ToolLoading};
 pub use extensions_store::ExtensionsModel;
 pub use general_model::GeneralSettingsModel;
 pub use hive_settings::HiveSettingsModel;
-pub use mcp_store::McpServersModel;
 pub use models_store::ModelsModel;
 pub use module_settings::ModuleSettingsModel;
 pub use providers_store::ProviderModel;

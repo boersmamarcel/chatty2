@@ -198,6 +198,7 @@ pub fn uninstall_extension(
 }
 
 /// Check whether an update is available for a Hive-sourced extension.
+#[cfg(test)]
 pub fn needs_update(ext: &InstalledExtension, latest_version: &str) -> bool {
     match &ext.source {
         ExtensionSource::Hive { version, .. } => version != latest_version,
@@ -452,8 +453,8 @@ pub const HIVE_MCP_EXT_ID: &str = "mcp-hive";
 // ── Curated external MCP catalog ──────────────────────────────────────────
 //
 // A small, hand-picked catalog of well-known external MCP servers that ship
-// with Chatty. Each entry is seeded into the user's `ExtensionsModel` and
-// `McpServersModel` on first launch as **disabled**, so the user opts in
+// with Chatty. Each entry is seeded into the user's `ExtensionsModel` on
+// first launch as **disabled**, so the user opts in
 // explicitly. Once seeded, the entry participates in the shared MCP
 // enable/disable flow exactly like any other MCP server — including OAuth
 // discovery, persistence, and error reporting.
@@ -503,7 +504,7 @@ pub const CURATED_MCP_SERVERS: &[CuratedMcpServer] = &[CuratedMcpServer {
 }];
 
 /// Ensure every entry in [`CURATED_MCP_SERVERS`] is present in the
-/// `ExtensionsModel` and `McpServersModel`.
+/// `ExtensionsModel`.
 ///
 /// New entries are added **disabled** so users must opt in explicitly. The
 /// function is idempotent: existing entries (including the user's
@@ -512,10 +513,7 @@ pub const CURATED_MCP_SERVERS: &[CuratedMcpServer] = &[CuratedMcpServer {
 ///
 /// Returns `true` if at least one new entry was added (caller should
 /// persist both stores).
-pub fn ensure_curated_mcp_servers(
-    extensions: &mut ExtensionsModel,
-    mcp_servers: &mut Vec<McpServerConfig>,
-) -> bool {
+pub fn ensure_curated_mcp_servers(extensions: &mut ExtensionsModel) -> bool {
     let mut added_any = false;
 
     for entry in CURATED_MCP_SERVERS {
@@ -535,17 +533,11 @@ pub fn ensure_curated_mcp_servers(
             id: entry.ext_id.to_string(),
             display_name: entry.display_name.to_string(),
             description: entry.description.to_string(),
-            kind: ExtensionKind::McpServer(config.clone()),
+            kind: ExtensionKind::McpServer(config),
             source: ExtensionSource::Custom,
             pricing_model: None,
             enabled: false,
         });
-
-        // Mirror into the legacy McpServersModel only if no entry with this
-        // name already exists (preserves any user-managed override).
-        if !mcp_servers.iter().any(|s| s.name == entry.server_name) {
-            mcp_servers.push(config);
-        }
 
         added_any = true;
     }
@@ -558,11 +550,7 @@ pub fn ensure_curated_mcp_servers(
 /// the Hive MCP endpoint is deployed (see hive issue #55).
 ///
 /// Returns `true` if a new entry was added (caller should persist both stores).
-pub fn ensure_default_hive_mcp(
-    registry_url: &str,
-    extensions: &mut ExtensionsModel,
-    mcp_servers: &mut Vec<McpServerConfig>,
-) -> bool {
+pub fn ensure_default_hive_mcp(registry_url: &str, extensions: &mut ExtensionsModel) -> bool {
     if extensions.is_installed(HIVE_MCP_EXT_ID) {
         return false;
     }
@@ -580,7 +568,7 @@ pub fn ensure_default_hive_mcp(
         id: HIVE_MCP_EXT_ID.to_string(),
         display_name: "Hive Registry".to_string(),
         description: "Search, browse, and manage Hive modules via MCP.".to_string(),
-        kind: ExtensionKind::McpServer(config.clone()),
+        kind: ExtensionKind::McpServer(config),
         source: ExtensionSource::Hive {
             module_name: "hive-mcp".to_string(),
             version: "built-in".to_string(),
@@ -589,17 +577,94 @@ pub fn ensure_default_hive_mcp(
         enabled: false,
     });
 
-    if !mcp_servers.iter().any(|s| s.name == "hive") {
-        mcp_servers.push(config);
-    }
-
     true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::models::mcp_store::McpAuthStatus;
     use sha2::Digest as _;
+
+    fn mcp_ext(name: &str, enabled: bool, api_key: Option<&str>) -> InstalledExtension {
+        InstalledExtension {
+            id: format!("mcp-{name}"),
+            display_name: name.to_string(),
+            description: String::new(),
+            kind: ExtensionKind::McpServer(McpServerConfig {
+                name: name.to_string(),
+                url: format!("http://localhost:3000/{name}"),
+                api_key: api_key.map(str::to_string),
+                enabled,
+                is_module: false,
+            }),
+            source: ExtensionSource::Custom,
+            pricing_model: None,
+            enabled,
+        }
+    }
+
+    fn mcp_cfg(name: &str, enabled: bool, api_key: Option<&str>) -> McpServerConfig {
+        McpServerConfig {
+            name: name.to_string(),
+            url: format!("http://localhost:3000/{name}"),
+            api_key: api_key.map(str::to_string),
+            enabled,
+            is_module: false,
+        }
+    }
+
+    /// AGE-420 round trip: the list persisted to `mcp_servers.json` after the
+    /// default seeding is the same list as before the legacy mirror was gone.
+    #[test]
+    fn persisted_mcp_list_after_seeding_is_unchanged() {
+        let mut extensions = ExtensionsModel::default();
+        extensions.add(mcp_ext("alpha", true, None));
+        extensions.add(mcp_ext("beta", false, None));
+        extensions.add(mcp_ext("gamma", true, Some("sk-gamma")));
+        extensions.add(InstalledExtension {
+            id: "wasm-echo".to_string(),
+            display_name: "echo".to_string(),
+            description: String::new(),
+            kind: ExtensionKind::WasmModule,
+            source: ExtensionSource::Custom,
+            pricing_model: None,
+            enabled: true,
+        });
+        extensions.set_mcp_auth_status("gamma".to_string(), McpAuthStatus::Authenticated);
+
+        let hive = ensure_default_hive_mcp("https://hive.example", &mut extensions);
+        let curated = ensure_curated_mcp_servers(&mut extensions);
+        assert!(hive && curated);
+
+        let persisted = extensions.mcp_server_configs();
+        assert_eq!(
+            extensions.mcp_auth_status("gamma"),
+            Some(&McpAuthStatus::Authenticated)
+        );
+        let mut expected = vec![
+            mcp_cfg("alpha", true, None),
+            mcp_cfg("beta", false, None),
+            mcp_cfg("gamma", true, Some("sk-gamma")),
+            McpServerConfig {
+                name: "hive".to_string(),
+                url: "https://hive.example/mcp".to_string(),
+                api_key: None,
+                enabled: false,
+                is_module: false,
+            },
+        ];
+        for entry in CURATED_MCP_SERVERS {
+            expected.push(McpServerConfig {
+                name: entry.server_name.to_string(),
+                url: entry.url.to_string(),
+                api_key: None,
+                enabled: false,
+                is_module: false,
+            });
+        }
+        assert_eq!(persisted, expected);
+    }
 
     #[test]
     fn build_module_toml_minimal() {
@@ -1082,10 +1147,10 @@ mod tests {
     #[test]
     fn ensure_default_hive_mcp_adds_on_first_run() {
         let mut ext = ExtensionsModel::default();
-        let mut servers = vec![];
-        let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
+        let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext);
         assert!(added);
         assert!(ext.is_installed(HIVE_MCP_EXT_ID));
+        let servers = ext.mcp_server_configs();
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "hive");
         assert!(!servers[0].enabled);
@@ -1094,9 +1159,8 @@ mod tests {
     #[test]
     fn ensure_default_hive_mcp_idempotent() {
         let mut ext = ExtensionsModel::default();
-        let mut servers = vec![];
-        ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
-        let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext, &mut servers);
+        ensure_default_hive_mcp("http://localhost:8080", &mut ext);
+        let added = ensure_default_hive_mcp("http://localhost:8080", &mut ext);
         assert!(!added);
         assert_eq!(ext.extensions.len(), 1);
     }
@@ -1137,8 +1201,7 @@ mod tests {
     #[test]
     fn ensure_curated_mcp_servers_seeds_disabled() {
         let mut ext = ExtensionsModel::default();
-        let mut servers = vec![];
-        let added = ensure_curated_mcp_servers(&mut ext, &mut servers);
+        let added = ensure_curated_mcp_servers(&mut ext);
         assert!(added);
 
         let notion_ext = ext
@@ -1149,6 +1212,7 @@ mod tests {
             "curated entries must be seeded as disabled"
         );
 
+        let servers = ext.mcp_server_configs();
         let notion_server = servers
             .iter()
             .find(|s| s.name == "notion")
@@ -1161,19 +1225,17 @@ mod tests {
     #[test]
     fn ensure_curated_mcp_servers_idempotent() {
         let mut ext = ExtensionsModel::default();
-        let mut servers = vec![];
-        ensure_curated_mcp_servers(&mut ext, &mut servers);
-        let added = ensure_curated_mcp_servers(&mut ext, &mut servers);
+        ensure_curated_mcp_servers(&mut ext);
+        let added = ensure_curated_mcp_servers(&mut ext);
         assert!(!added, "second call must not add duplicates");
         assert_eq!(ext.extensions.len(), CURATED_MCP_SERVERS.len());
-        assert_eq!(servers.len(), CURATED_MCP_SERVERS.len());
+        assert_eq!(ext.mcp_server_configs().len(), CURATED_MCP_SERVERS.len());
     }
 
     #[test]
     fn ensure_curated_mcp_servers_preserves_user_state() {
         let mut ext = ExtensionsModel::default();
-        let mut servers = vec![];
-        ensure_curated_mcp_servers(&mut ext, &mut servers);
+        ensure_curated_mcp_servers(&mut ext);
 
         // Simulate the user enabling Notion and providing an API key.
         if let Some(installed) = ext.find_mut("mcp-notion") {
@@ -1183,13 +1245,8 @@ mod tests {
                 cfg.api_key = Some("user-token".to_string());
             }
         }
-        if let Some(server) = servers.iter_mut().find(|s| s.name == "notion") {
-            server.enabled = true;
-            server.api_key = Some("user-token".to_string());
-        }
-
         // Subsequent seeding must not clobber the user's choices.
-        let added = ensure_curated_mcp_servers(&mut ext, &mut servers);
+        let added = ensure_curated_mcp_servers(&mut ext);
         assert!(!added);
 
         let notion_ext = ext.find("mcp-notion").unwrap();
@@ -1200,6 +1257,7 @@ mod tests {
             panic!("expected McpServer kind");
         }
 
+        let servers = ext.mcp_server_configs();
         let notion_server = servers.iter().find(|s| s.name == "notion").unwrap();
         assert!(notion_server.enabled);
         assert_eq!(notion_server.api_key.as_deref(), Some("user-token"));

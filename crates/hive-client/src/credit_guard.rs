@@ -185,15 +185,6 @@ impl CreditGuard {
         }
     }
 
-    /// Apply an optimistic local deduction after a successful invocation.
-    /// This reduces the cached balance without a network call.
-    pub async fn deduct_local(&self, tokens: i64) {
-        let mut cache = self.cache.lock().await;
-        if let Some(ref mut cached) = *cache {
-            cached.balance_tokens = cached.balance_tokens.saturating_sub(tokens);
-        }
-    }
-
     /// Force refresh the cached balance from the server.
     pub async fn refresh(&self) -> Result<i64, ClientError> {
         let credit_balance = self.client.get_credit_balance().await?;

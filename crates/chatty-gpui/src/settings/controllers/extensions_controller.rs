@@ -10,7 +10,7 @@ use chatty_core::settings::models::extensions_store::{
     ExtensionKind, ExtensionSource, ExtensionsModel, InstalledExtension,
 };
 use chatty_core::settings::models::hive_settings::HiveSettingsModel;
-use chatty_core::settings::models::mcp_store::{McpAuthStatus, McpServerConfig, McpServersModel};
+use chatty_core::settings::models::mcp_store::{McpAuthStatus, McpServerConfig};
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use gpui::{App, AsyncApp, Global};
 use std::path::PathBuf;
@@ -19,20 +19,17 @@ use tracing::{error, info, warn};
 
 // ── Default Hive MCP ──────────────────────────────────────────────────────
 
-/// Ensure the Hive registry MCP server is present in the Extensions store
-/// and in McpServersModel. Thin GPUI wrapper around [`chatty_core::install::ensure_default_hive_mcp`].
+/// Ensure the Hive registry MCP server is present in the Extensions store.
+/// Thin GPUI wrapper around [`chatty_core::install::ensure_default_hive_mcp`].
 ///
 /// Returns `true` if a new entry was added (caller should persist).
 pub fn ensure_default_hive_mcp(cx: &mut App) -> bool {
     let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
-    let mut mcp_servers = cx.global::<McpServersModel>().servers().to_vec();
 
     let extensions = cx.global_mut::<ExtensionsModel>();
-    let added = install::ensure_default_hive_mcp(&registry_url, extensions, &mut mcp_servers);
+    let added = install::ensure_default_hive_mcp(&registry_url, extensions);
 
     if added {
-        let mcp_model = cx.global_mut::<McpServersModel>();
-        mcp_model.replace_all(mcp_servers);
         info!("Added default Hive MCP server extension (disabled)");
     }
 
@@ -40,20 +37,16 @@ pub fn ensure_default_hive_mcp(cx: &mut App) -> bool {
 }
 
 /// Seed entries from the curated external MCP catalog (Notion, etc.) into the
-/// Extensions store and McpServersModel. Thin GPUI wrapper around
+/// Extensions store. Thin GPUI wrapper around
 /// [`chatty_core::install::ensure_curated_mcp_servers`].
 ///
 /// New entries are added disabled so the user must opt in. Returns `true` if
 /// at least one new entry was added (caller should persist).
 pub fn ensure_curated_mcp_servers(cx: &mut App) -> bool {
-    let mut mcp_servers = cx.global::<McpServersModel>().servers().to_vec();
-
     let extensions = cx.global_mut::<ExtensionsModel>();
-    let added = install::ensure_curated_mcp_servers(extensions, &mut mcp_servers);
+    let added = install::ensure_curated_mcp_servers(extensions);
 
     if added {
-        let mcp_model = cx.global_mut::<McpServersModel>();
-        mcp_model.replace_all(mcp_servers);
         info!("Seeded curated MCP catalog entries (disabled)");
     }
 
@@ -607,7 +600,7 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
         is_module: false,
     };
 
-    // Add to unified extensions store
+    // Add to the extensions store, then derive mcp_servers.json from it
     let extensions = cx.global_mut::<ExtensionsModel>();
     let id = format!("mcp-{name}");
     extensions.add(InstalledExtension {
@@ -620,20 +613,7 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
         enabled: true,
     });
     save_extensions_async(extensions.clone(), cx);
-
-    // Also push into the legacy McpServersModel
-    {
-        let model = cx.global_mut::<McpServersModel>();
-        model.servers_mut().push(config);
-        let servers = model.servers().to_vec();
-        let repo = chatty_core::mcp_repository();
-        cx.spawn(|_cx: &mut AsyncApp| async move {
-            if let Err(e) = repo.save_all(servers).await {
-                error!(error = ?e, "Failed to save MCP servers");
-            }
-        })
-        .detach();
-    }
+    save_servers_async(persisted_mcp_servers(cx), cx);
 
     cx.refresh_windows();
     info!(server = %name, "Created custom MCP server extension");
@@ -648,22 +628,19 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
 /// If the server is currently enabled and connected, it is reconnected so
 /// the new credentials take effect immediately.
 fn sync_hive_token_to_mcp(token: Option<String>, cx: &mut App) {
-    let (updated_servers, was_enabled, config) = {
-        let model = cx.global_mut::<McpServersModel>();
-
-        let Some(server) = model.servers_mut().iter_mut().find(|s| s.name == "hive") else {
-            return;
-        };
-        let was_enabled = server.enabled;
-        server.api_key = token;
-
-        let config = model.servers().iter().find(|s| s.name == "hive").cloned();
-        (model.servers().to_vec(), was_enabled, config)
+    // The token goes into the persisted/connect list only, never into
+    // ExtensionsModel (which is saved to extensions.json).
+    let updated_servers = cx
+        .global::<ExtensionsModel>()
+        .mcp_server_configs_with_hive_token(token.as_deref());
+    let Some(config) = updated_servers.iter().find(|s| s.name == "hive").cloned() else {
+        return;
     };
+    let was_enabled = config.enabled;
 
     save_servers_async(updated_servers, cx);
 
-    if was_enabled && let Some(config) = config {
+    if was_enabled {
         let service = cx.global::<McpService>().clone();
         let name = config.name.clone();
 
@@ -704,6 +681,15 @@ fn save_hive_settings_async(model: HiveSettingsModel, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// The MCP server list to write to `mcp_servers.json`: derived from
+/// [`ExtensionsModel`], with the stored Hive token injected into the "hive"
+/// entry (as that file has always held it). Use this for every save of that
+/// file.
+pub fn persisted_mcp_servers(cx: &App) -> Vec<McpServerConfig> {
+    cx.global::<ExtensionsModel>()
+        .mcp_server_configs_with_hive_token(cx.global::<HiveSettingsModel>().token.as_deref())
 }
 
 fn save_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {

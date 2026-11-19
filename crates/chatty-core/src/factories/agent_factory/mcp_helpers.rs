@@ -95,7 +95,7 @@ pub(super) fn filter_mcp_tool_info(
 /// (e.g., `"format": "uri"`). MCP tool schemas may include these, so we strip
 /// them before sending to OpenAI / Azure OpenAI.
 ///
-/// TODO(#127): Remove once rig-core's `sanitize_schema()` strips `"format"` (not fixed as of v0.42 — re-verified 2026-09).
+/// TODO(#127): Remove once rig-core's `sanitize_schema()` strips `"format"` (not fixed as of v0.46 — re-verified 2026-11; `tool::schema::plain()` strips it only for typed `args_schema` tools, not for MCP schemas, and the OpenAI strict-tool path does not call it).
 fn strip_format_from_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
     schema.remove("format");
 
@@ -132,7 +132,7 @@ fn strip_format_from_schema(schema: &mut serde_json::Map<String, serde_json::Val
 /// Strips unsupported JSON Schema keywords (like `"format"`) that OpenAI's
 /// strict-mode function calling rejects.
 ///
-/// TODO(#127): Remove once rig-core's `sanitize_schema()` strips `"format"` (not fixed as of v0.42 — re-verified 2026-09).
+/// TODO(#127): Remove once rig-core's `sanitize_schema()` strips `"format"` (not fixed as of v0.46 — re-verified 2026-11; `tool::schema::plain()` strips it only for typed `args_schema` tools, not for MCP schemas, and the OpenAI strict-tool path does not call it).
 pub(super) fn sanitize_mcp_tools_for_openai(
     mcp_tools: Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>>,
 ) -> Option<Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>> {

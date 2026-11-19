@@ -172,9 +172,6 @@ fn main() {
         // Initialize models model with empty state - will be populated async
         cx.set_global(settings::models::ModelsModel::new());
 
-        // Initialize MCP servers model with empty state - will be populated async
-        cx.set_global(settings::models::McpServersModel::new());
-
         // Initialize execution settings with default - will be populated async
         cx.set_global(settings::models::ExecutionSettingsModel::default());
 
@@ -501,35 +498,12 @@ fn main() {
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Some(servers) = mcp_rx.recv().await {
                 cx.update(|cx| {
-                    // Legacy sync
-                    cx.update_global::<settings::models::McpServersModel, _>(|model, _cx| {
-                        model.replace_all(servers.clone());
-                    });
-
-                    // Sync into ExtensionsModel: add/update MCP servers from the
-                    // tool-modified list while preserving non-MCP extensions.
+                    // Sync the tool-modified list into ExtensionsModel while
+                    // preserving non-MCP extensions.
                     {
-                        use chatty_core::settings::models::extensions_store::{
-                            ExtensionKind, ExtensionSource, ExtensionsModel, InstalledExtension,
-                        };
+                        use chatty_core::settings::models::extensions_store::ExtensionsModel;
                         let ext_model = cx.global_mut::<ExtensionsModel>();
-                        for server in &servers {
-                            let ext_id = format!("mcp-{}", server.name);
-                            if let Some(ext) = ext_model.find_mut(&ext_id) {
-                                ext.enabled = server.enabled;
-                                ext.kind = ExtensionKind::McpServer(server.clone());
-                            } else {
-                                ext_model.add(InstalledExtension {
-                                    id: ext_id,
-                                    display_name: server.name.clone(),
-                                    description: String::new(),
-                                    kind: ExtensionKind::McpServer(server.clone()),
-                                    source: ExtensionSource::Custom,
-                                    pricing_model: None,
-                                    enabled: server.enabled,
-                                });
-                            }
-                        }
+                        ext_model.apply_mcp_update(&servers);
                         let ext_clone = ext_model.clone();
                         let repo = chatty_core::extensions_repository();
                         cx.spawn(|_cx: &mut AsyncApp| async move {
@@ -861,11 +835,7 @@ fn main() {
             let repo = chatty_core::mcp_repository();
             match repo.load_all().await {
                 Ok(servers) => {
-                    let servers_clone = servers.clone();
                     cx.update(|cx| {
-                        cx.update_global::<settings::models::McpServersModel, _>(|model, _cx| {
-                            model.replace_all(servers);
-                        });
                         info!("MCP server configurations loaded");
 
                         // Merge legacy MCP servers into ExtensionsModel so it
@@ -875,7 +845,7 @@ fn main() {
                                 ExtensionKind, ExtensionSource, InstalledExtension,
                             };
                             let ext_model = cx.global_mut::<settings::models::ExtensionsModel>();
-                            for server in &servers_clone {
+                            for server in &servers {
                                 let ext_id = format!("mcp-{}", server.name);
                                 if ext_model.find(&ext_id).is_none() {
                                     ext_model.add(InstalledExtension {
@@ -894,7 +864,9 @@ fn main() {
                         // Inject the stored Hive JWT token into the "hive" MCP
                         // server config so authenticated tool calls work on
                         // startup without requiring an extra login.
-                        let mut servers_clone = servers_clone;
+                        let mut servers_clone = cx
+                            .global::<settings::models::ExtensionsModel>()
+                            .mcp_server_configs();
                         if let Some(token) = cx
                             .global::<chatty_core::settings::models::hive_settings::HiveSettingsModel>()
                             .token
@@ -916,9 +888,8 @@ fn main() {
                             cx.update(|cx| {
                                 use settings::models::mcp_store::McpAuthStatus;
 
-                                // Derive status once per connection result, then
-                                // write to both models (ExtensionsModel is
-                                // canonical; McpServersModel kept for legacy).
+                                // Derive status once per connection result and
+                                // record it on ExtensionsModel.
                                 let statuses: Vec<(String, McpAuthStatus)> = results
                                     .into_iter()
                                     .map(|(name, ok, err_msg)| {
@@ -938,11 +909,6 @@ fn main() {
                                         (name, status)
                                     })
                                     .collect();
-
-                                let model = cx.global_mut::<settings::models::McpServersModel>();
-                                for (name, status) in &statuses {
-                                    model.set_auth_status(name.clone(), status.clone());
-                                }
 
                                 let ext_model = cx.global_mut::<settings::models::ExtensionsModel>();
                                 for (name, status) in statuses {
@@ -1292,10 +1258,7 @@ fn main() {
                 if hive_added || curated_added {
                     // Persist the new extension and MCP server entries
                     let ext_model = cx.global::<settings::models::ExtensionsModel>().clone();
-                    let mcp_servers = cx
-                        .global::<settings::models::McpServersModel>()
-                        .servers()
-                        .to_vec();
+                    let mcp_servers = settings::controllers::extensions_controller::persisted_mcp_servers(cx);
                     cx.spawn(|_cx: &mut AsyncApp| async move {
                         if let Err(e) = chatty_core::extensions_repository().save(ext_model).await {
                             warn!(error = ?e, "Failed to persist default Hive/curated MCP extensions");
@@ -1315,18 +1278,15 @@ fn main() {
             // disabled so users opt in explicitly from the Extensions page.
             cx.update(|cx| {
                 let mut ext_model = cx.global::<settings::models::ExtensionsModel>().clone();
-                let mut mcp_servers = cx
-                    .global::<settings::models::McpServersModel>()
-                    .servers()
-                    .to_vec();
+                let mut mcp_servers = ext_model.mcp_server_configs();
                 let added = chatty_core::curated_mcp::ensure_curated_mcp_servers(
                     &mut ext_model,
                     &mut mcp_servers,
                 );
                 if added {
                     cx.set_global(ext_model.clone());
-                    cx.global_mut::<settings::models::McpServersModel>()
-                        .replace_all(mcp_servers.clone());
+                    let mcp_servers =
+                        settings::controllers::extensions_controller::persisted_mcp_servers(cx);
                     cx.spawn(|_cx: &mut AsyncApp| async move {
                         if let Err(e) = chatty_core::extensions_repository().save(ext_model).await {
                             warn!(error = ?e, "Failed to persist curated MCP extensions");

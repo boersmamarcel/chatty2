@@ -99,20 +99,6 @@ impl WriteOperation {
             asker: None,
         }
     }
-
-    /// Whether this is a destructive operation (delete, overwrite)
-    ///
-    /// Pre-built API: will be called by the write approval UI (not yet wired).
-    pub fn is_destructive(&self) -> bool {
-        matches!(
-            self,
-            WriteOperation::DeleteFile { .. }
-                | WriteOperation::WriteFile {
-                    is_overwrite: true,
-                    ..
-                }
-        )
-    }
 }
 
 /// Request for user approval to perform a filesystem write operation
