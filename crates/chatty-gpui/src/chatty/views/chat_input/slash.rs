@@ -2,9 +2,8 @@
 //!
 //! # What lives here
 //!
-//! - `SlashCommand` (an alias for `chatty_core::slash_commands::SlashCommandSpec`
-//!   — the catalog itself is shared with the TUI, see AGE-172) / `SkillEntry` /
-//!   `SlashMenuItem` types.
+//! - `SkillEntry` / `AgentPickerEntry` / `SlashMenuItem` (re-exported from
+//!   `chatty_core::slash_commands`, shared with the TUI, see AGE-172/AGE-1323).
 //! - `slash_menu_items_for` / `slash_menu_items_with_skills` /
 //!   `agent_menu_items` / `slash_menu_items` — pure filtering helpers
 //!   (also called from unit tests).
@@ -25,97 +24,13 @@ use std::path::Path;
 use super::{ChatInputEvent, ChatInputState};
 use crate::settings::models::{AgentSpecsModel, ExtensionsModel};
 use chatty_core::settings::models::extensions_store::ExtensionKind;
+use chatty_core::slash_commands::{MenuFrontend, command_and_skill_items};
 
 // ---------------------------------------------------------------------------
 // Slash command menu
 // ---------------------------------------------------------------------------
 
-/// A single entry in the slash-command picker. The catalog lives in
-/// `chatty_core::slash_commands` so it stays in sync with the TUI.
-pub type SlashCommand = chatty_core::slash_commands::SlashCommandSpec;
-
-/// A skill loaded from the filesystem for display in the slash-command picker.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SkillEntry {
-    /// Short directory name of the skill (e.g. `"fix-ci"`).
-    pub name: String,
-    /// Human-readable description extracted from the skill's frontmatter.
-    pub description: String,
-}
-
-/// An agent the `/agent ` picker offers (AGE-761).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentPickerEntry {
-    /// The name `/agent <name> <prompt>` dispatches to.
-    pub name: String,
-    /// The spec's description, or what a remote agent's config says about it.
-    pub description: String,
-}
-
-/// A combined item in the slash-command picker: a built-in command, a
-/// dynamic skill loaded from the filesystem, or — after `/agent ` — an agent
-/// the conversation can reach (AGE-761).
-#[derive(Clone, Debug, PartialEq)]
-pub enum SlashMenuItem {
-    Command(&'static SlashCommand),
-    Skill(SkillEntry),
-    Agent(AgentPickerEntry),
-    /// The `/agent ` picker's only row when there is no agent to offer.
-    NoAgents,
-}
-
-impl SlashMenuItem {
-    /// The slash-prefixed display string shown in the menu (e.g. `/compact` or `/fix-ci`).
-    pub fn display_command(&self) -> String {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.command.to_string(),
-            SlashMenuItem::Skill(skill) => format!("/{}", skill.name),
-            SlashMenuItem::Agent(agent) => agent.name.clone(),
-            SlashMenuItem::NoAgents => "No agents available".to_string(),
-        }
-    }
-
-    /// Human-readable description.
-    pub fn description(&self) -> &str {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.description,
-            SlashMenuItem::Skill(skill) => &skill.description,
-            SlashMenuItem::Agent(agent) => &agent.description,
-            SlashMenuItem::NoAgents => "",
-        }
-    }
-
-    /// Whether the item should be applied immediately (no arg input needed).
-    pub fn execute_immediately(&self) -> bool {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.execute_immediately,
-            // Skills are not execute-immediately — we insert a prompt the user
-            // can review and optionally extend before pressing Enter.
-            SlashMenuItem::Skill(_) | SlashMenuItem::Agent(_) | SlashMenuItem::NoAgents => false,
-        }
-    }
-
-    /// Text to insert into the input when this item is selected.
-    pub fn insert_text(&self) -> String {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.insert_text.to_string(),
-            SlashMenuItem::Skill(skill) => format!("Use the '{}' skill: ", skill.name),
-            SlashMenuItem::Agent(agent) => format!("/agent {} ", agent.name),
-            SlashMenuItem::NoAgents => String::new(),
-        }
-    }
-
-    /// Returns true when this item represents a filesystem skill.
-    pub fn is_skill(&self) -> bool {
-        matches!(self, SlashMenuItem::Skill(_))
-    }
-
-    /// Whether Enter, Tab or a click can apply it: every row but the empty
-    /// agent picker's placeholder (AGE-761).
-    pub fn is_selectable(&self) -> bool {
-        !matches!(self, SlashMenuItem::NoAgents)
-    }
-}
+pub use chatty_core::slash_commands::{AgentPickerEntry, SkillEntry, SlashMenuItem};
 
 /// Returns the built-in slash commands that match the current `input_text`.
 /// The menu is active only when `input_text` starts with `/` and contains
@@ -123,7 +38,9 @@ impl SlashMenuItem {
 ///
 /// Use [`slash_menu_items_with_skills`] to also include filesystem skills.
 #[cfg(test)]
-pub fn slash_menu_items_for(input_text: &str) -> Vec<&'static SlashCommand> {
+pub fn slash_menu_items_for(
+    input_text: &str,
+) -> Vec<&'static chatty_core::slash_commands::SlashCommandSpec> {
     let trimmed = input_text.trim();
     if !trimmed.starts_with('/') {
         return Vec::new();
@@ -155,68 +72,11 @@ pub fn slash_menu_items_with_skills(input_text: &str, skills: &[SkillEntry]) -> 
     if trimmed.chars().any(char::is_whitespace) {
         return Vec::new();
     }
-    let query = trimmed[1..].to_ascii_lowercase();
-
-    let mut items: Vec<SlashMenuItem> = chatty_core::slash_commands::gpui_commands()
-        .filter(|cmd| {
-            query.is_empty()
-                || cmd
-                    .command
-                    .trim_start_matches('/')
-                    .to_ascii_lowercase()
-                    .starts_with(&query)
-        })
-        .map(SlashMenuItem::Command)
-        .collect();
-
-    let skill_items = skills
-        .iter()
-        .filter(|skill| query.is_empty() || skill.name.to_ascii_lowercase().starts_with(&query));
-    items.extend(skill_items.map(|s| SlashMenuItem::Skill(s.clone())));
-
-    items
+    command_and_skill_items(&trimmed[1..], MenuFrontend::Gpui, skills)
 }
 
-/// The `/agent ` picker's query: the one word after `/agent `, `None` when
-/// the picker is not in play — before the space, or once a second space
-/// follows the name (AGE-761).
-fn agent_query(input_text: &str) -> Option<&str> {
-    // gpui-component appends Enter's newline to the buffer before it fires
-    // `PressEnter`; that is not a space the user typed.
-    let text = input_text.trim_start().trim_end_matches(['\n', '\r']);
-    let query = text.strip_prefix("/agent ")?;
-    (!query.contains(char::is_whitespace)).then_some(query)
-}
-
-/// The `/agent ` picker's rows for `input_text` (AGE-761), `None` when the
-/// picker is not in play. Names starting with the query come first, then
-/// names containing it. With no agent at all, a bare `/agent ` shows the
-/// one "No agents available" row; a typed word then closes the picker so
-/// Enter sends it to the default sub-agent.
-pub fn agent_menu_items(
-    input_text: &str,
-    agents: &[AgentPickerEntry],
-) -> Option<Vec<SlashMenuItem>> {
-    let query = agent_query(input_text)?.to_lowercase();
-    if agents.is_empty() {
-        return Some(if query.is_empty() {
-            vec![SlashMenuItem::NoAgents]
-        } else {
-            Vec::new()
-        });
-    }
-    let (mut items, substring): (Vec<_>, Vec<_>) = agents
-        .iter()
-        .filter(|agent| agent.name.to_lowercase().contains(&query))
-        .partition(|agent| agent.name.to_lowercase().starts_with(&query));
-    items.extend(substring);
-    Some(
-        items
-            .into_iter()
-            .map(|agent| SlashMenuItem::Agent(agent.clone()))
-            .collect(),
-    )
-}
+pub use chatty_core::slash_commands::agent_menu_items;
+use chatty_core::slash_commands::agent_query;
 
 /// Every picker row for `input_text`: the `/agent ` picker's once it is in
 /// play (AGE-761), else commands and skills.
@@ -346,7 +206,7 @@ impl ChatInputState {
 
     /// Current highlighted index in the picker.
     pub fn slash_menu_selected(&self) -> usize {
-        self.slash_menu_selected
+        self.slash_menu.selected()
     }
 
     /// Reset the selection to 0 **only** when the slash query text changes.
@@ -372,17 +232,8 @@ impl ChatInputState {
             ""
         };
 
-        // Compare without allocating; only convert to owned when storing.
-        let changed = self
-            .last_slash_query
-            .as_deref()
-            .map(|prev| !prev.eq_ignore_ascii_case(query_raw))
-            .unwrap_or(true);
-
-        if changed {
-            self.slash_menu_selected = 0;
+        if self.slash_menu.set_filter(query_raw) {
             self.slash_menu_scroll_handle.scroll_to_item(0);
-            self.last_slash_query = Some(query_raw.to_ascii_lowercase());
         }
     }
 
@@ -391,13 +242,9 @@ impl ChatInputState {
         if num_items == 0 {
             return;
         }
-        if self.slash_menu_selected == 0 {
-            self.slash_menu_selected = num_items - 1;
-        } else {
-            self.slash_menu_selected -= 1;
-        }
+        self.slash_menu.move_up(num_items);
         self.slash_menu_scroll_handle
-            .scroll_to_item(self.slash_menu_selected);
+            .scroll_to_item(self.slash_menu.selected());
     }
 
     /// Move selection down (wraps to first item).
@@ -405,9 +252,9 @@ impl ChatInputState {
         if num_items == 0 {
             return;
         }
-        self.slash_menu_selected = (self.slash_menu_selected + 1) % num_items;
+        self.slash_menu.move_down(num_items);
         self.slash_menu_scroll_handle
-            .scroll_to_item(self.slash_menu_selected);
+            .scroll_to_item(self.slash_menu.selected());
     }
 
     /// Apply the currently highlighted slash command or skill.
@@ -422,14 +269,13 @@ impl ChatInputState {
         if items.is_empty() {
             return;
         }
-        let selected = self.slash_menu_selected.min(items.len().saturating_sub(1));
+        let selected = self.slash_menu.selected_in(items.len());
         let item = &items[selected];
         if !item.is_selectable() {
             return;
         }
-        self.slash_menu_selected = 0;
+        self.slash_menu.clear(); // next '/' starts fresh
         self.slash_menu_scroll_handle.scroll_to_item(0);
-        self.last_slash_query = None; // reset so next '/' starts fresh
 
         if item.execute_immediately() {
             // Only built-in commands reach here (skills are never immediate).
@@ -530,8 +376,8 @@ pub(super) fn render_slash_menu(
                             let state = state.clone();
                             move |_event, _window, cx| {
                                 state.update(cx, |s, cx| {
-                                    if s.slash_menu_selected != idx {
-                                        s.slash_menu_selected = idx;
+                                    if s.slash_menu.selected() != idx {
+                                        s.slash_menu.select(idx);
                                         s.slash_menu_scroll_handle.scroll_to_item(idx);
                                         cx.notify();
                                     }
@@ -540,7 +386,7 @@ pub(super) fn render_slash_menu(
                         })
                         .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                             state_for_click.update(cx, |s, cx| {
-                                s.slash_menu_selected = idx;
+                                s.slash_menu.select(idx);
                                 s.slash_menu_scroll_handle.scroll_to_item(idx);
                                 s.apply_slash_command(cx);
                                 cx.notify();

@@ -38,8 +38,8 @@ pub use pr_status_bar_view::PrStatusBarView;
 pub use slash::SkillEntry;
 #[cfg(test)]
 pub use slash::slash_menu_items_for;
-#[allow(unused_imports)] // SlashCommand / SlashMenuItem are part of the public API
-pub use slash::{AgentPickerEntry, SlashCommand, SlashMenuItem};
+#[allow(unused_imports)] // SlashMenuItem is part of the public API
+pub use slash::{AgentPickerEntry, SlashMenuItem};
 #[cfg(test)]
 pub use slash::{agent_menu_items, slash_menu_items, slash_menu_items_with_skills};
 
@@ -118,15 +118,12 @@ pub struct ChatInputState {
     /// The most recent provider round-trip's index (`ApiCallUsage::turn`)
     /// and its own token total, updated live from `StreamManagerEvent::TurnProgress`.
     turn_progress: Option<(u32, u32)>,
-    /// Index of the highlighted item in the slash-command picker.
-    slash_menu_selected: usize,
+    /// Selection and filter state of the slash-command picker (shared with
+    /// the TUI, see `chatty_core::slash_commands::SlashMenu`).
+    slash_menu: chatty_core::slash_commands::SlashMenu,
     /// Scroll state for the slash-command picker so keyboard navigation can
     /// keep the selected item visible.
     slash_menu_scroll_handle: ScrollHandle,
-    /// The slash query that was in effect when `slash_menu_selected` was last
-    /// reset.  Used to detect genuine query changes vs. spurious Change events
-    /// (e.g. the newline that gpui-component appends before firing PressEnter).
-    last_slash_query: Option<String>,
     /// When set, the value is written into the input on the next render frame
     /// (requires Window access, deferred from the subscription closure).
     pending_slash_insert: Option<String>,
@@ -182,9 +179,10 @@ impl ChatInputState {
             supports_pdf: false,
             is_streaming: false,
             turn_progress: None,
-            slash_menu_selected: 0,
+            slash_menu: chatty_core::slash_commands::SlashMenu::new(
+                chatty_core::slash_commands::MenuWrap::Wrap,
+            ),
             slash_menu_scroll_handle: ScrollHandle::new(),
-            last_slash_query: None,
             pending_slash_insert: None,
             working_dir: None,
             available_skills: Vec::new(),

@@ -17,64 +17,18 @@ pub use chatty_core::at_mention::{
 };
 use chatty_core::paste;
 
-/// A single built-in slash command. The catalog lives in
-/// `chatty_core::slash_commands` so it stays in sync with the GPUI desktop app.
-pub type SlashCommandEntry = chatty_core::slash_commands::SlashCommandSpec;
-
-/// A combined item in the TUI slash-command picker: either a built-in command
-/// or a dynamic filesystem skill.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SlashMenuItem {
-    Command(SlashCommandEntry),
-    Skill { name: String, description: String },
-}
-
-impl SlashMenuItem {
-    /// The slash-prefixed display string (e.g. `/compact` or `/fix-ci`).
-    pub fn display_command(&self) -> String {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.command.to_string(),
-            SlashMenuItem::Skill { name, .. } => format!("/{}", name),
-        }
-    }
-
-    /// Human-readable description.
-    pub fn description(&self) -> &str {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.description,
-            SlashMenuItem::Skill { description, .. } => description,
-        }
-    }
-
-    /// Whether the item should be applied immediately (no arg input needed).
-    pub fn execute_immediately(&self) -> bool {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.execute_immediately,
-            SlashMenuItem::Skill { .. } => false,
-        }
-    }
-
-    /// Text to insert into the input box when this item is selected.
-    pub fn insert_text(&self) -> String {
-        match self {
-            SlashMenuItem::Command(cmd) => cmd.insert_text.to_string(),
-            SlashMenuItem::Skill { name, .. } => format!("Use the '{}' skill: ", name),
-        }
-    }
-
-    /// Returns true when this item represents a filesystem skill.
-    pub fn is_skill(&self) -> bool {
-        matches!(self, SlashMenuItem::Skill { .. })
-    }
-}
+/// The slash menu's rows are shared with the GPUI desktop app
+/// (`chatty_core::slash_commands`); the TUI only ever produces commands and
+/// skills, never the `/agent ` picker's agent rows.
+pub use chatty_core::slash_commands::SlashMenuItem;
+use chatty_core::slash_commands::{MenuFrontend, MenuWrap, SkillEntry, SlashMenu};
 
 /// Manages the text input state
 pub struct InputState {
     pub textarea: TextArea<'static>,
-    slash_menu_selected: usize,
-    slash_menu_scroll_offset: usize,
+    slash_menu: SlashMenu,
     /// Filesystem skills loaded from the project and global skill directories.
-    available_skills: Vec<(String, String)>,
+    available_skills: Vec<SkillEntry>,
     /// Cached list of files for the `@` mention picker.
     pub at_menu_files: Vec<String>,
     /// Index of the highlighted item in the `@` mention picker.
@@ -96,8 +50,7 @@ impl InputState {
         textarea.set_placeholder_style(theme::muted());
         Self {
             textarea,
-            slash_menu_selected: 0,
-            slash_menu_scroll_offset: 0,
+            slash_menu: SlashMenu::new(MenuWrap::Clamp),
             available_skills: Vec::new(),
             at_menu_files: Vec::new(),
             at_menu_selected: 0,
@@ -107,9 +60,11 @@ impl InputState {
 
     /// Replace the cached list of filesystem skills.
     pub fn set_available_skills(&mut self, skills: Vec<(String, String)>) {
-        self.available_skills = skills;
-        self.slash_menu_selected = 0;
-        self.slash_menu_scroll_offset = 0;
+        self.available_skills = skills
+            .into_iter()
+            .map(|(name, description)| SkillEntry { name, description })
+            .collect();
+        self.slash_menu.reset();
     }
 
     /// Get the current input text and clear the textarea
@@ -121,8 +76,7 @@ impl InputState {
         // Clear by selecting all and deleting
         self.textarea.select_all();
         self.textarea.cut();
-        self.slash_menu_selected = 0;
-        self.slash_menu_scroll_offset = 0;
+        self.slash_menu.reset();
         self.at_menu_selected = 0;
         self.at_menu_scroll_offset = 0;
         text
@@ -180,8 +134,7 @@ impl InputState {
         self.textarea.cut();
         self.textarea.insert_str(text);
         self.sync_paste_ranges();
-        self.slash_menu_selected = 0;
-        self.slash_menu_scroll_offset = 0;
+        self.slash_menu.reset();
         self.at_menu_selected = 0;
         self.at_menu_scroll_offset = 0;
     }
@@ -193,29 +146,11 @@ impl InputState {
             return Vec::new();
         };
 
-        let mut items: Vec<SlashMenuItem> = chatty_core::slash_commands::tui_commands()
-            .copied()
-            .filter(|item| {
-                query.is_empty()
-                    || item
-                        .command
-                        .trim_start_matches('/')
-                        .to_ascii_lowercase()
-                        .starts_with(&query)
-            })
-            .map(SlashMenuItem::Command)
-            .collect();
-
-        let skill_items = self
-            .available_skills
-            .iter()
-            .filter(|(name, _)| query.is_empty() || name.to_ascii_lowercase().starts_with(&query));
-        items.extend(skill_items.map(|(name, desc)| SlashMenuItem::Skill {
-            name: name.clone(),
-            description: desc.clone(),
-        }));
-
-        items
+        chatty_core::slash_commands::command_and_skill_items(
+            &query,
+            MenuFrontend::Tui,
+            &self.available_skills,
+        )
     }
 
     pub fn is_slash_menu_open(&self) -> bool {
@@ -223,47 +158,31 @@ impl InputState {
     }
 
     pub fn move_slash_menu_up(&mut self) {
-        self.normalize_slash_menu_selection();
-        if self.slash_menu_selected > 0 {
-            self.slash_menu_selected -= 1;
-        }
+        let len = self.slash_menu_items().len();
+        self.slash_menu.move_up(len);
     }
 
     pub fn move_slash_menu_down(&mut self) {
-        self.normalize_slash_menu_selection();
-        let items = self.slash_menu_items();
-        if self.slash_menu_selected + 1 < items.len() {
-            self.slash_menu_selected += 1;
-        }
+        let len = self.slash_menu_items().len();
+        self.slash_menu.move_down(len);
     }
 
     pub fn selected_slash_menu_item(&mut self) -> Option<SlashMenuItem> {
-        self.normalize_slash_menu_selection();
-        self.slash_menu_items()
-            .get(self.slash_menu_selected)
-            .cloned()
+        let items = self.slash_menu_items();
+        self.slash_menu.normalize(items.len());
+        items.get(self.slash_menu.selected()).cloned()
     }
 
     pub fn slash_menu_selected_index(&self) -> usize {
-        self.slash_menu_selected
+        self.slash_menu.selected()
     }
 
     pub fn slash_menu_scroll_offset(&self) -> usize {
-        self.slash_menu_scroll_offset
+        self.slash_menu.offset()
     }
 
     pub fn set_slash_menu_scroll_offset(&mut self, offset: usize) {
-        self.slash_menu_scroll_offset = offset;
-    }
-
-    fn normalize_slash_menu_selection(&mut self) {
-        let len = self.slash_menu_items().len();
-        if len == 0 {
-            self.slash_menu_selected = 0;
-            self.slash_menu_scroll_offset = 0;
-        } else if self.slash_menu_selected >= len {
-            self.slash_menu_selected = len - 1;
-        }
+        self.slash_menu.set_offset(offset);
     }
 
     fn slash_query(&self) -> Option<String> {
@@ -387,7 +306,7 @@ mod tests {
     fn has_skill(items: &[SlashMenuItem], name: &str) -> bool {
         items
             .iter()
-            .any(|i| matches!(i, SlashMenuItem::Skill { name: n, .. } if n == name))
+            .any(|i| matches!(i, SlashMenuItem::Skill(s) if s.name == name))
     }
 
     #[test]
@@ -441,10 +360,10 @@ mod tests {
 
     #[test]
     fn skill_insert_text() {
-        let item = SlashMenuItem::Skill {
+        let item = SlashMenuItem::Skill(chatty_core::slash_commands::SkillEntry {
             name: "fix-ci".to_string(),
             description: "Fix CI".to_string(),
-        };
+        });
         assert_eq!(item.insert_text(), "Use the 'fix-ci' skill: ");
         assert!(!item.execute_immediately());
         assert!(item.is_skill());

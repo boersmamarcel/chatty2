@@ -115,33 +115,23 @@ impl ChattyApp {
             return;
         };
 
-        if history.len() < 4 {
-            self.chat_view.update(cx, |view, cx| {
-                view.add_info_message(
-                    "Conversation is too short to compact (need at least 4 messages).".to_string(),
-                    cx,
-                );
-            });
-            return;
-        }
-
         let chat_view = self.chat_view.clone();
         let conv_id_clone = conv_id.clone();
-        let midpoint = history.len() / 2;
-        cx.spawn(
-            async move |_weak, cx| match summarize_oldest_half(&agent, &history).await {
-                Ok(result) => {
-                    let msg = format!(
-                        "Compacted conversation: summarized {} messages (~{} tokens freed).",
-                        result.messages_summarized, result.estimated_tokens_freed
-                    );
-                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                        if let Some(conv) = store.get_conversation_mut(&conv_id_clone) {
-                            conv.replace_history(result.new_history, midpoint);
-                        }
-                    })
-                    .map_err(|e| warn!(error = ?e, "Failed to apply compact"))
-                    .ok();
+        cx.spawn(async move |_weak, cx| {
+            match chatty_core::slash_commands::compact_history(&agent, &history).await {
+                Ok(outcome) => {
+                    let msg = outcome.message();
+                    if let chatty_core::slash_commands::CompactOutcome::Compacted(compaction) =
+                        outcome
+                    {
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            if let Some(conv) = store.get_conversation_mut(&conv_id_clone) {
+                                conv.apply_compaction(compaction);
+                            }
+                        })
+                        .map_err(|e| warn!(error = ?e, "Failed to apply compact"))
+                        .ok();
+                    }
                     chat_view
                         .update(cx, |view, cx| view.add_info_message(msg, cx))
                         .map_err(|e| warn!(error = ?e, "Failed to show compact result"))
@@ -154,8 +144,8 @@ impl ChattyApp {
                         .map_err(|e| warn!(error = ?e, "Failed to show compact error"))
                         .ok();
                 }
-            },
-        )
+            }
+        })
         .detach();
     }
 
@@ -411,65 +401,17 @@ impl ChattyApp {
         let prompt_label = prompt.clone();
 
         cx.spawn(async move |weak, cx| {
-            use futures::StreamExt;
-
-            // Streaming, to match invoke_agent's visual behaviour — and on
-            // the delegation client, because a remote agent's answer takes as
-            // long as it takes (AGE-319).
-            let client = chatty_core::services::A2aClient::for_delegation();
-            let stream_result = client.send_message_stream(&config, &prompt).await;
-
-            let (success, result_text) =
-                match stream_result {
-                    Ok(mut stream) => {
-                        let mut response = String::new();
-                        let mut success = true;
-
-                        while let Some(event) = stream.next().await {
-                            match event {
-                            Ok(chatty_core::services::a2a_client::A2aStreamEvent::StatusUpdate {
-                                state,
-                                message,
-                                ..
-                            }) => {
-                                if state == "failed" {
-                                    success = false;
-                                    if let Some(msg) = message {
-                                        response = format!("\u{26a0}\u{fe0f} {msg}");
-                                    }
-                                } else if state == "working"
-                                    && let Some(ref msg) = message {
-                                        chat_view
-                                            .update(cx, |view, cx| {
-                                                view.append_delegation_progress(UNTAGGED_CALL, msg, cx);
-                                            })
-                                            .map_err(|e| warn!(error = ?e, "Failed to update chat view with A2A progress"))
-                                            .ok();
-                                    }
-                            }
-                            Ok(chatty_core::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
-                                text,
-                                ..
-                            }) => {
-                                response.push_str(&text);
-                            }
-                            Err(e) => {
-                                success = false;
-                                response = format!("\u{26a0}\u{fe0f} A2A error: {e:#}");
-                                break;
-                            }
-                        }
-                        }
-
-                        let result_text = if response.is_empty() {
-                            None
-                        } else {
-                            Some(response)
-                        };
-                        (success, result_text)
-                    }
-                    Err(e) => (false, Some(format!("\u{26a0}\u{fe0f} A2A error: {e:#}"))),
-                };
+            let run = chatty_core::slash_commands::run_a2a_delegation(&config, &prompt, |msg| {
+                chat_view
+                    .update(cx, |view, cx| {
+                        view.append_delegation_progress(UNTAGGED_CALL, msg, cx);
+                    })
+                    .map_err(|e| warn!(error = ?e, "Failed to update chat view with A2A progress"))
+                    .ok();
+            })
+            .await;
+            let success = run.success;
+            let result_text = (!run.response.is_empty()).then_some(run.response);
 
             // Inject into conversation history.
             if let (Some(conv_id), Some(txt)) = (&launch_conv_id, &result_text) {
@@ -495,7 +437,9 @@ impl ChattyApp {
                     app.update(cx, |app, cx| {
                         app.persist_conversation(&conv_id_for_persist, cx);
                     })
-                    .map_err(|e| warn!(error = ?e, "Failed to persist conversation after A2A result"))
+                    .map_err(
+                        |e| warn!(error = ?e, "Failed to persist conversation after A2A result"),
+                    )
                     .ok();
                 }
             }
