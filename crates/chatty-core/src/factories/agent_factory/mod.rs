@@ -45,7 +45,7 @@ use crate::tools::{
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, SendMessageTool, ShellCdTool,
     ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool,
-    UpdateTodoTool, VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    UpdateTodoTool, VerifyCompletionTool, ViewImageTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -484,6 +484,7 @@ impl AgentClient {
 
         // Create filesystem tools if a workspace directory is configured
         let mut add_attachment_tool: Option<AddAttachmentTool> = None;
+        let mut view_image_tool: Option<ViewImageTool> = None;
         #[cfg(feature = "pdf")]
         let mut pdf_to_image_tool: Option<PdfToImageTool> = None;
         #[cfg(feature = "pdf")]
@@ -527,6 +528,12 @@ impl AgentClient {
                         .unwrap_or(false)
                     {
                         tracing::info!(workspace = %workspace_dir, "Filesystem read tools enabled");
+
+                        // The agent looks at an image itself, where its model takes
+                        // images: the file comes back in the tool result (view_image).
+                        if model_config.supports_images {
+                            view_image_tool = Some(ViewImageTool::new(service.clone()));
+                        }
 
                         if let Some(ref artifacts) = pending_artifacts {
                             add_attachment_tool =
@@ -1185,6 +1192,7 @@ impl AgentClient {
             git: git_tools.is_some(),
             search: search_tools.is_some(),
             add_attachment: add_attachment_tool.is_some(),
+            view_image: view_image_tool.is_some(),
             excel_read: {
                 #[cfg(feature = "excel")]
                 {
@@ -1593,6 +1601,7 @@ impl AgentClient {
             doc_retriever: doc_retriever_tool,
             fs_write: fs_write_tools,
             add_attachment: add_attachment_tool,
+            view_image: view_image_tool,
             pdf_to_image: pdf_to_image_tool,
             pdf_info: pdf_info_tool,
             pdf_extract_text: pdf_extract_text_tool,

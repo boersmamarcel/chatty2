@@ -14,7 +14,7 @@ use crate::tools::{
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, SendMessageTool, ShellCdTool,
     ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool,
-    UpdateTodoTool, VerifyCompletionTool, WriteFileTool, WriteTodosTool,
+    UpdateTodoTool, VerifyCompletionTool, ViewImageTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -104,6 +104,7 @@ pub(super) struct NativeTools {
     pub doc_retriever: Option<DocRetrieverTool>,
     pub fs_write: Option<FsWriteTools>,
     pub add_attachment: Option<AddAttachmentTool>,
+    pub view_image: Option<ViewImageTool>,
     #[cfg(feature = "pdf")]
     pub pdf_to_image: Option<PdfToImageTool>,
     #[cfg(feature = "pdf")]
@@ -227,6 +228,9 @@ impl NativeTools {
             b = add(b, profile, ad);
         }
         if let Some(t) = self.add_attachment {
+            b = add(b, profile, t);
+        }
+        if let Some(t) = self.view_image {
             b = add(b, profile, t);
         }
         #[cfg(feature = "pdf")]
@@ -374,6 +378,7 @@ macro_rules! native_tools {
         doc_retriever: $doc_retriever:expr,
         fs_write: $fs_write:expr,
         add_attachment: $add_attachment:expr,
+        view_image: $view_image:expr,
         pdf_to_image: $pdf_to_image:expr,
         pdf_info: $pdf_info:expr,
         pdf_extract_text: $pdf_extract_text:expr,
@@ -421,6 +426,7 @@ macro_rules! native_tools {
             doc_retriever: $doc_retriever,
             fs_write: $fs_write,
             add_attachment: $add_attachment,
+            view_image: $view_image,
             #[cfg(feature = "pdf")]
             pdf_to_image: $pdf_to_image,
             #[cfg(feature = "pdf")]

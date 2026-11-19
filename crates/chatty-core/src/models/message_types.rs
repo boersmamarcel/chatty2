@@ -566,6 +566,7 @@ pub fn friendly_tool_name(name: &str) -> String {
         "fetch" => "Fetching page".to_string(),
         // Media & documents
         "add_attachment" => "Attaching file".to_string(),
+        "view_image" => "Looking at an image".to_string(),
         "create_chart" => "Creating chart".to_string(),
         "compile_typst" => "Generating PDF".to_string(),
         // Excel
