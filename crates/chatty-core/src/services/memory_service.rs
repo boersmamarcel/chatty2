@@ -1,13 +1,17 @@
 use anyhow::{Context, Result};
+#[cfg(feature = "memory")]
 use memvid_core::{DocMetadata, Memvid, PutOptions, SearchRequest};
 use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
+#[cfg(feature = "memory")]
 use tracing::{info, warn};
 
 /// Maximum number of search results returned by default
+#[cfg_attr(not(feature = "memory"), allow(dead_code))]
 const DEFAULT_TOP_K: usize = 5;
 
 /// Snippet length for search results
+#[cfg_attr(not(feature = "memory"), allow(dead_code))]
 const SNIPPET_CHARS: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -41,6 +45,7 @@ pub struct MemoryStats {
 }
 
 /// Commands sent to the dedicated memory thread.
+#[cfg_attr(not(feature = "memory"), allow(dead_code))]
 enum MemoryCommand {
     Search {
         query: String,
@@ -343,6 +348,7 @@ impl MemoryService {
 
 /// Runs on the dedicated memory thread. All Memvid operations happen here,
 /// ensuring tantivy's lexical index state is always on the same OS thread.
+#[cfg(feature = "memory")]
 fn run_memory_thread(
     path: PathBuf,
     mut cmd_rx: mpsc::Receiver<MemoryCommand>,
@@ -452,6 +458,7 @@ fn run_memory_thread(
 /// lex index. If the index is broken (e.g. empty manifest from a previous bug),
 /// recreates the file to restore working lex search. This is a one-time
 /// self-healing step — data stored with a broken lex index is unrecoverable.
+#[cfg(feature = "memory")]
 fn init_memvid(path: &Path) -> Result<Memvid> {
     let existed = path.exists();
     let mut memvid = if existed {
@@ -504,6 +511,7 @@ fn init_memvid(path: &Path) -> Result<Memvid> {
     Ok(memvid)
 }
 
+#[cfg(feature = "memory")]
 fn handle_search(memvid: &mut Memvid, query: &str, top_k: usize) -> Result<Vec<MemoryHit>> {
     let request = make_search_request(query, top_k, SNIPPET_CHARS);
 
@@ -543,6 +551,7 @@ fn handle_search(memvid: &mut Memvid, query: &str, top_k: usize) -> Result<Vec<M
 /// Returns up to `limit` entries in reverse order (newest first).
 /// Uses `frame_by_id` + `frame_text_by_id` to read title and content,
 /// avoiding the Tantivy search path which rejects empty queries.
+#[cfg(feature = "memory")]
 fn handle_list_all(memvid: &mut Memvid, limit: usize) -> Result<Vec<MemoryHit>> {
     let count = memvid.frame_count();
     if count == 0 {
@@ -602,6 +611,7 @@ fn handle_list_all(memvid: &mut Memvid, limit: usize) -> Result<Vec<MemoryHit>> 
 /// - `metadata` names the content `text/plain`, so `need_metadata` is false;
 /// - `auto_tag(false)`: memvid's derived keyword tags, labels and dates are
 ///   not added (the caller's own `tags` still are).
+#[cfg(feature = "memory")]
 fn remember_put_options(
     content: &str,
     title: Option<&str>,
@@ -623,6 +633,7 @@ fn remember_put_options(
     builder.build()
 }
 
+#[cfg(feature = "memory")]
 fn handle_remember(
     memvid: &mut Memvid,
     content: &str,
@@ -645,6 +656,7 @@ fn handle_remember(
     Ok(())
 }
 
+#[cfg(feature = "memory")]
 fn handle_remember_with_embedding(
     memvid: &mut Memvid,
     content: &str,
@@ -668,6 +680,7 @@ fn handle_remember_with_embedding(
     Ok(())
 }
 
+#[cfg(feature = "memory")]
 fn handle_search_vec(
     memvid: &mut Memvid,
     query_embedding: &[f32],
@@ -719,6 +732,7 @@ fn handle_search_vec(
     Ok(results)
 }
 
+#[cfg(feature = "memory")]
 fn handle_clear(memvid: &mut Memvid, path: &Path) -> Result<()> {
     warn!(path = %path.display(), "Clearing all agent memory");
 
@@ -731,6 +745,7 @@ fn handle_clear(memvid: &mut Memvid, path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "memory")]
 fn handle_delete(memvid: &mut Memvid, frame_id: u64) -> Result<()> {
     memvid
         .delete_frame(frame_id)
@@ -741,6 +756,7 @@ fn handle_delete(memvid: &mut Memvid, frame_id: u64) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "memory")]
 fn handle_stats(memvid: &mut Memvid, path: &Path) -> Result<MemoryStats> {
     let file_size_bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let entry_count = memvid.frame_count();
@@ -752,6 +768,7 @@ fn handle_stats(memvid: &mut Memvid, path: &Path) -> Result<MemoryStats> {
 }
 
 /// Build a SearchRequest with sensible defaults for optional fields.
+#[cfg(feature = "memory")]
 fn make_search_request(query: &str, top_k: usize, snippet_chars: usize) -> SearchRequest {
     SearchRequest {
         query: query.to_string(),
@@ -769,12 +786,25 @@ fn make_search_request(query: &str, top_k: usize, snippet_chars: usize) -> Searc
     }
 }
 
+/// Without the `memory` feature there is no store: opening fails, so callers
+/// run as they do when the memory file cannot be opened.
+#[cfg(not(feature = "memory"))]
+fn run_memory_thread(
+    _path: PathBuf,
+    _cmd_rx: mpsc::Receiver<MemoryCommand>,
+    init_tx: oneshot::Sender<Result<()>>,
+) {
+    let _ = init_tx.send(Err(anyhow::anyhow!(
+        "agent memory is not compiled in (feature `memory`)"
+    )));
+}
+
 /// Returns the platform-specific data directory for memory storage.
 pub fn memory_data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("chatty"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "memory"))]
 mod tests {
     use super::*;
 
