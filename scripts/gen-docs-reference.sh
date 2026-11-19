@@ -405,13 +405,13 @@ character count.
 ## `module_settings.json` — `ModuleSettingsModel`
 
 Source: `settings/models/module_settings.rs`. Load path
-(`ModuleSettingsJsonRepository`) runs `normalize_module_dir()`: empty values
-and the legacy `.chatty/modules` fallback become the platform data-dir default.
+(`ModuleSettingsJsonRepository`) runs `normalize_module_dir()`: only empty values
+become the platform data-dir default; a saved path is kept as written.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
 | `enabled` | `bool` | `false` | WASM module runtime |
-| `module_dir` | `String` | platform data dir + `/chatty/modules` | Linux `~/.local/share/chatty/modules`; macOS `~/Library/Application Support/chatty/modules`; Windows `%APPDATA%\chatty\modules`. Last-resort fallback: `.chatty/modules` |
+| `module_dir` | `String` | platform data dir + `/chatty/modules` | Linux `~/.local/share/chatty/modules`; macOS `~/Library/Application Support/chatty/modules`; Windows `%APPDATA%\chatty\modules`. Used when there is no platform data dir: `.chatty/modules` |
 | `gateway_port` | `u16` | `8420` | Local protocol gateway |
 | `default_endpoint_budget` | `usize` | `1` | Delegated workers the broker runs at once against one model endpoint when nothing more specific is known (ADR-0011 C6, AGE-305). Ollama's `OLLAMA_NUM_PARALLEL` / a provider's `num_parallel` beat it |
 | `endpoint_budgets` | `HashMap<String, usize>` | `{}` | Per-endpoint overrides keyed by the server's base URL (`http://localhost:11434`); beats the default and what the provider reports. Omitted when empty |

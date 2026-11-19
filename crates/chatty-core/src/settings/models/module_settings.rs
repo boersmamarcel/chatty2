@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const LEGACY_FALLBACK_MODULE_DIR: &str = ".chatty/modules";
+pub const NO_DATA_DIR_FALLBACK_MODULE_DIR: &str = ".chatty/modules";
 
 /// Settings for the WASM module runtime and protocol gateway.
 ///
@@ -205,7 +205,7 @@ pub fn default_module_dir() -> String {
                 .to_string_lossy()
                 .into_owned()
         })
-        .unwrap_or_else(|| LEGACY_FALLBACK_MODULE_DIR.to_string())
+        .unwrap_or_else(|| NO_DATA_DIR_FALLBACK_MODULE_DIR.to_string())
 }
 
 pub fn normalize_module_dir(module_dir: String) -> String {
@@ -214,12 +214,7 @@ pub fn normalize_module_dir(module_dir: String) -> String {
         return default_module_dir();
     }
 
-    let platform_default = default_module_dir();
-    if trimmed == LEGACY_FALLBACK_MODULE_DIR && platform_default != LEGACY_FALLBACK_MODULE_DIR {
-        platform_default
-    } else {
-        trimmed.to_string()
-    }
+    trimmed.to_string()
 }
 
 fn default_endpoint_budget() -> usize {
@@ -492,15 +487,12 @@ mod tests {
     }
 
     #[test]
-    fn normalize_module_dir_migrates_legacy_fallback_when_platform_default_exists() {
-        let normalized = normalize_module_dir(LEGACY_FALLBACK_MODULE_DIR.to_string());
-        let platform_default = default_module_dir();
-
-        if platform_default == LEGACY_FALLBACK_MODULE_DIR {
-            assert_eq!(normalized, LEGACY_FALLBACK_MODULE_DIR);
-        } else {
-            assert_eq!(normalized, platform_default);
-        }
+    fn normalize_module_dir_does_not_rewrite_old_chatty_modules_path() {
+        // PL-D2/PL-D5: no settings migration; a saved path is kept as written.
+        assert_eq!(
+            normalize_module_dir(".chatty/modules".to_string()),
+            ".chatty/modules"
+        );
     }
 
     #[test]
