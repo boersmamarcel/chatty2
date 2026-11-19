@@ -41,6 +41,7 @@ struct HiveSettingsWire {
     #[serde(default = "default_registry_url")]
     registry_url: String,
     #[serde(default, deserialize_with = "refuse_runner_url")]
+    // Field exists only so `refuse_runner_url` runs on deserialize; it is never read.
     #[allow(dead_code)]
     runner_url: Option<serde::de::IgnoredAny>,
     #[serde(default)]
