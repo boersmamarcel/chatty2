@@ -9,7 +9,6 @@ use gpui::Global;
 impl Global for crate::settings::models::GeneralSettingsModel {}
 impl Global for crate::settings::models::ModelsModel {}
 impl Global for crate::settings::models::ProviderModel {}
-impl Global for crate::settings::models::McpServersModel {}
 impl Global for crate::settings::models::A2aAgentsModel {}
 impl Global for crate::settings::models::ExecutionSettingsModel {}
 impl Global for crate::settings::models::TrainingSettingsModel {}

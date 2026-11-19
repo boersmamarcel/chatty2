@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Shared write lock for all MCP tool operations (add, delete, edit).
 ///
@@ -36,7 +35,7 @@ pub enum McpAuthStatus {
 /// remotely. It is the user's responsibility to start the server before adding
 /// it here. The `url` field must point to the server's MCP endpoint (e.g.
 /// `http://localhost:3000/mcp` for a streamable-HTTP server).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct McpServerConfig {
     /// Unique name identifier for the MCP server
     pub name: String,
@@ -74,53 +73,6 @@ impl McpServerConfig {
     /// Returns true if an API key has been configured.
     pub fn has_api_key(&self) -> bool {
         self.api_key.as_deref().is_some_and(|k| !k.is_empty())
-    }
-}
-
-/// Global store for MCP server configurations
-#[derive(Clone)]
-pub struct McpServersModel {
-    servers: Vec<McpServerConfig>,
-    /// Runtime auth status per server (not persisted)
-    auth_statuses: HashMap<String, McpAuthStatus>,
-}
-
-impl McpServersModel {
-    pub fn new() -> Self {
-        Self {
-            servers: Vec::new(),
-            auth_statuses: HashMap::new(),
-        }
-    }
-
-    pub fn servers(&self) -> &[McpServerConfig] {
-        &self.servers
-    }
-
-    /// Get mutable access to servers (for in-place updates)
-    pub fn servers_mut(&mut self) -> &mut Vec<McpServerConfig> {
-        &mut self.servers
-    }
-
-    /// Count enabled servers
-    pub fn enabled_count(&self) -> usize {
-        self.servers.iter().filter(|s| s.enabled).count()
-    }
-
-    /// Replace all servers (used when loading from disk)
-    pub fn replace_all(&mut self, servers: Vec<McpServerConfig>) {
-        self.servers = servers;
-    }
-
-    /// Set auth status for a server
-    pub fn set_auth_status(&mut self, server_name: String, status: McpAuthStatus) {
-        self.auth_statuses.insert(server_name, status);
-    }
-}
-
-impl Default for McpServersModel {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -210,34 +162,5 @@ mod tests {
             is_module: false,
         };
         assert!(!empty_key.has_api_key());
-    }
-
-    #[test]
-    fn test_mcp_servers_model_enabled_count() {
-        let mut model = McpServersModel::new();
-        model.replace_all(vec![
-            McpServerConfig {
-                name: "a".to_string(),
-                url: "http://localhost:3001/mcp".to_string(),
-                api_key: None,
-                enabled: true,
-                is_module: false,
-            },
-            McpServerConfig {
-                name: "b".to_string(),
-                url: "http://localhost:3002/mcp".to_string(),
-                api_key: None,
-                enabled: false,
-                is_module: false,
-            },
-            McpServerConfig {
-                name: "c".to_string(),
-                url: "http://localhost:3003/mcp".to_string(),
-                api_key: Some("token".to_string()),
-                enabled: true,
-                is_module: false,
-            },
-        ]);
-        assert_eq!(model.enabled_count(), 2);
     }
 }

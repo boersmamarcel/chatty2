@@ -159,6 +159,64 @@ impl ExtensionsModel {
             .collect()
     }
 
+    /// Every MCP server config, in order, with `enabled` taken from the
+    /// extension's flag. This is the list persisted to `mcp_servers.json` and
+    /// handed to the MCP service.
+    pub fn mcp_server_configs(&self) -> Vec<McpServerConfig> {
+        self.extensions
+            .iter()
+            .filter_map(|e| match &e.kind {
+                ExtensionKind::McpServer(cfg) => Some(McpServerConfig {
+                    enabled: e.enabled,
+                    ..cfg.clone()
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Apply a server list pushed over `MCP_UPDATE_SENDER`: add new servers
+    /// and update known ones (matched by `mcp-<name>` id). Never removes
+    /// anything; non-MCP extensions are untouched.
+    pub fn apply_mcp_update(&mut self, servers: &[McpServerConfig]) {
+        for server in servers {
+            let ext_id = format!("mcp-{}", server.name);
+            if let Some(ext) = self.find_mut(&ext_id) {
+                ext.enabled = server.enabled;
+                ext.kind = ExtensionKind::McpServer(server.clone());
+            } else {
+                self.add(InstalledExtension {
+                    id: ext_id,
+                    display_name: server.name.clone(),
+                    description: String::new(),
+                    kind: ExtensionKind::McpServer(server.clone()),
+                    source: ExtensionSource::Custom,
+                    pricing_model: None,
+                    enabled: server.enabled,
+                });
+            }
+        }
+    }
+
+    /// [`Self::mcp_server_configs`] for persisting to `mcp_servers.json`, with
+    /// the Hive token injected into the "hive" entry. The token lives only in
+    /// that file and in memory-only copies: it is never written into this
+    /// model, so `extensions.json` can not leak it.
+    pub fn mcp_server_configs_with_hive_token(&self, token: Option<&str>) -> Vec<McpServerConfig> {
+        let mut servers = self.mcp_server_configs();
+        if let Some(token) = token
+            && let Some(hive) = servers.iter_mut().find(|s| s.name == "hive")
+        {
+            hive.api_key = Some(token.to_string());
+        }
+        servers
+    }
+
+    /// The runtime auth status of an MCP server, if one was recorded.
+    pub fn mcp_auth_status(&self, server_name: &str) -> Option<&McpAuthStatus> {
+        self.mcp_auth_statuses.get(server_name)
+    }
+
     /// Count of enabled MCP server extensions.
     pub fn enabled_mcp_count(&self) -> usize {
         self.extensions
@@ -236,5 +294,94 @@ impl ExtensionsModel {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod mcp_config_tests {
+    use super::*;
+
+    fn mcp(name: &str, ext_enabled: bool, cfg_enabled: bool) -> InstalledExtension {
+        InstalledExtension {
+            id: format!("mcp-{name}"),
+            display_name: name.to_string(),
+            description: String::new(),
+            kind: ExtensionKind::McpServer(McpServerConfig {
+                name: name.to_string(),
+                url: format!("http://localhost/{name}"),
+                api_key: None,
+                enabled: cfg_enabled,
+                is_module: false,
+            }),
+            source: ExtensionSource::Custom,
+            pricing_model: None,
+            enabled: ext_enabled,
+        }
+    }
+
+    #[test]
+    fn mcp_server_configs_keeps_order_and_uses_extension_flag() {
+        let mut model = ExtensionsModel::default();
+        model.add(mcp("a", true, false));
+        model.add(InstalledExtension {
+            kind: ExtensionKind::WasmModule,
+            ..mcp("wasm", true, true)
+        });
+        model.add(mcp("b", false, true));
+
+        let configs = model.mcp_server_configs();
+        let names: Vec<_> = configs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert!(configs[0].enabled);
+        assert!(!configs[1].enabled);
+    }
+
+    #[test]
+    fn apply_mcp_update_adds_and_updates_but_never_removes() {
+        let mut model = ExtensionsModel::default();
+        model.add(mcp("keep", true, true));
+        model.add(mcp("unlisted", true, true));
+        model.add(InstalledExtension {
+            kind: ExtensionKind::WasmModule,
+            ..mcp("wasm", true, true)
+        });
+
+        let cfg = |name: &str, enabled: bool| McpServerConfig {
+            name: name.to_string(),
+            url: format!("http://localhost/new-{name}"),
+            api_key: Some("k".to_string()),
+            enabled,
+            is_module: false,
+        };
+        model.apply_mcp_update(&[cfg("keep", false), cfg("fresh", true)]);
+
+        assert!(model.find("mcp-unlisted").is_some());
+        assert!(model.find("mcp-wasm").is_some());
+        let keep = model.find("mcp-keep").unwrap();
+        assert!(!keep.enabled);
+        assert!(matches!(&keep.kind, ExtensionKind::McpServer(c) if c.url.ends_with("new-keep")));
+        assert!(model.find("mcp-fresh").unwrap().enabled);
+    }
+
+    #[test]
+    fn hive_token_is_injected_into_persisted_list_only() {
+        let mut model = ExtensionsModel::default();
+        model.add(mcp("hive", true, true));
+        model.add(mcp("other", true, true));
+
+        let persisted = model.mcp_server_configs_with_hive_token(Some("jwt-secret"));
+        assert_eq!(persisted[0].api_key.as_deref(), Some("jwt-secret"));
+        assert_eq!(persisted[1].api_key, None);
+
+        // The model itself (what extensions.json is written from) is clean.
+        let json = serde_json::to_string(&model).unwrap();
+        assert!(!json.contains("jwt-secret"));
+        assert!(!json.contains("api_key"));
+
+        // No token: the list is the plain derivation.
+        assert_eq!(
+            model.mcp_server_configs_with_hive_token(None),
+            model.mcp_server_configs()
+        );
     }
 }
