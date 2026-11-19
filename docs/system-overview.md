@@ -79,7 +79,7 @@ lets core types act as GPUI globals.
 3. Start the GPUI `Application`; inside `run`, do only what the first frame needs:
    `gpui_component::init`, the theme registry (baked-in default applied now, theme
    pack loaded later), and every global the root view reads, registered with defaults
-   (`GeneralSettingsModel`, `ProviderModel`, `ModelsModel`, `McpServersModel`,
+   (`GeneralSettingsModel`, `ProviderModel`, `ModelsModel`,
    `ExecutionSettingsModel`, `TokenTrackingSettings`, `GlobalStreamManager`,
    approval stores, …). No I/O happens here.
 4. Open the window and create the `ChattyApp` entity; `open_window` paints the first
