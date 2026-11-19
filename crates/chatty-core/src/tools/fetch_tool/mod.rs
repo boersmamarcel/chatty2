@@ -941,19 +941,18 @@ impl FetchTool {
 /// oversized body is never held in memory whole (AGE-548). Returns the
 /// bytes read and whether the body went on past `cap`; the rest is not read.
 async fn read_capped(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     cap: usize,
 ) -> Result<(Vec<u8>, bool), reqwest::Error> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        let room = cap - body.len();
-        if chunk.len() > room {
-            body.extend_from_slice(&chunk[..room]);
-            return Ok((body, true));
-        }
-        body.extend_from_slice(&chunk);
+    use hive_client::net::{CappedReadError, Overflow};
+
+    match hive_client::net::read_capped(response.bytes_stream(), cap, Overflow::Truncate, |_| {})
+        .await
+    {
+        Ok(body) => Ok((body.bytes, body.truncated)),
+        Err(CappedReadError::Stream(e)) => Err(e),
+        Err(CappedReadError::Overflow) => unreachable!("Overflow::Truncate never overflows"),
     }
-    Ok((body, false))
 }
 
 /// Decode `bytes` in the charset `content_type` names (`charset=`), or

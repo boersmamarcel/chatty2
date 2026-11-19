@@ -63,6 +63,7 @@ pub mod credit_guard;
 pub mod error;
 pub mod metering;
 pub mod models;
+pub mod net;
 pub mod secure_url;
 pub mod session;
 pub mod session_key;

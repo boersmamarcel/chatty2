@@ -404,19 +404,18 @@ async fn send_checked(
 }
 
 /// Read a whole response body, refusing one larger than `max` bytes.
-async fn read_capped(mut resp: reqwest::Response, max: usize, what: &str) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .with_context(|| format!("Failed to read the A2A {what}"))?
-    {
-        if body.len() + chunk.len() > max {
-            bail!("the A2A {what} exceeds the {max}-byte cap; refusing it");
+async fn read_capped(resp: reqwest::Response, max: usize, what: &str) -> Result<Vec<u8>> {
+    use hive_client::net::{CappedReadError, Overflow};
+
+    match hive_client::net::read_capped(resp.bytes_stream(), max, Overflow::Error, |_| {}).await {
+        Ok(body) => Ok(body.bytes),
+        Err(CappedReadError::Overflow) => {
+            bail!("the A2A {what} exceeds the {max}-byte cap; refusing it")
         }
-        body.extend_from_slice(&chunk);
+        Err(CappedReadError::Stream(e)) => {
+            Err(anyhow::Error::new(e).context(format!("Failed to read the A2A {what}")))
+        }
     }
-    Ok(body)
 }
 
 async fn read_json_capped(resp: reqwest::Response, max: usize, what: &str) -> Result<Value> {

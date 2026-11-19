@@ -150,21 +150,21 @@ where
     S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
     crate::ClientError: From<E>,
 {
-    use futures_util::StreamExt as _;
+    use crate::net::{CappedReadError, Overflow};
 
     if declared > cap {
         return Err(crate::ClientError::TooLarge { limit: cap });
     }
-    let mut body = Vec::with_capacity(declared as usize);
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        if body.len() as u64 + chunk.len() as u64 > cap {
-            return Err(crate::ClientError::TooLarge { limit: cap });
-        }
-        body.extend_from_slice(&chunk);
-        on_progress(body.len() as u64);
+    let cap_bytes = usize::try_from(cap).unwrap_or(usize::MAX);
+    match crate::net::read_capped(stream, cap_bytes, Overflow::Error, |n| {
+        on_progress(n as u64)
+    })
+    .await
+    {
+        Ok(body) => Ok(body.bytes),
+        Err(CappedReadError::Overflow) => Err(crate::ClientError::TooLarge { limit: cap }),
+        Err(CappedReadError::Stream(e)) => Err(e.into()),
     }
-    Ok(body)
 }
 
 // ── Authentication ─────────────────────────────────────────────────────────

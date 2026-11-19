@@ -50,22 +50,22 @@ pub fn ensure_secure_url(url: &str) -> Result<(), String> {
 /// private-LAN range (RFC-1918: `10.0.0.0/8`, `172.16.0.0/12` — which
 /// includes the docker bridge default `172.17.0.1` — and `192.168.0.0/16`).
 fn is_loopback_or_private_lan(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
+    if crate::net::is_localhost_name(host) {
         return true;
     }
-    let ip_str = host.trim_start_matches('[').trim_end_matches(']');
+    let ip_str = crate::net::strip_ip_brackets(host);
     let Ok(ip) = ip_str.parse::<IpAddr>() else {
         return false;
     };
     match ip {
         IpAddr::V4(v4) => {
             let o = v4.octets();
-            v4.is_loopback()
+            crate::net::is_loopback_ip(&ip)
                 || o[0] == 10
                 || (o[0] == 172 && (16..=31).contains(&o[1]))
                 || (o[0] == 192 && o[1] == 168)
         }
-        IpAddr::V6(v6) => v6.is_loopback(),
+        IpAddr::V6(_) => crate::net::is_loopback_ip(&ip),
     }
 }
 
