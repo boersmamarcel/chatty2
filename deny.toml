@@ -28,6 +28,17 @@ ignore = [
     # (crates/chatty-core/src/repositories/conversation_sqlite_repository.rs open_pool, path from the app data dir); an attacker who can plant a
     # crafted DB + mismatched -wal there already has the user's file access. Re-check by 2026-12-10: remove once sqlx-sqlite allows libsqlite3-sys >= 0.39.
     "RUSTSEC-2026-0459",
+    # zip 0.6.6 / 6.0.0 / 7.2.0 / 8.6.0: old zip pinned by calamine 0.22, docx-rs, memvid-core, pptx, rdocx (oxml-opc, rpptx), rust_xlsxwriter and umya-spreadsheet;
+    # the fix exists only in zip >= 9.0.5 (checked 2026-11-19). chatty-core's own zip is 9.0.5, including the one ZipArchive::extract call
+    # (services/browser/provisioning.rs). Exposure of the old copies: they only read Office files through those parsers; none calls extract(), so
+    # RUSTSEC-2026-0546 (extract symlink escape) is not reachable, while the AES / Shrink / stream-reader ones apply to a crafted Office file we open.
+    # Re-check by 2026-12-14: remove entries as each parent moves to zip >= 9.0.5.
+    "RUSTSEC-2026-0545",
+    "RUSTSEC-2026-0546",
+    "RUSTSEC-2026-0547",
+    "RUSTSEC-2026-0548",
+    # chrono 0.4.44: unmaintained (RUSTSEC-2026-0543), no safe upgrade; replace or wait for upstream
+    "RUSTSEC-2026-0543",
     # paste: unmaintained, no patched release; replace or wait for upstream
     "RUSTSEC-2024-0436",
     # proc-macro-error2: unmaintained, no patched release; replace or wait for upstream
