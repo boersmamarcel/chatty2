@@ -68,7 +68,7 @@ trait impls live behind the `gpui-globals` feature.
 | Add a workspace-global singleton | Define in `chatty-core`, add `impl Global` in `chatty-core/src/gpui_globals.rs` |
 | Find all process-wide statics | Singleton inventory at top of `crates/chatty-core/src/lib.rs` |
 | Persist data | JSON repo in `chatty-core/src/settings/repositories/`, or SQLite in `chatty-core/src/repositories/` |
-| Add a slash command | `crates/chatty-gpui/src/chatty/controllers/app_controller/slash_commands.rs` |
+| Add a slash command | Spec, `/compact`, A2A launch and slash-menu state: `crates/chatty-core/src/slash_commands.rs` (shared); desktop handler: `crates/chatty-gpui/src/chatty/controllers/app_controller/slash_commands.rs`; TUI: `crates/chatty-tui/src/engine/commands.rs` |
 
 ## Build / test / lint — single source of truth
 
