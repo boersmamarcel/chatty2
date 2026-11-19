@@ -407,6 +407,15 @@
         "agent": {
           "type": "string"
         },
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "handle": {
           "default": null,
           "type": [

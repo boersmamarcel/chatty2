@@ -246,6 +246,7 @@ async fn root_call_to(
             prompt: "delegate".into(),
             handle: None,
             include_trace: false,
+            files: None,
             spawn_context: None,
             remaining: Default::default(),
             run: None,

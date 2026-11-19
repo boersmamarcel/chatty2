@@ -86,6 +86,7 @@ fn invoke(agent: &str, run: Option<&str>) -> InvokeAgentParams {
         prompt: "go".to_string(),
         handle: None,
         include_trace: false,
+        files: None,
         spawn_context: None,
         remaining: Remaining::default(),
         run: run.map(str::to_string),

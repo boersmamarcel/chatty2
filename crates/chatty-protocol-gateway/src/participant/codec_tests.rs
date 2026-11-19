@@ -554,6 +554,45 @@ fn a_refused_hello_is_an_error_for_its_id() {
 }
 
 #[test]
+fn invoke_files_round_trip_absent_empty_and_named() {
+    let (broker, worker) = connected();
+    for (files, wire) in [
+        (None, None),
+        (Some(vec![]), Some(json!([]))),
+        (
+            Some(vec!["a.csv".to_string(), "b.txt".to_string()]),
+            Some(json!(["a.csv", "b.txt"])),
+        ),
+    ] {
+        let call = ParticipantFrame::Call {
+            id: 1,
+            request: CallRequest::InvokeAgent(InvokeAgentParams {
+                agent: "local-reviewer".into(),
+                prompt: "review it".into(),
+                handle: None,
+                include_trace: false,
+                files: files.clone(),
+                spawn_context: None,
+                remaining: Default::default(),
+                run: None,
+            }),
+        };
+        let line = worker.encode(&call).unwrap().unwrap();
+        let json = value(&line);
+        // Absent stays off the wire, so an old message is byte-identical.
+        assert_eq!(json["params"].get("files").cloned(), wire);
+        let Some(ParticipantFrame::Call {
+            request: CallRequest::InvokeAgent(params),
+            ..
+        }) = broker.decode(&line).unwrap()
+        else {
+            panic!("a call");
+        };
+        assert_eq!(params.files, files);
+    }
+}
+
+#[test]
 fn calls_map_to_requests_and_back() {
     let (broker, worker) = connected();
     // The worker's transport numbers its calls itself; the codec gives each
@@ -565,6 +604,7 @@ fn calls_map_to_requests_and_back() {
             prompt: "review it".into(),
             handle: None,
             include_trace: false,
+            files: None,
             spawn_context: None,
             remaining: Default::default(),
             run: None,
