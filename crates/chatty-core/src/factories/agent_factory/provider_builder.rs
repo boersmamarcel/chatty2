@@ -41,7 +41,7 @@ static AZURE_TOKEN_CACHE: OnceLock<Option<AzureTokenCache>> = OnceLock::new();
 
 /// What rig is told the Entra credential is. It never reaches Azure:
 /// `AzureAuthHttpClient` overwrites the header on every request (AGE-245).
-const AZURE_ENTRA_PLACEHOLDER_TOKEN: &str = "entra-token-attached-per-request";
+pub(crate) const AZURE_ENTRA_PLACEHOLDER_TOKEN: &str = "entra-token-attached-per-request";
 
 type McpToolSet = Vec<(String, Vec<rmcp::model::Tool>, rmcp::service::ServerSink)>;
 
@@ -410,7 +410,7 @@ fn azure_responses_model(
 
 /// The process-wide Entra token cache, or a per-agent one when the shared
 /// one could not be created.
-fn shared_azure_token_cache() -> Result<AzureTokenCache> {
+pub(crate) fn shared_azure_token_cache() -> Result<AzureTokenCache> {
     Ok(
         match AZURE_TOKEN_CACHE.get_or_init(|| match AzureTokenCache::new() {
             Ok(cache) => Some(cache),

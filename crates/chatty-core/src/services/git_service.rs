@@ -186,11 +186,13 @@ impl GitService {
     async fn run_git(&self, args: &[&str]) -> Result<String> {
         debug!(args = ?args, "Running git command");
 
-        let output = tokio::process::Command::new("git")
-            .args(HOST_GIT_HARDENING)
+        // Pinned to the workspace's own `.git` and refused when the
+        // repository config names a command git could run (AGE-1362).
+        let mut git = crate::services::host_git::host_git(&self.workspace_root)
+            .await
+            .map_err(|why| anyhow!(why))?;
+        let output = git
             .args(harden_subcommand(args))
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .current_dir(&self.workspace_root)
             .output()
             .await
             .map_err(|e| anyhow!("Failed to execute git command: {}", e))?;

@@ -520,6 +520,8 @@ impl Tool for EditExcelTool {
         let mut sheets: Vec<SheetData> = Vec::new();
 
         for name in &sheet_names {
+            super::check_sheet_size(&mut workbook, name)
+                .map_err(|why| ExcelToolError::OperationError(anyhow::anyhow!(why)))?;
             let range = workbook.worksheet_range(name).map_err(|e| {
                 ExcelToolError::OperationError(anyhow::anyhow!(
                     "Failed to read sheet '{}': {}",

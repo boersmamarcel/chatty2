@@ -48,6 +48,7 @@ pub mod filesystem_service;
 pub mod git_service;
 pub mod github_pr_service;
 pub mod handoff;
+pub(crate) mod host_git;
 pub mod http_client;
 /// A local broker/gateway a host has not necessarily started yet (BI-2 /
 /// AGE-634): `list_agents`/`invoke_agent` start it lazily, on first use.
@@ -178,7 +179,7 @@ pub use stream_processor::{
     ChunkAction, HEADLESS_MALFORMED_JSON_RETRY_ATTEMPTS, HEADLESS_STALL_RESUME_ATTEMPTS,
     HEADLESS_TRANSPORT_RETRY_ATTEMPTS, HEARTBEAT_INTERVAL, HeartbeatThrottle, RecoveryAction,
     STALL_SCALE_ENV, STALL_TICK, STALL_TIMEOUT, StreamChunkHandler, StreamError, StreamErrorKind,
-    StreamSurface, decide_recovery, heartbeat_interval, install_progress_channel, run_stream_loop,
-    stalled_stream_message,
+    StreamSurface, decide_recovery, heartbeat_interval, install_progress_channel,
+    is_kept_failed_turn_note, kept_failed_turn_note, run_stream_loop, stalled_stream_message,
 };
 pub use title_generator::generate_title;

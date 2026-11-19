@@ -77,6 +77,7 @@ pub(super) async fn fetch_latest_release(
                 &checksums_text,
                 checksums_signature.as_deref(),
                 &signature::pinned_release_keys(),
+                &release.tag_name,
             )?;
             let sha256 = checksums.get(&asset.name).cloned();
 

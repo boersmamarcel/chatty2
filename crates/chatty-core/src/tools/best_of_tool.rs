@@ -196,6 +196,8 @@ impl Tool for BestOfTool {
                     .iter()
                     .map(|a| format!("{}: {}", a.agent, a.answer))
                     .collect();
+                self.invoke
+                    .stop_on_budget(crate::services::budget_stop::BEST_OF_FAILED_HEADLINE);
                 return Err(BestOfError::AllFailed(errors.join("; ")));
             }
             Plan::Decided(n, by) => (n, by, None, None),
@@ -545,5 +547,32 @@ mod tests {
         let split = [att(1, "1", None), att(2, "2", None), att(3, "2", None)];
         assert_eq!(plan(&split), Plan::Judge(vec![1, 2, 3]));
         assert_eq!(vote(&split, &[1, 2, 3]), 2);
+    }
+
+    /// Every solver failing is the leader's failure, not data to answer
+    /// around (AGE-1132): the seam is the smallest one — solvers that name
+    /// no known agent fail at once, no model or broker involved.
+    #[tokio::test]
+    async fn all_failed_stops_the_run() {
+        let invoke = InvokeAgentTool::new(Vec::new());
+        let tool = BestOfTool::new(
+            invoke.clone(),
+            BestOfSection {
+                solvers: vec!["nobody-a".into(), "nobody-b".into()],
+                judge: "nobody-j".into(),
+            },
+        );
+        let err = tool
+            .call(
+                &mut ToolContext::new(),
+                BestOfArgs {
+                    task: "t".to_string(),
+                },
+            )
+            .await
+            .expect_err("every solver fails");
+        assert!(matches!(err, BestOfError::AllFailed(_)));
+        let headline = invoke.stop_headline().expect("the stop channel is set");
+        assert!(headline.starts_with("best_of_failed:"), "{headline}");
     }
 }

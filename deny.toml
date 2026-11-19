@@ -17,7 +17,11 @@ ignore = [
     "RUSTSEC-2024-0384",
     # lopdf: lopdf 0.39 pinned by memvid-core
     "RUSTSEC-2026-0187",
-    # calamine: calamine 0.22 is pinned by memvid-core 2.0.140 (latest release, no newer one uses calamine >= 0.38, the fixed line). Panic/OOM on malformed .xls/.xlsb (CFB parser). Exposure: chatty's own Excel and data-query tools use calamine 0.38 (fixed); which memvid-core ingest path reaches calamine 0.22 is not yet traced. Remove once memvid-core upgrades calamine.
+    # calamine: 0.22 is pinned by memvid-core <= 2.0.140 (calamine ^0.22; latest release, checked 2026-11-14); malformed legacy .xls/.xlsb panic/OOM in calamine's own CFB parser.
+    # chatty-core's own reader is on calamine 0.38 (fixed), with a regression test (excel_tool malformed_ole2_xls_is_an_error_not_a_panic).
+    # Exposure of 0.22: none today. chatty's only memvid write (memory_service.rs handle_remember) passes UTF-8 text as text/plain, and memvid's XlsReader
+    # only takes Xls / application/vnd.ms-excel input; valid UTF-8 cannot start with the OLE magic D0 CF.
+    # Re-check by 2026-12-14: remove once memvid-core upgrades calamine to >= 0.38.
     "RUSTSEC-2026-0436",
     # libsqlite3-sys 0.30.1 (bundled SQLite < 3.54.0, CVE-2026-119375): pulled only by sqlx-sqlite 0.9.0 (latest), which caps libsqlite3-sys at < 0.38;
     # the fix is in libsqlite3-sys >= 0.39 (no rusqlite in the tree). Exposure: the only SQLite file chatty opens is its own conversation DB

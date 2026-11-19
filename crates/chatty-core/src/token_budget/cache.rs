@@ -199,8 +199,7 @@ fn hash_message(message: &Message) -> u64 {
 /// Build a compact tool-hint string and return the total enabled tool count.
 ///
 /// The hint encodes every dimension of `ExecutionSettingsModel` that affects
-/// which tools are added to the agent (mirroring the logic in `estimate_overhead()`
-/// in the legacy `token_context_bar_view.rs`). When any field changes, the hint
+/// which tools are added to the agent. When any field changes, the hint
 /// string changes, causing `CachedTokenCounts::tool_tokens()` to recompute.
 ///
 /// # Arguments

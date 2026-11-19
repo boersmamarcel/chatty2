@@ -1,7 +1,8 @@
 //! A spent budget ends the whole tree (AGE-903).
 //!
 //! When the model endpoint refuses a call with `402` and a body naming
-//! `budget_exceeded` or `cap_exceeded` (hive's egress and turn route), or
+//! `budget_exceeded`, `cap_exceeded` or `credit_required` (hive's egress and
+//! turn route, and its managed `search_web` and `fetch` endpoints), or
 //! the run's own spend gate refuses a delegation (`cap_exceeded`,
 //! `budget_spent: usd`), nothing in the tree may spend again:
 //!
@@ -27,6 +28,7 @@ use rig_agent::agent::{
 };
 use rig_agent::tool::Tool;
 
+use crate::tools::best_of_tool::BestOfTool;
 use crate::tools::invoke_agent_tool::InvokeAgentTool;
 
 /// The typed reason a run stopped on a spent budget. It leads the failed
@@ -44,6 +46,24 @@ pub const BUDGET_STOP_NOTE: &str = "The budget is spent: no agent may make anoth
 /// as its text.
 pub const BUDGET_STOP: &str = "budget exhausted\n";
 
+/// The headline `best_of` stops its leader's run with when every attempt
+/// failed (AGE-1132). Not a budget stop: it only shares the stop channel.
+///
+/// Decision (AGE-1132, criterion 4): the stop applies to every leader
+/// holding the `InvokeAgentTool`, not only a `best_of` one. The channel
+/// belongs to the tool and cannot be limited to a single caller cleanly,
+/// and `best_of` is the only caller that sets it.
+pub const BEST_OF_FAILED_HEADLINE: &str = "best_of_failed: every attempt failed";
+
+/// The text of `BestOfError::AllFailed` a rendered `best_of` result carries.
+const BEST_OF_ALL_FAILED_TEXT: &str = "best_of: every attempt failed";
+
+/// The headline prefix [`final_message`] answers with [`BEST_OF_STOP`].
+const BEST_OF_FAILED_PREFIX: &str = "best_of_failed:";
+
+/// What a run whose `best_of` failed on every attempt answers with.
+pub const BEST_OF_STOP: &str = "best_of failed on every attempt, so no answer was produced.";
+
 /// `budget_exhausted: <headline>`.
 pub fn budget_exhausted(headline: &str) -> String {
     format!("{BUDGET_EXHAUSTED}: {headline}")
@@ -57,9 +77,10 @@ fn budget_line(cap_usd: Option<f64>) -> String {
     }
 }
 
-/// The typed error text for a model endpoint's refusal, when `status` and
-/// `body` are one: a `402` whose JSON body names `budget_exceeded` or
-/// `cap_exceeded` as its `error` (hive's `{"error": "cap_exceeded",
+/// The typed error text for an endpoint's refusal (the model egress or a
+/// managed tool endpoint), when `status` and `body` are one: a `402` whose
+/// JSON body names `budget_exceeded`, `cap_exceeded` or `credit_required`
+/// as its `error` (hive's `{"error": "cap_exceeded",
 /// "month_to_date": …, "cap_usd": …}`), its `code`, or its nested
 /// `error.code` (OpenAI's envelope). The dollar figure is the body's
 /// `cap_usd` or `budget_usd`; the provider's `message` (top-level or
@@ -73,7 +94,7 @@ pub fn endpoint_refusal(status: u16, body: &str) -> Option<String> {
         .as_str()
         .or_else(|| json["code"].as_str())
         .or_else(|| json["error"]["code"].as_str())?;
-    if !matches!(code, "budget_exceeded" | "cap_exceeded") {
+    if !matches!(code, "budget_exceeded" | "cap_exceeded" | "credit_required") {
         return None;
     }
     let cap = json["cap_usd"]
@@ -84,19 +105,41 @@ pub fn endpoint_refusal(status: u16, body: &str) -> Option<String> {
         .or_else(|| json["error"]["message"].as_str())
         .map(|m| format!(": {}", m.trim()))
         .unwrap_or_default();
-    Some(budget_exhausted(&format!(
-        "{}; the model endpoint refused the call ({code}){message}",
+    let line = if code == "credit_required" {
+        "No credit left".to_string()
+    } else {
         budget_line(cap)
+    };
+    Some(budget_exhausted(&format!(
+        "{line}; the endpoint refused the call ({code}){message}"
     )))
 }
 
-/// The one fixed wrapper a typed stop is read through: how
-/// `map_tool_error` hands a failed `invoke_agent` to the model, the stream
-/// and the worker's frame mapper.
-const TOOL_ERROR_PREFIX: &str = "Error: invoke_agent: ";
+/// The tools whose failed result can carry a typed budget stop:
+/// `invoke_agent`, and the managed integrations (`search_web`, `fetch`)
+/// that hive refuses with a `402` (AGE-1439).
+///
+/// `map_tool_error` wraps each failure as `Error: <tool>: …`; that wrapper
+/// is how a stop is read from a tool's error.
+const BUDGET_STOP_TOOLS: [&str; 3] = ["invoke_agent", "search_web", "fetch"];
+
+/// Whether a failed `tool_name` result may carry a typed budget stop.
+pub fn can_budget_stop(tool_name: &str) -> bool {
+    BUDGET_STOP_TOOLS.contains(&tool_name)
+}
+
+/// `text` without a leading `Error: <tool>: ` wrapper of a tool in
+/// [`BUDGET_STOP_TOOLS`].
+fn strip_tool_error_prefix(text: &str) -> &str {
+    BUDGET_STOP_TOOLS
+        .iter()
+        .find_map(|tool| text.strip_prefix(&format!("Error: {tool}: ")))
+        .unwrap_or(text)
+}
 
 /// The headline of the budget stop `text` *leads with* — itself, or after
-/// the tool-error wrapper `Error: invoke_agent: `: a [`budget_exhausted`]
+/// the tool-error wrapper `Error: <tool>: ` of `invoke_agent`, `search_web`
+/// or `fetch`: a [`budget_exhausted`]
 /// text (up to its first blank line), or a spend gate's refusal of a
 /// delegation (`cap_exceeded: … cap $Y …`, `budget_spent: usd`), which is
 /// the same stop when the gate is local (DP-3).
@@ -110,7 +153,7 @@ const TOOL_ERROR_PREFIX: &str = "Error: invoke_agent: ";
 /// not stop the tree.
 pub fn find_budget_exhausted(text: &str) -> Option<String> {
     let text = text.trim_start();
-    let text = text.strip_prefix(TOOL_ERROR_PREFIX).unwrap_or(text);
+    let text = strip_tool_error_prefix(text);
     let first_paragraph = |rest: &str| rest.split("\n\n").next().unwrap_or(rest).trim().to_string();
     if let Some(rest) = text.strip_prefix(&format!("{BUDGET_EXHAUSTED}: ")) {
         return Some(first_paragraph(rest));
@@ -133,6 +176,9 @@ pub fn find_budget_exhausted(text: &str) -> Option<String> {
 /// the headline, then each delegation's work — the finished ones' answers
 /// and the stopped ones' partial output — in the order they came back.
 pub fn final_message(headline: &str, finished: &[(String, String)]) -> String {
+    if headline.starts_with(BEST_OF_FAILED_PREFIX) {
+        return BEST_OF_STOP.to_string();
+    }
     let mut message = format!("{headline}. Here is what was finished:");
     if finished.is_empty() {
         message.push_str("\n\nNothing was finished before the budget ran out.");
@@ -143,8 +189,8 @@ pub fn final_message(headline: &str, finished: &[(String, String)]) -> String {
     message
 }
 
-/// Ends the run of a model whose `invoke_agent` came back with a spent
-/// budget, at the model call that would have answered it, with
+/// Ends the run of a model whose `invoke_agent`, `search_web` or `fetch`
+/// came back with a spent budget or no credit, at the model call that would have answered it, with
 /// [`final_message`] as the reason after [`BUDGET_STOP`].
 ///
 /// Every `invoke_agent` result of the run is noted on the way: a finished
@@ -196,15 +242,29 @@ impl AgentHook for StopOnBudgetExhausted {
         let Some(result) = event.tool_result() else {
             return OutcomeAction::Proceed;
         };
-        if event.tool_name() != Some(InvokeAgentTool::NAME) {
+        if event.tool_name() == Some(BestOfTool::NAME) {
+            // Every attempt failed: end the run instead of letting the
+            // leader answer from its own knowledge (AGE-1132). Any other
+            // best_of failure leaves the run to the leader.
+            if !result.is_success() && result.output().render().contains(BEST_OF_ALL_FAILED_TEXT) {
+                ctx.scratchpad().update(|stop: &mut BudgetStop| {
+                    stop.headline
+                        .get_or_insert_with(|| BEST_OF_FAILED_HEADLINE.to_string());
+                });
+            }
             return OutcomeAction::Proceed;
         }
+        let Some(tool_name) = event.tool_name().filter(|n| can_budget_stop(n)) else {
+            return OutcomeAction::Proceed;
+        };
         let rendered = result.output().render();
         ctx.scratchpad().update(|stop: &mut BudgetStop| {
             if result.is_success() {
-                stop.finished.extend(finished_work(&rendered));
+                if tool_name == InvokeAgentTool::NAME {
+                    stop.finished.extend(finished_work(&rendered));
+                }
             } else if let Some(headline) = find_budget_exhausted(&rendered) {
-                tracing::warn!(%headline, "A delegation ran out of budget; ending the run");
+                tracing::warn!(%headline, tool = tool_name, "A tool ran out of budget; ending the run");
                 stop.finished.extend(partial_work(&rendered));
                 stop.headline.get_or_insert(headline);
             }
@@ -236,14 +296,14 @@ mod tests {
 
     /// The shapes accepted as a budget refusal: hive's `402` body today
     /// (`error`), a `code` field, and OpenAI's nested envelope; nothing
-    /// that is not a `402` naming one of the two codes.
+    /// that is not a `402` naming one of the three codes.
     #[test]
     fn a_402_budget_refusal_is_read_from_its_body() {
         let hive = r#"{"error":"cap_exceeded","month_to_date":12.5,"cap_usd":10.0}"#;
         assert_eq!(
             endpoint_refusal(402, hive).as_deref(),
             Some(
-                "budget_exhausted: Budget of $10.00 spent; the model endpoint refused the call \
+                "budget_exhausted: Budget of $10.00 spent; the endpoint refused the call \
                  (cap_exceeded)"
             )
         );
@@ -251,7 +311,7 @@ mod tests {
         assert_eq!(
             endpoint_refusal(402, coded).as_deref(),
             Some(
-                "budget_exhausted: Budget spent; the model endpoint refused the call \
+                "budget_exhausted: Budget spent; the endpoint refused the call \
                  (budget_exceeded): task budget spent"
             )
         );
@@ -316,5 +376,138 @@ mod tests {
             )),
             None
         );
+    }
+
+    async fn best_of_failure_stop(message: &str) -> Option<String> {
+        failure_stop(BestOfTool::NAME, message).await
+    }
+
+    /// Run `StopOnBudgetExhausted` over a failed `tool` result with
+    /// `message`; the text its next model call is stopped with, if any.
+    async fn failure_stop(tool: &str, message: &str) -> Option<String> {
+        use rig_agent::test_utils::HookTestHarness;
+        use rig_agent::tool::{ToolErrorKind, ToolExecutionError, ToolResult};
+        use rig_core::effect::{Answered, EffectId, EffectKind};
+
+        let harness = HookTestHarness::new().with_hook(StopOnBudgetExhausted);
+        let kind = EffectKind::ToolCall {
+            name: tool.to_string(),
+            args: "{}".to_string(),
+        };
+        let outcome = Ok(Answered::ToolResult {
+            result: ToolResult::failed(ToolExecutionError::new(ToolErrorKind::Provider, message)),
+        });
+        let event = OutcomeEvent {
+            id: EffectId::from_raw(1),
+            kind: &kind,
+            outcome: &outcome,
+            turn: 1,
+            call_id: None,
+            context: None,
+        };
+        StopOnBudgetExhausted
+            .on_outcome(harness.context(), event)
+            .await;
+        let prompt = rig_core::message::Message::user("go on");
+        let call = CompletionCallEvent {
+            prompt: &prompt,
+            history: &[],
+            turn: 2,
+        };
+        match StopOnBudgetExhausted
+            .on_completion_call(harness.context(), call)
+            .await
+        {
+            CompletionCallAction::Stop(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_all_failed_best_of_result_stops_the_run() {
+        let text = best_of_failure_stop("Error: best_of: best_of: every attempt failed: a: boom")
+            .await
+            .expect("the run stops");
+        assert!(text.contains(BEST_OF_STOP), "{text}");
+    }
+
+    #[tokio::test]
+    async fn another_best_of_error_does_not_stop_the_run() {
+        assert_eq!(
+            best_of_failure_stop("Error: best_of: bad arguments").await,
+            None
+        );
+    }
+
+    #[test]
+    fn a_managed_402_refusal_reads_like_the_model_endpoint_one() {
+        let nested = r#"{"error":{"code":"budget_exceeded"},"budget_usd":2.5}"#;
+        assert_eq!(
+            endpoint_refusal(402, nested).as_deref(),
+            Some(
+                "budget_exhausted: Budget of $2.50 spent; the endpoint refused the call \
+                 (budget_exceeded)"
+            )
+        );
+        let credit = r#"{"error":"credit_required"}"#;
+        assert_eq!(
+            endpoint_refusal(402, credit).as_deref(),
+            Some(
+                "budget_exhausted: No credit left; the endpoint refused the call \
+                 (credit_required)"
+            )
+        );
+        assert_eq!(endpoint_refusal(402, r#"{"error":"other"}"#), None);
+    }
+
+    #[test]
+    fn a_search_web_or_fetch_tool_error_is_read_as_a_budget_stop() {
+        let typed = "budget_exhausted: Budget spent; the endpoint refused the call";
+        for tool in ["search_web", "fetch", "invoke_agent"] {
+            assert!(
+                find_budget_exhausted(&format!("Error: {tool}: {typed}")).is_some(),
+                "{tool}"
+            );
+        }
+        for text in [
+            "Error: search_web: Tavily API returned 402 Payment Required: {}",
+            "Error: fetch: The managed extract service returned 402",
+            "Error: read_file: budget_exhausted: x",
+            "search results mention Error: fetch: budget_exhausted: x",
+        ] {
+            assert_eq!(find_budget_exhausted(text), None, "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_search_web_budget_error_stops_the_run() {
+        let text = failure_stop(
+            "search_web",
+            "Error: search_web: budget_exhausted: Budget of $2.50 spent",
+        )
+        .await
+        .expect("the run stops");
+        assert!(text.contains("Budget of $2.50 spent"), "{text}");
+        assert_eq!(
+            failure_stop(
+                "search_web",
+                "Error: search_web: Tavily API returned 402: {}"
+            )
+            .await,
+            None
+        );
+        assert_eq!(
+            failure_stop("read_file", "Error: read_file: budget_exhausted: x").await,
+            None
+        );
+    }
+
+    #[test]
+    fn best_of_stop_text_names_best_of() {
+        let message = final_message("best_of_failed: every attempt failed", &[]);
+        assert!(message.contains("best_of"), "{message}");
+        assert!(message.contains("no answer was produced"), "{message}");
+        assert!(!message.contains("Budget"), "{message}");
+        assert!(!message.to_lowercase().contains("budget"), "{message}");
     }
 }

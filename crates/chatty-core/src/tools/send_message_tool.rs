@@ -119,6 +119,7 @@ impl Tool for SendMessageTool {
             .call(CallRequest::SendMessage(SendMessageParams {
                 to: args.to,
                 text: args.text,
+                run: None,
             }))
             .await
             .map_err(|e| failed(e.to_string()))?;
@@ -244,7 +245,8 @@ mod tests {
             broker.seen.lock().as_slice(),
             [CallRequest::SendMessage(SendMessageParams {
                 to: "root".into(),
-                text: "halfway".into()
+                text: "halfway".into(),
+                run: None,
             })]
         );
 

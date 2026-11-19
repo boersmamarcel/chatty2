@@ -437,9 +437,10 @@ impl InvokeAgentTool {
     }
 
     /// Stop this run's delegations on a spent budget: the ones still
-    /// running hang up, later ones are refused (AGE-903). The first
+    /// running hang up, later ones are refused (AGE-903). The channel also
+    /// carries `best_of`'s `best_of_failed:` stop (AGE-1132). The first
     /// headline stands.
-    fn stop_on_budget(&self, headline: &str) {
+    pub(crate) fn stop_on_budget(&self, headline: &str) {
         self.budget_stop.send_if_modified(|stop| {
             if stop.is_some() {
                 return false;
@@ -447,6 +448,12 @@ impl InvokeAgentTool {
             *stop = Some(headline.to_string());
             true
         });
+    }
+
+    /// The headline this run's delegations were stopped with, if any.
+    #[cfg(test)]
+    pub(crate) fn stop_headline(&self) -> Option<String> {
+        self.budget_stop.borrow().clone()
     }
 
     /// Resolves with the headline once this run stops on a spent budget.

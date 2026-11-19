@@ -116,6 +116,8 @@ impl Tool for ReadExcelTool {
 
         // Select sheet
         let selected_sheet = args.sheet.unwrap_or_else(|| sheet_names[0].clone());
+        super::check_sheet_size(&mut workbook, &selected_sheet)
+            .map_err(|why| ExcelToolError::OperationError(anyhow::anyhow!(why)))?;
         let range_data = workbook.worksheet_range(&selected_sheet).map_err(|e| {
             ExcelToolError::OperationError(anyhow::anyhow!(
                 "Failed to read sheet '{}': {}",

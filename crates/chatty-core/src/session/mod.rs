@@ -75,7 +75,7 @@ use crate::services::turn_budget::TurnBudget;
 use crate::services::{
     AgentTaskController, AgentTaskSnapshot, RecoveryAction, StreamError, StreamErrorKind,
     StreamSurface, decide_recovery, exchange_count, extract_user_text, install_progress_channel,
-    run_stream_loop, stream_prompt,
+    kept_failed_turn_note, run_stream_loop, stream_prompt,
 };
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
 use crate::settings::models::models_store::ModelConfig;
@@ -208,6 +208,16 @@ pub struct AgentSession {
     pending_tool_names: HashMap<String, String>,
     /// Usage of the most recent turn that reported any.
     last_turn_usage: Option<TokenUsage>,
+    /// The reply a turn in flight keeps after the stream error that ended
+    /// it (AGE-1438): set only for a stall or a connection-level failure
+    /// (`kept_failed_turn_note`), for which `finish_turn` keeps the turn's
+    /// completed round-trips and its user message instead of rolling an
+    /// empty turn back. `None` for every other ending, every other error
+    /// included — auth, rate limit, provider status, spent budget, empty
+    /// completion, a stream that never started — which roll back as
+    /// before. The note is a fixed sentence: the error's own text, which
+    /// can carry a raw provider body or a URL, is never persisted.
+    kept_failed_turn_note: Option<&'static str>,
     /// What this turn's delegated agents spent, one line per model per
     /// delegation (AGE-415, AGE-682), and what its plugins spent, one line
     /// per plugin (PL-U2): recorded on the conversation by `finish_turn`
@@ -255,6 +265,7 @@ impl AgentSession {
             cancel_flag: None,
             pending_tool_names: HashMap::new(),
             last_turn_usage: None,
+            kept_failed_turn_note: None,
             side_usages: Vec::new(),
             price_book: PriceBook::default(),
             recovery_attempts: HashMap::new(),
@@ -540,6 +551,7 @@ impl AgentSession {
         }
         self.cancel_flag = Some(cancel_flag);
         self.pending_tool_names.clear();
+        self.kept_failed_turn_note = None;
         Ok(())
     }
 
@@ -661,6 +673,7 @@ impl AgentSession {
 
         self.cancel_flag = Some(cancel_flag.clone());
         self.pending_tool_names.clear();
+        self.kept_failed_turn_note = None;
 
         Ok(PreparedTurn {
             agent,
@@ -720,9 +733,20 @@ impl AgentSession {
             SessionEvent::TokenUsage(usage) => self.record_turn_usage(usage.clone()),
             SessionEvent::PluginUsage(usage) => self.note_plugin_usage(usage.clone()),
             SessionEvent::SwarmEvent(batch) => self.note_swarm_event(batch),
+            SessionEvent::Error(error) => self.note_turn_error(error),
             _ => {}
         }
         None
+    }
+
+    /// `SessionEvent::Error`: the turn in flight ended on a stream error.
+    /// A stall or a connection failure makes `finish_turn` keep the turn
+    /// (AGE-1438, see [`kept_failed_turn_note`]); any other error is
+    /// finalized under the empty-turn rule, as before.
+    pub fn note_turn_error(&mut self, error: &StreamError) {
+        if self.is_turn_active() {
+            self.kept_failed_turn_note = kept_failed_turn_note(error.kind);
+        }
     }
 
     /// `SessionEvent::Text`: extend the reply in flight.
@@ -1065,7 +1089,10 @@ impl AgentSession {
                     .count() as u32
             })
             .unwrap_or(0);
-        let outcome = conversation.finalize_turn(response, artifacts, trace);
+        let outcome = match self.kept_failed_turn_note.take() {
+            Some(note) => conversation.finalize_failed_turn(response, artifacts, trace, note),
+            None => conversation.finalize_turn(response, artifacts, trace),
+        };
         conversation.set_streaming_message(None);
         conversation.set_streaming_trace(None);
         conversation.clear_streaming_delegation_traces();
@@ -1189,7 +1216,8 @@ impl PreparedTurn {
             Err(e) => {
                 // The turn still starts and ends, so the owner finalizes it
                 // like any other and the user message is rolled back under
-                // the empty-turn rule.
+                // the empty-turn rule: no stream opened, so there is nothing
+                // to keep (`Other` is not a kept kind, AGE-1438).
                 emit(SessionEvent::TurnStarted);
                 emit(SessionEvent::Error(StreamError::new(
                     StreamErrorKind::Other,
@@ -1312,6 +1340,8 @@ pub async fn replay_scenario(
 
 #[cfg(test)]
 mod append_only_prefix;
+#[cfg(test)]
+mod failed_turn_history;
 #[cfg(test)]
 mod spec_budget;
 #[cfg(test)]

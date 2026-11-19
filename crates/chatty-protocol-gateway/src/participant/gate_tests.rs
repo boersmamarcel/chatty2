@@ -198,6 +198,7 @@ fn outsiders_are_refused_every_request() {
     let post = SendMessageParams {
         to: ROOT_NAME.to_string(),
         text: "hi".to_string(),
+        run: None,
     };
     let params = invoke("target", None);
     for caller in outsiders() {
@@ -313,6 +314,7 @@ fn only_the_root_answers_cancels_and_takes_its_messages() {
     let post = SendMessageParams {
         to: "anyone".to_string(),
         text: "x".to_string(),
+        run: None,
     };
     let refused = decide(&Caller::Root, &Request::Post(&post), &snapshot).outcome;
     assert_eq!(refused, Err(Refused::Message(RefusalReason::NotOnTree)));
@@ -567,6 +569,7 @@ fn mid_run_message_rows() {
     let to = |name: &str| SendMessageParams {
         to: name.to_string(),
         text: "look at X instead".to_string(),
+        run: None,
     };
     let with = |owner: Owner, addressee: Addressee| {
         reaching(&policy, "target").map(|snapshot| Snapshot {
@@ -654,6 +657,7 @@ fn handle_message_rows() {
     let to = SendMessageParams {
         to: "fixer".to_string(),
         text: "use the second approach".to_string(),
+        run: None,
     };
     assert_eq!(
         decide(

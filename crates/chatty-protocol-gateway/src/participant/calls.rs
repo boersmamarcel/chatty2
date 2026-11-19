@@ -1523,36 +1523,38 @@ impl BrokerCalls {
     /// ancestors ([`HandleOwner::admits`]). Only a node has handles to
     /// message.
     ///
-    /// The scopes are the union over every run `peer` has open, not the
-    /// posting run's: `SendMessageParams` does not name the run, so the
-    /// broker cannot tell which conversation the post is for. An optional
-    /// `run` field, like `InvokeAgentParams.run`, would be wire compatible
-    /// but costs a schema golden change, and newer workers talking to an
-    /// older broker would be refused by its `deny_unknown_fields`.
-    ///
-    /// The gap: with same-named handles in two conversations, `find_map`
-    /// can route a message of one conversation into the other's handle,
-    /// against `docs/agents-and-specs.md:563-565`. Deferred to AGE-1349.
-    fn idle_handle_of(&self, peer: &Peer, name: &str) -> Option<HandleKey> {
+    /// `run` is the run the post names. With it, only that run's scope is
+    /// checked, so a node with runs in two conversations never reaches the
+    /// other conversation's handle of the same name; one that is not an
+    /// open run of `peer` reaches nothing. Without it (an older worker),
+    /// the scopes are the union over every run `peer` has open.
+    fn idle_handle_of(&self, peer: &Peer, name: &str, run: Option<&str>) -> Option<HandleKey> {
         let Peer::Node(node) = peer else {
             return None;
         };
-        let mut scopes = vec![ConversationScope::new(format!("node:{node}"))];
-        if let Some(key) = self.handles.served_by(node) {
-            scopes.push(key.scope);
-        }
-        if let Some((_, runs)) = self.registry.open_runs_of(node) {
-            for run in runs {
-                scopes.push(
-                    locked(&self.scopes)
-                        .get(&run.chain.root_task_id)
-                        .cloned()
-                        .unwrap_or_else(|| {
-                            ConversationScope::new(format!("run:{}", run.chain.root_task_id))
-                        }),
-                );
+        let runs = self
+            .registry
+            .open_runs_of(node)
+            .map_or_else(Vec::new, |(_, runs)| runs);
+        let run_scope = |run: &super::gate::OpenRun| {
+            locked(&self.scopes)
+                .get(&run.chain.root_task_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    ConversationScope::new(format!("run:{}", run.chain.root_task_id))
+                })
+        };
+        let scopes = match run {
+            Some(named) => vec![run_scope(runs.iter().find(|open| open.name == named)?)],
+            None => {
+                let mut scopes = vec![ConversationScope::new(format!("node:{node}"))];
+                if let Some(key) = self.handles.served_by(node) {
+                    scopes.push(key.scope);
+                }
+                scopes.extend(runs.iter().map(run_scope));
+                scopes
             }
-        }
+        };
         let root = self.run_root();
         scopes.into_iter().find_map(|scope| {
             let key = HandleKey::new(scope, name);
@@ -1627,7 +1629,12 @@ impl BrokerCalls {
         };
         let addressee = match request {
             Request::Post(params) => match self.registry.node_and_owner(&params.to) {
-                None if self.idle_handle_of(peer, &params.to).is_some() => Addressee::Handle,
+                None if self
+                    .idle_handle_of(peer, &params.to, params.run.as_deref())
+                    .is_some() =>
+                {
+                    Addressee::Handle
+                }
                 None => Addressee::None,
                 Some((node, owner)) => Addressee::Node {
                     id: node.id(),
@@ -1907,7 +1914,7 @@ impl BrokerCalls {
                 // registry's locks (taken by `idle_handle_of`); nothing
                 // takes them the other way round, and nothing awaits here.
                 let mut pending = lock(&self.handle_pending);
-                match self.idle_handle_of(peer, &params.to) {
+                match self.idle_handle_of(peer, &params.to, params.run.as_deref()) {
                     Some(key) => {
                         #[cfg(test)]
                         if let Some(hook) = locked(&self.before_handle_push).as_ref() {
@@ -2907,6 +2914,7 @@ mod tests {
             CallRequest::SendMessage(SendMessageParams {
                 to: to.to_string(),
                 text: text.to_string(),
+                run: None,
             }),
         );
         let Some(Ok(CallEvent::Result(CallResult::Posted(status)))) = stream.next().await else {
@@ -3297,6 +3305,113 @@ mod tests {
             .filter(|row| row.4 == "dropped")
             .count();
         assert_eq!(dropped, 1);
+    }
+
+    /// A node `lead` with one open run under each of two root
+    /// conversations, `conv-a` and `conv-b`, and an idle handle `fixer`
+    /// that `lead` owns in both. Returns the broker, `lead`, the two runs'
+    /// names and the two handles' keys, as `(a, b)` pairs.
+    #[allow(clippy::type_complexity)]
+    fn lead_in_two_conversations() -> (
+        Arc<BrokerCalls>,
+        ParticipantRegistry,
+        String,
+        (String, String),
+        (HandleKey, HandleKey),
+    ) {
+        let (calls, registry) = broker(None);
+        let lead = registry.admit_under("lead", None);
+        let mut runs = Vec::new();
+        let mut keys = Vec::new();
+        for (root, conversation) in [("t-a", "conv-a"), ("t-b", "conv-b")] {
+            let chain = CallChain::root(root).extend("lead").unwrap();
+            std::mem::forget(registry.open_run(&lead, None, None, chain).unwrap());
+            locked(&calls.scopes).insert(root.to_string(), ConversationScope::new(conversation));
+            let (_, open) = registry.open_runs_of(&lead).unwrap();
+            runs.push(
+                open.into_iter()
+                    .find(|run| run.chain.root_task_id == root)
+                    .unwrap()
+                    .name,
+            );
+            let key = HandleKey::new(ConversationScope::new(conversation), "fixer");
+            let owner =
+                HandleOwner::new(RunRoot::Owner, HandleParty::Node(lead.clone()), Vec::new());
+            let ticket = calls
+                .handles
+                .begin(key.clone(), owner, &HandleStatus::Free)
+                .unwrap();
+            assert!(ticket.save(Handle {
+                name: "fixer".to_string(),
+                agent: "worker".to_string(),
+                conversation: SavedConversation::new(json!([])),
+                tree: None,
+                last_task_base: None,
+            }));
+            drop(ticket);
+            keys.push(key);
+        }
+        let (b, a) = (runs.pop().unwrap(), runs.pop().unwrap());
+        let (key_b, key_a) = (keys.pop().unwrap(), keys.pop().unwrap());
+        (calls, registry, lead, (a, b), (key_a, key_b))
+    }
+
+    async fn send_from_run(
+        calls: &BrokerCalls,
+        lead: &str,
+        run: Option<&str>,
+        to: &str,
+    ) -> MessageStatus {
+        let mut stream = calls.call(
+            node(lead),
+            CallRequest::SendMessage(SendMessageParams {
+                to: to.to_string(),
+                text: "hello".to_string(),
+                run: run.map(str::to_string),
+            }),
+        );
+        let Some(Ok(CallEvent::Result(CallResult::Posted(status)))) = stream.next().await else {
+            panic!("a send_message call answers with one status");
+        };
+        status
+    }
+
+    fn waiting(calls: &BrokerCalls, key: &HandleKey) -> usize {
+        lock(&calls.handle_pending)
+            .get(key)
+            .map_or(0, |list| list.len())
+    }
+
+    /// AGE-1349: a node with runs under two conversations that each hold a
+    /// handle of the same name reaches, from each run, only that run's
+    /// conversation's handle, whichever scope the node's list names first.
+    #[tokio::test]
+    async fn a_node_in_two_conversations_messages_only_its_runs_handle() {
+        let (calls, _registry, lead, (run_a, run_b), (key_a, key_b)) = lead_in_two_conversations();
+
+        let status = send_from_run(&calls, &lead, Some(&run_a), "fixer").await;
+        assert_eq!(status, MessageStatus::Pending { id: "msg-1".into() });
+        assert_eq!((waiting(&calls, &key_a), waiting(&calls, &key_b)), (1, 0));
+
+        let status = send_from_run(&calls, &lead, Some(&run_b), "fixer").await;
+        assert_eq!(status, MessageStatus::Pending { id: "msg-2".into() });
+        assert_eq!((waiting(&calls, &key_a), waiting(&calls, &key_b)), (1, 1));
+
+        // A run that is not the node's own is refused, not trusted.
+        let status = send_from_run(&calls, &lead, Some("not-my-run"), "fixer").await;
+        assert_eq!(status, refused(RefusalReason::NotOnTree));
+        assert_eq!((waiting(&calls, &key_a), waiting(&calls, &key_b)), (1, 1));
+    }
+
+    /// AGE-1349: an older worker names no run; its post is read under the
+    /// node's whole scope, as before, and reaches a handle of its node.
+    #[tokio::test]
+    async fn a_post_without_run_falls_back_to_the_node_scope() {
+        let (calls, _registry, lead, _runs, (key_a, key_b)) = lead_in_two_conversations();
+
+        let status = send_from_run(&calls, &lead, None, "fixer").await;
+        assert_eq!(status, MessageStatus::Pending { id: "msg-1".into() });
+        assert_eq!(waiting(&calls, &key_a) + waiting(&calls, &key_b), 1);
     }
 
     /// RO-4: a handle's roster row counts the messages waiting for it, in

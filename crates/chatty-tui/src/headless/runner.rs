@@ -19,7 +19,7 @@ use chatty_core::models::clarification_store::ClarificationAnswer;
 use chatty_core::models::token_usage::ConversationTokenUsage;
 use chatty_core::repositories::ConversationData;
 use chatty_core::services::StreamSurface;
-use chatty_core::services::handoff::{self, HandoffContract, HandoffLedger, HandoffOutcome};
+use chatty_core::services::handoff::{HandoffContract, HandoffFinisher, HandoffLedger};
 use chatty_core::services::run_budget::RunBudget;
 use chatty_core::services::spend_gate::LocalSpendGate;
 use chatty_core::services::team::Team;
@@ -297,15 +297,10 @@ impl HeadlessRunner {
         self.handoff = contract;
     }
 
-    /// The follow-up a final answer whose last model call said
-    /// `final_call_text` needs: the schema errors, when this worker has a
-    /// contract and the answer does not meet it.
-    pub(super) fn handoff_follow_up(&self, final_call_text: &str) -> Option<String> {
-        let contract = self.handoff.as_ref()?;
-        match handoff::check(contract, final_call_text) {
-            HandoffOutcome::Valid(_) => None,
-            HandoffOutcome::Invalid { errors } => Some(handoff::follow_up(contract, &errors)),
-        }
+    /// A fresh finisher for one run, when this worker has a contract: it
+    /// checks the final answer and sends it back once (AGE-1437).
+    pub(super) fn handoff_finisher(&self) -> Option<HandoffFinisher> {
+        self.handoff.clone().map(HandoffFinisher::new)
     }
 
     /// Send the handoff back once (TD-2): the observer — the worker's frame
@@ -505,49 +500,45 @@ impl HeadlessRunner {
     }
 
     /// Finish a `--team` leader's report file, when its team names one
-    /// (AGE-910): the citation check against the researchers' notes, and
-    /// the run's cost; `answer` becomes a partial report when the team
-    /// wrote none. Called when the run ends, however it ends.
+    /// (AGE-910): chatty-core's host hook
+    /// ([`finish_team_run_in_workspace`](chatty_core::services::team_report::finish_team_run_in_workspace),
+    /// AGE-1433) does the citation check against the researchers' notes,
+    /// the cost footer naming the search backend, and the partial report
+    /// when the team wrote none. Called when the run ends, however it ends.
     ///
-    /// The notes are the files the host kept them in (AGE-1295), with any
-    /// note the conversation still carries. Returns the run's answer when
-    /// the team wrote its report: the report's opening, then `reply`, the
-    /// lead's last reply.
+    /// Returns the run's answer when the team wrote its report: the
+    /// report's opening, then `reply`, the lead's last reply.
     pub(super) fn finish_team_report(
         &self,
         answer: &str,
         reply: &str,
         wall: std::time::Duration,
     ) -> Option<String> {
-        use chatty_core::services::research_notes::read_notes;
-        use chatty_core::services::team_report::{
-            answer_from_report, finish_file, notes_in_history,
-        };
+        use chatty_core::services::team_report::{TeamRunEnd, finish_team_run_in_workspace};
         let (Some((workspace, _)), Some(tally)) = (&self.session_record, &self.team_tally) else {
             return None;
         };
         let team = self.config.team.as_ref()?;
         let relative = team.file.report.as_deref()?;
-        let mut notes = team
-            .leader
-            .swarm
-            .rounds
-            .as_ref()
-            .and_then(|rounds| rounds.notes.as_deref())
-            .map(|dir| read_notes(workspace, dir))
-            .unwrap_or_default();
         let messages = self
             .session
             .conversation()
             .map(|conversation| conversation.messages())
             .unwrap_or_default();
-        notes.extend(notes_in_history(&messages));
-        let tally = tally.tally(Some(self.session.price_book()), wall);
-        match finish_file(workspace, relative, answer, &notes, &tally) {
-            Ok(path) => {
+        let end = TeamRunEnd {
+            team,
+            answer,
+            reply,
+            messages: &messages,
+            tally,
+            price_book: Some(self.session.price_book()),
+            search_settings: self.config.search_settings.as_ref(),
+            wall,
+        };
+        match finish_team_run_in_workspace(&end, workspace)? {
+            Ok((path, done)) => {
                 eprintln!("Report: {}", path.display());
-                let report = std::fs::read_to_string(&path).ok()?;
-                answer_from_report(&report, relative, reply)
+                done.answer
             }
             Err(error) => {
                 eprintln!("report {relative}: {error:#}");
@@ -1000,6 +991,7 @@ impl HeadlessRunner {
             }
             AppEvent::StreamError(error) => {
                 self.transcript.mark_error(&error.to_string());
+                self.session.note_turn_error(&error);
                 self.finish_turn();
                 self.usage.checkpoint();
                 self.drain_mailbox(TurnEnd::Error);

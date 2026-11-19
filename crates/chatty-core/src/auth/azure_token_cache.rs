@@ -1,11 +1,49 @@
 use anyhow::{Context, Result};
 use azure_core::credentials::TokenCredential;
+use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
 const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 const TOKEN_REFRESH_THRESHOLD_SECS: u64 = 5 * 60; // 5 minutes
+
+/// Where fresh tokens come from: the token and its `expires_on`.
+/// Faked in tests; production uses the Azure credential.
+pub(crate) trait TokenFetcher: Send + Sync {
+    fn fetch(&self) -> BoxFuture<'_, Result<(String, SystemTime)>>;
+}
+
+/// The wall clock, injectable so tests can move past expiry.
+pub(crate) trait Clock: Send + Sync {
+    fn now(&self) -> SystemTime;
+}
+
+struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
+struct CredentialFetcher(Arc<dyn TokenCredential>);
+
+impl TokenFetcher for CredentialFetcher {
+    fn fetch(&self) -> BoxFuture<'_, Result<(String, SystemTime)>> {
+        Box::pin(async move {
+            let response = self
+                .0
+                .get_token(&[AZURE_OPENAI_SCOPE], None)
+                .await
+                .context("Failed to refresh Azure Entra ID token")?;
+            Ok((
+                response.token.secret().to_string(),
+                SystemTime::from(response.expires_on),
+            ))
+        })
+    }
+}
 
 #[derive(Clone)]
 struct CachedToken {
@@ -28,8 +66,9 @@ struct CachedToken {
 /// - `refresh_lock` prevents duplicate simultaneous refreshes
 #[derive(Clone)]
 pub struct AzureTokenCache {
-    /// Singleton credential instance (reused for all token fetches)
-    credential: Arc<dyn TokenCredential>,
+    /// Source of fresh tokens (the singleton Entra credential in production)
+    fetcher: Arc<dyn TokenFetcher>,
+    clock: Arc<dyn Clock>,
     /// Cached token with expiry timestamp
     cached_token: Arc<RwLock<Option<CachedToken>>>,
     /// Mutex to prevent concurrent refresh operations
@@ -53,11 +92,27 @@ impl AzureTokenCache {
         let credential = super::azure_auth::create_entra_credential()
             .context("Failed to create Entra ID credential")?;
 
-        Ok(Self {
-            credential,
+        Ok(Self::with_parts(
+            Arc::new(CredentialFetcher(credential)),
+            Arc::new(SystemClock),
+        ))
+    }
+
+    pub(crate) fn with_parts(fetcher: Arc<dyn TokenFetcher>, clock: Arc<dyn Clock>) -> Self {
+        Self {
+            fetcher,
+            clock,
             cached_token: Arc::new(RwLock::new(None)),
             refresh_lock: Arc::new(Mutex::new(())),
-        })
+        }
+    }
+
+    /// The cached token's remaining life, if it is still outside the refresh margin.
+    fn fresh_token(&self, cached: &Option<CachedToken>) -> Option<(String, Duration)> {
+        let token = cached.as_ref()?;
+        let ttl = token.expires_at.duration_since(self.clock.now()).ok()?;
+        (ttl > Duration::from_secs(TOKEN_REFRESH_THRESHOLD_SECS))
+            .then(|| (token.token.clone(), ttl))
     }
 
     /// Get a valid token, refreshing if needed
@@ -74,12 +129,9 @@ impl AzureTokenCache {
         // First check: fast path for valid cached tokens
         {
             let cached = self.cached_token.read().await;
-            if let Some(ref token) = *cached
-                && let Ok(ttl) = token.expires_at.duration_since(SystemTime::now())
-                && ttl > Duration::from_secs(TOKEN_REFRESH_THRESHOLD_SECS)
-            {
+            if let Some((token, ttl)) = self.fresh_token(&cached) {
                 tracing::debug!(ttl_seconds = ttl.as_secs(), "Using cached Azure token");
-                return Ok(token.token.clone());
+                return Ok(token);
             }
         }
 
@@ -89,15 +141,12 @@ impl AzureTokenCache {
         // Second check: another thread may have refreshed while we waited for the lock
         {
             let cached = self.cached_token.read().await;
-            if let Some(ref token) = *cached
-                && let Ok(ttl) = token.expires_at.duration_since(SystemTime::now())
-                && ttl > Duration::from_secs(TOKEN_REFRESH_THRESHOLD_SECS)
-            {
+            if let Some((token, ttl)) = self.fresh_token(&cached) {
                 tracing::debug!(
                     ttl_seconds = ttl.as_secs(),
                     "Using token refreshed by another thread"
                 );
-                return Ok(token.token.clone());
+                return Ok(token);
             }
         }
 
@@ -128,14 +177,7 @@ impl AzureTokenCache {
     async fn do_refresh_token(&self) -> Result<String> {
         tracing::debug!("Fetching new token from Azure");
 
-        let token_response = self
-            .credential
-            .get_token(&[AZURE_OPENAI_SCOPE], None)
-            .await
-            .context("Failed to refresh Azure Entra ID token")?;
-
-        let token_string = token_response.token.secret().to_string();
-        let expires_at = SystemTime::from(token_response.expires_on);
+        let (token_string, expires_at) = self.fetcher.fetch().await?;
 
         // Cache the new token
         {
@@ -158,53 +200,107 @@ impl AzureTokenCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[test]
-    fn test_cached_token_within_threshold() {
-        // Token that expires in 10 minutes should still be valid
-        let token = CachedToken {
-            token: "test-token".to_string(),
-            expires_at: SystemTime::now() + Duration::from_secs(10 * 60),
-        };
+    /// Settable clock.
+    struct FakeClock(StdMutex<SystemTime>);
 
-        let ttl = token.expires_at.duration_since(SystemTime::now()).unwrap();
-        assert!(ttl > Duration::from_secs(TOKEN_REFRESH_THRESHOLD_SECS));
+    impl FakeClock {
+        fn new() -> Arc<Self> {
+            Arc::new(Self(StdMutex::new(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000),
+            )))
+        }
+        fn advance(&self, by: Duration) {
+            *self.0.lock().unwrap() += by;
+        }
     }
 
-    #[test]
-    fn test_cached_token_needs_refresh() {
-        // Token that expires in 3 minutes should need refresh
-        let token = CachedToken {
-            token: "test-token".to_string(),
-            expires_at: SystemTime::now() + Duration::from_secs(3 * 60),
-        };
-
-        let ttl = token.expires_at.duration_since(SystemTime::now()).unwrap();
-        assert!(ttl < Duration::from_secs(TOKEN_REFRESH_THRESHOLD_SECS));
+    impl Clock for FakeClock {
+        fn now(&self) -> SystemTime {
+            *self.0.lock().unwrap()
+        }
     }
 
-    #[test]
-    fn test_cached_token_expired() {
-        // Token that expired 5 minutes ago
-        let token = CachedToken {
-            token: "test-token".to_string(),
-            expires_at: SystemTime::now() - Duration::from_secs(5 * 60),
-        };
-
-        // duration_since should return an error for past times
-        assert!(token.expires_at.duration_since(SystemTime::now()).is_err());
+    /// Hands out `token-N`, each valid for an hour from the fake clock, and counts fetches.
+    struct FakeFetcher {
+        clock: Arc<FakeClock>,
+        fetches: AtomicUsize,
     }
 
-    #[test]
-    fn test_token_refresh_threshold_constant() {
-        // Verify the threshold is set to 5 minutes as documented
-        assert_eq!(TOKEN_REFRESH_THRESHOLD_SECS, 5 * 60);
+    impl TokenFetcher for FakeFetcher {
+        fn fetch(&self) -> BoxFuture<'_, Result<(String, SystemTime)>> {
+            let n = self.fetches.fetch_add(1, Ordering::SeqCst) + 1;
+            let expires = self.clock.now() + Duration::from_secs(3600);
+            Box::pin(async move {
+                // Yield so concurrent callers really overlap.
+                tokio::task::yield_now().await;
+                Ok((format!("token-{n}"), expires))
+            })
+        }
+    }
+
+    fn setup() -> (AzureTokenCache, Arc<FakeClock>, Arc<FakeFetcher>) {
+        let clock = FakeClock::new();
+        let fetcher = Arc::new(FakeFetcher {
+            clock: clock.clone(),
+            fetches: AtomicUsize::new(0),
+        });
+        let cache = AzureTokenCache::with_parts(fetcher.clone(), clock.clone());
+        (cache, clock, fetcher)
+    }
+
+    #[tokio::test]
+    async fn token_is_reused_before_expiry() {
+        let (cache, clock, fetcher) = setup();
+        assert_eq!(cache.get_token().await.unwrap(), "token-1");
+        clock.advance(Duration::from_secs(30 * 60));
+        assert_eq!(cache.get_token().await.unwrap(), "token-1");
+        assert_eq!(fetcher.fetches.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn token_is_refetched_after_expiry() {
+        let (cache, clock, fetcher) = setup();
+        assert_eq!(cache.get_token().await.unwrap(), "token-1");
+        clock.advance(Duration::from_secs(3600 + 1));
+        assert_eq!(cache.get_token().await.unwrap(), "token-2");
+        assert_eq!(fetcher.fetches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn token_is_refetched_within_the_safety_margin() {
+        let (cache, clock, fetcher) = setup();
+        assert_eq!(cache.get_token().await.unwrap(), "token-1");
+        // 4 minutes left: inside the 5-minute margin, though not yet expired.
+        clock.advance(Duration::from_secs(3600 - 4 * 60));
+        assert_eq!(cache.get_token().await.unwrap(), "token-2");
+        assert_eq!(fetcher.fetches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_near_expiry_refetch_once() {
+        let (cache, clock, fetcher) = setup();
+        cache.get_token().await.unwrap();
+        clock.advance(Duration::from_secs(3600 - 60));
+
+        let calls = (0..16).map(|_| {
+            let cache = cache.clone();
+            tokio::spawn(async move { cache.get_token().await.unwrap() })
+        });
+        for call in futures::future::join_all(calls).await {
+            assert_eq!(call.unwrap(), "token-2");
+        }
+        assert_eq!(
+            fetcher.fetches.load(Ordering::SeqCst),
+            2,
+            "one initial fetch plus exactly one shared refresh"
+        );
     }
 
     #[test]
     fn test_azure_openai_scope_constant() {
-        // Verify the scope is correct for Azure OpenAI
         assert_eq!(
             AZURE_OPENAI_SCOPE,
             "https://cognitiveservices.azure.com/.default"

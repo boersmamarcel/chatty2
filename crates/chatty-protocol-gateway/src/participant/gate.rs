@@ -998,6 +998,11 @@ fn post(
     params: &SendMessageParams,
     snapshot: &Snapshot<'_>,
 ) -> Result<Grant, Refused> {
+    // A run the post names must be one of the node's own open runs
+    // (GT-0b, AGE-1349); one without it is an older worker's.
+    if let Some(run) = params.run.as_deref() {
+        named_run(node, Some(run))?;
+    }
     let owner = match &snapshot.owner {
         Owner::Root => Some((PostTo::Root, ROOT_NAME, false)),
         Owner::Node { id, name, ended } => Some((PostTo::Node(*id), name.as_str(), *ended)),

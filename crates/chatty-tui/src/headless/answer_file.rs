@@ -593,7 +593,7 @@ pub(super) fn write_inferred_answer_file(
             continue;
         }
 
-        match std::fs::write(&path, format!("{candidate}\n")) {
+        match write_no_follow(&path, &format!("{candidate}\n")) {
             Ok(()) => return Ok(path),
             Err(error) => last_error = Some(error),
         }
@@ -605,9 +605,11 @@ pub(super) fn normalize_existing_answer_file_for_prompt(
     engine: &HeadlessRunner,
     prompt: &str,
 ) -> std::io::Result<()> {
+    // A symlink is never read through or rewritten: the model can plant
+    // one in the sandbox, and this runs on the host (AGE-1359).
     let Some(path) = answer_file_candidates(engine)
         .into_iter()
-        .find(|path| path.exists())
+        .find(|path| is_regular_file(path))
     else {
         return Ok(());
     };
@@ -615,7 +617,7 @@ pub(super) fn normalize_existing_answer_file_for_prompt(
     let trimmed = original.trim();
     let normalized = normalize_answer_for_prompt(trimmed, prompt);
     if normalized != trimmed {
-        std::fs::write(path, format!("{normalized}\n"))?;
+        write_no_follow(&path, &format!("{normalized}\n"))?;
     }
     Ok(())
 }
@@ -673,9 +675,38 @@ pub(super) fn answer_file_exists(engine: &HeadlessRunner) -> bool {
     // Treat any existing file (even empty) as a valid answer — empty string is a valid
     // answer for "empty list" questions.  We use metadata instead of content so we don't
     // accidentally overwrite an intentionally-empty answer in the salvage path.
+    // `symlink_metadata`, not `exists`: a dangling symlink counts as
+    // present, so the host never writes an inferred answer through it
+    // (AGE-1359).
     answer_file_candidates(engine)
         .into_iter()
-        .any(|path| path.exists())
+        .any(|path| std::fs::symlink_metadata(&path).is_ok())
+}
+
+/// Whether `path` is a regular file, not following a symlink.
+fn is_regular_file(path: &std::path::Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
+}
+
+/// Write `text` to `path` on the host without following a symlink there:
+/// the sandboxed model can create `answer.txt` as a link to any file the
+/// user can write (AGE-1359).
+fn write_no_follow(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err(std::io::Error::other(format!(
+            "{} is a symlink; refusing to write through it",
+            path.display()
+        )));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)?.write_all(text.as_bytes())
 }
 
 pub(super) fn answer_file_candidates(engine: &HeadlessRunner) -> Vec<PathBuf> {
@@ -693,4 +724,26 @@ pub(super) fn answer_file_candidates(engine: &HeadlessRunner) -> Vec<PathBuf> {
     }
 
     candidates
+}
+
+#[cfg(all(test, unix))]
+mod no_follow_tests {
+    /// AGE-1359: a dangling or live symlink at the answer path is never
+    /// written through.
+    #[test]
+    fn answer_writes_do_not_follow_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        let link = dir.path().join("answer.txt");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(super::write_no_follow(&link, "x\n").is_err());
+        assert!(!outside.exists(), "a dangling symlink was followed");
+        std::fs::write(&outside, "keep").unwrap();
+        assert!(super::write_no_follow(&link, "x\n").is_err());
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
+        assert!(!super::is_regular_file(&link));
+        let plain = dir.path().join("plain.txt");
+        super::write_no_follow(&plain, "42\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&plain).unwrap(), "42\n");
+    }
 }

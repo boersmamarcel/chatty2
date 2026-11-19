@@ -22,7 +22,9 @@ name: Auto-arm
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    # `synchronize` re-checks a docs/* PR on every push (AGE-1365): a push
+    # after arming must not land code with no review.
+    types: [opened, reopened, ready_for_review, synchronize]
 
 permissions:
   contents: read
@@ -45,20 +47,34 @@ jobs:
           SENDER: ${{ github.event.sender.login }}
           ACTOR: ${{ github.actor }}
           OWNER: ${{ github.repository_owner }}
+          ACTION: ${{ github.event.action }}
         run: |
           set -euo pipefail
           [ -n "${GH_TOKEN:-}" ] || { echo "::error::AUTO_UPDATE_TOKEN is not set on this repository"; exit 1; }
+
+          # A push by the owner or the automation never re-arms anything: a PR
+          # whose auto-merge someone turned off stays off.
+          if [ "$ACTION" = "synchronize" ] && { [ "$SENDER" = "$OWNER" ] || [ "$ACTOR" = "github-actions[bot]" ]; }; then
+            exit 0
+          fi
 
           # A `docs/*` PR the owner did not open is armed only when it changes
           # documentation alone (AGE-1261): the docs bots read merged PRs'
           # text, so they can be steered into a code change, which must then
           # wait for a human.
           if [ "$SENDER" != "$OWNER" ] && [ "$ACTOR" != "github-actions[bot]" ]; then
-            files="$(gh pr diff "$PR" --repo "$REPO" --name-only)"
+            # Every path the PR touches, with a rename's old name too, so a
+            # code file renamed into a docs name still counts (AGE-1365).
+            files="$(gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')"
             outside="$(printf '%s\n' "$files" | grep -Ev '^((.*/)?(CLAUDE|AGENTS|README)\.md|docs-site/src/.*\.md)$' || true)"
-            if [ -z "$files" ] || [ -n "$outside" ]; then
+            if [ -z "$files" ] || [ -n "$outside" ] || printf '%s\n' "$files" | grep -q '\.\./'; then
               echo "::warning::PR #$PR is a docs/* PR that changes files outside the docs allowlist; not arming it. A human reviews and merges it."
               printf '%s\n' "$outside"
+              # Armed earlier (before a push added code): take it back.
+              if [ -n "$(gh pr view "$PR" --repo "$REPO" --json autoMergeRequest --jq '.autoMergeRequest.mergeMethod // empty')" ]; then
+                gh pr merge "$PR" --repo "$REPO" --disable-auto
+                echo "::warning::PR #$PR: auto-merge turned off."
+              fi
               exit 0
             fi
           fi
