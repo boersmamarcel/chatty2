@@ -198,6 +198,7 @@ pub fn uninstall_extension(
 }
 
 /// Check whether an update is available for a Hive-sourced extension.
+#[cfg(test)]
 pub fn needs_update(ext: &InstalledExtension, latest_version: &str) -> bool {
     match &ext.source {
         ExtensionSource::Hive { version, .. } => version != latest_version,

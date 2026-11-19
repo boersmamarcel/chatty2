@@ -89,18 +89,8 @@ pub(crate) fn open_web_client_with(
         .expect("Failed to initialize HTTP client (TLS backend error)")
 }
 
-/// Build a minimal HTTP client (no custom user-agent) for probing endpoints.
-///
-/// Used for short-lived metadata requests where a branded user-agent is not
-/// needed (e.g. OAuth well-known discovery).
-pub fn probe_client(timeout_secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .build()
-        .expect("Failed to initialize HTTP client (TLS backend error)")
-}
-
-/// [`probe_client`] for the OAuth endpoints an MCP server at `server_url`
+/// A minimal HTTP client (no custom user-agent, short timeout) for the OAuth
+/// endpoints an MCP server at `server_url`
 /// names (AGE-1101): every name it connects to is resolved once and checked
 /// against [`mcp_oauth_endpoint`](crate::services::ssrf_guard::mcp_oauth_endpoint).
 /// No redirects and no proxy, so the address checked is the one connected

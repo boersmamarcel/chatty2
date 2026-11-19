@@ -197,6 +197,7 @@ pub fn render_pdf_page(
 /// Extract plain text from the first `max_pages` pages.
 ///
 /// Returns `(total_pages, text)`. Pages are labelled when more than one is read.
+#[cfg(test)]
 pub fn extract_pdf_plain_text(
     pdf_path: &Path,
     max_pages: u32,

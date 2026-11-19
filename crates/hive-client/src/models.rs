@@ -291,15 +291,6 @@ pub struct UsageSummary {
     pub total_execution_ms: i64,
 }
 
-/// Paginated list of usage summaries.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageSummaryList {
-    pub items: Vec<UsageSummary>,
-    pub page: i64,
-    pub per_page: i64,
-    pub total: i64,
-}
-
 // ── Credit balance ─────────────────────────────────────────────────────────
 
 /// Credit balance for the authenticated user.
