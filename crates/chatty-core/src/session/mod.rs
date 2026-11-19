@@ -69,6 +69,7 @@ use crate::models::message_types::{
 use crate::models::token_usage::{PriceBook, TokenUsage};
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteApprovalStore};
 use crate::repositories::ConversationData;
+use crate::services::is_agent_todo_tool;
 use crate::services::run_budget::RunBudget;
 use crate::services::swarm_trace::{AGENTS_TRACE_KEY, SwarmTrace};
 use crate::services::turn_budget::TurnBudget;
@@ -86,7 +87,7 @@ pub use delegation::Delegation;
 pub use event::SessionEvent;
 pub use handler::{
     BREVITY_FOLLOW_UP, CUT_OFF_FOLLOW_UP, MALFORMED_TOOL_CALL_FOLLOW_UP, SessionStreamHandler,
-    TurnPolicy, UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX, is_agent_todo_tool,
+    TurnPolicy, UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX,
 };
 pub use hosted::HostedSession;
 pub use mailbox::{Arrival, Decision, Mailbox, Queued, QueuedId, Refusal, TurnEnd};

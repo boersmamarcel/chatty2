@@ -1,147 +1,35 @@
-//! Tool-row wording shared in *semantics* with the desktop transcript
-//! (`chatty-gpui/src/chatty/views/transcript/{verb,activity}.rs`): the same
-//! tense verbs per tool, the same activity classes, the same tally order
-//! (edits → explored → searches → tools → commands → handoffs). The widgets
-//! are not shared — this is the terminal's copy of the tables (AGE-136).
+//! Tool-row wording for the terminal: the verbs, subjects, activity classes
+//! and diff counts come from `chatty_core::presentation::tool_verb`, shared
+//! with the desktop transcript (AGE-1318). What stays here is the terminal's
+//! tally sentence and change tray.
 
-use std::path::Path;
-
-use chatty_core::services::is_agent_todo_tool;
-use chatty_core::tools::plugin_tool::plugin_tool_display_name;
+use chatty_core::models::message_types::ToolCallState as CoreToolCallState;
+use chatty_core::presentation::tool_verb::{
+    ToolKind, classify_tool, diff_stats, known_verb, subject_for,
+};
 
 use crate::engine::{ToolCallInfo, ToolCallState};
 
 /// `Read` / `Reading` / `Failed Read` for a tool the table knows; `None` for
 /// anything else, which keeps its raw `name(args)` header.
-pub fn verb_for(tool_name: &str, state: &ToolCallState) -> Option<String> {
-    // A spec's plugin tool (PL-U2): one generic verb, whatever the plugin.
-    if let Some(plugin_tool) = plugin_tool_display_name(tool_name) {
-        return Some(match state {
-            ToolCallState::Running => format!("Running {plugin_tool}"),
-            ToolCallState::Success => format!("Ran {plugin_tool}"),
-            ToolCallState::Error => format!("Failed to run {plugin_tool}"),
-        });
-    }
-    let (running, done) = match tool_name {
-        "read_file" | "read_binary" | "read_excel" | "read_skill" => ("Reading", "Read"),
-        "list_directory" | "list_agents" | "list_mcp_services" | "list_tools" => {
-            ("Listing", "Listed")
-        }
-        "write_file" | "write_excel" | "write_docx" | "write_pptx" => ("Writing", "Wrote"),
-        "create_directory" => ("Creating", "Created"),
-        "delete_file" => ("Deleting", "Deleted"),
-        "move_file" => ("Moving", "Moved"),
-        "apply_diff" => ("Editing", "Edited"),
-        "glob_search" | "search_code" | "search_web" | "search_memory" | "find_files" => {
-            ("Searching", "Searched")
-        }
-        "shell_execute" | "execute_code" | "daytona_run" => ("Running", "Ran"),
-        "compile_typst" => ("Generating", "Generated"),
-        "file_structure_detector" => ("Mapping", "Mapped"),
-        "fetch" => ("Fetching", "Fetched"),
-        "git_diff" => ("Diffing", "Diffed"),
-        "git_status" => ("Checking", "Checked"),
-        "terminal_read" => ("Reading terminal", "Read terminal"),
-        "browser_take_control" => (
-            "Taking control of the browser",
-            "Took control of the browser",
-        ),
-        "browser_release_control" => ("Handing the browser back", "Handed the browser back"),
-        _ => return None,
-    };
-    Some(match state {
-        ToolCallState::Running => running.to_string(),
-        ToolCallState::Success => done.to_string(),
-        ToolCallState::Error => format!("Failed {done}"),
-    })
+pub fn known_row_verb(tool_name: &str, state: &ToolCallState) -> Option<String> {
+    known_verb(tool_name, &core_state(state))
 }
 
-/// The path, query or command a tool call is about, from its JSON input.
-pub fn subject_for(input: &str) -> String {
-    let Ok(json) = serde_json::from_str::<serde_json::Value>(input) else {
-        return String::new();
-    };
-    for key in [
-        "path",
-        "file_path",
-        "filename",
-        "output_path",
-        "directory",
-        "dir",
-    ] {
-        if let Some(v) = json.get(key).and_then(|v| v.as_str())
-            && !v.is_empty()
-        {
-            return short_path(Path::new(v));
-        }
-    }
-    for key in ["query", "pattern", "command", "url", "task"] {
-        if let Some(v) = json.get(key).and_then(|v| v.as_str()) {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                return truncate(trimmed, 64);
-            }
-        }
-    }
-    String::new()
-}
-
-fn short_path(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    if let Some(name) = path.file_name().and_then(|n| n.to_str())
-        && s.len() > 48
-    {
-        return name.to_string();
-    }
-    truncate(&s, 64)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let trimmed: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{trimmed}…")
+fn core_state(state: &ToolCallState) -> CoreToolCallState {
+    match state {
+        ToolCallState::Running => CoreToolCallState::Running,
+        ToolCallState::Success => CoreToolCallState::Success,
+        ToolCallState::Error => CoreToolCallState::Error(String::new()),
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolKind {
-    Edit,
-    Explore,
-    Search,
-    External,
-    Command,
-    Handoff,
-}
-
-pub fn classify_tool(name: &str) -> ToolKind {
-    let n = name.to_ascii_lowercase();
-    if n == "browser_take_control" || n == "browser_release_control" {
-        return ToolKind::Handoff;
-    }
-    if is_agent_todo_tool(&n) {
-        return ToolKind::Explore;
-    }
-    if plugin_tool_display_name(name).is_some() {
-        // A spec's plugin tool (PL-U2) counts as a tool, whatever its name.
-        return ToolKind::External;
-    }
-    if n.contains("diff") || n.contains("edit") || n.contains("write") || n.contains("apply") {
-        ToolKind::Edit
-    } else if n.contains("search") || n.contains("grep") || n.contains("glob") {
-        ToolKind::Search
-    } else if n.contains("web") || n.contains("fetch") || n.contains("http") || n.contains("mcp") {
-        ToolKind::External
-    } else if n.contains("bash")
-        || n.contains("shell")
-        || n.contains("exec")
-        || n.contains("command")
-    {
-        ToolKind::Command
-    } else {
-        ToolKind::Explore
-    }
+/// `(added, removed)` for an edit tool; an edit with nothing to count still
+/// reads `+0 −0` here, so it shows as a change. `None` for tools that do not
+/// edit.
+pub fn edit_stats(tool_name: &str, input: &str, output: Option<&str>) -> Option<(usize, usize)> {
+    diff_stats(tool_name, input, output)
+        .or_else(|| (classify_tool(tool_name) == ToolKind::Edit).then_some((0, 0)))
 }
 
 /// The counted sentence for a folded run of tools.
@@ -201,54 +89,16 @@ fn push_count(parts: &mut Vec<String>, verb: &str, n: usize, one: &str, many: &s
     }
 }
 
-/// `(added, removed)` for an edit tool, from a structured result, a unified
-/// diff in the output, or the new content in the input. `None` for tools
-/// that do not edit.
-pub fn diff_stats(tool_name: &str, input: &str, output: Option<&str>) -> Option<(usize, usize)> {
-    if classify_tool(tool_name) != ToolKind::Edit {
-        return None;
-    }
-    if let Some(out) = output {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(out) {
-            let insertions = json
-                .get("insertions")
-                .or_else(|| json.get("added"))
-                .and_then(|v| v.as_u64());
-            let deletions = json
-                .get("deletions")
-                .or_else(|| json.get("removed"))
-                .and_then(|v| v.as_u64());
-            if insertions.is_some() || deletions.is_some() {
-                return Some((
-                    insertions.unwrap_or(0) as usize,
-                    deletions.unwrap_or(0) as usize,
-                ));
-            }
-        }
-        let (a, r) = count_diff_lines(out);
-        if a > 0 || r > 0 {
-            return Some((a, r));
-        }
-    }
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(input)
-        && let Some(content) = json.get("content").and_then(|v| v.as_str())
-        && !content.is_empty()
-    {
-        return Some((content.lines().count().max(1), 0));
-    }
-    Some((0, 0))
-}
-
 /// `4 files +58 −4` over the settled edits, or `None` when nothing was
 /// edited. Files are counted by distinct subject; lines are summed.
 pub fn change_tray_label<'a>(tools: impl Iterator<Item = &'a ToolCallInfo>) -> Option<String> {
     let mut files = std::collections::BTreeSet::new();
     let (mut added, mut removed) = (0, 0);
     for tc in tools.filter(|tc| matches!(tc.state, ToolCallState::Success)) {
-        let Some((a, r)) = diff_stats(&tc.name, &tc.input, tc.output.as_deref()) else {
+        let Some((a, r)) = edit_stats(&tc.name, &tc.input, tc.output.as_deref()) else {
             continue;
         };
-        files.insert(subject_for(&tc.input));
+        files.insert(subject_for(&tc.name, &tc.input, ""));
         added += a;
         removed += r;
     }
@@ -260,35 +110,10 @@ pub fn change_tray_label<'a>(tools: impl Iterator<Item = &'a ToolCallInfo>) -> O
     Some(format!("{n} {noun} +{added} −{removed}"))
 }
 
-fn count_diff_lines(output: &str) -> (usize, usize) {
-    let mut added = 0;
-    let mut removed = 0;
-    for line in output.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
-            continue;
-        }
-        if line.starts_with('+') {
-            added += 1;
-        } else if line.starts_with('-') {
-            removed += 1;
-        }
-    }
-    (added, removed)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use chatty_core::models::message_types::ToolSource;
-
-    /// Without an arm the row fell back to the raw `terminal_read(lines=80)`.
-    #[test]
-    fn terminal_read_reads_as_reading_the_terminal() {
-        assert_eq!(
-            verb_for("terminal_read", &ToolCallState::Success).as_deref(),
-            Some("Read terminal")
-        );
-    }
 
     fn tool(name: &str) -> ToolCallInfo {
         ToolCallInfo {
@@ -302,40 +127,18 @@ mod tests {
         }
     }
 
+    /// The terminal's states map onto the shared verb table's tenses.
     #[test]
-    fn verbs_change_tense_with_state() {
+    fn states_map_to_the_shared_tenses() {
         assert_eq!(
-            verb_for("read_file", &ToolCallState::Running).as_deref(),
+            known_row_verb("read_file", &ToolCallState::Running).as_deref(),
             Some("Reading")
         );
         assert_eq!(
-            verb_for("read_file", &ToolCallState::Success).as_deref(),
-            Some("Read")
-        );
-        assert_eq!(
-            verb_for("apply_diff", &ToolCallState::Error).as_deref(),
+            known_row_verb("apply_diff", &ToolCallState::Error).as_deref(),
             Some("Failed Edited")
         );
-        assert_eq!(verb_for("run_shell", &ToolCallState::Success), None);
-    }
-
-    /// PL-U2: a spec's plugin tool reads as running `<plugin>.<tool>`,
-    /// whichever plugin, and counts as a tool in the tally.
-    #[test]
-    fn plugin_tools_read_as_ran_plugin_dot_tool() {
-        assert_eq!(
-            verb_for("echo-agent__reverse", &ToolCallState::Running).as_deref(),
-            Some("Running echo-agent.reverse")
-        );
-        assert_eq!(
-            verb_for("echo-agent__reverse", &ToolCallState::Success).as_deref(),
-            Some("Ran echo-agent.reverse")
-        );
-        assert_eq!(
-            verb_for("spin__spin", &ToolCallState::Error).as_deref(),
-            Some("Failed to run spin.spin")
-        );
-        assert_eq!(classify_tool("echo-agent__reverse"), ToolKind::External);
+        assert_eq!(known_row_verb("run_shell", &ToolCallState::Success), None);
     }
 
     /// Same order as the desktop's `RunTally::phrase_spans`.
@@ -383,18 +186,11 @@ mod tests {
     }
 
     #[test]
-    fn diff_stats_only_for_edit_tools() {
-        assert_eq!(diff_stats("read_file", "{}", Some("+a\n-b")), None);
+    fn edit_stats_only_for_edit_tools_and_zero_when_uncounted() {
+        assert_eq!(edit_stats("read_file", "{}", Some("+a\n-b")), None);
+        assert_eq!(edit_stats("apply_diff", "{}", Some("ok")), Some((0, 0)));
         assert_eq!(
-            diff_stats(
-                "apply_diff",
-                "{}",
-                Some(r#"{"insertions":3,"deletions":1}"#)
-            ),
-            Some((3, 1))
-        );
-        assert_eq!(
-            diff_stats("write_file", r#"{"content":"a\nb\nc"}"#, Some("ok")),
+            edit_stats("write_file", r#"{"content":"a\nb\nc"}"#, Some("ok")),
             Some((3, 0))
         );
     }

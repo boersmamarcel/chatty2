@@ -226,9 +226,11 @@ impl Transcript {
             if is_agent_todo_tool(&tc.name) {
                 plan = snapshot_from_tool_output(&result);
             }
-            diff = verb::diff_stats(&tc.name, &tc.input, Some(&result)).map(|(added, removed)| {
+            diff = verb::edit_stats(&tc.name, &tc.input, Some(&result)).map(|(added, removed)| {
                 DiffStat {
-                    path: verb::subject_for(&tc.input),
+                    path: chatty_core::presentation::tool_verb::subject_for(
+                        &tc.name, &tc.input, "",
+                    ),
                     added,
                     removed,
                 }
