@@ -54,7 +54,7 @@ Tool names and their exact scopes are in the [tools catalog](../dev/reference/to
 
 ### Files and code
 
-The agent can read files, list directories, search by glob or content, jump to a definition, and create, edit, rename, move or delete files — always inside the workspace. Edits show as diffs in the transcript. With git integration on it can also inspect status and diffs, stage, commit and merge branches.
+The agent can read files, list directories, search by glob or content, jump to a definition, and create, edit, rename, move or delete files — always inside the workspace. Edits show as diffs in the transcript. If the model supports images, the agent can also look at a PNG, JPEG, GIF or WebP file in the workspace (up to 3 MB) — a chart or screenshot it just made, say — and see it directly rather than only showing it to you. With git integration on it can also inspect status and diffs, stage, commit and merge branches.
 
 *Rename the `User` struct to `Account` across the project and update every import.*
 
