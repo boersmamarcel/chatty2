@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use futures::StreamExt;
 use rig_core::completion::Message;
 use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
@@ -622,26 +621,16 @@ impl ChatEngine {
             }
         };
 
-        if history.len() < 4 {
-            self.add_system_message(
-                "Conversation is too short to compact (need at least 4 messages).".to_string(),
-            );
-            return Ok(());
-        }
-
-        let midpoint = history.len() / 2;
-        let result = chatty_core::token_budget::summarize_oldest_half(&agent, &history)
+        let outcome = chatty_core::slash_commands::compact_history(&agent, &history)
             .await
             .context("Failed to summarize conversation")?;
-
-        if let Some(conv) = self.session.conversation_mut() {
-            conv.replace_history(result.new_history, midpoint);
+        let message = outcome.message();
+        if let chatty_core::slash_commands::CompactOutcome::Compacted(compaction) = outcome
+            && let Some(conv) = self.session.conversation_mut()
+        {
+            conv.apply_compaction(compaction);
         }
-
-        self.add_system_message(format!(
-            "Compacted conversation: summarized {} messages (estimated {} tokens freed).",
-            result.messages_summarized, result.estimated_tokens_freed
-        ));
+        self.add_system_message(message);
         Ok(())
     }
 
@@ -748,64 +737,19 @@ impl ChatEngine {
         let event_tx = self.event_tx.clone();
 
         tokio::spawn(async move {
-            // The delegation client: a remote agent's answer takes as long as
-            // it takes, and only silence is a failure (AGE-319).
-            let client = chatty_core::services::A2aClient::for_delegation();
-            let stream_result = client.send_message_stream(&config, &prompt).await;
+            let run = chatty_core::slash_commands::run_a2a_delegation(&config, &prompt, |msg| {
+                let _ = event_tx.send(AppEvent::DelegationProgress(msg.to_string()));
+            })
+            .await;
 
-            let message = match stream_result {
-                Ok(mut stream) => {
-                    let mut response = String::new();
-                    let mut success = true;
-
-                    while let Some(event) = stream.next().await {
-                        match event {
-                            Ok(
-                                chatty_core::services::a2a_client::A2aStreamEvent::StatusUpdate {
-                                    state,
-                                    message,
-                                    ..
-                                },
-                            ) => {
-                                if state == "failed" {
-                                    success = false;
-                                    if let Some(msg) = message {
-                                        response = format!("\u{26a0}\u{fe0f} {msg}");
-                                    }
-                                } else if state == "working"
-                                    && let Some(ref msg) = message
-                                {
-                                    let _ =
-                                        event_tx.send(AppEvent::DelegationProgress(msg.clone()));
-                                }
-                            }
-                            Ok(
-                                chatty_core::services::a2a_client::A2aStreamEvent::ArtifactUpdate {
-                                    text,
-                                    ..
-                                },
-                            ) => {
-                                response.push_str(&text);
-                            }
-                            Err(e) => {
-                                success = false;
-                                response = format!("\u{26a0}\u{fe0f} A2A error: {e:#}");
-                                break;
-                            }
-                        }
-                    }
-
-                    if success {
-                        if response.is_empty() {
-                            "Agent completed with no output.".to_string()
-                        } else {
-                            format!("Agent response:\n{response}")
-                        }
-                    } else {
-                        response
-                    }
+            let message = if run.success {
+                if run.response.is_empty() {
+                    "Agent completed with no output.".to_string()
+                } else {
+                    format!("Agent response:\n{}", run.response)
                 }
-                Err(e) => format!("\u{26a0}\u{fe0f} A2A error: {e:#}"),
+            } else {
+                run.response
             };
 
             if let Err(e) = event_tx.send(AppEvent::DelegationFinished(message)) {
