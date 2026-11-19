@@ -1160,6 +1160,36 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Show the note a stalled or disconnected turn was kept with (AGE-1438)
+    /// as its reply, so the live transcript matches what a reload renders
+    /// from the persisted history. Called after `finalize_assistant_message`:
+    /// the turn's bubble, when it had a trace, gets the note as its text;
+    /// an empty bubble was already removed, so the note gets a bubble of its
+    /// own under the user message.
+    pub fn show_kept_failed_turn_note(&mut self, note: &str, cx: &mut Context<Self>) {
+        match self.messages.last_mut() {
+            Some(last)
+                if matches!(last.role, MessageRole::Assistant) && last.content.is_empty() =>
+            {
+                last.content = note.to_string();
+            }
+            _ => self.messages.push(DisplayMessage {
+                role: MessageRole::Assistant,
+                content: note.to_string(),
+                is_streaming: false,
+                system_trace_view: None,
+                live_trace: None,
+                is_markdown: true,
+                attachments: Vec::new(),
+                feedback: None,
+                history_index: None,
+                swarm_tree: None,
+            }),
+        }
+        cx.notify();
+        self.activate_sticky_scroll();
+    }
+
     /// Set the history_index on the last assistant DisplayMessage.
     ///
     /// Called after `finalize_response` adds the assistant message to the
@@ -4875,6 +4905,58 @@ mod delegation_run_tests {
                         .is_some_and(|p| p.id == "req-1"),
                 );
                 assert_eq!((in_transcript, floating), (0, 1), "one card for one request");
+            });
+        });
+    }
+}
+
+/// AGE-1438: a stalled or disconnected turn is kept with a fixed note as its
+/// reply, and the live transcript shows it as a reload would.
+#[cfg(test)]
+mod kept_failed_turn_tests {
+    use super::{ChatView, ExecutionSettingsModel, MessageRole};
+    use chatty_core::services::{StreamErrorKind, kept_failed_turn_note};
+    use gpui::{AnyWindowHandle, AppContext as _, Entity};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    fn harness(cx: &mut gpui::TestAppContext) -> (Entity<ChatView>, AnyWindowHandle) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::models::general_model::GeneralSettingsModel::default());
+            cx.set_global(ExecutionSettingsModel::default());
+            cx.set_global(crate::settings::models::ExtensionsModel::default());
+            cx.set_global(chatty_core::models::ErrorStore::new(100));
+            cx.set_global(crate::auto_updater::AutoUpdater::new("0.0.0"));
+            cx.set_global(chatty_core::models::ConversationsStore::new());
+        });
+        let slot: Rc<RefCell<Option<Entity<ChatView>>>> = Rc::default();
+        let slot_for_window = slot.clone();
+        let window = cx.add_window(move |window, cx| {
+            let view = cx.new(|cx| ChatView::new(window, cx));
+            *slot_for_window.borrow_mut() = Some(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = slot.borrow_mut().take().expect("ChatView captured");
+        (view, window.into())
+    }
+
+    /// A turn that stalled before any output: its empty bubble is removed
+    /// when the stream ends, and the note takes its place.
+    #[gpui::test]
+    fn an_empty_stalled_turn_shows_its_note(cx: &mut gpui::TestAppContext) {
+        let (view, _window) = harness(cx);
+        let note = kept_failed_turn_note(StreamErrorKind::Stalled).unwrap();
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.start_assistant_message(cx);
+                v.finalize_assistant_message(cx);
+                assert!(v.messages.is_empty(), "the empty bubble is removed");
+                v.show_kept_failed_turn_note(note, cx);
+                let last = v.messages.last().expect("the note is shown");
+                assert!(matches!(last.role, MessageRole::Assistant));
+                assert_eq!(last.content, note);
+                assert!(!last.is_streaming);
             });
         });
     }

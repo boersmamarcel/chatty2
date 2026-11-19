@@ -108,7 +108,7 @@ usvg = { workspace = true, optional = true }
 tiktoken-rs.workspace = true
 
 # Agent memory
-memvid-core.workspace = true
+memvid-core = { workspace = true, optional = true }
 
 # The broker's pure state and the `Transport` seam (ADR-0020, AGE-633).
 chatty-fabric = { path = "../chatty-fabric" }
@@ -150,23 +150,26 @@ ed25519-dalek.workspace = true
 # tests/pdfium_build.rs compiles scripts/pdfium_build.rs (the build-script helper)
 # as a test target, so it needs the build script's own dependencies.
 reqwest = { version = "0.13.2", features = ["blocking", "rustls"] }
-flate2 = "1.0"
-tar = "0.4"
+flate2.workspace = true
+tar.workspace = true
 
 [build-dependencies]
 # Pdfium library download
 reqwest = { version = "0.13.2", features = ["blocking", "rustls"] }
-flate2 = "1.0"
-tar = "0.4"
+flate2.workspace = true
+tar.workspace = true
 sha2.workspace = true
 
 [features]
-default = ["mcp", "all-tools"]
+default = ["mcp", "memory", "all-tools"]
 # MCP tools reach rig through chatty's own adapter (tools/mcp_tool_adapter.rs) on
 # rmcp 3, not rig-agent's `rmcp` feature, which requires rmcp ^2 (RUSTSEC-2026-0457,
-# RUSTSEC-2026-0462; AGE-1101). Workspace still lists rig-mcp (=0.2.5); it is not
-# wired here because it pins rmcp ^1.6.
+# RUSTSEC-2026-0462; AGE-1101).
 mcp = []
+# Agent memory store on memvid-core. memvid-core links document parsers
+# (calamine, lopdf, zip) that a host which never parses documents (ADR-0090,
+# chatty-server) must not carry; off, `MemoryService::open_or_create` fails.
+memory = ["dep:memvid-core"]
 # Scripted stream fixtures for the frontends' characterization tests (AGE-191).
 # Enabled from chatty-tui / chatty-gpui dev-dependencies, never in a release build.
 test-support = []

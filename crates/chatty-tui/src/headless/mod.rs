@@ -25,15 +25,14 @@
 
 use anyhow::Result;
 use chatty_core::services::agent_loop_guard::{PROGRESS_WINDOW_TOOL_CALLS, ProgressCheck};
-use chatty_core::services::budget_stop::find_budget_exhausted;
+use chatty_core::services::budget_stop::{can_budget_stop, find_budget_exhausted};
+use chatty_core::services::handoff::HandoffStep;
 use chatty_core::services::resume_brief::SessionOutcome;
 use chatty_core::services::{
     AgentLoopGuard, HEADLESS_STALL_RESUME_ATTEMPTS, RecoveryAction, StreamError, StreamErrorKind,
     is_agent_todo_tool,
 };
-use chatty_core::tools::invoke_agent_tool::InvokeAgentTool;
 use chatty_fabric::deadline_grace;
-use rig_agent::tool::Tool;
 use tokio::sync::mpsc;
 
 use crate::engine::ToolCallState;
@@ -87,12 +86,13 @@ fn text_overflow_recovery_prompt(answer_file_required: bool) -> &'static str {
 }
 /// Sent on the same history after the stall watchdog ended a turn: the
 /// provider went quiet, not the task, so the model picks up where it was.
-/// rig hands back a turn's tool round-trips only when the turn finishes,
-/// so a stalled turn keeps its text but not its tool calls and results;
-/// the prompt says so, or the model trusts results it can no longer see.
-const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. Its tool \
-     calls and their results are not in the history, but files it wrote are still on disk. \
-     Continue the task from where you left off: check the current state before redoing work.";
+/// A stalled turn keeps the tool calls that got their results (AGE-1438);
+/// a call still running when it stalled is not in the history, so the
+/// prompt says to check the current state rather than trust it either way.
+const STALL_RESUME_PROMPT: &str = "The previous response was interrupted by a stall. The tool \
+     calls that finished and their results are in the history above; a call still running when \
+     it stalled is not, and files it wrote are still on disk. Continue the task from where you \
+     left off: check the current state before redoing work.";
 /// Sent on the same history after a provider error (a dropped connection,
 /// an HTTP error status, a malformed tool call) ended a turn the model had
 /// already said something in. The failed run's tool round-trips were
@@ -284,8 +284,9 @@ pub async fn run_headless(
     // a turn the model itself ended is read by `announces_untaken_step`.
     let mut last_call_text = String::new();
     let mut announced_step_nudges = 0usize;
-    // A worker's handoff is sent back once when it fails its schema (TD-2).
-    let mut handoff_sent_back = false;
+    // A worker's handoff is sent back once when it fails its schema (TD-2,
+    // AGE-1437: chatty-core's finisher decides).
+    let mut handoff = engine.handoff_finisher();
     // A delegation came back with a spent budget (AGE-903): the turn ends
     // on its own with the final message, and nothing follows it — no
     // finalization pass, nudge or follow-up is sent, each being a paid call.
@@ -530,7 +531,7 @@ pub async fn run_headless(
                     for line in format_tool_call_lines(tc) {
                         eprintln!("{line}");
                     }
-                    if budget_stop.is_some() && tc.name == InvokeAgentTool::NAME {
+                    if tool_error_is_budget_stop(&tc.name, budget_stop.as_deref()) {
                         // The run's own hook ends the turn with its final
                         // message; nothing here may stop it for another pass.
                         budget_stopped = true;
@@ -684,9 +685,11 @@ pub async fn run_headless(
                     }
                     tokio::time::sleep(delay).await;
                     if let Some(message) = engine.take_rolled_back_message() {
-                        // The turn failed before the model said anything, so
-                        // it was rolled back with its prompt: send that
-                        // same message again.
+                        // The turn failed before the model said anything
+                        // and was rolled back with its prompt: send that
+                        // same message again. A stall or a connection
+                        // failure keeps its turn instead (AGE-1438), and is
+                        // resumed by the prompts below.
                         engine.send_recovery_prompt(message);
                     } else if error.kind == StreamErrorKind::Stalled {
                         engine.send_recovery_prompt(format!(
@@ -801,10 +804,9 @@ pub async fn run_headless(
                 // last model call's text does not match it (TD-2,
                 // AGE-693). A second miss fails the task, which the frame
                 // mapper decides from the same text.
-                if !handoff_sent_back
-                    && let Some(prompt) = engine.handoff_follow_up(&final_call_text)
+                if let Some(finisher) = handoff.as_mut()
+                    && let HandoffStep::SendBack(prompt) = finisher.step(&final_call_text)
                 {
-                    handoff_sent_back = true;
                     eprintln!("The handoff does not match its schema; sending it back once.");
                     engine.send_handoff_follow_up(prompt);
                     continue;
@@ -1169,6 +1171,13 @@ use announced_step::{ANNOUNCED_STEP_NUDGE, MAX_ANNOUNCED_STEP_NUDGES, announces_
 use answer_file::*;
 use recovery::*;
 use tool_format::*;
+
+/// Whether a failed `tool` call whose error carries `budget_stop` (the
+/// typed headline, if any) ends the run: only `invoke_agent`, `search_web`
+/// and `fetch` can carry one (AGE-1439).
+fn tool_error_is_budget_stop(tool: &str, budget_stop: Option<&str>) -> bool {
+    budget_stop.is_some() && can_budget_stop(tool)
+}
 
 #[cfg(test)]
 mod tests;
