@@ -28,7 +28,7 @@ use serde_json::Value;
 use tracing::warn;
 
 pub use chatty_fabric::HandoffContract;
-use chatty_fabric::wire::TaskMetadata;
+use chatty_fabric::wire::{HandoffInvalid, Opaque, TaskMetadata};
 
 /// The terminal-status metadata key a valid handoff rides under.
 pub const HANDOFF_METADATA_KEY: &str = "handoff";
@@ -256,6 +256,179 @@ pub fn follow_up(contract: &HandoffContract, errors: &[String]) -> String {
 /// Whether `prompt` is a handoff re-prompt.
 pub fn is_follow_up(prompt: &str) -> bool {
     prompt.starts_with(HANDOFF_FOLLOW_UP_PREFIX)
+}
+
+/// The worker side of a handoff (AGE-1437): check the final answer, send it
+/// back once when it fails its schema, and say how the task ends.
+///
+/// One finisher per task with a [`HandoffContract`]. A host that runs the
+/// worker's turns itself calls [`finish`] after the last one. A host that
+/// sequences its own turns drives [`step`](Self::step) (chatty-tui's
+/// headless loop). A host that only watches the turns counts the send-backs
+/// with [`note_sent_back`](Self::note_sent_back) and reads
+/// [`result`](Self::result) at the terminal status (chatty-protocol-gateway's
+/// frame mapper).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandoffFinisher {
+    contract: HandoffContract,
+    /// How many handoff re-prompts went out, each an invalid answer.
+    sent_back: u32,
+}
+
+/// What a [`HandoffFinisher`] wants after a final answer.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HandoffStep {
+    /// Send this [`follow_up`] as one more turn, then step again with that
+    /// turn's final text.
+    SendBack(String),
+    /// The handoff is settled; nothing more is sent.
+    Done(HandoffResult),
+}
+
+impl HandoffFinisher {
+    pub fn new(contract: HandoffContract) -> Self {
+        Self {
+            contract,
+            sent_back: 0,
+        }
+    }
+
+    pub fn contract(&self) -> &HandoffContract {
+        &self.contract
+    }
+
+    /// Check `final_text`, the text of the worker's last model call. The
+    /// first invalid answer is sent back once; after that, or on a valid
+    /// answer, the handoff is done.
+    pub fn step(&mut self, final_text: &str) -> HandoffStep {
+        match check(&self.contract, final_text) {
+            HandoffOutcome::Invalid { errors } if self.sent_back == 0 => {
+                self.sent_back += 1;
+                HandoffStep::SendBack(follow_up(&self.contract, &errors))
+            }
+            outcome => HandoffStep::Done(self.settle(Some(outcome))),
+        }
+    }
+
+    /// Count a handoff re-prompt someone else sent ([`is_follow_up`]).
+    pub fn note_sent_back(&mut self) {
+        self.sent_back += 1;
+    }
+
+    /// How the task ends: `final_text` is the last model call's text of a
+    /// task that completed, `None` for one that failed or was cancelled,
+    /// whose answer is not read.
+    pub fn result(&self, final_text: Option<&str>) -> HandoffResult {
+        self.settle(final_text.map(|text| check(&self.contract, text)))
+    }
+
+    fn settle(&self, outcome: Option<HandoffOutcome>) -> HandoffResult {
+        let failed = matches!(outcome, Some(HandoffOutcome::Invalid { .. }));
+        HandoffResult {
+            role: self.contract.role.clone(),
+            invalid_count: self.sent_back + u32::from(failed),
+            outcome,
+        }
+    }
+}
+
+/// How a worker's handoff ended, ready for its terminal status.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandoffResult {
+    /// The role the handoff was for.
+    pub role: String,
+    /// The last answer's check; `None` when the task did not complete.
+    pub outcome: Option<HandoffOutcome>,
+    /// How many answers failed their schema, the last one included: 0 for
+    /// a valid first answer, 1 for one send-back that then succeeded, 2
+    /// for two invalid answers.
+    pub invalid_count: u32,
+}
+
+impl HandoffResult {
+    /// The failure message of a task whose last answer failed its schema:
+    /// `handoff_invalid: <role>: <errors>`. `None` otherwise; the task then
+    /// ends as it would without a contract.
+    pub fn failure_message(&self) -> Option<String> {
+        match &self.outcome {
+            Some(HandoffOutcome::Invalid { errors }) => Some(format!(
+                "handoff_invalid: {}: {}",
+                self.role,
+                errors.join("; ")
+            )),
+            _ => None,
+        }
+    }
+
+    /// Write the handoff keys onto the terminal status's metadata: the
+    /// valid handoff ([`HANDOFF_METADATA_KEY`]), or the role and errors of
+    /// an invalid one ([`HANDOFF_INVALID_METADATA_KEY`]), and the invalid
+    /// count ([`HANDOFF_INVALID_COUNT_METADATA_KEY`]) when it is not 0.
+    pub fn write_metadata(self, metadata: &mut TaskMetadata) {
+        match self.outcome {
+            Some(HandoffOutcome::Valid(value)) => {
+                metadata.handoff = Opaque::from_value(&value)
+                    .map_err(|e| warn!(error = %e, "The handoff does not fit the terminal status"))
+                    .ok();
+            }
+            Some(HandoffOutcome::Invalid { errors }) => {
+                metadata.handoff_invalid = Some(HandoffInvalid {
+                    role: self.role,
+                    errors,
+                });
+            }
+            None => {}
+        }
+        if self.invalid_count > 0 {
+            metadata.handoff_invalid_count = Some(self.invalid_count);
+        }
+    }
+}
+
+/// Finish a worker's handoff after its last turn (AGE-1437): check
+/// `final_text`, send the [`follow_up`] back once through `send_follow_up`
+/// when it fails its schema, and check that turn's final text again.
+///
+/// `send_follow_up` runs one more turn with the prompt it is given and
+/// returns the text of that turn's last model call. It is called at most
+/// once.
+///
+/// # Hosted workers (hive)
+///
+/// A hosted chatty-server worker in a microVM calls this after its last
+/// turn whenever its task carries a [`HandoffContract`], then marks the
+/// task failed with [`HandoffResult::failure_message`] when there is one,
+/// and writes [`HandoffResult::write_metadata`] onto the terminal status's
+/// [`TaskMetadata`]. The leader reads those keys back
+/// ([`HandoffReport::from_task_metadata`]) and counts them in its ledger
+/// once `AgentBuildContext.handoff_ledger = team.handoff_ledger()` is set
+/// where the leader's agent is built.
+///
+/// Hive's `VmRunner` does not set a handoff contract on member tasks today,
+/// so a hosted worker never has one to finish; a hive follow-up has to pass
+/// the role's contract (`team.handoffs[role]`) on the task it sends
+/// into the VM, and give the worker the [`instruction`] with its task.
+pub async fn finish<F, Fut>(
+    contract: HandoffContract,
+    final_text: &str,
+    send_follow_up: F,
+) -> HandoffResult
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = String>,
+{
+    let mut finisher = HandoffFinisher::new(contract);
+    match finisher.step(final_text) {
+        HandoffStep::Done(result) => result,
+        HandoffStep::SendBack(prompt) => {
+            let retried = send_follow_up(prompt).await;
+            match finisher.step(&retried) {
+                HandoffStep::Done(result) => result,
+                // A finisher sends back once; a second step is always done.
+                HandoffStep::SendBack(_) => finisher.result(Some(&retried)),
+            }
+        }
+    }
 }
 
 /// What a leader's `invoke_agent` reads off a worker's terminal status.
@@ -566,5 +739,96 @@ mod tests {
 
         ledger.record("reviewer", 0, Some(&json!({ "reviewed": ["a.rs"] })));
         assert_eq!(ledger.failure_tags(), [HANDOFF_MISREAD_TAG]);
+    }
+
+    const VALID: &str = "Done.\n\n```json\n{\"files_changed\": [\"a.rs\"]}\n```\n";
+    const INVALID: &str = "```json\n{\"files_changed\": \"a.rs\"}\n```";
+
+    /// The terminal status's metadata keys a result writes, as JSON.
+    fn status_metadata(result: HandoffResult) -> Value {
+        let mut metadata = TaskMetadata::default();
+        result.write_metadata(&mut metadata);
+        serde_json::to_value(metadata).unwrap()
+    }
+
+    /// AGE-1437: a valid first answer is done with no send-back; the
+    /// handoff rides under `handoff`, with no invalid keys.
+    #[tokio::test]
+    async fn the_finisher_keeps_a_valid_first_answer() {
+        let mut sends = 0;
+        let result = finish(contract(), VALID, |_| {
+            sends += 1;
+            async { String::new() }
+        })
+        .await;
+        assert_eq!(sends, 0);
+        assert_eq!(result.invalid_count, 0);
+        assert_eq!(result.failure_message(), None);
+        let metadata = status_metadata(result);
+        assert_eq!(
+            metadata,
+            json!({ HANDOFF_METADATA_KEY: { "files_changed": ["a.rs"] } })
+        );
+    }
+
+    /// AGE-1437: an invalid answer is sent back once with its errors; a
+    /// valid retry is the handoff, and the one invalid answer is counted.
+    #[tokio::test]
+    async fn the_finisher_sends_back_once_and_keeps_a_valid_retry() {
+        let mut prompts = Vec::new();
+        let result = finish(contract(), INVALID, |prompt| {
+            prompts.push(prompt);
+            async { VALID.to_string() }
+        })
+        .await;
+        assert_eq!(prompts.len(), 1);
+        assert!(is_follow_up(&prompts[0]), "{}", prompts[0]);
+        assert!(prompts[0].contains("/files_changed"), "{}", prompts[0]);
+        assert_eq!(result.invalid_count, 1);
+        assert_eq!(result.failure_message(), None);
+        assert_eq!(
+            status_metadata(result),
+            json!({
+                HANDOFF_METADATA_KEY: { "files_changed": ["a.rs"] },
+                HANDOFF_INVALID_COUNT_METADATA_KEY: 1,
+            })
+        );
+    }
+
+    /// AGE-1437: two invalid answers fail the task. The count is 2, the
+    /// sent-back answer and the last one, as the gateway mapper always
+    /// counted: its re-prompts plus the failed final check.
+    #[tokio::test]
+    async fn the_finisher_fails_two_invalid_answers_with_a_count_of_two() {
+        let mut sends = 0;
+        let result = finish(contract(), INVALID, |_| {
+            sends += 1;
+            async { "no block".to_string() }
+        })
+        .await;
+        assert_eq!(sends, 1, "the only retry");
+        assert_eq!(result.invalid_count, 2);
+        let message = result.failure_message().expect("a failed task");
+        assert!(message.starts_with("handoff_invalid: coder: "), "{message}");
+        assert!(message.contains("no fenced"), "{message}");
+        let metadata = status_metadata(result);
+        assert_eq!(metadata[HANDOFF_INVALID_COUNT_METADATA_KEY], 2);
+        assert_eq!(metadata[HANDOFF_INVALID_METADATA_KEY]["role"], "coder");
+        assert!(metadata.get(HANDOFF_METADATA_KEY).is_none());
+    }
+
+    /// A watcher's finisher: re-prompts it is told of count, and a task
+    /// that did not complete is not read.
+    #[test]
+    fn an_observing_finisher_counts_send_backs_and_skips_an_unfinished_task() {
+        let mut finisher = HandoffFinisher::new(contract());
+        finisher.note_sent_back();
+        let unfinished = finisher.result(None);
+        assert_eq!(unfinished.outcome, None);
+        assert_eq!(unfinished.invalid_count, 1);
+        assert_eq!(unfinished.failure_message(), None);
+        assert_eq!(finisher.result(Some(INVALID)).invalid_count, 2);
+        // Once sent back, a step never sends back again.
+        assert!(matches!(finisher.step(INVALID), HandoffStep::Done(_)));
     }
 }

@@ -1095,11 +1095,11 @@ mod runner {
         assert!(history.contains("Time to finish"), "{history}");
     }
 
-    /// The tool and failure budgets end the stream mid-turn, and rig hands
-    /// back a turn's tool round-trips only with its final response: the cut
-    /// turn is in the history as text alone. A finalization that only
-    /// pointed at "the evidence gathered above" then had none, so after a
-    /// cut the prompt carries the transcript's digest of the tool results.
+    /// A finalization after a cut turn carries the transcript's digest of
+    /// the tool results. The cut here is a stall, which now keeps the
+    /// round-trips it completed in the history (AGE-1438), so the evidence
+    /// is both in the history and in the digest; the digest stays for a cut
+    /// whose round-trips did not reach the history.
     #[tokio::test]
     async fn finalization_after_a_cut_turn_carries_the_tool_evidence() {
         let (mut runner, mut event_rx) = test_runner().await;
@@ -1136,8 +1136,10 @@ mod runner {
             let event = event_rx.recv().await.expect("turn events");
             runner.handle_event(event);
         }
+        // A stalled turn keeps its round-trips (AGE-1438); the digest a cut
+        // turn's finalization carries still goes out.
         let history = format!("{:?}", runner.session.conversation().unwrap().messages());
-        assert!(!history.contains("UNIQUE-API-ID-42"), "{history}");
+        assert!(history.contains("UNIQUE-API-ID-42"), "{history}");
 
         send_answer_file_finalization_prompt(&mut runner, task, true);
         while runner.is_streaming {
@@ -1315,10 +1317,10 @@ mod runner {
     }
 
     /// What the resume prompt tells the model: a stalled turn keeps its
-    /// text, but rig hands back its tool round-trips only when a turn
-    /// finishes, so they are not in the history the resume runs on.
+    /// text and the tool round-trips it completed (AGE-1438), rebuilt from
+    /// the stream since rig hands back no record of a stalled turn.
     #[tokio::test]
-    async fn a_stalled_turn_keeps_its_text_but_not_its_tool_results() {
+    async fn a_stalled_turn_keeps_its_text_and_its_tool_results() {
         let (mut runner, mut event_rx) = test_runner().await;
         runner.scripted_turns = vec![Scenario {
             name: "stall_after_a_tool",
@@ -1354,16 +1356,15 @@ mod runner {
         let history = format!("{:?}", runner.session.conversation().unwrap().messages());
         assert!(history.contains("the task"), "{history}");
         assert!(history.contains("Listing files."), "{history}");
-        assert!(!history.contains("UNIQUE-TOOL-OUTPUT"), "{history}");
-        assert!(STALL_RESUME_PROMPT.contains("not in the history"));
+        assert!(history.contains("UNIQUE-TOOL-OUTPUT"), "{history}");
+        assert!(STALL_RESUME_PROMPT.contains("are in the history above"));
     }
 
-    /// A stall before the model said anything: the empty turn is rolled
-    /// back (AGE-243), taking the task's own message with it, so a
-    /// "continue" on that history would ask the model to continue nothing.
-    /// The retry re-sends the rolled-back message instead.
+    /// A stall before the model said anything: the turn keeps the task's
+    /// own message (AGE-1438), so the resume continues it on that history,
+    /// restating the task, rather than re-sending a rolled-back message.
     #[tokio::test]
-    async fn a_turn_that_stalls_before_any_output_is_retried_with_its_own_message() {
+    async fn a_turn_that_stalls_before_any_output_keeps_its_message_for_the_resume() {
         let silent_stall = Scenario {
             name: "silent_stall",
             progress: Vec::new(),
@@ -1383,7 +1384,8 @@ mod runner {
         assert_eq!(*started.lock().unwrap(), 2);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 2);
-        assert_eq!(sent[1], "Count the files in /data", "got {sent:?}");
+        assert!(sent[1].starts_with(STALL_RESUME_PROMPT), "got {sent:?}");
+        assert!(sent[1].contains("Count the files in /data"), "got {sent:?}");
     }
 
     // -------------------------------------------------------------------
@@ -1491,16 +1493,47 @@ mod runner {
         assert!(!sent[1].contains("final_answer"), "got {sent:?}");
     }
 
-    /// The same error before the model said anything: the turn is rolled
-    /// back with its message, and the retry is that same message.
+    /// The same error before the model said anything: the turn keeps its
+    /// message (AGE-1438), and the retry continues it, restating the task.
     #[tokio::test]
-    async fn a_transport_error_before_any_output_resends_the_same_message() {
+    async fn a_transport_error_before_any_output_keeps_the_message_for_the_retry() {
         let silent = Scenario {
             name: "silent_transport_error",
             progress: Vec::new(),
             items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
                 StreamErrorKind::Transport,
                 "error sending request for url",
+            )))],
+        };
+        let (mut runner, event_rx, started, _workspace) =
+            scripted_runner(vec![silent, answer_turn("Fixed.")]).await;
+        runner.skip_recovery_delay = true;
+        let sent = runner.scripted_inputs.clone();
+
+        run_headless(runner, event_rx, CODING_TASK.to_string())
+            .await
+            .expect("the retried run exits 0");
+
+        assert_eq!(*started.lock().unwrap(), 2);
+        let sent = sent.lock().unwrap();
+        assert!(
+            sent[1].starts_with("A provider error interrupted"),
+            "got {sent:?}"
+        );
+        assert!(sent[1].contains(CODING_TASK), "got {sent:?}");
+    }
+
+    /// A provider status before the model said anything is not a kept
+    /// error (AGE-1438): the turn is rolled back with its message, and the
+    /// retry is that same message.
+    #[tokio::test]
+    async fn a_provider_status_before_any_output_resends_the_same_message() {
+        let silent = Scenario {
+            name: "silent_provider_status",
+            progress: Vec::new(),
+            items: vec![ScriptedItem::Chunk(StreamChunk::Error(StreamError::new(
+                StreamErrorKind::ProviderStatus(503),
+                "503 Service Unavailable",
             )))],
         };
         let (mut runner, event_rx, started, _workspace) =
@@ -2642,4 +2675,16 @@ fn the_text_overflow_nudge_names_final_answer_only_where_it_exists() {
     let worker = text_overflow_recovery_prompt(false);
     assert!(!worker.contains("final_answer"), "{worker}");
     assert!(worker.contains("no tool call is needed"), "{worker}");
+}
+
+/// AGE-1439: a typed budget stop ends the run from `invoke_agent`,
+/// `search_web` and `fetch` errors only.
+#[test]
+fn a_budget_stop_from_search_web_or_fetch_ends_the_run() {
+    let headline = Some("Budget spent");
+    for tool in ["invoke_agent", "search_web", "fetch"] {
+        assert!(tool_error_is_budget_stop(tool, headline), "{tool}");
+    }
+    assert!(!tool_error_is_budget_stop("read_file", headline));
+    assert!(!tool_error_is_budget_stop("search_web", None));
 }

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chatty_core::models::message_types::{SystemTrace, ToolCallState, TraceItem};
+use chatty_core::services::is_agent_todo_tool;
 
 use super::activity::classify_tool;
 use super::artifact_kind::{
@@ -324,10 +325,6 @@ fn dedup_standalone_artifacts(out: &mut Vec<Block>) {
         idx += 1;
         keep
     });
-}
-
-pub(crate) fn is_agent_todo_tool(name: &str) -> bool {
-    matches!(name, "write_todos" | "update_todo" | "verify_completion")
 }
 
 /// Insert a single plan block onto the last assistant turn when a snapshot

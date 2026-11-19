@@ -100,7 +100,23 @@ pub(super) fn build_preamble(
         );
     }
     if tools.add_attachment {
-        tool_sections.push("- **add_attachment** (display image or PDF inline)".to_string());
+        tool_sections.push(
+            "- **add_attachment** (show an image to the user: to show a screenshot, \
+             deliver it with this tool)"
+                .to_string(),
+        );
+    }
+    if tools.view_image {
+        tool_sections.push(
+            "- **view_image** (look at a screenshot, chart or diagram yourself; say what you see)"
+                .to_string(),
+        );
+    }
+    if tools.view_image {
+        tool_sections.push(
+            "- **view_image** (look at a screenshot, chart or diagram yourself; say what you see)"
+                .to_string(),
+        );
     }
     if tools.view_image {
         tool_sections.push(
@@ -624,6 +640,27 @@ mod tests {
         assert!(result.contains("## Formatting Capabilities"));
         assert!(result.contains("Math (Typst/LaTeX)"));
         assert!(result.contains("Mermaid Diagrams"));
+    }
+
+    #[test]
+    fn add_attachment_says_it_shows_images_and_how_to_show_a_screenshot() {
+        let tools = ToolAvailability {
+            add_attachment: true,
+            ..Default::default()
+        };
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenRouter,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+            &AgentRole::default(),
+            None,
+        );
+        assert!(result.contains("to show a screenshot, deliver it with this tool"));
+        assert!(!result.contains(concat!("display image ", "or PDF inline")));
     }
 
     #[test]

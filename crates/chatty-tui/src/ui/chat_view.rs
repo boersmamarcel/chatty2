@@ -14,6 +14,7 @@ use crate::engine::{
 };
 use crate::ui::theme;
 use crate::ui::{plan, tool_summary, verb};
+use chatty_core::presentation::tool_verb::subject_for;
 use chatty_core::services::{AgentTaskSnapshot, is_agent_todo_tool};
 
 pub fn render_messages(frame: &mut Frame, area: Rect, engine: &mut ChatEngine) {
@@ -553,7 +554,7 @@ fn render_tool_call_collapsed(
     // Known tools read as tense verb + subject (`Read README.md`); the rest
     // keep their raw `name(args)` header. Either way what follows the verb
     // or name gets the columns the header has left.
-    let verb = verb::verb_for(&tc.name, &tc.state);
+    let verb = verb::known_row_verb(&tc.name, &tc.state);
     let overhead = match &verb {
         Some(verb) => 5 + verb.chars().count(),
         None => 6 + tc.name.chars().count() + status_width,
@@ -582,7 +583,7 @@ fn render_tool_call_collapsed(
     ];
     if let Some(verb) = verb {
         header.push(Span::styled(verb, theme::tool()));
-        let subject = tool_summary::truncate(&verb::subject_for(&tc.input), budget);
+        let subject = tool_summary::truncate(&subject_for(&tc.name, &tc.input, ""), budget);
         if !subject.is_empty() {
             header.push(Span::styled(format!(" {subject}"), theme::text()));
         }
@@ -620,7 +621,7 @@ fn render_tool_call_collapsed(
     // The call in flight shows the whole command, not just the part of it
     // that fits beside its verb.
     if matches!(tc.state, ToolCallState::Running) {
-        let shown = tool_summary::truncate(&verb::subject_for(&tc.input), budget);
+        let shown = tool_summary::truncate(&subject_for(&tc.name, &tc.input, ""), budget);
         let body_width = usize::from(width).saturating_sub(RESULT_INDENT);
         let detail = running_detail(&tc.input, &shown, body_width);
         push_result_lines(lines, detail, 0, theme::text_subtle());

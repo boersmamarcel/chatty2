@@ -15,7 +15,7 @@ use super::activity::{ToolKind, classify_tool};
 use super::artifact_kind::tool_file_path;
 use super::diff::DiffStatRow;
 use super::types::{Block, Turn};
-use super::verb::diff_stats;
+use chatty_core::presentation::tool_verb::diff_stats;
 
 /// One workspace file touched by an edit/write tool in this conversation.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub fn file_change_from_tool(tool: &ToolCallBlock) -> Option<FileChange> {
     let path =
         tool_file_path(&tool.input).or_else(|| tool.output.as_deref().and_then(tool_file_path))?;
     let (old, new) = edit_bodies(&tool.input);
-    let (added, removed) = diff_stats(&tool.tool_name, &tool.input, tool.output.as_deref());
+    let (added, removed) = diff_stats(&tool.tool_name, &tool.input, tool.output.as_deref()).unzip();
     Some(FileChange {
         path,
         old: old.unwrap_or_default(),
