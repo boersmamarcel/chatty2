@@ -110,14 +110,6 @@ pub const BREVITY_FOLLOW_UP: &str = "You produced a long response without any to
      If you have enough information, give your final answer now. \
      Otherwise, make a single focused tool call to get what you need.";
 
-/// True for the tools that change the agent's todo snapshot.
-pub fn is_agent_todo_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "write_todos" | "update_todo" | "verify_completion"
-    )
-}
-
 /// Per-turn decisions the handler makes on the session's behalf. Built by
 /// [`AgentSession`](super::AgentSession) from its config and history, so the
 /// handler itself reads no settings and no globals.
