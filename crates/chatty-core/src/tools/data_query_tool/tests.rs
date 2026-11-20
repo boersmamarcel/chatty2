@@ -692,3 +692,32 @@ async fn a_sibling_route_is_off_the_scope_and_the_locked_sandbox_holds() {
     );
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
 }
+
+#[tokio::test]
+async fn query_data_accepts_sql_as_alias_of_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    std::fs::write(
+        data_dir.join("sales.csv"),
+        "category,amount\nbook,10\ngame,30\n",
+    )
+    .unwrap();
+    let service = Arc::new(
+        FileSystemService::new(dir.path().to_str().unwrap())
+            .await
+            .unwrap(),
+    );
+    let tool = QueryDataTool::new(service);
+    let sql = "SELECT * FROM 'data/sales.csv' ORDER BY amount";
+
+    let mut outputs = Vec::new();
+    for key in ["query", "sql"] {
+        let args: QueryDataArgs =
+            serde_json::from_value(serde_json::json!({ key: sql, "max_rows": 10 })).unwrap();
+        outputs.push(tool.call(&mut ToolContext::new(), args).await.unwrap());
+    }
+    assert_eq!(outputs[0].row_count, 2);
+    assert_eq!(outputs[0].row_count, outputs[1].row_count);
+    assert_eq!(outputs[0].markdown_table, outputs[1].markdown_table);
+}
