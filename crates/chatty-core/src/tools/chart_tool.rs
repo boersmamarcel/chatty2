@@ -8,7 +8,10 @@ use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::filesystem_service::FileSystemService;
 use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::ToolError;
-use crate::tools::path_utils::{approve_output_write, resolve_workspace_output, write_output_file};
+use crate::tools::path_utils::{
+    approve_output_write, output_root_note, resolve_workspace_output, under_output_root,
+    write_output_file,
+};
 
 /// A single data point for bar, line, pie, donut, and area charts.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -84,6 +87,9 @@ pub struct CreateChartTool {
     /// or no workspace) refuses `save_path`; the chart still shows inline.
     save_service: Option<Arc<FileSystemService>>,
     write_approval: Option<(ApprovalMode, PendingWriteApprovals)>,
+    /// Where a relative `save_path` goes, inside the workspace (AGE-1747).
+    /// `None`: relative to the workspace root, as always.
+    output_root: Option<std::path::PathBuf>,
 }
 
 impl CreateChartTool {
@@ -92,7 +98,15 @@ impl CreateChartTool {
             theme_colors,
             save_service: None,
             write_approval: None,
+            output_root: None,
         }
+    }
+
+    /// Place a relative `save_path` under `output_root` (the execution
+    /// settings' `output_root`, AGE-1747); `None` keeps today's behaviour.
+    pub fn with_output_root(mut self, output_root: Option<std::path::PathBuf>) -> Self {
+        self.output_root = output_root;
+        self
     }
 
     /// Let `save_path` write PNGs into `service`'s workspace (AGE-534). The
@@ -130,6 +144,7 @@ impl Tool for CreateChartTool {
                          Example: {\"chart_type\":\"bar\",\"title\":\"Sales\",\"save_path\":\"charts/sales.png\",\
                          \"data\":[{\"label\":\"Jan\",\"value\":45},{\"label\":\"Feb\",\"value\":52}]}"
             .to_string()
+            + &output_root_note(self.output_root.as_deref(), "save_path")
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -282,7 +297,8 @@ impl Tool for CreateChartTool {
                     "Chart created but failed to save PNG to '{save_path}': {e}"
                 ))
             };
-            let resolved = resolve_workspace_output(root, &save_path).map_err(failed)?;
+            let output_path = under_output_root(self.output_root.as_deref(), &save_path);
+            let resolved = resolve_workspace_output(root, &output_path).map_err(failed)?;
             let png = render_chart_png(&spec, self.theme_colors.as_ref()).map_err(failed)?;
             let approved = approve_output_write(
                 self.write_approval.as_ref(),
@@ -724,6 +740,34 @@ mod tests {
                 "{path}: {err}"
             );
         }
+    }
+
+    /// AGE-1747: under an output root, a relative `save_path` lands there.
+    #[cfg(feature = "mermaid")]
+    #[tokio::test]
+    async fn save_path_under_an_output_root_writes_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            FileSystemService::new(dir.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = CreateChartTool::new(None)
+            .with_save_path(service)
+            .with_output_root(Some("outputs".into()));
+        assert!(tool.description().contains("`outputs/`"));
+        let spec = tool
+            .call(
+                &mut ToolContext::new(),
+                bar_with_save_path("charts/sales.png"),
+            )
+            .await
+            .unwrap();
+        let expected = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("outputs/charts/sales.png");
+        assert_eq!(spec.saved_path.as_deref(), expected.to_str());
+        assert!(expected.exists());
     }
 
     #[cfg(feature = "mermaid")]

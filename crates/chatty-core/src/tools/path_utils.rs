@@ -1,11 +1,18 @@
 //! Output paths for tools that render a file into the workspace
 //! (`create_chart`'s `save_path`, `compile_typst`'s `output_path`).
 //!
+//! With the execution settings' `output_root` set (AGE-1747), a relative
+//! output path of these tools and of the document writers (`write_docx`,
+//! `write_excel`, `edit_excel`'s `output_path`, `write_pptx`) is placed
+//! under it ([`under_output_root`]); an absolute path inside the workspace
+//! is kept as given. Unset, every path is taken as it always was.
+//!
 //! Both write only inside the workspace (AGE-534): no `~` escape hatch, no
 //! absolute path outside the workspace root, no write through a symlink, and
 //! the write is asked about (`request_write_approval`) like every other
 //! file write.
 
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
 use crate::models::write_approval_store::{PendingWriteApprovals, WriteOperation};
@@ -55,6 +62,37 @@ fn anchor_to_disk(path: &Path) -> Result<PathBuf, String> {
             _ => return Err(format!("No existing ancestor for '{}'", path.display())),
         }
     }
+}
+
+/// `path` placed under `output_root` (AGE-1747), before it is resolved:
+/// a relative path is joined onto `output_root`; an absolute path, a `~`
+/// path (which the resolvers refuse), an empty path or no `output_root`
+/// leaves it as given. Only a path the model wrote goes through here; the
+/// workspace bounds check that follows is unchanged.
+pub(super) fn under_output_root<'a>(output_root: Option<&Path>, path: &'a str) -> Cow<'a, str> {
+    match output_root {
+        Some(output_root)
+            if !path.trim().is_empty()
+                && !path.starts_with('~')
+                && !Path::new(path).is_absolute() =>
+        {
+            Cow::Owned(output_root.join(path).to_string_lossy().into_owned())
+        }
+        _ => Cow::Borrowed(path),
+    }
+}
+
+/// One sentence for a writing tool's description saying where a relative
+/// `param` goes, when `output_root` is set (AGE-1747); empty otherwise, so
+/// a description without one is the text it always was.
+pub(super) fn output_root_note(output_root: Option<&Path>, param: &str) -> String {
+    output_root.map_or_else(String::new, |root| {
+        format!(
+            "\n\nA relative {param} is saved under `{}/` in the workspace; \
+             an absolute path inside the workspace is kept as given.",
+            root.display()
+        )
+    })
 }
 
 /// Resolve a tool's output file inside the workspace `root` (canonical, as
@@ -282,6 +320,53 @@ mod tests {
         std::os::unix::fs::symlink(&victim, &target).unwrap();
         assert!(write_output_file(&root, &target, b"png").is_err());
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    }
+
+    /// AGE-1747: with an output root, a relative output path lands under
+    /// it; an absolute path inside the workspace is still allowed as given;
+    /// without one, nothing moves.
+    #[test]
+    fn a_relative_output_path_lands_under_the_output_root() {
+        let (_tmp, root) = workspace();
+        let outputs = Some(Path::new("outputs"));
+        assert_eq!(
+            resolve_workspace_output(&root, &under_output_root(outputs, "report.pdf")).unwrap(),
+            root.join("outputs/report.pdf")
+        );
+        assert_eq!(
+            resolve_workspace_output(&root, &under_output_root(outputs, "charts/a.png")).unwrap(),
+            root.join("outputs/charts/a.png")
+        );
+        let inside = root.join("elsewhere/x.pdf");
+        let inside = inside.to_str().unwrap();
+        assert_eq!(under_output_root(outputs, inside), inside);
+        assert_eq!(
+            resolve_workspace_output(&root, &under_output_root(outputs, inside)).unwrap(),
+            root.join("elsewhere/x.pdf")
+        );
+        assert_eq!(under_output_root(None, "report.pdf"), "report.pdf");
+        for refused in ["~", "~/x.pdf", ""] {
+            assert_eq!(under_output_root(outputs, refused), refused);
+        }
+    }
+
+    /// The output root moves a path, never past the workspace bounds.
+    #[test]
+    fn the_output_root_does_not_widen_the_workspace() {
+        let (_tmp, root) = workspace();
+        let outputs = Some(Path::new("outputs"));
+        let err = resolve_workspace_output(&root, &under_output_root(outputs, "../../x.pdf"))
+            .unwrap_err();
+        assert!(err.contains("outside the workspace directory"), "{err}");
+        let err = resolve_workspace_output(&root, &under_output_root(Some(Path::new("/etc")), "x"))
+            .unwrap_err();
+        assert!(err.contains("outside the workspace directory"), "{err}");
+    }
+
+    #[test]
+    fn the_output_root_note_is_empty_without_one() {
+        assert_eq!(output_root_note(None, "path"), "");
+        assert!(output_root_note(Some(Path::new("outputs")), "path").contains("`outputs/`"));
     }
 
     #[test]

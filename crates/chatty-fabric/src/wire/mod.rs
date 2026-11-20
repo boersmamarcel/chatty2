@@ -43,9 +43,11 @@ pub use broker::{
 pub use error::WireError;
 pub use identity::TaskIdentity;
 pub use opaque::{OPAQUE_CAP_BYTES, Opaque, OpaqueError};
+#[allow(deprecated)] // `WireArtifact`, parsed for one release (AGE-1747).
+pub use payload::WireArtifact;
 pub use payload::{
-    ARTIFACT_CAP_BYTES, HandoffInvalid, TaskMetadata, WireArtifact, WireModelRef, WireProgress,
-    WireUsage, WireUsageLine,
+    ARTIFACT_CAP_BYTES, HandoffInvalid, TaskMetadata, WireModelRef, WireProgress, WireUsage,
+    WireUsageLine,
 };
 pub use worker::{
     HelloParams, ParticipantCard, ParticipantSkill, TaskEvent, TaskOutcome, WorkerNotification,

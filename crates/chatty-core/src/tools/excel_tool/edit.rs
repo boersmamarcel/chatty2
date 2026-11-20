@@ -206,6 +206,9 @@ pub struct EditExcelTool {
     service: Arc<FileSystemService>,
     approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
+    /// Where a relative `output_path` goes, inside the workspace (AGE-1747).
+    /// `None`: relative to the workspace root, as always.
+    output_root: Option<std::path::PathBuf>,
 }
 
 impl EditExcelTool {
@@ -218,7 +221,16 @@ impl EditExcelTool {
             service,
             approval_mode,
             pending_approvals,
+            output_root: None,
         }
+    }
+
+    /// Place a relative `output_path` under `output_root` (the execution
+    /// settings' `output_root`, AGE-1747); an in-place edit stays where it
+    /// is, and `None` keeps today's behaviour.
+    pub fn with_output_root(mut self, output_root: Option<std::path::PathBuf>) -> Self {
+        self.output_root = output_root;
+        self
     }
 }
 
@@ -406,6 +418,7 @@ impl Tool for EditExcelTool {
                          - Add a sheet: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"add_sheet\", \"name\": \"NewSheet\", \"data\": [[\"A\",\"B\"],[1,2]]}]}\n\
                          - Delete rows: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"delete_rows\", \"sheet\": \"Sheet1\", \"start_row\": 5, \"count\": 3}]}"
                 .to_string()
+            + &crate::tools::path_utils::output_root_note(self.output_root.as_deref(), "output_path")
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -425,7 +438,8 @@ impl Tool for EditExcelTool {
     ) -> Result<Self::Output, Self::Error> {
         let canonical = self.service.resolve_path(&args.path).await?;
         let output_canonical = if let Some(ref out) = args.output_path {
-            self.service.resolve_new_path(out).await?
+            let out = crate::tools::path_utils::under_output_root(self.output_root.as_deref(), out);
+            self.service.resolve_new_path(&out).await?
         } else {
             canonical.clone()
         };

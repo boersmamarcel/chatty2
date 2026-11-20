@@ -171,6 +171,15 @@ pub struct ExecutionSettingsModel {
     /// snapshots stay byte-for-byte what they were.
     #[serde(default, skip_serializing_if = "is_false")]
     pub terminal_access: bool,
+    /// Where a relative output path goes, inside the workspace (AGE-1747):
+    /// `compile_typst`'s `output_path`, `create_chart`'s `save_path`, and
+    /// the `path` of `write_docx`, `write_excel` and `write_pptx` (and
+    /// `edit_excel`'s `output_path`). Relative to the workspace root; hive
+    /// sets `outputs/`, the directory it captures from a lease. `None`, the
+    /// default, keeps every path where it always went. Skipped when unset,
+    /// like `tool_loading`, so persisted settings files stay what they were.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_root: Option<std::path::PathBuf>,
 }
 
 /// The tool group names `--enable`/`--disable`/`--only` and an agent spec's
@@ -302,6 +311,7 @@ impl Default for ExecutionSettingsModel {
             tool_loading: ToolLoading::All,
             ask_user_enabled: true,
             terminal_access: false, // Opt-in: the terminal may show secrets
+            output_root: None,      // Outputs go where the tool call says
         }
     }
 }
@@ -363,5 +373,24 @@ mod ask_user_serde_tests {
         assert_eq!(json["terminal_access"], true);
         let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
         assert!(back.terminal_access);
+    }
+
+    /// AGE-1747: no output root by default, absent from the serialized
+    /// settings until one is set, and kept across a round trip.
+    #[test]
+    fn output_root_is_unset_by_default_and_absent_when_unset() {
+        let json = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
+        assert!(json.get("output_root").is_none());
+        let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
+        assert_eq!(back.output_root, None);
+
+        let set = ExecutionSettingsModel {
+            output_root: Some("outputs".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&set).unwrap();
+        assert_eq!(json["output_root"], "outputs");
+        let back: ExecutionSettingsModel = serde_json::from_value(json).unwrap();
+        assert_eq!(back.output_root, Some("outputs".into()));
     }
 }

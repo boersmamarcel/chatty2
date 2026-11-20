@@ -465,6 +465,7 @@ mod tests {
                 tool_loading: Default::default(),
                 ask_user_enabled: true,
                 terminal_access: false,
+                output_root: None,
             },
             extensions: {
                 let mut model = ExtensionsModel::default();

@@ -1,4 +1,6 @@
-use super::path_utils::{approve_output_write, resolve_workspace_output, write_output_file};
+use super::path_utils::{
+    approve_output_write, resolve_workspace_output, under_output_root, write_output_file,
+};
 use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::filesystem_service::FileSystemService;
 use crate::services::typst_compiler_service::TypstCompilerService;
@@ -8,6 +10,7 @@ use crate::tools::ToolError;
 use rig_agent::tool::tool_definition;
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Arguments for the compile_typst tool.
@@ -35,6 +38,9 @@ pub struct CompileTypstOutput {
 pub struct CompileTypstTool {
     service: Arc<FileSystemService>,
     write_approval: Option<(ApprovalMode, PendingWriteApprovals)>,
+    /// Where a relative `output_path` goes, inside the workspace
+    /// (AGE-1747). `None`: relative to the workspace root, as always.
+    output_root: Option<PathBuf>,
 }
 
 impl CompileTypstTool {
@@ -42,7 +48,15 @@ impl CompileTypstTool {
         Self {
             service,
             write_approval: None,
+            output_root: None,
         }
+    }
+
+    /// Place a relative `output_path` under `output_root` (the execution
+    /// settings' `output_root`, AGE-1747); `None` keeps today's behaviour.
+    pub fn with_output_root(mut self, output_root: Option<PathBuf>) -> Self {
+        self.output_root = output_root;
+        self
     }
 
     /// Ask for write approval under `mode` before every write (AGE-534,
@@ -65,7 +79,16 @@ impl Tool for CompileTypstTool {
     type Output = CompileTypstOutput;
 
     fn description(&self) -> String {
-        "Compile Typst markup into a PDF file and save it to disk.\n\
+        let output_path = match &self.output_root {
+            None => "The output_path is relative to the workspace root (or absolute within it).\n"
+                .to_string(),
+            Some(root) => format!(
+                "A relative output_path is saved under `{}/` in the workspace \
+                 (an absolute path inside the workspace is kept as given).\n",
+                root.display()
+            ),
+        };
+        let head = "Compile Typst markup into a PDF file and save it to disk.\n\
                 \n\
                 Typst is a modern document preparation system with markdown-like syntax.\n\
                 Use it to produce formatted documents including:\n\
@@ -85,18 +108,27 @@ impl Tool for CompileTypstTool {
                 - Tables: #table(columns: 2, [A], [B], [1], [2])\n\
                 - Page settings: #set page(margin: (x: 2cm, y: 2cm))\n\
                 - Text settings: #set text(font: \"New Computer Modern\", size: 12pt)\n\
-                \n\
-                The output_path is relative to the workspace root (or absolute within it).\n\
-                Parent directories are created automatically.\n\
+                \n";
+        let tail = "Parent directories are created automatically.\n\
                 \n\
                 Example:\n\
                 content: \"= Sales Report\\n\\n#set text(size: 11pt)\\n\\nTotal revenue: $ 1.2 times 10^6 $\\n\\n\
                 #table(columns: 2, [Month], [Revenue], [Jan], [$100K], [Feb], [$120K])\"\n\
-                output_path: \"reports/sales_q1.pdf\""
-                .to_string()
+                output_path: \"reports/sales_q1.pdf\"";
+        format!("{head}{output_path}{tail}")
     }
 
     fn parameters(&self) -> serde_json::Value {
+        let output_path = match &self.output_root {
+            None => {
+                "File path where the PDF will be saved, relative to the workspace root".to_string()
+            }
+            Some(root) => format!(
+                "File path where the PDF will be saved; a relative path goes under `{}/` \
+                 in the workspace",
+                root.display()
+            ),
+        };
         serde_json::json!({
             "type": "object",
             "properties": {
@@ -106,7 +138,7 @@ impl Tool for CompileTypstTool {
                 },
                 "output_path": {
                     "type": "string",
-                    "description": "File path where the PDF will be saved, relative to the workspace root"
+                    "description": output_path
                 }
             },
             "required": ["content", "output_path"]
@@ -126,8 +158,9 @@ impl Tool for CompileTypstTool {
     ) -> Result<Self::Output, Self::Error> {
         // Inside the workspace only, symlinks resolved (AGE-534).
         let root = self.service.workspace_root();
-        let resolved = resolve_workspace_output(root, &args.output_path)
-            .map_err(ToolError::OperationFailed)?;
+        let output_path = under_output_root(self.output_root.as_deref(), &args.output_path);
+        let resolved =
+            resolve_workspace_output(root, &output_path).map_err(ToolError::OperationFailed)?;
 
         // Compile first: a markup error needs no approval prompt.
         let (pdf_bytes, page_count) =
@@ -205,6 +238,33 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output.page_count, 1);
         assert!(std::path::Path::new(&output.saved_path).exists());
+    }
+
+    /// AGE-1747: under `output_root = outputs/`, `output_path =
+    /// "report.pdf"` writes `outputs/report.pdf`, and the description says
+    /// where a relative path goes; without one the description is unchanged.
+    #[tokio::test]
+    async fn compile_typst_under_an_output_root_writes_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = CompileTypstTool::new(service(&dir).await);
+        assert!(
+            plain
+                .description()
+                .contains("The output_path is relative to the workspace root (or absolute within it).\nParent directories")
+        );
+        let tool = plain.with_output_root(Some(PathBuf::from("outputs")));
+        assert!(tool.description().contains("saved under `outputs/`"));
+
+        let output = tool
+            .call(&mut ToolContext::new(), args("= Report", "report.pdf"))
+            .await
+            .unwrap();
+        let expected = std::fs::canonicalize(dir.path())
+            .unwrap()
+            .join("outputs/report.pdf");
+        assert_eq!(std::path::Path::new(&output.saved_path), expected);
+        assert!(expected.exists());
+        assert!(!dir.path().join("report.pdf").exists());
     }
 
     #[tokio::test]
