@@ -130,6 +130,7 @@ async fn invoke_agent_delegates_to_local_agent_and_returns_its_answer() {
                 prompt: "say hello".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await
@@ -195,6 +196,7 @@ async fn delegate(
                 prompt: "say hello".to_string(),
                 include_trace,
                 handle: None,
+                files: None,
             },
         )
         .await;

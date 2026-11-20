@@ -249,6 +249,7 @@ async fn handoff_invalid_twice_fails_typed() {
                 prompt: "change the readme".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         ),
     )

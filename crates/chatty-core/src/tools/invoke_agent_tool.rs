@@ -182,6 +182,11 @@ pub struct InvokeAgentArgs {
     /// worktree. Absent for a plain call, which keeps nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
+    /// Which of the caller's input files the agent may read, by the names
+    /// they have under `inputs/` (AGE-1653): absent shares them all, `[]`
+    /// none. Local agents only; the host applies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
 }
 
 /// Output from the invoke_agent tool
@@ -718,6 +723,12 @@ impl Tool for InvokeAgentTool {
                                    A new name starts the agent fresh and saves its \
                                    conversation; the same name again continues that \
                                    conversation, on the same worktree. Local agents only."
+                },
+                "files": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Names of your input files the sub-agent may read; omit to \
+                                   share all."
                 }
             },
             "required": ["agent", "prompt"]
@@ -841,6 +852,7 @@ impl InvokeAgentTool {
                     &prompt,
                     args.include_trace,
                     handle,
+                    args.files,
                 )
                 .await;
         }
@@ -852,6 +864,13 @@ impl InvokeAgentTool {
                 return Err(InvokeAgentError::InvocationFailed(format!(
                     "'{agent_name}' is a remote agent; handle '{handle}' can only keep a \
                      local agent's conversation. Call it without `handle`."
+                )));
+            }
+            // A remote agent reads none of the caller's input files.
+            if args.files.is_some() {
+                return Err(InvokeAgentError::InvocationFailed(format!(
+                    "'{agent_name}' is a remote agent; `files` can only narrow a local \
+                     agent's input files. Call it without `files`."
                 )));
             }
             if !config.enabled {
@@ -1052,6 +1071,7 @@ impl InvokeAgentTool {
         prompt: &str,
         include_trace: bool,
         handle: Option<String>,
+        files: Option<Vec<String>>,
     ) -> Result<InvokeAgentOutput, InvokeAgentError> {
         use futures::StreamExt;
 
@@ -1063,7 +1083,7 @@ impl InvokeAgentTool {
             spawn_context: None,
             remaining: self.remaining(),
             run: None,
-            files: None,
+            files,
         });
         let mut stream = transport.call(request).await.map_err(|e| {
             let err_text = format!("\u{26a0}\u{fe0f} Failed to invoke agent '{agent}': {e}");
@@ -1776,6 +1796,7 @@ mod tests {
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await;
@@ -1809,6 +1830,7 @@ mod tests {
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await;
@@ -1838,6 +1860,7 @@ mod tests {
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -1904,6 +1927,7 @@ mod tests {
                     prompt: "summarise the contract".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -1934,6 +1958,7 @@ mod tests {
                     prompt: "hello".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await;
@@ -1957,6 +1982,7 @@ mod tests {
                     prompt: "hello".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await;
@@ -1982,6 +2008,7 @@ mod tests {
                     prompt: "hello".to_string(),
                     include_trace: false,
                     handle: Some("fixer".to_string()),
+                    files: None,
                 },
             )
             .await
@@ -1995,6 +2022,128 @@ mod tests {
         let plain: InvokeAgentArgs =
             serde_json::from_value(serde_json::json!({"agent": "a", "prompt": "p"})).unwrap();
         assert_eq!(plain.handle, None);
+    }
+
+    /// AGE-1653: the model may name which of its input files a sub-agent
+    /// reads, as an optional list of names; absent stays absent.
+    #[test]
+    fn the_tool_offers_files_as_an_optional_list_of_names() {
+        let parameters = InvokeAgentTool::new(vec![]).parameters();
+        assert_eq!(
+            parameters["properties"]["files"]["type"],
+            serde_json::json!("array")
+        );
+        assert_eq!(
+            parameters["properties"]["files"]["items"],
+            serde_json::json!({ "type": "string" })
+        );
+        assert!(
+            !parameters["required"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("files"))
+        );
+        let args = |value: serde_json::Value| -> InvokeAgentArgs {
+            serde_json::from_value(value).unwrap()
+        };
+        assert_eq!(
+            args(serde_json::json!({"agent": "a", "prompt": "p"})).files,
+            None
+        );
+        assert_eq!(
+            args(serde_json::json!({"agent": "a", "prompt": "p", "files": []})).files,
+            Some(vec![])
+        );
+        assert_eq!(
+            args(serde_json::json!({"agent": "a", "prompt": "p", "files": ["a.csv"]})).files,
+            Some(vec!["a.csv".to_string()])
+        );
+    }
+
+    /// A fabric that keeps the `files` of every call it is made, then
+    /// refuses it.
+    #[derive(Default)]
+    struct KeepsFiles(Mutex<Vec<Option<Vec<String>>>>);
+
+    #[async_trait::async_trait]
+    impl Transport for KeepsFiles {
+        async fn call(&self, req: CallRequest) -> Result<chatty_fabric::CallStream, CallError> {
+            use futures::StreamExt;
+            let CallRequest::InvokeAgent(params) = req else {
+                panic!("an invoke");
+            };
+            self.0.lock().push(params.files);
+            Ok(
+                futures::stream::iter([Err(CallError::Delegation(Refusal::TooDeep {
+                    depth: 5,
+                    max: 4,
+                }))])
+                .boxed(),
+            )
+        }
+    }
+
+    /// AGE-1653: a local agent's call carries the model's `files` as they
+    /// are onto `agent.invoke`, absent, empty or named; the host applies
+    /// them.
+    #[tokio::test]
+    async fn files_reach_the_fabric_call() {
+        let fabric = Arc::new(KeepsFiles::default());
+        let tool = InvokeAgentTool::new(vec![])
+            .with_local_agents(vec!["data-coder".to_string()])
+            .with_transport(fabric.clone());
+        let cases = [
+            None,
+            Some(Vec::new()),
+            Some(vec!["a.csv".to_string(), "b.txt".to_string()]),
+        ];
+        for files in cases.clone() {
+            tool.call(
+                &mut ToolContext::new(),
+                InvokeAgentArgs {
+                    agent: "data-coder".to_string(),
+                    prompt: "count the rows".to_string(),
+                    include_trace: false,
+                    handle: None,
+                    files,
+                },
+            )
+            .await
+            .expect_err("the fabric refused");
+        }
+        assert_eq!(*fabric.0.lock(), cases);
+    }
+
+    /// AGE-1653: a remote agent has no input files of the caller's to
+    /// narrow, so a call naming `files` (even none) is refused before
+    /// anything is sent.
+    #[tokio::test]
+    async fn a_remote_agent_refuses_files() {
+        let tool = InvokeAgentTool::new(vec![make_agent(
+            "my-agent",
+            "https://example.com/a2a",
+            true,
+        )]);
+        for files in [Vec::new(), vec!["a.csv".to_string()]] {
+            let error = tool
+                .call(
+                    &mut ToolContext::new(),
+                    InvokeAgentArgs {
+                        agent: "my-agent".to_string(),
+                        prompt: "hello".to_string(),
+                        include_trace: false,
+                        handle: None,
+                        files: Some(files),
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, InvokeAgentError::InvocationFailed(text)
+                    if text.contains("'my-agent' is a remote agent; `files` can only narrow")),
+                "{error}"
+            );
+        }
     }
 
     /// PL-U5: a WASM module is never an agent. A name only a module
@@ -2012,6 +2161,7 @@ mod tests {
                     prompt: "analyze data".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -2034,6 +2184,7 @@ mod tests {
                     prompt: "Sum column b of data.csv".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -2076,6 +2227,7 @@ mod tests {
                     prompt: "Sum column b of data.csv".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -2101,6 +2253,7 @@ mod tests {
                     prompt: "hello".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await;
@@ -2121,6 +2274,7 @@ mod tests {
                     prompt: "".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await;
@@ -2152,6 +2306,7 @@ mod tests {
                     prompt: "hello".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -2175,6 +2330,7 @@ mod tests {
                     prompt: "hi".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -2193,6 +2349,7 @@ mod tests {
                     prompt: "hi".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -2243,6 +2400,7 @@ mod tests {
                 prompt: "do the thing".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await
@@ -2346,6 +2504,7 @@ mod tests {
                         prompt: s("fix it"),
                         include_trace: false,
                         handle: None,
+                        files: None,
                     },
                 )
                 .await
@@ -2460,6 +2619,7 @@ mod tests {
                     prompt: "go".into(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await

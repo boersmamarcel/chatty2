@@ -335,6 +335,7 @@ async fn stop_targets_one_of_two_parallel_same_spec_calls() {
                     prompt: "Dig a.".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -348,6 +349,7 @@ async fn stop_targets_one_of_two_parallel_same_spec_calls() {
                     prompt: "Dig b.".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await

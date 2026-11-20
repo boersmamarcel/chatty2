@@ -134,6 +134,7 @@ async fn the_preset_team_lists_both_agents_with_their_profiles_and_delegates_to_
                 prompt: "Fix the overdraft bug.".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await
