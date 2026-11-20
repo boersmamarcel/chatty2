@@ -236,6 +236,7 @@ async fn a_grandchilds_question_reaches_the_parents_popover_and_its_answer_comes
                     prompt: "Set up the database.".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -324,6 +325,7 @@ async fn child_over_its_connection(broker: &Broker, grandchild: String) -> Strin
                     prompt: task.text,
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -364,6 +366,7 @@ async fn clarification_relays_across_two_hops() {
                     prompt: "Set up the database.".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
@@ -417,6 +420,7 @@ async fn a_question_nobody_can_answer_ends_the_delegation() {
                 prompt: "Set up the database.".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         ),
     )

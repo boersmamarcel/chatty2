@@ -56,6 +56,7 @@ async fn invoke(
                 prompt: prompt.to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         ),
     )

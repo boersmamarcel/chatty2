@@ -27,6 +27,7 @@ fn args(prompt: &str, handle: Option<&str>) -> InvokeAgentArgs {
         prompt: prompt.to_string(),
         include_trace: false,
         handle: handle.map(str::to_string),
+        files: None,
     }
 }
 

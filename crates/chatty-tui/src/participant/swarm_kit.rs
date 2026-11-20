@@ -672,6 +672,7 @@ impl SwarmKit {
                 prompt: prompt.to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await
@@ -1744,6 +1745,7 @@ async fn cancel_reaps_the_subtree() {
                 prompt: "ask the grandchild".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await
@@ -3028,6 +3030,7 @@ async fn messages_dropped_with_recipient_e2e() {
                 prompt: "ask the grandchild to read the readme".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await
@@ -3328,6 +3331,7 @@ async fn cancelled_permit_wait_makes_no_model_call() {
                     prompt: "go".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await

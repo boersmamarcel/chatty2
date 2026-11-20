@@ -158,6 +158,7 @@ async fn broker_run(events: Vec<SessionEvent>) -> BrokerRun {
                 prompt: "do the delegated task".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await;
@@ -577,6 +578,7 @@ mod evidence {
                     prompt: "delegate this".to_string(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await;
@@ -847,6 +849,7 @@ pub(super) mod named_virtual_agents {
                 prompt: format!("a task for {agent}"),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await
@@ -1355,6 +1358,7 @@ mod spend_cap {
                 prompt: "do the delegated task".to_string(),
                 include_trace: false,
                 handle: None,
+                files: None,
             },
         )
         .await

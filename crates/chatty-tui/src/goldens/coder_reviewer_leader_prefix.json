@@ -156,6 +156,13 @@
             "handle": {
               "type": "string",
               "description": "Optional. A name to keep this agent's conversation under. A new name starts the agent fresh and saves its conversation; the same name again continues that conversation, on the same worktree. Local agents only."
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Names of your input files the sub-agent may read; omit to share all."
             }
           },
           "required": [

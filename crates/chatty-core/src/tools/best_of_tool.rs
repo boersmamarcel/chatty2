@@ -129,6 +129,7 @@ impl BestOfTool {
                     prompt,
                     include_trace: true,
                     handle: None,
+                    files: None,
                 },
             )
             .await

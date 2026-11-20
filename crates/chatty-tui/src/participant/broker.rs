@@ -876,6 +876,7 @@ mod tests {
                         prompt: "hi".to_string(),
                         include_trace: false,
                         handle: None,
+                        files: None,
                     },
                 )
                 .await

@@ -249,6 +249,7 @@ async fn stubbed_third_party_peer_question_shows_its_origin() {
                         prompt: task.text,
                         include_trace: false,
                         handle: None,
+                        files: None,
                     },
                 )
                 .await
@@ -279,6 +280,7 @@ async fn stubbed_third_party_peer_question_shows_its_origin() {
                     prompt: "Pay the invoice.".into(),
                     include_trace: false,
                     handle: None,
+                    files: None,
                 },
             )
             .await
