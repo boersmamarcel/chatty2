@@ -27,6 +27,8 @@ struct Spawned {
     task_id: String,
     /// Whether its task restored a handle's conversation.
     resumed: bool,
+    /// The `files` its task carried (AGE-1735).
+    files: Option<Vec<String>>,
 }
 
 /// A virtual agent whose workers are admitted under their caller, serve
@@ -89,6 +91,7 @@ impl VirtualAgent for Saving {
             run: run.name(),
             task_id: task_id.clone(),
             resumed: task.resume.is_some(),
+            files: task.files.clone(),
         });
         drop(spawned);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -202,16 +205,31 @@ impl Kit {
         run: Option<&str>,
         handle: &str,
     ) -> Result<InvokeAgentOutcome, CallError> {
+        self.invoke(agent, peer, scope, run, Some(handle), None)
+            .await
+    }
+
+    /// [`call_agent`](Self::call_agent) under `handle`, if any, narrowing
+    /// the callee's input files to `files`.
+    async fn invoke(
+        &self,
+        agent: &str,
+        peer: Peer,
+        scope: Option<&str>,
+        run: Option<&str>,
+        handle: Option<&str>,
+        files: Option<Vec<String>>,
+    ) -> Result<InvokeAgentOutcome, CallError> {
         let scope = scope.map(ConversationScope::new);
         let mut stream = self.calls.call_in(
             peer,
             scope.as_ref(),
             CallRequest::InvokeAgent(InvokeAgentParams {
                 agent: agent.to_string(),
-                prompt: format!("task under {handle}"),
-                handle: Some(handle.to_string()),
+                prompt: format!("task under {}", handle.unwrap_or("no handle")),
+                handle: handle.map(str::to_string),
                 include_trace: false,
-                files: None,
+                files,
                 spawn_context: None,
                 remaining: Remaining::default(),
                 run: run.map(str::to_string),
@@ -554,4 +572,77 @@ async fn tasks_get_answers_recent() {
         kit.calls.tasks_get(Some(&scope), "task-unknown").unwrap(),
         None
     );
+}
+
+/// AGE-1735: the call's `files` reaches the task the runner is handed, as
+/// the call named it: absent stays `None`, `[]` is `Some([])`, names are
+/// that subset — with a handle's first task as without one.
+#[tokio::test]
+async fn files_reach_the_runners_task() {
+    let kit = Kit::new(None);
+    let names = vec!["a.csv".to_string(), "notes/b.md".to_string()];
+    for (n, (handle, files)) in [
+        (None, None),
+        (None, Some(Vec::new())),
+        (None, Some(names.clone())),
+        (Some("narrowed"), Some(names.clone())),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let done = kit
+            .invoke(
+                WORKER,
+                Peer::Root,
+                Some("conv-a"),
+                None,
+                handle,
+                files.clone(),
+            )
+            .await
+            .expect("the call runs");
+        assert!(done.success, "{done:?}");
+        assert_eq!(kit.spawned()[n].files, files, "call {n}");
+    }
+}
+
+/// AGE-1735: a call that resumes a handle cannot narrow its files — the
+/// worker keeps its first task's — so one naming `files` is refused with
+/// nothing spawned, while the same call without `files` resumes it.
+#[tokio::test]
+async fn files_refused_on_a_continuing_handle() {
+    let kit = Kit::new(None);
+    kit.invoke(
+        WORKER,
+        Peer::Root,
+        Some("conv-a"),
+        None,
+        Some("fix"),
+        Some(vec!["a.csv".to_string()]),
+    )
+    .await
+    .expect("the first task narrows its files");
+    let before = kit.spawned().len();
+    for files in [Some(Vec::new()), Some(vec!["b.csv".to_string()])] {
+        let refused = kit
+            .invoke(WORKER, Peer::Root, Some("conv-a"), None, Some("fix"), files)
+            .await
+            .expect("a refusal is a failed outcome");
+        assert!(!refused.success);
+        let error = refused.error.unwrap_or_default();
+        assert!(
+            error.contains("`files` can only narrow a new sub-agent's inputs")
+                && error.contains("a continuing handle keeps its first files"),
+            "{error}"
+        );
+        assert_eq!(kit.spawned().len(), before, "nothing spawned");
+    }
+    let resumed = kit
+        .root("conv-a", "fix")
+        .await
+        .expect("resumes without files");
+    assert!(resumed.success, "{resumed:?}");
+    let last = kit.spawned().last().cloned().unwrap();
+    assert!(last.resumed);
+    assert_eq!(last.files, None);
 }

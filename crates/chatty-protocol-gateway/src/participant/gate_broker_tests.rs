@@ -900,3 +900,60 @@ async fn message_rows_name_the_siblings_a_relay_request_names() {
             .all(|r| r.root_task_id.as_deref() == Some(stamp_root.as_str()))
     );
 }
+
+/// AGE-1735: a call handed to a connected participant cannot narrow its
+/// files — it is already running with the ones it has, and the task frame
+/// does not carry them — so one naming `files`, even `[]`, is refused and
+/// the participant is handed nothing; the same call without `files` is
+/// handed over.
+#[tokio::test]
+async fn files_refused_for_a_connected_participant() {
+    let kit = Kit::new(&[]);
+    let (lead, mut frames) = kit.connect("lead");
+    for files in [Some(Vec::new()), Some(vec!["a.csv".to_string()])] {
+        // Bounded: a call handed over waits for a result that never comes.
+        let events: Vec<_> = tokio::time::timeout(
+            Duration::from_secs(5),
+            kit.calls
+                .call(
+                    Peer::Root,
+                    CallRequest::InvokeAgent(InvokeAgentParams {
+                        files,
+                        ..params(&lead, None)
+                    }),
+                )
+                .collect(),
+        )
+        .await
+        .expect("the call is refused at once, not handed over");
+        let Some(Ok(CallEvent::Result(CallResult::Invoked(outcome)))) = events.last() else {
+            panic!("a refusal is a failed outcome: {events:?}");
+        };
+        assert!(!outcome.success);
+        let error = outcome.error.clone().unwrap_or_default();
+        assert!(
+            error.contains("is already running")
+                && error.contains("`files` can only narrow a new sub-agent's inputs"),
+            "{error}"
+        );
+        assert!(
+            frames.try_recv().is_err(),
+            "the participant was handed nothing"
+        );
+    }
+
+    let calls = kit.calls.clone();
+    let plain = params(&lead, None);
+    let call = tokio::spawn(async move {
+        calls
+            .call(Peer::Root, CallRequest::InvokeAgent(plain))
+            .collect::<Vec<_>>()
+            .await
+    });
+    let frame = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+        .await
+        .expect("the task is handed over")
+        .expect("the connection is open");
+    assert!(matches!(frame, BrokerFrame::Task { .. }), "{frame:?}");
+    call.abort();
+}
