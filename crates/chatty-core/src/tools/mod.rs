@@ -221,7 +221,7 @@ pub use browser_use_tool::BrowserUseTool;
 pub use calculate_tool::CalculateTool;
 pub use chart_tool::CreateChartTool;
 #[cfg(feature = "duckdb")]
-pub use data_query_tool::{DescribeDataTool, ProfileDataTool, QueryDataTool};
+pub use data_query_tool::{DescribeDataTool, HttpReads, ProfileDataTool, QueryDataTool};
 pub use daytona_tool::DaytonaTool;
 pub use doc_retriever_tool::DocRetrieverTool;
 #[cfg(feature = "docx")]

@@ -85,6 +85,12 @@ pub(super) fn looks_like_file_literal(literal: &str) -> bool {
     if trimmed.is_empty() || trimmed.contains('\n') {
         return false;
     }
+    // A URL is not a workspace path: it is left to DuckDB, which reads it
+    // in place when HTTP reads are configured (AGE-1652) and refuses it
+    // otherwise.
+    if is_http_url(trimmed) {
+        return false;
+    }
 
     trimmed.contains('/')
         || trimmed.contains('\\')
@@ -137,6 +143,14 @@ pub(super) fn resolve_literal_path(
     }
 
     Ok(resolved)
+}
+
+/// `http://` or `https://`, case-insensitively.
+pub(super) fn is_http_url(literal: &str) -> bool {
+    let lower = literal.get(..8).map(str::to_ascii_lowercase);
+    lower
+        .as_deref()
+        .is_some_and(|l| l.starts_with("http://") || l.starts_with("https://"))
 }
 
 pub(super) fn has_glob_pattern(path: &Path) -> bool {
