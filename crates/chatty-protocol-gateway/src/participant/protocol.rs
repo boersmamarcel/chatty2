@@ -188,6 +188,15 @@ pub struct DelegatedTask {
     /// with the broker, like `call`: the runner attaches the worker to it
     /// instead of making a new one. `None` makes one as usual.
     pub attach: Option<WorkerTreeRef>,
+    /// Which of the caller's input files the worker gets, as the call's
+    /// `files` named them (AGE-1735, files design § 6): `None` leaves the
+    /// runner to give it the caller's resources, `Some([])` none, and names
+    /// just that subset. Stays with the broker, like `call`, and is not
+    /// part of the task frame: the runner applies it when it starts the
+    /// worker. A call that resumes a handle, or that is handed to an
+    /// already-connected participant, is refused with one, so it is only
+    /// ever set on a new worker's task.
+    pub files: Option<Vec<String>>,
 }
 
 /// What a broker call stamps on the task it starts (DP-2): the gate's
@@ -234,7 +243,14 @@ impl DelegatedTask {
             swarm_events: false,
             resume: None,
             attach: None,
+            files: None,
         }
+    }
+
+    /// Which of the caller's input files the worker gets (AGE-1735).
+    pub fn with_files(mut self, files: Option<Vec<String>>) -> Self {
+        self.files = files;
+        self
     }
 
     /// The conversation the worker restores before its first turn (RC-3).

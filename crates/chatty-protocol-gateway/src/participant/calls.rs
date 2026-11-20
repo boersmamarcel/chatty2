@@ -2101,7 +2101,10 @@ impl BrokerCalls {
             .with_capture_conversation(true)
             // A hosted broker's tasks carry its binding, and no other
             // (ADR-0021 § 3).
-            .with_identity(self.hosted.as_ref().map(Hosted::identity));
+            .with_identity(self.hosted.as_ref().map(Hosted::identity))
+            // Which of the caller's files the worker gets (AGE-1735): the
+            // runner applies it when it starts the worker.
+            .with_files(params.files);
         let agent = params.agent;
         // A call naming a handle (RC-3) queues on it; the gate decided it
         // may (RC-4).
@@ -2200,6 +2203,13 @@ impl BrokerCalls {
                             "handle '{name}' holds a conversation with '{}', not '{agent}'",
                             saved.agent
                         )),
+                        // A resumed worker keeps the files its first task
+                        // got: a later call's `files` would be silently
+                        // ignored, so it is refused (AGE-1735).
+                        Some(_) if task.files.is_some() => Some(format!(
+                            "handle '{name}': `files` can only narrow a new sub-agent's \
+                             inputs; a continuing handle keeps its first files"
+                        )),
                         Some(saved) => match Opaque::from_value(&saved.conversation.data) {
                             Ok(conversation) => {
                                 task = task
@@ -2234,6 +2244,22 @@ impl BrokerCalls {
                     yield Ok(CallEvent::Result(outcome(TaskState::Failed, String::new(), Some(reason), None, messages())));
                     return;
                 }
+            }
+            // A connected participant is already running with the files it
+            // has: the task frame has no room for `files`, so narrowing them
+            // would be silently ignored, and is refused (AGE-1735).
+            if submits && task.files.is_some() {
+                let reason = format!(
+                    "participant '{agent}' is already running: `files` can only narrow a new \
+                     sub-agent's inputs; a connected participant keeps the files it has"
+                );
+                warn!(agent = %agent, %reason, "Refusing a call narrowing a running participant's files");
+                // No worker was started: the row must not count as one
+                // (TM-3).
+                edge.root_task_id = None;
+                edge.refused(&reason);
+                yield Ok(CallEvent::Result(outcome(TaskState::Failed, String::new(), Some(reason), None, messages())));
+                return;
             }
             let running = match effect {
                 Effect::Submit(node) => a2a_participant::submit(&registry, &node, task).await
