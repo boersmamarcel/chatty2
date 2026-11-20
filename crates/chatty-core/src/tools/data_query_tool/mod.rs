@@ -133,6 +133,8 @@ pub(super) fn sandboxed_connection_with(
 #[derive(Deserialize, Serialize)]
 pub struct QueryDataArgs {
     /// SQL query to execute. File paths in the query are relative to the workspace.
+    // Models often send `sql`; accept it. Plain comment: a doc comment would reach the schema.
+    #[serde(alias = "sql")]
     pub query: String,
     /// Maximum number of result rows to return (default: 20).
     pub max_rows: Option<u32>,
