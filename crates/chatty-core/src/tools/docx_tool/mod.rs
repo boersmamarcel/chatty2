@@ -68,6 +68,50 @@ mod tests {
         assert!(read_output.text.contains("Section 2"));
     }
 
+    /// AGE-1747: under an output root a relative `path` is written there;
+    /// an absolute path inside the workspace is kept as given.
+    #[tokio::test]
+    async fn write_docx_under_an_output_root_writes_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("outputs")).unwrap();
+        let service = Arc::new(
+            FileSystemService::new(tmp.path().to_str().unwrap())
+                .await
+                .unwrap(),
+        );
+        let tool = WriteDocxTool::new(service).with_output_root(Some("outputs".into()));
+        assert!(tool.description().contains("`outputs/`"));
+        let write = |path: String| {
+            let tool = tool.clone();
+            async move {
+                tool.call(
+                    &mut ToolContext::new(),
+                    WriteDocxArgs {
+                        path,
+                        content: "# Hi".to_string(),
+                    },
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        let written = write("report.docx".into()).await;
+        let outputs = std::fs::canonicalize(tmp.path()).unwrap().join("outputs");
+        assert_eq!(
+            written.path,
+            outputs.join("report.docx").display().to_string()
+        );
+        assert!(!tmp.path().join("report.docx").exists());
+
+        let absolute = tmp.path().join("kept.docx");
+        write(absolute.to_str().unwrap().to_string()).await;
+        assert!(
+            absolute.exists(),
+            "an absolute path inside the workspace is kept"
+        );
+    }
+
     #[tokio::test]
     async fn test_read_nonexistent_file() {
         let tmp = tempfile::tempdir().unwrap();

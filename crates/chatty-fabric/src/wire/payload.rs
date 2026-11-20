@@ -7,6 +7,10 @@
 //! The lenient `Value` usage parser stays only on the A2A edge, for peers
 //! that are not chatty.
 
+// `WireArtifact` is deprecated (AGE-1747) but still a field of
+// `TaskMetadata`, which this file defines and derives for.
+#![allow(deprecated)]
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -139,23 +143,34 @@ pub struct TaskMetadata {
     /// broker for a virtual agent's worker. Opaque: the runner's facts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<Opaque>,
-    /// The files the task produced for its caller to keep (AGE-946): a
-    /// hosted worker's workspace is gone with its lease, so a deliverable
-    /// rides back on the terminal status. Empty for every task that made
-    /// none, and then absent from the wire.
+    /// Deprecated (AGE-1747): always empty, and then absent from the wire.
+    /// No file byte rides the envelope (ADR-0089); a hosted worker's files
+    /// stay in its workspace's `outputs/`, which hive captures. Kept, and
+    /// still parsed, for one release so a peer at an older pin that sends
+    /// it (AGE-946) is not refused.
+    // TODO(AGE-1748): remove with `WireArtifact` once hive is re-pinned.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<WireArtifact>,
 }
 
-/// The most bytes one task's artifacts carry, all of them together
-/// (AGE-946). An artifact past it rides as its name and size alone, never
-/// truncated: well under the frame cap, beside a captured conversation.
+/// The most bytes one task's artifacts carried, all of them together
+/// (AGE-946). Nothing in chatty2 reads a file into an artifact any more
+/// (AGE-1747).
+// TODO(AGE-1748): drop from the public wire once hive is re-pinned.
 pub const ARTIFACT_CAP_BYTES: u64 = 10 * 1024 * 1024;
 
 /// One file a task produced: its name, media type and size, and its bytes
 /// as standard base64 unless they did not fit [`ARTIFACT_CAP_BYTES`].
+///
+/// Deprecated (AGE-1747): never set by chatty2; parsed for one release so
+/// a peer at an older pin still decodes.
+// TODO(AGE-1748): remove once hive is re-pinned.
+#[deprecated(
+    note = "AGE-1747: no file rides the envelope (ADR-0089); never set, parsed for one release"
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[schemars(transform = keep_the_wire_schema)]
 pub struct WireArtifact {
     /// The file's name, without its directory.
     pub name: String,
@@ -165,6 +180,14 @@ pub struct WireArtifact {
     /// The bytes, base64; absent when they did not fit the cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
+}
+
+/// Leave `WireArtifact`'s exported schema as it was before it was
+/// deprecated (AGE-1747): the Rust attribute is for chatty2's own code, and
+/// a `deprecated` keyword in the export would change the schema hash every
+/// `session.hello` carries, refusing a peer at the previous pin.
+fn keep_the_wire_schema(schema: &mut schemars::Schema) {
+    schema.remove("deprecated");
 }
 
 impl TaskMetadata {

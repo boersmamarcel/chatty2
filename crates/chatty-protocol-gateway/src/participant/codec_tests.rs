@@ -11,8 +11,8 @@ use chatty_core::services::handoff::{
     HANDOFF_INVALID_COUNT_METADATA_KEY, HANDOFF_INVALID_METADATA_KEY, HANDOFF_METADATA_KEY,
 };
 use chatty_fabric::wire::{
-    HandoffInvalid, Opaque, TaskIdentity, TaskMetadata, WireArtifact, WireModelRef, WireProgress,
-    WireUsage, WireUsageLine, WorkerSwarmItem,
+    HandoffInvalid, Opaque, TaskIdentity, TaskMetadata, WireModelRef, WireProgress, WireUsage,
+    WireUsageLine, WorkerSwarmItem,
 };
 use chatty_fabric::{
     Answer, AskReply, AskRequest, Asker, ConversationScope, InvokeAgentParams, NodeName, Question,
@@ -1141,6 +1141,48 @@ fn unknown_error_kind_is_decode_error() {
     ));
 }
 
+/// AGE-1747: no worker writes `artifacts` any more, but a status from a
+/// peer at an older pin that carries one (AGE-946) still decodes, for one
+/// release, and an empty list is never written.
+#[test]
+#[allow(deprecated)]
+fn a_terminal_status_with_old_artifacts_still_decodes() {
+    let (broker, worker) = connected();
+    let old = TaskMetadata {
+        artifacts: vec![chatty_fabric::wire::WireArtifact {
+            name: "book.pdf".into(),
+            media_type: "application/pdf".into(),
+            size: 4,
+            data: Some("JVBERg==".into()),
+        }],
+        ..TaskMetadata::default()
+    };
+    let line = worker
+        .encode(&ParticipantFrame::Status {
+            task_id: "task-1".into(),
+            state: TaskState::Completed,
+            message: None,
+            metadata: Some(old.clone()),
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        value(&line)["result"]["metadata"]["artifacts"][0]["data"],
+        "JVBERg=="
+    );
+    let Some(ParticipantFrame::Status { metadata, .. }) = broker.decode(&line).unwrap() else {
+        panic!("the terminal status");
+    };
+    assert_eq!(metadata, Some(old));
+
+    let none = TaskMetadata {
+        trace: Some("### compile_typst (ok)".into()),
+        ..TaskMetadata::default()
+    };
+    let wire = serde_json::to_value(&none).unwrap();
+    assert!(wire.get("artifacts").is_none(), "{wire}");
+}
+
 /// Every key the worker's mapper writes on a terminal status, plus the
 /// runner's evidence the broker adds, is a field of [`TaskMetadata`]: a
 /// status carrying all of them crosses the wire and comes back equal, under
@@ -1176,12 +1218,7 @@ fn task_metadata_roundtrips_every_worker_key() {
         evidence: Some(
             Opaque::from_value(&json!({"branch": "kit-coder-0", "commits": 1})).unwrap(),
         ),
-        artifacts: vec![WireArtifact {
-            name: "book.pdf".into(),
-            media_type: "application/pdf".into(),
-            size: 4,
-            data: Some("JVBERg==".into()),
-        }],
+        ..TaskMetadata::default()
     };
     let line = worker
         .encode(&ParticipantFrame::Status {
@@ -1209,8 +1246,6 @@ fn task_metadata_roundtrips_every_worker_key() {
         HANDOFF_INVALID_COUNT_METADATA_KEY,
         // The runner's, added by the broker (`with_evidence`).
         "evidence",
-        // The PDFs `compile_typst` wrote (AGE-946).
-        "artifacts",
     ]
     .into_iter()
     .map(String::from)

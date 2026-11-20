@@ -87,6 +87,9 @@ pub struct WriteExcelTool {
     service: Arc<FileSystemService>,
     approval_mode: ApprovalMode,
     pending_approvals: PendingWriteApprovals,
+    /// Where a relative `path` goes, inside the workspace (AGE-1747).
+    /// `None`: relative to the workspace root, as always.
+    output_root: Option<std::path::PathBuf>,
 }
 
 impl WriteExcelTool {
@@ -99,7 +102,15 @@ impl WriteExcelTool {
             service,
             approval_mode,
             pending_approvals,
+            output_root: None,
         }
+    }
+
+    /// Place a relative `path` under `output_root` (the execution
+    /// settings' `output_root`, AGE-1747); `None` keeps today's behaviour.
+    pub fn with_output_root(mut self, output_root: Option<std::path::PathBuf>) -> Self {
+        self.output_root = output_root;
+        self
     }
 }
 
@@ -218,6 +229,7 @@ impl Tool for WriteExcelTool {
                          - Simple data: {\"path\": \"output.xlsx\", \"sheets\": [{\"name\": \"Sheet1\", \"data\": [[\"Name\",\"Age\"],[\"Alice\",30]]}]}\n\
                          - With formatting: {\"path\": \"report.xlsx\", \"sheets\": [{\"name\": \"Sales\", \"data\": [...], \"formatting\": {\"header_bold\": true, \"auto_filter\": true, \"freeze_top_row\": true}, \"column_widths\": [20, 15, 12]}]}"
                 .to_string()
+            + &crate::tools::path_utils::output_root_note(self.output_root.as_deref(), "path")
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -320,7 +332,9 @@ impl Tool for WriteExcelTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        let canonical = self.service.resolve_new_path(&args.path).await?;
+        let path =
+            crate::tools::path_utils::under_output_root(self.output_root.as_deref(), &args.path);
+        let canonical = self.service.resolve_new_path(&path).await?;
         // `symlink_metadata`: a link is not shown as its target (AGE-1113).
         let is_overwrite = crate::services::no_follow_write::entry_exists(&canonical);
 

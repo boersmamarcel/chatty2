@@ -34,6 +34,9 @@ pub struct WriteDocxOutput {
 pub struct WriteDocxTool {
     service: Arc<FileSystemService>,
     write_approval: Option<(ApprovalMode, PendingWriteApprovals)>,
+    /// Where a relative `path` goes, inside the workspace (AGE-1747).
+    /// `None`: relative to the workspace root, as always.
+    output_root: Option<std::path::PathBuf>,
 }
 
 impl WriteDocxTool {
@@ -41,7 +44,15 @@ impl WriteDocxTool {
         Self {
             service,
             write_approval: None,
+            output_root: None,
         }
+    }
+
+    /// Place a relative `path` under `output_root` (the execution
+    /// settings' `output_root`, AGE-1747); `None` keeps today's behaviour.
+    pub fn with_output_root(mut self, output_root: Option<std::path::PathBuf>) -> Self {
+        self.output_root = output_root;
+        self
     }
 
     /// Ask for write approval under `mode` before every write (AGE-1096,
@@ -77,6 +88,7 @@ impl Tool for WriteDocxTool {
                          Examples:\n\
                          - Simple doc: {\"path\": \"report.docx\", \"content\": \"# Title\\n\\nParagraph text.\"}\n\
                          - With table: {\"path\": \"data.docx\", \"content\": \"# Summary\\n\\n| Name | Value |\\n|---|---|\\n| Alice | 100 |\"}".to_string()
+            + &crate::tools::path_utils::output_root_note(self.output_root.as_deref(), "path")
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -118,7 +130,9 @@ impl Tool for WriteDocxTool {
             .into());
         }
 
-        let canonical = self.service.resolve_new_path(&args.path).await?;
+        let path =
+            crate::tools::path_utils::under_output_root(self.output_root.as_deref(), &args.path);
+        let canonical = self.service.resolve_new_path(&path).await?;
 
         if let Some((mode, pending)) = &self.write_approval {
             let approved = request_write_approval(

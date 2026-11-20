@@ -557,6 +557,7 @@ mod tests {
                 tool_loading: crate::settings::models::ToolLoading::Dynamic,
                 ask_user_enabled: false,
                 terminal_access: true,
+                output_root: Some("outputs".into()),
             },
         )
         .await;

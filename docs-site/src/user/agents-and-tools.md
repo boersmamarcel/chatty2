@@ -84,7 +84,7 @@ The agent can run SQL over CSV, Parquet and JSON files in the workspace and desc
 
 Reading and querying never ask. Writing spreadsheets and other files follows your approval mode.
 
-Typeset PDFs (`compile_typst`) and charts saved to a file (`create_chart` with a save path) are written only inside the workspace, need filesystem writes turned on, and follow your approval mode too; a `~` path is refused. Without writes, a chart is still shown in the chat but is not saved.
+Typeset PDFs (`compile_typst`) and charts saved to a file (`create_chart` with a save path) are written only inside the workspace, need filesystem writes turned on, and follow your approval mode too; a `~` path is refused. Without writes, a chart is still shown in the chat but is not saved. With `output_root` set in the execution settings (a directory inside the workspace, such as `outputs`), a relative path for these tools and for `write_docx`, `write_excel` and `write_pptx` is saved under that directory; an absolute path inside the workspace is kept as given. It is unset by default.
 
 ### Web and the built-in browser
 

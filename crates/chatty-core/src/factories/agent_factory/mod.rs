@@ -507,6 +507,10 @@ impl AgentClient {
         let mut pptx_write_tool: Option<WritePptxTool> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
+        // Where a relative output path of the tools below and the document
+        // writers goes (AGE-1747); `None` keeps it where it always went.
+        let output_root: Option<std::path::PathBuf> =
+            exec_settings.as_ref().and_then(|s| s.output_root.clone());
         // Where `create_chart`'s save_path and `compile_typst` may write,
         // with the approval they ask under (AGE-534): set only when the
         // filesystem write tools are, so it fails closed like they do.
@@ -661,12 +665,14 @@ impl AgentClient {
                                     service.clone(),
                                     write_approval_mode.clone(),
                                     approvals.clone(),
-                                ),
+                                )
+                                .with_output_root(output_root.clone()),
                                 EditExcelTool::new(
                                     service.clone(),
                                     write_approval_mode.clone(),
                                     approvals.clone(),
-                                ),
+                                )
+                                .with_output_root(output_root.clone()),
                             )
                         });
                     }
@@ -685,6 +691,7 @@ impl AgentClient {
                             tracing::info!(workspace = %workspace_dir, "DOCX write tool enabled");
                             WriteDocxTool::new(service.clone())
                                 .with_write_approval(write_approval_mode.clone(), approvals.clone())
+                                .with_output_root(output_root.clone())
                         });
                     }
 
@@ -702,6 +709,7 @@ impl AgentClient {
                             tracing::info!(workspace = %workspace_dir, "PPTX write tool enabled");
                             WritePptxTool::new(service.clone())
                                 .with_write_approval(write_approval_mode.clone(), approvals.clone())
+                                .with_output_root(output_root.clone())
                         });
                     }
 
@@ -1063,7 +1071,8 @@ impl AgentClient {
         let chart_tool: Option<CreateChartTool> = Some(match &output_writes {
             Some((service, mode, approvals)) => CreateChartTool::new(theme_colors)
                 .with_save_path(service.clone())
-                .with_write_approval(mode.clone(), approvals.clone()),
+                .with_write_approval(mode.clone(), approvals.clone())
+                .with_output_root(output_root.clone()),
             None => CreateChartTool::new(theme_colors),
         });
 
@@ -1075,6 +1084,7 @@ impl AgentClient {
                 tracing::info!("Typst compile tool enabled");
                 CompileTypstTool::new(service.clone())
                     .with_write_approval(mode.clone(), approvals.clone())
+                    .with_output_root(output_root.clone())
             });
 
         // Code execution tool (Monty and optional Docker fallback)

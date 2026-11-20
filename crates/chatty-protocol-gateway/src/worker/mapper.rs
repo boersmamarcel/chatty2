@@ -25,7 +25,6 @@
 //! | `ApiCallUsage` | — (folded into `TokenUsage`) |
 //! | `TokenUsage` | — (held, and attached to the terminal status) |
 //! | `TurnMessages` | — (held when capture is on, and attached to the terminal status; RC-0, AGE-649) |
-//! | `ToolCallResult` of `compile_typst` | its progress line, and the PDF's path held for the terminal status (AGE-946) |
 //! | `Error` / `Cancelled` | `status: working`, and the task's recorded outcome |
 //! | `TurnEnded` | — (see below) |
 //! | `FollowUp` | — |
@@ -122,19 +121,13 @@
 //! rides under [`CONVERSATION_TOO_LARGE_METADATA_KEY`] instead — never a
 //! silently truncated conversation.
 //!
-//! # Artifacts (AGE-946)
+//! # No files (AGE-1747)
 //!
-//! A hosted worker's workspace dies with its lease, so a file it made for
-//! its caller has to travel back on the terminal status. The channel is
-//! narrow on purpose: the PDFs `compile_typst` wrote and the images the
-//! worker named with `add_attachment` (AGE-1502), read back at the terminal
-//! status, newest first under [`ARTIFACT_CAP_BYTES`] for all of them
-//! together. One over the cap rides as its name and size alone, never
-//! truncated. A path written or named again is sent once, as it is at the
-//! end. An image is typed by its bytes, never its name: PNG, JPEG, GIF and
-//! WebP go, at most 3 MB each with their bytes; anything else (SVG, BMP, a
-//! name that lies) is left out. A desktop worker shares its caller's disk,
-//! and nothing on the desktop reads them.
+//! A file a worker writes stays in its workspace, like any tool's output:
+//! no file byte rides the envelope (ADR-0089). `compile_typst` used to have
+//! its PDFs, and `add_attachment` its images, read back onto the terminal
+//! status (AGE-946, AGE-1502); a hosted workspace's `outputs/` is now what
+//! hive captures instead, so `TaskMetadata::artifacts` is always empty.
 //!
 //! # A run that hit its limit (AGE-992)
 //!
@@ -164,7 +157,6 @@
 //! its frames are the bytes they always were.
 
 use crate::participant::{ParticipantFrame, TaskState};
-use base64::Engine as _;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarificationStore};
 use chatty_core::models::execution_approval_store::{
     self as approvals, ApprovalDecision, ApprovalDetail, ExecutionApprovalStore,
@@ -179,9 +171,7 @@ use chatty_core::services::{HeartbeatThrottle, heartbeat_interval};
 use chatty_core::session::SessionEvent;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 use chatty_core::tools::progress_text_for_event;
-use chatty_fabric::wire::{
-    ARTIFACT_CAP_BYTES, Opaque, TaskMetadata, WireArtifact, WorkerSwarmItem,
-};
+use chatty_fabric::wire::{Opaque, TaskMetadata, WorkerSwarmItem};
 use chatty_fabric::{Answer, ApprovalKind, ApprovalRequest, ApprovalVerdict, AskRequest, Question};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -442,9 +432,6 @@ pub struct TaskMapper {
     /// Tool call id → index into `trace`, for a call still waiting on its
     /// result or error.
     open_calls: HashMap<String, usize>,
-    /// The files `compile_typst` wrote and the images `add_attachment`
-    /// named, oldest first, each path once (AGE-946, AGE-1502).
-    artifacts: Vec<(String, ArtifactKind)>,
     /// Whether this task's conversation is captured at its terminal status
     /// (RC-0, AGE-649). Off by default.
     capture_conversation: bool,
@@ -496,7 +483,6 @@ impl TaskMapper {
             usage: Vec::new(),
             trace: Vec::new(),
             open_calls: HashMap::new(),
-            artifacts: Vec::new(),
             capture_conversation: false,
             captured_messages: Vec::new(),
             handoff: None,
@@ -645,10 +631,6 @@ impl TaskMapper {
             }
             SessionEvent::ToolCallResult { id, result } => {
                 if let Some(index) = self.open_calls.remove(id) {
-                    if let Some(artifact) = artifact_of(&self.trace[index].name, result) {
-                        self.artifacts.retain(|(known, _)| *known != artifact.0);
-                        self.artifacts.push(artifact);
-                    }
                     self.trace[index].outcome = StepOutcome::Ok(result.clone());
                 }
             }
@@ -877,7 +859,6 @@ impl TaskMapper {
         if let Some(handoff) = handoff {
             handoff.write_metadata(&mut metadata);
         }
-        metadata.artifacts = read_artifacts(&self.artifacts);
         (!metadata.is_empty()).then_some(metadata)
     }
 
@@ -909,136 +890,6 @@ impl TaskMapper {
             metadata: None,
         }
     }
-}
-
-/// The tool whose output files ride back as artifacts (AGE-946).
-const ARTIFACT_TOOL: &str = "compile_typst";
-
-/// The tool a worker names an image for its caller with (AGE-1502).
-const ATTACHMENT_TOOL: &str = "add_attachment";
-
-/// The largest image that rides back with its bytes: the same 3 MB
-/// `view_image` takes. A screenshot is a few hundred KB.
-const MAX_IMAGE_ARTIFACT_BYTES: u64 = chatty_core::tools::view_image_tool::MAX_VIEW_IMAGE_BYTES;
-
-/// How a recorded file is typed when it is read back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArtifactKind {
-    /// A `compile_typst` output: typed by its extension, as it always was.
-    Document,
-    /// An `add_attachment` image: typed by its bytes, and only PNG, JPEG,
-    /// GIF or WebP; anything else (SVG, BMP, a name that lies) stays home.
-    Image,
-}
-
-/// The file a successful tool result hands back, if that tool's files
-/// travel: the `saved_path` of a `compile_typst` result, or the `path` of an
-/// `add_attachment` result whose `file_type` is `"image"`.
-fn artifact_of(tool: &str, result: &str) -> Option<(String, ArtifactKind)> {
-    match tool {
-        ARTIFACT_TOOL => saved_path(result).map(|path| (path, ArtifactKind::Document)),
-        ATTACHMENT_TOOL => {
-            let value: Value = serde_json::from_str(result).ok()?;
-            if value["file_type"].as_str() != Some("image") {
-                return None;
-            }
-            value["path"]
-                .as_str()
-                .map(|path| (path.to_string(), ArtifactKind::Image))
-        }
-        _ => None,
-    }
-}
-
-/// The `saved_path` of a `compile_typst` result.
-fn saved_path(result: &str) -> Option<String> {
-    let value: Value = serde_json::from_str(result).ok()?;
-    value["saved_path"].as_str().map(str::to_string)
-}
-
-/// The MIME type of an image, read from its first bytes: PNG, JPEG, GIF or
-/// WebP, else `None`. Never from the name.
-fn image_media_type(bytes: &[u8]) -> Option<&'static str> {
-    use rig_core::message::{ImageMediaType, MimeType as _};
-    ImageMediaType::sniff(bytes).map(|kind| kind.to_mime_type())
-}
-
-/// The first bytes of the file at `path`, enough to tell its image type.
-fn file_head(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Read as _;
-    let mut head = Vec::with_capacity(16);
-    std::fs::File::open(path)?.take(16).read_to_end(&mut head)?;
-    Ok(head)
-}
-
-/// The files at `paths` as artifacts, in the same order: the newest first
-/// gets its bytes while the cap allows; a file over what is left goes as
-/// its name and size alone, and a file that is gone is left out. An image
-/// over [`MAX_IMAGE_ARTIFACT_BYTES`] also goes as its name and size alone,
-/// and a file named as an image that is not a PNG, JPEG, GIF or WebP is
-/// left out.
-fn read_artifacts(paths: &[(String, ArtifactKind)]) -> Vec<WireArtifact> {
-    let mut left = ARTIFACT_CAP_BYTES;
-    let mut artifacts: Vec<WireArtifact> = paths
-        .iter()
-        .rev()
-        .filter_map(|(path, kind)| {
-            let path = std::path::Path::new(path);
-            let size = std::fs::metadata(path).ok()?.len();
-            let fits = size <= left
-                && (*kind == ArtifactKind::Document || size <= MAX_IMAGE_ARTIFACT_BYTES);
-            let bytes = if fits {
-                match std::fs::read(path) {
-                    Ok(bytes) => Some(bytes),
-                    Err(e) => {
-                        warn!(error = %e, path = %path.display(), "An artifact could not be read");
-                        return None;
-                    }
-                }
-            } else {
-                None
-            };
-            let media_type = match kind {
-                ArtifactKind::Document => match path.extension().and_then(|e| e.to_str()) {
-                    Some(ext) if ext.eq_ignore_ascii_case("pdf") => "application/pdf",
-                    _ => "application/octet-stream",
-                },
-                ArtifactKind::Image => {
-                    let head = match &bytes {
-                        Some(bytes) => image_media_type(bytes),
-                        None => match file_head(path) {
-                            Ok(head) => image_media_type(&head),
-                            Err(e) => {
-                                warn!(error = %e, path = %path.display(), "An image could not be read");
-                                return None;
-                            }
-                        },
-                    };
-                    let Some(media_type) = head else {
-                        warn!(
-                            path = %path.display(),
-                            "Not a PNG, JPEG, GIF or WebP image (by its content); not sent"
-                        );
-                        return None;
-                    };
-                    media_type
-                }
-            };
-            let name = path.file_name()?.to_string_lossy().into_owned();
-            let data = bytes.map(|bytes| {
-                left -= size;
-                base64::engine::general_purpose::STANDARD.encode(bytes)
-            });
-            Some(WireArtifact {
-                name,
-                media_type: media_type.to_string(),
-                size,
-                data,
-            })
-        })
-        .collect();
-    artifacts.reverse();
-    artifacts
 }
 
 /// Fold `line` into `lines`: onto the line with the same agent and model
@@ -1143,253 +994,41 @@ mod tests {
         );
     }
 
-    /// One `compile_typst` call that wrote `path`.
-    fn compiled(mapper: &mut TaskMapper, id: &str, path: &std::path::Path) {
-        mapper.map(&tool_started(id, "compile_typst"));
-        mapper.map(&SessionEvent::ToolCallResult {
-            id: id.into(),
-            result: serde_json::json!({"saved_path": path, "page_count": 1}).to_string(),
-        });
-    }
-
-    fn artifacts(mapper: &TaskMapper) -> Vec<WireArtifact> {
-        match mapper.terminal() {
-            ParticipantFrame::Status { metadata, .. } => metadata
-                .map(|metadata| metadata.artifacts)
-                .unwrap_or_default(),
-            other => panic!("expected a status frame, got {other:?}"),
-        }
-    }
-
-    /// AGE-946: the PDF `compile_typst` wrote rides back on the terminal
-    /// status, its bytes base64; a path compiled to again goes once, as it
-    /// is at the end; a failed compile and a file since removed add nothing.
+    /// AGE-1747: `compile_typst` writes its PDF into the workspace like any
+    /// other tool, and nothing reads it back: the terminal status carries no
+    /// file bytes (ADR-0089), however many PDFs were compiled or images
+    /// attached. Hive captures the files from the workspace instead.
     #[test]
-    fn the_pdfs_compile_typst_wrote_ride_the_terminal_status() {
+    fn compile_typst_writes_a_file_and_the_status_carries_no_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let book = dir.path().join("book.pdf");
-        let gone = dir.path().join("gone.pdf");
-        let mut mapper = TaskMapper::new("task-1");
-        assert!(artifacts(&mapper).is_empty(), "no compile, no artifacts");
-
-        std::fs::write(&book, b"%PDF-1.7 draft").unwrap();
-        compiled(&mut mapper, "c1", &book);
-        std::fs::write(&gone, b"%PDF-1.7 gone").unwrap();
-        compiled(&mut mapper, "c2", &gone);
-        std::fs::remove_file(&gone).unwrap();
-        mapper.map(&tool_started("c3", "compile_typst"));
-        mapper.map(&SessionEvent::ToolCallError {
-            id: "c3".into(),
-            error: "Error: compile_typst: Typst compilation failed".into(),
-        });
-        // Another tool's `saved_path` is not an artifact.
-        mapper.map(&tool_started("c4", "write_file"));
-        mapper.map(&SessionEvent::ToolCallResult {
-            id: "c4".into(),
-            result: serde_json::json!({"saved_path": book}).to_string(),
-        });
         std::fs::write(&book, b"%PDF-1.7 final").unwrap();
-        compiled(&mut mapper, "c5", &book);
-
-        let sent = artifacts(&mapper);
-        assert_eq!(sent.len(), 1, "{sent:?}");
-        assert_eq!(sent[0].name, "book.pdf");
-        assert_eq!(sent[0].media_type, "application/pdf");
-        assert_eq!(sent[0].size, 14);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(sent[0].data.as_deref().unwrap())
-            .unwrap();
-        assert_eq!(bytes, b"%PDF-1.7 final");
-    }
-
-    /// Over the cap an artifact is its name and size, never cut short;
-    /// the newest gets the bytes first.
-    #[test]
-    fn an_artifact_over_the_cap_goes_without_its_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let big = dir.path().join("big.pdf");
-        let small = dir.path().join("small.pdf");
-        let file = std::fs::File::create(&big).unwrap();
-        file.set_len(ARTIFACT_CAP_BYTES).unwrap();
-        std::fs::write(&small, b"%PDF").unwrap();
-        let mut mapper = TaskMapper::new("task-1");
-        compiled(&mut mapper, "c1", &big);
-        compiled(&mut mapper, "c2", &small);
-
-        let sent = artifacts(&mapper);
-        assert_eq!(
-            sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["big.pdf", "small.pdf"]
-        );
-        assert_eq!(sent[0].size, ARTIFACT_CAP_BYTES);
-        assert_eq!(sent[0].data, None, "the newest took the room first");
-        assert!(sent[1].data.is_some());
-    }
-
-    /// One successful `add_attachment` call on `path`, as the tool reports
-    /// it: the canonical path and `file_type` from the extension.
-    fn attached(mapper: &mut TaskMapper, id: &str, path: &std::path::Path, file_type: &str) {
-        mapper.map(&tool_started(id, "add_attachment"));
-        mapper.map(&SessionEvent::ToolCallResult {
-            id: id.into(),
-            result: serde_json::json!({
-                "path": path,
-                "file_type": file_type,
-                "message": "will be displayed inline",
-            })
-            .to_string(),
-        });
-    }
-
-    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
-    const JPEG: &[u8] = b"\xff\xd8\xff\xe0\0\x10JFIF";
-    const GIF: &[u8] = b"GIF89a\x01\0\x01\0";
-    const WEBP: &[u8] = b"RIFF\x24\0\0\0WEBPVP8 ";
-
-    /// The artifacts a task that attached `bytes` as `name` sends.
-    fn attach_one(name: &str, bytes: &[u8]) -> Vec<WireArtifact> {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(name);
-        std::fs::write(&path, bytes).unwrap();
-        let mut mapper = TaskMapper::new("task-1");
-        attached(&mut mapper, "a1", &path, "image");
-        artifacts(&mapper)
-    }
-
-    fn assert_image_rides(name: &str, bytes: &[u8], media_type: &str) {
-        let sent = attach_one(name, bytes);
-        assert_eq!(sent.len(), 1, "{name}: {sent:?}");
-        assert_eq!(sent[0].name, name);
-        assert_eq!(sent[0].media_type, media_type);
-        assert_eq!(sent[0].size, bytes.len() as u64);
-        let data = base64::engine::general_purpose::STANDARD
-            .decode(sent[0].data.as_deref().expect("its bytes ride along"))
-            .unwrap();
-        assert_eq!(data, bytes);
-    }
-
-    /// AGE-1502: an image the worker named with `add_attachment` rides the
-    /// terminal status, typed by its bytes, its base64 equal to the file.
-    #[test]
-    fn an_attached_png_rides_the_terminal_status() {
-        assert_image_rides("shot.png", PNG, "image/png");
-    }
-
-    #[test]
-    fn an_attached_jpeg_rides_the_terminal_status() {
-        assert_image_rides("shot.jpg", JPEG, "image/jpeg");
-    }
-
-    #[test]
-    fn an_attached_gif_rides_the_terminal_status() {
-        assert_image_rides("shot.gif", GIF, "image/gif");
-    }
-
-    #[test]
-    fn an_attached_webp_rides_the_terminal_status() {
-        assert_image_rides("shot.webp", WEBP, "image/webp");
-    }
-
-    /// SVG can carry script: it never leaves the worker, whatever its name.
-    #[test]
-    fn an_attached_svg_is_left_out() {
-        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#;
-        assert!(attach_one("chart.svg", svg).is_empty());
-        assert!(attach_one("chart.png", svg).is_empty(), "an SVG named .png");
-    }
-
-    /// The type comes from the bytes, never the name: text named `.png` is
-    /// left out, and a JPEG named `.png` goes as the JPEG it is.
-    #[test]
-    fn an_image_whose_name_lies_is_typed_by_its_bytes() {
-        assert!(attach_one("shot.png", b"just some text, not a picture").is_empty());
-        assert!(
-            attach_one("shot.bmp", b"BM\x36\0\0\0\0\0").is_empty(),
-            "BMP"
-        );
-        assert_image_rides("shot.png", JPEG, "image/jpeg");
-    }
-
-    /// An image over 3 MB goes as its name and size alone, never cut short,
-    /// and leaves the room under the task's cap to the files that fit.
-    #[test]
-    fn an_image_over_three_mb_goes_without_its_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let big = dir.path().join("big.png");
-        let mut bytes = PNG.to_vec();
-        bytes.resize(MAX_IMAGE_ARTIFACT_BYTES as usize + 1, 0);
-        std::fs::write(&big, &bytes).unwrap();
-        let small = dir.path().join("small.png");
-        std::fs::write(&small, PNG).unwrap();
-        let mut mapper = TaskMapper::new("task-1");
-        attached(&mut mapper, "a1", &small, "image");
-        attached(&mut mapper, "a2", &big, "image");
-
-        let sent = artifacts(&mapper);
-        assert_eq!(sent.len(), 2, "{sent:?}");
-        assert_eq!(sent[1].name, "big.png");
-        assert_eq!(sent[1].media_type, "image/png");
-        assert_eq!(sent[1].size, MAX_IMAGE_ARTIFACT_BYTES + 1);
-        assert_eq!(sent[1].data, None, "over 3 MB: name and size only");
-        assert!(sent[0].data.is_some(), "the small one still fits");
-    }
-
-    /// Images share the task's total cap with the PDFs: the newest takes
-    /// the room first, whatever its kind.
-    #[test]
-    fn images_and_pdfs_share_the_task_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let book = dir.path().join("book.pdf");
-        std::fs::File::create(&book)
-            .unwrap()
-            .set_len(ARTIFACT_CAP_BYTES - 10)
-            .unwrap();
         let shot = dir.path().join("shot.png");
-        let mut bytes = PNG.to_vec();
-        bytes.resize(100, 0);
-        std::fs::write(&shot, &bytes).unwrap();
+        std::fs::write(&shot, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap();
         let mut mapper = TaskMapper::new("task-1");
-        compiled(&mut mapper, "c1", &book);
-        attached(&mut mapper, "a1", &shot, "image");
-
-        let sent = artifacts(&mapper);
-        assert_eq!(
-            sent.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["book.pdf", "shot.png"]
-        );
-        assert!(sent[1].data.is_some(), "the newest, the image, went first");
-        assert_eq!(sent[0].data, None, "the PDF no longer fits under the cap");
-    }
-
-    /// Only a successful `add_attachment` of an image counts: a PDF it
-    /// names (the PDF path is `compile_typst`'s), a failed call and another
-    /// tool's `path` add nothing; an image named twice goes once.
-    #[test]
-    fn only_successful_image_attachments_ride() {
-        let dir = tempfile::tempdir().unwrap();
-        let shot = dir.path().join("shot.png");
-        std::fs::write(&shot, PNG).unwrap();
-        let doc = dir.path().join("doc.pdf");
-        std::fs::write(&doc, b"%PDF-1.7").unwrap();
-        let mut mapper = TaskMapper::new("task-1");
-        attached(&mut mapper, "a1", &doc, "pdf");
-        mapper.map(&tool_started("a2", "add_attachment"));
-        mapper.map(&SessionEvent::ToolCallError {
-            id: "a2".into(),
-            error: "Error: add_attachment: Attachment validation failed".into(),
-        });
-        mapper.map(&tool_started("w1", "write_file"));
+        mapper.map(&tool_started("c1", "compile_typst"));
         mapper.map(&SessionEvent::ToolCallResult {
-            id: "w1".into(),
+            id: "c1".into(),
+            result: serde_json::json!({"saved_path": book, "page_count": 1}).to_string(),
+        });
+        mapper.map(&tool_started("a1", "add_attachment"));
+        mapper.map(&SessionEvent::ToolCallResult {
+            id: "a1".into(),
             result: serde_json::json!({"path": shot, "file_type": "image"}).to_string(),
         });
-        assert!(artifacts(&mapper).is_empty());
 
-        attached(&mut mapper, "a3", &shot, "image");
-        attached(&mut mapper, "a4", &shot, "image");
-        let sent = artifacts(&mapper);
-        assert_eq!(sent.len(), 1, "{sent:?}");
-        assert_eq!(sent[0].media_type, "image/png");
+        let ParticipantFrame::Status { metadata, .. } = mapper.terminal() else {
+            panic!("expected a status frame");
+        };
+        let metadata = metadata.expect("the trace still rides");
+        assert!(
+            metadata.artifacts.is_empty(),
+            "no file rides the status: {:?}",
+            metadata.artifacts
+        );
+        let wire = serde_json::to_value(&metadata).unwrap();
+        assert!(wire.get("artifacts").is_none(), "{wire}");
+        assert!(book.exists(), "the PDF stays in the workspace");
     }
 
     /// AGE-932: this task's own heartbeats, a grandchild's, and a

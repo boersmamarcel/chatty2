@@ -102,9 +102,10 @@ const MEMORY: &[&str] = &["remember", "save_skill", "search_memory"];
 /// a group back on.
 const WEB: &[&str] = &["search_web", "fetch"];
 
-/// Showing an image file to the user (AGE-1502): a hosted worker's image
-/// rides back to its caller's chat. Offered only where the host builds the
-/// tool (it needs a place to queue the file).
+/// Showing an image file to the user (AGE-1502). A hosted worker's image no
+/// longer rides back on its terminal status (AGE-1747); it stays in the
+/// workspace. Offered only where the host builds the tool (it needs a place
+/// to queue the file).
 const ATTACH: &[&str] = &["add_attachment"];
 
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
