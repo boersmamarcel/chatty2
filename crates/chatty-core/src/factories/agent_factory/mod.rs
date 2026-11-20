@@ -710,7 +710,9 @@ impl AgentClient {
                     if read_tools.is_some() {
                         tracing::info!(workspace = %workspace_dir, "Data query tools enabled");
                         data_query_tools = Some((
-                            QueryDataTool::new(service.clone()),
+                            // Files a hive lease delivers in place (AGE-1652).
+                            QueryDataTool::new(service.clone())
+                                .with_http_reads(crate::tools::HttpReads::from_env()),
                             DescribeDataTool::new(service.clone()),
                             ProfileDataTool::new(service.clone()),
                             FileStructureTool::new(service.clone()),

@@ -18,11 +18,13 @@
 //! - Filesystem permission policy — `services::filesystem_service`.
 //! - Tool registration with the agent — `factories::agent_factory`.
 
+mod http;
 mod markdown;
 mod profile;
 mod sql;
 pub mod table_preview;
 
+pub use http::{HTTP_BEARER_ENV, HTTP_SCOPE_ENV, HTTPFS_ENV, HttpReads};
 use markdown::*;
 use profile::*;
 use sql::*;
@@ -85,18 +87,40 @@ pub enum DataQueryError {
 /// Disables external network access and sets the working directory so that
 /// relative file paths in SQL resolve within the workspace.
 pub(super) fn sandboxed_connection(workspace_root: &str) -> Result<Connection, DataQueryError> {
+    sandboxed_connection_with(workspace_root, None)
+}
+
+/// [`sandboxed_connection`], and with `http` the connection may also read
+/// files in place under one HTTP scope with a bearer (hive's ranged
+/// delivery, AGE-1652; see [`http`]). `httpfs` is loaded and the secret
+/// created before the configuration is locked.
+pub(super) fn sandboxed_connection_with(
+    workspace_root: &str,
+    http: Option<&HttpReads>,
+) -> Result<Connection, DataQueryError> {
     let conn = Connection::open_in_memory()
         .map_err(|e| DataQueryError::QueryFailed(format!("Failed to open DuckDB: {}", e)))?;
     let workspace_root = escape_sql_string(workspace_root);
 
+    if let Some(http) = http {
+        http.configure(&conn)?;
+    }
     // Lock DuckDB down to workspace-local files only. This still allows relative
     // reads inside the workspace but blocks arbitrary local file access and
-    // prevents the SQL itself from loosening the configuration again.
+    // prevents the SQL itself from loosening the configuration again. With
+    // HTTP reads, the scope is allowed beside the workspace.
+    let allowed = match http {
+        Some(http) => format!(
+            "['{workspace_root}', '{}']",
+            escape_sql_string(http.scope())
+        ),
+        None => format!("['{workspace_root}']"),
+    };
     conn.execute_batch(&format!(
         "SET autoinstall_known_extensions = false;
              SET autoload_known_extensions = false;
              SET allow_community_extensions = false;
-             SET allowed_directories = ['{workspace_root}'];
+             SET allowed_directories = {allowed};
              SET file_search_path = '{workspace_root}';
              SET enable_external_access = false;
              SET lock_configuration = true;"
@@ -135,11 +159,22 @@ pub struct QueryDataOutput {
 #[derive(Clone)]
 pub struct QueryDataTool {
     service: Arc<FileSystemService>,
+    /// Files delivered in place over HTTP (AGE-1652), if any.
+    http: Option<Arc<HttpReads>>,
 }
 
 impl QueryDataTool {
     pub fn new(service: Arc<FileSystemService>) -> Self {
-        Self { service }
+        Self {
+            service,
+            http: None,
+        }
+    }
+
+    /// Also read files in place under `http`'s scope with its bearer.
+    pub fn with_http_reads(mut self, http: Option<HttpReads>) -> Self {
+        self.http = http.map(Arc::new);
+        self
     }
 }
 
@@ -150,7 +185,7 @@ impl Tool for QueryDataTool {
     type Output = QueryDataOutput;
 
     fn description(&self) -> String {
-        "Run a SQL query against local Parquet, CSV, or JSON files using DuckDB.\n\
+        let mut description = "Run a SQL query against local Parquet, CSV, or JSON files using DuckDB.\n\
                           \n\
                           DuckDB can query files directly by path in SQL:\n\
                           - SELECT * FROM 'data/payments.csv' WHERE year = 2023 LIMIT 5\n\
@@ -162,7 +197,16 @@ impl Tool for QueryDataTool {
                           Prefer aggregate queries and small LIMITs for previews. \
                           For benchmark tasks with `/app/data`, use `/app/data/<file>` or `data/<file>`, not bare file names like `payments.csv`. \
                           Supports aggregations, joins, window functions, and all standard SQL."
-                    .to_string()
+                    .to_string();
+        if self.http.is_some() {
+            description.push_str(
+                "\n\nA file the task lists as \"not copied\" with a URL is read in place over HTTP: \
+                 SELECT … FROM read_parquet('http://…') with that exact URL. Authentication is \
+                 already configured; only the columns and row groups a query touches are fetched, \
+                 so prefer aggregate queries and column selections over SELECT *.",
+            );
+        }
+        description
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -199,6 +243,7 @@ impl Tool for QueryDataTool {
             .clamp(1, MAX_QUERY_MAX_ROWS);
         let workspace_root = self.service.workspace_root().to_path_buf();
         let query = args.query.clone();
+        let http = self.http.clone();
 
         info!(query = %args.query, max_rows, "Executing data query");
 
@@ -207,7 +252,7 @@ impl Tool for QueryDataTool {
             tokio::task::spawn_blocking(move || {
                 let workspace_root_str = workspace_root.to_string_lossy().to_string();
                 let rewritten_query = rewrite_query_file_literals(&query, &workspace_root)?;
-                let conn = sandboxed_connection(&workspace_root_str)?;
+                let conn = sandboxed_connection_with(&workspace_root_str, http.as_deref())?;
                 results_to_markdown(&conn, &rewritten_query, max_rows)
             })
             .await
