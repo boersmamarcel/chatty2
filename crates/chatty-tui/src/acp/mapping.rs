@@ -175,6 +175,7 @@ pub(super) fn tool_kind(name: &str) -> ToolKind {
         | "read_excel"
         | "read_docx"
         | "read_pptx"
+        | "list_archive"
         | "read_skill"
         | "list_directory"
         | "file_structure_detector"
@@ -188,7 +189,7 @@ pub(super) fn tool_kind(name: &str) -> ToolKind {
         | "git_diff"
         | "git_log" => ToolKind::Read,
         "write_file" | "apply_diff" | "create_directory" | "write_excel" | "edit_excel"
-        | "write_docx" | "write_pptx" => ToolKind::Edit,
+        | "write_docx" | "write_pptx" | "extract_archive" => ToolKind::Edit,
         "delete_file" => ToolKind::Delete,
         "move_file" => ToolKind::Move,
         "glob_search" | "search_code" | "find_files" | "find_definition" | "search_memory"

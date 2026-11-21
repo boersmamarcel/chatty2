@@ -181,6 +181,24 @@ pub(super) fn build_preamble(
         }
         tool_sections.push(format!("- **PDF tools**: {}", pdf_names.join(", ")));
     }
+    if tools.archive_list || tools.archive_extract {
+        let mut archive_desc = Vec::new();
+        if tools.archive_list {
+            archive_desc.push("**list_archive**");
+        }
+        if tools.archive_extract {
+            archive_desc.push("**extract_archive**");
+        }
+        tool_sections.push(format!(
+            "- {} (.zip archives: {}then read the extracted files with the readers above)",
+            archive_desc.join(" / "),
+            if tools.archive_extract {
+                "extract into a new folder, "
+            } else {
+                "list the members, "
+            }
+        ));
+    }
     if tools.data_query {
         tool_sections.push(
             "- **file_structure_detector / profile_data / describe_data / query_data** (generic DuckDB tools for CSV/JSON/Parquet and document outlines; start data-analysis tasks with file_structure_detector to map files/docs, then use profile_data or aggregate SQL for tables and one compact script when needed; profile_data includes likely important low-cardinality columns beyond the first few columns; when filtering CSV/JSON booleans or categorical strings in code, inspect distinct values or normalize with `str(value).strip().lower()`)"
@@ -899,6 +917,34 @@ mod tests {
         );
         assert!(result.contains("pdf_info"));
         assert!(result.contains("pdf_extract_text"));
+    }
+
+    /// AGE-1785: the zip tools are named only when they exist, and say the
+    /// extracted files are read with the other readers.
+    #[test]
+    fn archive_tools_section_included_only_with_the_tools() {
+        let preamble = |tools: &ToolAvailability| {
+            build_preamble(
+                "",
+                &ProviderType::OpenRouter,
+                tools,
+                &None,
+                &McpTools::none(),
+                &[],
+                &[],
+                &AgentRole::default(),
+                None,
+            )
+        };
+        let with = preamble(&ToolAvailability {
+            archive_list: true,
+            archive_extract: true,
+            ..Default::default()
+        });
+        assert!(with.contains("**list_archive** / **extract_archive** (.zip archives"));
+        assert!(with.contains("read the extracted files with the readers above"));
+        let without = preamble(&ToolAvailability::default());
+        assert!(!without.contains("list_archive") && !without.contains("extract_archive"));
     }
 
     #[test]

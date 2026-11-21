@@ -20,6 +20,8 @@ use crate::tools::{
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "archive")]
+use crate::tools::{ExtractArchiveTool, ListArchiveTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 #[cfg(feature = "docx")]
@@ -128,6 +130,10 @@ pub(super) struct NativeTools {
     pub pptx_read: Option<ReadPptxTool>,
     #[cfg(feature = "pptx")]
     pub pptx_write: Option<WritePptxTool>,
+    #[cfg(feature = "archive")]
+    pub archive_list: Option<ListArchiveTool>,
+    #[cfg(feature = "archive")]
+    pub archive_extract: Option<ExtractArchiveTool>,
     #[cfg(feature = "duckdb")]
     pub data_query: Option<DataQueryTools>,
     pub chart_tool: Option<CreateChartTool>,
@@ -296,6 +302,14 @@ impl NativeTools {
         if let Some(t) = self.pptx_write {
             b = add(b, profile, t);
         }
+        #[cfg(feature = "archive")]
+        if let Some(t) = self.archive_list {
+            b = add(b, profile, t);
+        }
+        #[cfg(feature = "archive")]
+        if let Some(t) = self.archive_extract {
+            b = add(b, profile, t);
+        }
         #[cfg(feature = "duckdb")]
         if let Some((qt, dt, pt, fsd)) = self.data_query {
             b = add(b, profile, qt);
@@ -393,6 +407,8 @@ macro_rules! native_tools {
         docx_write: $docx_write:expr,
         pptx_read: $pptx_read:expr,
         pptx_write: $pptx_write:expr,
+        archive_list: $archive_list:expr,
+        archive_extract: $archive_extract:expr,
         data_query: $data_query:expr,
         chart_tool: $chart_tool:expr,
         typst_tool: $typst_tool:expr,
@@ -450,6 +466,10 @@ macro_rules! native_tools {
             pptx_read: $pptx_read,
             #[cfg(feature = "pptx")]
             pptx_write: $pptx_write,
+            #[cfg(feature = "archive")]
+            archive_list: $archive_list,
+            #[cfg(feature = "archive")]
+            archive_extract: $archive_extract,
             #[cfg(feature = "duckdb")]
             data_query: $data_query,
             chart_tool: $chart_tool,

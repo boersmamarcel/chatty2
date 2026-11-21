@@ -166,6 +166,44 @@ pub(super) fn resolve_workspace_output(root: &Path, path: &str) -> Result<PathBu
     ))
 }
 
+/// Resolve a directory to create inside the workspace `root` (canonical),
+/// which must not exist yet: `extract_archive`'s destination (AGE-1785).
+///
+/// The same bounds as [`resolve_workspace_output`]: `~` refused, a relative
+/// path taken against `root`, symlinks in the existing part resolved before
+/// the check, the workspace root itself refused. Anything already at the
+/// path (a file, a directory, a symlink, dangling or not) is refused too.
+#[cfg_attr(not(feature = "archive"), allow(dead_code))]
+pub(super) fn resolve_fresh_workspace_dir(root: &Path, path: &str) -> Result<PathBuf, String> {
+    if path.trim().is_empty() {
+        return Err("Destination cannot be empty".to_string());
+    }
+    if path == "~" || path.starts_with("~/") {
+        return Err(format!(
+            "Destination '{path}' is home-relative; '~' is not allowed"
+        ));
+    }
+    let p = Path::new(path);
+    let candidate = normalize_path(&if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    });
+    if candidate != root && entry_exists(&candidate) {
+        return Err(format!("Destination '{path}' already exists"));
+    }
+    let resolved = anchor_to_disk(&candidate)?;
+    if !resolved.starts_with(root) || resolved == root {
+        return Err(format!(
+            "Destination '{path}' is outside the workspace directory"
+        ));
+    }
+    if entry_exists(&resolved) {
+        return Err(format!("Destination '{path}' already exists"));
+    }
+    Ok(resolved)
+}
+
 /// Ask for approval to write `path` under `approval`'s mode; `None` (no
 /// approval wired, i.e. not an agent's tool) lets the write through.
 /// Returns whether the write may go ahead.

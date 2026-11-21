@@ -51,6 +51,8 @@ use crate::tools::{
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
 #[cfg(feature = "excel")]
 use crate::tools::{EditExcelTool, ReadExcelTool, WriteExcelTool};
+#[cfg(feature = "archive")]
+use crate::tools::{ExtractArchiveTool, ListArchiveTool};
 #[cfg(feature = "pdf")]
 use crate::tools::{PdfExtractTextTool, PdfInfoTool, PdfToImageTool};
 #[cfg(feature = "docx")]
@@ -505,6 +507,10 @@ impl AgentClient {
         let mut pptx_read_tool: Option<ReadPptxTool> = None;
         #[cfg(feature = "pptx")]
         let mut pptx_write_tool: Option<WritePptxTool> = None;
+        #[cfg(feature = "archive")]
+        let mut archive_list_tool: Option<ListArchiveTool> = None;
+        #[cfg(feature = "archive")]
+        let mut archive_extract_tool: Option<ExtractArchiveTool> = None;
         #[cfg(feature = "duckdb")]
         let mut data_query_tools: Option<DataQueryTools> = None;
         // Where a relative output path of the tools below and the document
@@ -708,6 +714,21 @@ impl AgentClient {
                         pptx_write_tool = pending_write_approvals.as_ref().map(|approvals| {
                             tracing::info!(workspace = %workspace_dir, "PPTX write tool enabled");
                             WritePptxTool::new(service.clone())
+                                .with_write_approval(write_approval_mode.clone(), approvals.clone())
+                                .with_output_root(output_root.clone())
+                        });
+                    }
+
+                    // Zip archive tools (AGE-1785): listing reads, extracting
+                    // writes (into a new folder only) and asks like a write.
+                    #[cfg(feature = "archive")]
+                    if read_tools.is_some() {
+                        archive_list_tool = Some(ListArchiveTool::new(service.clone()));
+                    }
+                    #[cfg(feature = "archive")]
+                    if write_tools.is_some() {
+                        archive_extract_tool = pending_write_approvals.as_ref().map(|approvals| {
+                            ExtractArchiveTool::new(service.clone())
                                 .with_write_approval(write_approval_mode.clone(), approvals.clone())
                                 .with_output_root(output_root.clone())
                         });
@@ -1295,6 +1316,26 @@ impl AgentClient {
                     false
                 }
             },
+            archive_list: {
+                #[cfg(feature = "archive")]
+                {
+                    archive_list_tool.is_some()
+                }
+                #[cfg(not(feature = "archive"))]
+                {
+                    false
+                }
+            },
+            archive_extract: {
+                #[cfg(feature = "archive")]
+                {
+                    archive_extract_tool.is_some()
+                }
+                #[cfg(not(feature = "archive"))]
+                {
+                    false
+                }
+            },
             data_query: {
                 #[cfg(feature = "duckdb")]
                 {
@@ -1628,6 +1669,8 @@ impl AgentClient {
             docx_write: docx_write_tool,
             pptx_read: pptx_read_tool,
             pptx_write: pptx_write_tool,
+            archive_list: archive_list_tool,
+            archive_extract: archive_extract_tool,
             data_query: data_query_tools,
             chart_tool: chart_tool,
             typst_tool: typst_tool,

@@ -72,6 +72,8 @@ tools = [
     ("pdf_to_image", "pdf", "pdf_to_image_tool.rs", "feature: pdf"),
     ("pdf_info", "pdf", "pdf_info_tool.rs", "feature: pdf"),
     ("pdf_extract_text", "pdf", "pdf_extract_text_tool.rs", "feature: pdf"),
+    ("list_archive", "documents", "archive_tool.rs", "feature: archive; fs_read; zip only"),
+    ("extract_archive", "documents", "archive_tool.rs", "feature: archive; fs_write + approval; into a new folder only, capped (members, size, ratio), no symlinks or `..`"),
     ("query_data", "data", "data_query_tool/", "feature: duckdb"),
     ("describe_data", "data", "data_query_tool/", "feature: duckdb"),
     ("profile_data", "data", "data_query_tool/", "feature: duckdb"),
