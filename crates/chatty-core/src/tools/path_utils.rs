@@ -74,12 +74,28 @@ pub(super) fn under_output_root<'a>(output_root: Option<&Path>, path: &'a str) -
         Some(output_root)
             if !path.trim().is_empty()
                 && !path.starts_with('~')
-                && !Path::new(path).is_absolute() =>
+                && !Path::new(path).is_absolute()
+                && !already_under(output_root, path) =>
         {
             Cow::Owned(output_root.join(path).to_string_lossy().into_owned())
         }
         _ => Cow::Borrowed(path),
     }
+}
+
+/// A relative `path` that already starts with `output_root` (`outputs/x` or
+/// `./outputs/x` with root `outputs`) is not joined again: a model told to
+/// write to `outputs/` would otherwise get `outputs/outputs/x` (AGE-1784).
+fn already_under(output_root: &Path, path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .find(|c| !matches!(c, std::path::Component::CurDir))
+        .is_some_and(|first| {
+            let mut root = output_root
+                .components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir));
+            root.next() == Some(first) && root.next().is_none()
+        })
 }
 
 /// One sentence for a writing tool's description saying where a relative
@@ -343,6 +359,18 @@ mod tests {
         assert_eq!(
             resolve_workspace_output(&root, &under_output_root(outputs, inside)).unwrap(),
             root.join("elsewhere/x.pdf")
+        );
+        // AGE-1784: a path already under the root is not prefixed twice.
+        for given in ["outputs/report.pdf", "./outputs/report.pdf", "report.pdf"] {
+            assert_eq!(
+                resolve_workspace_output(&root, &under_output_root(outputs, given)).unwrap(),
+                root.join("outputs/report.pdf"),
+                "{given}"
+            );
+        }
+        assert_eq!(
+            resolve_workspace_output(&root, &under_output_root(outputs, "outputs2/x.pdf")).unwrap(),
+            root.join("outputs/outputs2/x.pdf")
         );
         assert_eq!(under_output_root(None, "report.pdf"), "report.pdf");
         for refused in ["~", "~/x.pdf", ""] {
