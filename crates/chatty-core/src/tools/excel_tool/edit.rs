@@ -13,7 +13,9 @@ use crate::services::filesystem_service::FileSystemService;
 use crate::settings::models::execution_settings::ApprovalMode;
 
 use super::ExcelToolError;
-use super::formula_eval::{CellInput, Evaluation, WorkbookModel, XlError, XlValue, evaluate};
+use super::formula_eval::{
+    CellInput, Evaluation, WorkbookModel, XlError, XlValue, col_letters, evaluate,
+};
 use super::parsing::{
     build_format, calamine_to_json, parse_cell_ref, parse_range, write_cell_value,
 };
@@ -441,7 +443,7 @@ fn apply_preserving_template_edits(
                 // A new formula starts at 0, not at the cell's old value;
                 // `refresh_cached_results` replaces it when it can (AGE-1790).
                 ws.cell_mut(cell.as_str())
-                    .set_formula(formula.as_str())
+                    .set_formula(formula.strip_prefix('=').unwrap_or(formula))
                     .set_formula_result_number(0);
             }
             EditOperation::FormatRange { .. } => {
@@ -496,6 +498,7 @@ impl Tool for EditExcelTool {
                          Only use when modifications are needed.\n\
                          \n\
                          Supported operations: set_cell, set_range, add_sheet, delete_rows, set_formula, format_range\n\
+                         In fallback mode, delete_rows moves formulas and formats with their rows but does not rewrite references inside formula text.\n\
                          Formula results are recomputed over the whole workbook; any formula cell the tool cannot compute is listed in the result, and previews may show a stale value or 0 for it until Excel recalculates.\n\
                          \n\
                          Examples:\n\
@@ -635,9 +638,11 @@ impl Tool for EditExcelTool {
                 ))
             })?;
 
-            let mut rows = Vec::new();
+            // calamine's range starts at the first used cell, not at A1.
+            let (start_row, start_col) = range.start().unwrap_or((0, 0));
+            let mut rows = vec![Vec::new(); start_row as usize];
             for r in 0..range.height() {
-                let mut row_data = Vec::new();
+                let mut row_data = vec![Value::Null; start_col as usize];
                 for c in 0..range.width() {
                     let val = range
                         .get((r, c))
@@ -679,6 +684,8 @@ impl Tool for EditExcelTool {
                         row.push(Value::Null);
                     }
                     row[c as usize] = value.clone();
+                    // A value replaces an earlier formula on the cell.
+                    sd.formulas.retain(|(fr, fc, _)| !(*fr == r && *fc == c));
                 }
                 EditOperation::SetRange {
                     sheet,
@@ -707,6 +714,9 @@ impl Tool for EditExcelTool {
                                 row.push(Value::Null);
                             }
                             row[target_col] = val.clone();
+                            sd.formulas.retain(|(fr, fc, _)| {
+                                !(*fr as usize == target_row && *fc as usize == target_col)
+                            });
                         }
                     }
                 }
@@ -742,6 +752,44 @@ impl Tool for EditExcelTool {
                     if idx < sd.rows.len() {
                         sd.rows.drain(idx..end);
                     }
+                    // Formulas and formats below move up with their rows;
+                    // those inside the deleted rows go. Formula text is not
+                    // rewritten (Excel would adjust references; we do not).
+                    let (d0, d1) = (idx as i64, (idx + count) as i64);
+                    let shift = |r: i64| if r >= d1 { r - *count as i64 } else { r };
+                    sd.formulas.retain_mut(|(fr, _, _)| {
+                        let r = i64::from(*fr);
+                        if r >= d0 && r < d1 {
+                            return false;
+                        }
+                        *fr = shift(r) as u32;
+                        true
+                    });
+                    sd.formats.retain_mut(|(range_str, spec)| {
+                        let Ok(((sr, sc), (er, ec))) = parse_range(&spec.range) else {
+                            return true;
+                        };
+                        let (sr, er) = (i64::from(sr), i64::from(er));
+                        let ns = if sr >= d0 && sr < d1 { d0 } else { shift(sr) };
+                        let ne = if er >= d0 && er < d1 {
+                            d0 - 1
+                        } else {
+                            shift(er)
+                        };
+                        if ns > ne {
+                            return false;
+                        }
+                        let new_range = format!(
+                            "{}{}:{}{}",
+                            col_letters(sc),
+                            ns + 1,
+                            col_letters(ec),
+                            ne + 1
+                        );
+                        *range_str = new_range.clone();
+                        spec.range = new_range;
+                        true
+                    });
                 }
                 EditOperation::SetFormula {
                     sheet,
@@ -852,7 +900,22 @@ impl Tool for EditExcelTool {
                             .and_then(|row| row.get(c as usize))
                             .cloned()
                             .unwrap_or(Value::Null);
-                        write_cell_value(ws, r, c, &existing, Some(&fmt))?;
+                        // A formatted formula cell stays a formula.
+                        if let Some((_, _, formula)) = sd
+                            .formulas
+                            .iter()
+                            .rev()
+                            .find(|(fr, fc, _)| *fr == r && *fc == c)
+                        {
+                            let mut f = Formula::new(formula.as_str());
+                            if let Some(v) = evaluation.result(sheet_index, r, c) {
+                                f = f.set_result(v.to_cached_result());
+                            }
+                            ws.write_formula_with_format(r, c, f, &fmt)
+                                .map_err(|e| ExcelToolError::WriteError(e.to_string()))?;
+                        } else {
+                            write_cell_value(ws, r, c, &existing, Some(&fmt))?;
+                        }
                     }
                 }
             }
