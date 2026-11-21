@@ -78,13 +78,15 @@ In the desktop app you can also share the terminals in its own [terminal dock](.
 
 ### Data and documents
 
-The agent can run SQL over CSV, Parquet and JSON files in the workspace and describe their schema — Excel and ODS files too — read and write Excel, Word and PowerPoint files, extract text and page images from PDFs, typeset PDFs and draw charts. Results open as [artifacts](./chatting.md) beside the chat.
+The agent can run SQL over CSV, Parquet and JSON files in the workspace and describe their schema — Excel and ODS files too — read and write Excel, Word and PowerPoint files, extract text and page images from PDFs, list and unpack `.zip` archives, typeset PDFs and draw charts. Results open as [artifacts](./chatting.md) beside the chat.
 
 *Load `sales.parquet`, chart revenue by region for the last four quarters, and write a two-page PDF summary.*
 
 Reading and querying never ask. Writing spreadsheets and other files follows your approval mode.
 
 Typeset PDFs (`compile_typst`) and charts saved to a file (`create_chart` with a save path) are written only inside the workspace, need filesystem writes turned on, and follow your approval mode too; a `~` path is refused. Without writes, a chart is still shown in the chat but is not saved. With `output_root` set in the execution settings (a directory inside the workspace, such as `outputs`), a relative path for these tools and for `write_docx`, `write_excel` and `write_pptx` is saved under that directory; an absolute path inside the workspace is kept as given. It is unset by default.
+
+`list_archive` shows a zip's members, and `extract_archive` unpacks it into a new folder (by default beside the archive, so `in/pack.zip` becomes `in/pack/`; a relative `dest` goes under `output_root`). Extraction asks like a write, never overwrites, and refuses a folder that already exists, unsafe paths, symlinks, encrypted members, and archives over 1,000 members or 200 MiB unpacked. Read the extracted files with the document tools.
 
 ### Web and the built-in browser
 
