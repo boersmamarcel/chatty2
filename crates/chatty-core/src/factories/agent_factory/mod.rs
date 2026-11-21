@@ -2157,6 +2157,7 @@ mod tests {
     /// Tool names an Ollama agent is built with when filesystem writes are
     /// `writes_on` in a temp workspace, with or without a write-approval
     /// store (AGE-534).
+    #[cfg(feature = "math-render")]
     async fn tool_names_for_writes(writes_on: bool, with_store: bool) -> Vec<String> {
         use super::{AgentBuildContext, AgentClient, AgentServices};
         use crate::models::write_approval_store::WriteApprovalStore;

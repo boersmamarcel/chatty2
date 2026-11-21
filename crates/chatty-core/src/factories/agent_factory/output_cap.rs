@@ -850,6 +850,8 @@ mod tests {
     /// run is over the window: every `max_tokens` plus the real input fits.
     /// (A cap that large is also the history's reply reserve, so the
     /// history is shaped to some 12k tokens, not 20k.)
+    // The fixture sizes are calibrated to the tool block of the all-tools build; a smaller one shifts the history budget.
+    #[cfg(feature = "all-tools")]
     #[tokio::test]
     async fn a_long_run_with_a_large_output_cap_fits_every_request() {
         let daemon = FakeDaemon::scripted(analyst_script())
