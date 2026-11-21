@@ -328,7 +328,7 @@ impl ListToolsTool {
         if tools.archive_extract {
             native_tools.push(ToolInfo {
                 name: "extract_archive".to_string(),
-                description: "Extract a zip archive (.zip) into a new folder in the workspace and list the extracted files, to read with the other readers. Overwrites nothing; refuses zip bombs, '..' or absolute member paths and symlinks.".to_string(),
+                description: "Extract a zip archive (.zip) into a new folder at the workspace root (not the output folder) and list the extracted files, to read with the other readers. Overwrites nothing; refuses zip bombs, '..' or absolute member paths and symlinks.".to_string(),
                 source: "native".to_string(),
             });
         }
