@@ -511,6 +511,8 @@ async fn the_context_guard_shapes_inside_the_tool_loop() {
 /// The fixture window leaves a budget the 12 KB listing exceeds half of, so
 /// it is cut at recording; the cut form then fits the budget, so request 3
 /// is not shaped and carries it unchanged.
+// The 8 KB bound assumes the tool block of the all-tools build; a smaller one raises the recording cap.
+#[cfg(feature = "all-tools")]
 #[tokio::test]
 async fn a_result_over_the_recording_cap_is_recorded_truncated_once() {
     let workspace = workspace_with_payload(150);
