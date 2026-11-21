@@ -1426,4 +1426,239 @@ mod tests {
             "D2 and D3 are computed"
         );
     }
+
+    /// AGE-1791: a sheet whose first used cell is B3 keeps every cell where it
+    /// was through the rewrite fallback.
+    #[tokio::test]
+    async fn fallback_keeps_cell_positions_when_data_starts_at_b3() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("offset.xlsx");
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet().set_name("S").unwrap();
+        sheet.write_string(2, 1, "head").unwrap();
+        sheet.write_number(2, 2, 1.0).unwrap();
+        sheet.write_number(3, 1, 7.0).unwrap();
+        sheet.write_number(4, 3, 9.0).unwrap();
+        book.save(&input).unwrap();
+        edit_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: input.to_str().unwrap().to_string(),
+                    output_path: Some("out.xlsx".to_string()),
+                    operations: vec![
+                        serde_json::from_value(serde_json::json!({
+                            "type": "format_range", "sheet": "S", "range": "B3:B3", "bold": true
+                        }))
+                        .unwrap(),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let out = tmp.path().join("out.xlsx");
+        assert_eq!(cached(&out, "S", "B3"), Data::String("head".into()));
+        assert_number(&out, "S", "C3", 1.0);
+        assert_number(&out, "S", "B4", 7.0);
+        assert_number(&out, "S", "D5", 9.0);
+        assert_eq!(cached(&out, "S", "A1"), Data::Empty);
+    }
+
+    /// AGE-1791: a formula inside a formatted range stays a formula, with its
+    /// computed cached value.
+    #[tokio::test]
+    async fn fallback_format_range_keeps_formulas() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = create_test_xlsx(tmp.path(), "plain.xlsx");
+        edit_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: plain.to_str().unwrap().to_string(),
+                    output_path: Some("out.xlsx".to_string()),
+                    operations: vec![
+                        EditOperation::SetCell {
+                            sheet: "Data".to_string(),
+                            cell: "B2".to_string(),
+                            value: serde_json::json!(21),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "Data".to_string(),
+                            cell: "C2".to_string(),
+                            formula: "B2*2".to_string(),
+                        },
+                        serde_json::from_value(serde_json::json!({
+                            "type": "format_range", "sheet": "Data", "range": "B2:D2", "bold": true
+                        }))
+                        .unwrap(),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let out = tmp.path().join("out.xlsx");
+        let book = umya_spreadsheet::reader::xlsx::read(&out).unwrap();
+        let cell = book.sheet_by_name("Data").unwrap().cell("C2").unwrap();
+        assert!(cell.is_formula(), "C2 must stay a formula");
+        assert_eq!(cell.formula(), "B2*2");
+        assert_number(&out, "Data", "C2", 42.0);
+    }
+
+    /// AGE-1791: one leading `=` is not stored in the umya path, and the
+    /// evaluator still computes the formula.
+    #[tokio::test]
+    async fn set_formula_strips_one_leading_equals_in_umya_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = create_test_xlsx(tmp.path(), "plain.xlsx");
+        edit_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: plain.to_str().unwrap().to_string(),
+                    output_path: Some("out.xlsx".to_string()),
+                    operations: vec![
+                        EditOperation::SetCell {
+                            sheet: "Data".to_string(),
+                            cell: "A1".to_string(),
+                            value: serde_json::json!(5),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "Data".to_string(),
+                            cell: "E1".to_string(),
+                            formula: "=A1*2".to_string(),
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let out = tmp.path().join("out.xlsx");
+        let book = umya_spreadsheet::reader::xlsx::read(&out).unwrap();
+        let cell = book.sheet_by_name("Data").unwrap().cell("E1").unwrap();
+        assert_eq!(cell.formula(), "A1*2");
+        assert_number(&out, "Data", "E1", 10.0);
+    }
+
+    /// AGE-1791: in the fallback, a later set_cell/set_range replaces an
+    /// earlier set_formula on the same cell.
+    #[tokio::test]
+    async fn fallback_set_cell_replaces_an_earlier_formula() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plain = create_test_xlsx(tmp.path(), "plain.xlsx");
+        edit_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: plain.to_str().unwrap().to_string(),
+                    output_path: Some("out.xlsx".to_string()),
+                    operations: vec![
+                        EditOperation::SetFormula {
+                            sheet: "Data".to_string(),
+                            cell: "D2".to_string(),
+                            formula: "B2*2".to_string(),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "Data".to_string(),
+                            cell: "D3".to_string(),
+                            formula: "B3*2".to_string(),
+                        },
+                        EditOperation::SetCell {
+                            sheet: "Data".to_string(),
+                            cell: "D2".to_string(),
+                            value: serde_json::json!(5),
+                        },
+                        EditOperation::SetRange {
+                            sheet: "Data".to_string(),
+                            start_cell: "D3".to_string(),
+                            data: vec![vec![serde_json::json!(6)]],
+                        },
+                        serde_json::from_value(serde_json::json!({
+                            "type": "format_range", "sheet": "Data", "range": "A1:A1", "bold": true
+                        }))
+                        .unwrap(),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let out = tmp.path().join("out.xlsx");
+        let book = umya_spreadsheet::reader::xlsx::read(&out).unwrap();
+        let ws = book.sheet_by_name("Data").unwrap();
+        assert!(!ws.cell("D2").unwrap().is_formula());
+        assert!(!ws.cell("D3").unwrap().is_formula());
+        assert_number(&out, "Data", "D2", 5.0);
+        assert_number(&out, "Data", "D3", 6.0);
+    }
+
+    /// AGE-1791: in the fallback, delete_rows moves formulas and formats up
+    /// with the rows below, and drops those inside the deleted rows.
+    #[tokio::test]
+    async fn fallback_delete_rows_shifts_formulas_and_formats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("rows.xlsx");
+        let mut book = rust_xlsxwriter::Workbook::new();
+        let sheet = book.add_worksheet().set_name("S").unwrap();
+        for r in 0..5u32 {
+            sheet.write_number(r, 0, f64::from(r + 1)).unwrap();
+        }
+        book.save(&input).unwrap();
+        let fmt = |range: &str| {
+            serde_json::from_value(serde_json::json!({
+                "type": "format_range", "sheet": "S", "range": range, "bold": true
+            }))
+            .unwrap()
+        };
+        edit_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: input.to_str().unwrap().to_string(),
+                    output_path: Some("out.xlsx".to_string()),
+                    operations: vec![
+                        EditOperation::SetFormula {
+                            sheet: "S".to_string(),
+                            cell: "B2".to_string(),
+                            formula: "1+1".to_string(),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "S".to_string(),
+                            cell: "B5".to_string(),
+                            formula: "7*10".to_string(),
+                        },
+                        fmt("A2:A2"),
+                        fmt("A5:A5"),
+                        EditOperation::DeleteRows {
+                            sheet: "S".to_string(),
+                            start_row: 2,
+                            count: 1,
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let out = tmp.path().join("out.xlsx");
+        // Old row 5 is now row 4: its value 5, its formula, its bold.
+        assert_number(&out, "S", "A4", 5.0);
+        assert_number(&out, "S", "B4", 70.0);
+        assert_eq!(cached(&out, "S", "B2"), Data::Empty);
+        assert_eq!(cached(&out, "S", "B5"), Data::Empty);
+        let book = umya_spreadsheet::reader::xlsx::read(&out).unwrap();
+        let ws = book.sheet_by_name("S").unwrap();
+        assert!(ws.cell("B4").unwrap().is_formula());
+        let bold = |c: &str| {
+            ws.cell(c)
+                .unwrap()
+                .style()
+                .font()
+                .is_some_and(|f| f.font_bold().val())
+        };
+        assert!(bold("A4"), "format moved with its row");
+        assert!(!bold("A2"), "the deleted row's format is gone");
+    }
 }
