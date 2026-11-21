@@ -1,6 +1,6 @@
 use calamine::{Reader, open_workbook_auto};
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
-use rust_xlsxwriter::Workbook;
+use rust_xlsxwriter::{Formula, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
@@ -13,10 +13,11 @@ use crate::services::filesystem_service::FileSystemService;
 use crate::settings::models::execution_settings::ApprovalMode;
 
 use super::ExcelToolError;
+use super::formula_eval::{CellInput, Evaluation, WorkbookModel, XlError, XlValue, evaluate};
 use super::parsing::{
     build_format, calamine_to_json, parse_cell_ref, parse_range, write_cell_value,
 };
-use super::write::CellFormatSpec;
+use super::write::{CellFormatSpec, formula_warning};
 
 // Re-use the write approval helper from filesystem_write_tool
 use super::super::filesystem_write_tool::request_write_approval;
@@ -278,11 +279,87 @@ fn write_umya_cell_value(cell: &mut umya_spreadsheet::Cell, value: &Value) {
     }
 }
 
+/// A umya cell's stored value, as the evaluator sees it. Values read from a
+/// file are typed lazily; this follows umya's own guess.
+fn umya_value(raw: &umya_spreadsheet::CellRawValue) -> XlValue {
+    use umya_spreadsheet::CellRawValue;
+    match raw {
+        CellRawValue::Empty => XlValue::Empty,
+        CellRawValue::Numeric(n) => XlValue::Number(*n),
+        CellRawValue::Bool(b) => XlValue::Bool(*b),
+        CellRawValue::Error(e) => {
+            XlValue::Error(XlError::parse(&e.to_string()).unwrap_or(XlError::Value))
+        }
+        CellRawValue::String(s) => XlValue::Text(s.to_string()),
+        CellRawValue::RichText(t) => XlValue::Text(t.text().into_owned()),
+        CellRawValue::Lazy(s) => {
+            if s.is_empty() {
+                XlValue::Empty
+            } else if s.eq_ignore_ascii_case("TRUE") {
+                XlValue::Bool(true)
+            } else if s.eq_ignore_ascii_case("FALSE") {
+                XlValue::Bool(false)
+            } else if let Some(e) = XlError::parse(s) {
+                XlValue::Error(e)
+            } else if let Some(n) = s.parse::<f64>().ok().filter(|n| n.is_finite()) {
+                XlValue::Number(n)
+            } else {
+                XlValue::Text(s.to_string())
+            }
+        }
+    }
+}
+
+/// Recompute the cached result of every formula in the edited workbook,
+/// including cells this edit did not touch (AGE-1790). A formula that
+/// cannot be evaluated keeps the cached value it has: Excel's last result
+/// for one already in the file, 0 for one this edit set.
+fn refresh_cached_results(workbook: &mut umya_spreadsheet::Workbook) -> Evaluation {
+    let sheets = workbook.sheet_collection_mut();
+    let mut model = WorkbookModel::default();
+    for ws in sheets.iter() {
+        let s = model.add_sheet(ws.name());
+        for cell in ws.collection_to_hashmap().values() {
+            let coord = cell.coordinate();
+            let (Some(r), Ok(c)) = (
+                coord.row_num().checked_sub(1),
+                u16::try_from(coord.col_num().saturating_sub(1)),
+            ) else {
+                continue;
+            };
+            let input = if cell.is_formula() {
+                CellInput::Formula(cell.formula().to_string())
+            } else {
+                CellInput::Value(umya_value(cell.raw_value()))
+            };
+            model.set(s, r, c, input);
+        }
+    }
+    let evaluation = evaluate(&model);
+    for (s, ws) in sheets.iter_mut().enumerate() {
+        for ((r, c), v) in evaluation.sheet_results(s) {
+            let cell = ws.cell_mut((u32::from(c) + 1, r + 1));
+            match v {
+                XlValue::Number(n) => cell.set_formula_result_number(*n),
+                XlValue::Text(t) => cell.set_formula_result_string(t.as_str()),
+                XlValue::Bool(b) => cell.set_formula_result_bool(*b),
+                XlValue::Error(e) => match e.as_str().parse() {
+                    Ok(e) => cell.set_formula_result_error(e),
+                    Err(_) => cell.set_formula_result_number(0),
+                },
+                XlValue::Empty => cell.set_formula_result_number(0),
+            };
+        }
+    }
+    evaluation
+}
+
+/// Returns the final sheet names and the formula evaluation.
 fn apply_preserving_template_edits(
     canonical: &Path,
     output_canonical: &Path,
     operations: &[EditOperation],
-) -> Result<Vec<String>, ExcelToolError> {
+) -> Result<(Vec<String>, Evaluation), ExcelToolError> {
     let mut workbook = reader::xlsx::read(canonical).map_err(|e| {
         ExcelToolError::OperationError(anyhow::anyhow!(
             "Failed to open '{}' with style-preserving editor: {}",
@@ -361,7 +438,11 @@ fn apply_preserving_template_edits(
                 let ws = workbook.sheet_by_name_mut(sheet).map_err(|_| {
                     ExcelToolError::OperationError(anyhow::anyhow!("Sheet '{}' not found", sheet))
                 })?;
-                ws.cell_mut(cell.as_str()).set_formula(formula.as_str());
+                // A new formula starts at 0, not at the cell's old value;
+                // `refresh_cached_results` replaces it when it can (AGE-1790).
+                ws.cell_mut(cell.as_str())
+                    .set_formula(formula.as_str())
+                    .set_formula_result_number(0);
             }
             EditOperation::FormatRange { .. } => {
                 return Err(ExcelToolError::OperationError(anyhow::anyhow!(
@@ -370,6 +451,8 @@ fn apply_preserving_template_edits(
             }
         }
     }
+
+    let evaluation = refresh_cached_results(&mut workbook);
 
     // In memory, then never through a symlink at the target (AGE-1113):
     // `writer::xlsx::write` would `File::create` a `.xlsxtmp` sibling,
@@ -389,11 +472,12 @@ fn apply_preserving_template_edits(
             ))
         })?;
 
-    Ok(workbook
+    let names = workbook
         .sheet_collection_no_check()
         .iter()
         .map(|s| s.name().to_string())
-        .collect())
+        .collect();
+    Ok((names, evaluation))
 }
 
 impl Tool for EditExcelTool {
@@ -412,6 +496,7 @@ impl Tool for EditExcelTool {
                          Only use when modifications are needed.\n\
                          \n\
                          Supported operations: set_cell, set_range, add_sheet, delete_rows, set_formula, format_range\n\
+                         Formula results are recomputed over the whole workbook; any formula cell the tool cannot compute is listed in the result, and previews may show a stale value or 0 for it until Excel recalculates.\n\
                          \n\
                          Examples:\n\
                          - Set a cell: {\"path\": \"data.xlsx\", \"operations\": [{\"type\": \"set_cell\", \"sheet\": \"Sheet1\", \"cell\": \"B2\", \"value\": 42}]}\n\
@@ -509,7 +594,7 @@ impl Tool for EditExcelTool {
                 .all(|op| !matches!(op, EditOperation::FormatRange { .. }));
 
         if use_style_preserving_mode {
-            let final_sheet_names =
+            let (final_sheet_names, evaluation) =
                 apply_preserving_template_edits(&canonical, &output_canonical, &args.operations)?;
             return Ok(EditExcelOutput {
                 path: output_canonical.display().to_string(),
@@ -521,7 +606,13 @@ impl Tool for EditExcelTool {
                     canonical.display(),
                     output_canonical.display()
                 ),
-                warning: None,
+                warning: evaluation.summary().map(|s| {
+                    format!(
+                        "{s}. They keep their previous cached value (0 for a formula set by this edit), \
+                         possibly stale if this edit changed their inputs: Excel recalculates them on open, \
+                         but previews and readers that trust cached values show that value."
+                    )
+                }),
             });
         }
 
@@ -704,11 +795,29 @@ impl Tool for EditExcelTool {
             }
         }
 
-        // PHASE 3: Write back with rust_xlsxwriter
+        // PHASE 3: Precompute the formulas over the edited cells (AGE-1790)
+        let mut model = WorkbookModel::default();
+        for sd in &sheets {
+            let s = model.add_sheet(&sd.name);
+            for (r, row) in sd.rows.iter().enumerate() {
+                for (c, val) in row.iter().enumerate() {
+                    if let (Ok(r), Ok(c)) = (u32::try_from(r), u16::try_from(c)) {
+                        model.set(s, r, c, CellInput::Value(XlValue::from_json(val)));
+                    }
+                }
+            }
+            for (r, c, formula) in &sd.formulas {
+                model.set(s, *r, *c, CellInput::Formula(formula.clone()));
+            }
+        }
+        let mut evaluation = evaluate(&model);
+        evaluation.demote_unstorable_text();
+
+        // PHASE 4: Write back with rust_xlsxwriter
         let mut wb = Workbook::new();
         let final_sheet_names: Vec<String> = sheets.iter().map(|s| s.name.clone()).collect();
 
-        for sd in &sheets {
+        for (sheet_index, sd) in sheets.iter().enumerate() {
             let ws = wb
                 .add_worksheet()
                 .set_name(&sd.name)
@@ -723,7 +832,11 @@ impl Tool for EditExcelTool {
 
             // Write formulas
             for (r, c, formula) in &sd.formulas {
-                ws.write_formula(*r, *c, formula.as_str())
+                let mut f = Formula::new(formula.as_str());
+                if let Some(v) = evaluation.result(sheet_index, *r, *c) {
+                    f = f.set_result(v.to_cached_result());
+                }
+                ws.write_formula(*r, *c, f)
                     .map_err(|e| ExcelToolError::WriteError(e.to_string()))?;
             }
 
@@ -763,8 +876,13 @@ impl Tool for EditExcelTool {
                 output_canonical.display()
             ),
             warning: Some(
-                "Original formatting, macros, charts, and images may have been lost during the read-modify-write cycle."
-                    .to_string(),
+                std::iter::once(
+                    "Original formatting, macros, charts, and images may have been lost during the read-modify-write cycle."
+                        .to_string(),
+                )
+                .chain(formula_warning(&evaluation))
+                .collect::<Vec<_>>()
+                .join(" "),
             ),
         })
     }
