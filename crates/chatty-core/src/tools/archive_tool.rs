@@ -287,42 +287,64 @@ fn write_members(
             .by_index(member.index)
             .map_err(|e| refused(format!("could not read '{}': {e}", member.path.display())))?;
         let cap = limits.member_cap(member.compressed_size);
-        let mut written: u64 = 0;
-        loop {
-            let n = reader.read(&mut buf).map_err(|e| {
-                refused(format!("could not unpack '{}': {e}", member.path.display()))
-            })?;
-            if n == 0 {
-                break;
-            }
-            written += n as u64;
-            total += n as u64;
-            if written > member.declared_size {
-                return Err(refused(format!(
-                    "member '{}' unpacks to more than the {} bytes its header declares (a zip bomb?)",
-                    member.path.display(),
-                    member.declared_size
-                )));
-            }
-            if written > cap {
-                return Err(refused(format!(
-                    "member '{}' unpacks past the {}:1 compression ratio allowed (a zip bomb?)",
-                    member.path.display(),
-                    limits.max_ratio
-                )));
-            }
-            if total > limits.max_total_bytes {
-                return Err(refused(format!(
-                    "the archive unpacks to more than the {} bytes allowed",
-                    limits.max_total_bytes
-                )));
-            }
-            file.write_all(&buf[..n])?;
-        }
+        copy_counted(
+            &mut reader,
+            &mut file,
+            member,
+            cap,
+            limits,
+            &mut total,
+            &mut buf,
+        )?;
         file.flush()?;
         files.push(member.path.clone());
     }
     Ok((files, total))
+}
+
+/// Copy `reader` into `file`, counting the bytes actually read against the
+/// member's declared size, its ratio `cap` and the archive total in `limits`.
+fn copy_counted<R: Read, W: Write>(
+    reader: &mut R,
+    file: &mut W,
+    member: &PlannedMember,
+    cap: u64,
+    limits: &ArchiveLimits,
+    total: &mut u64,
+    buf: &mut [u8],
+) -> Result<(), ArchiveToolError> {
+    let mut written: u64 = 0;
+    loop {
+        let n = reader
+            .read(buf)
+            .map_err(|e| refused(format!("could not unpack '{}': {e}", member.path.display())))?;
+        if n == 0 {
+            return Ok(());
+        }
+        written += n as u64;
+        *total += n as u64;
+        if written > member.declared_size {
+            return Err(refused(format!(
+                "member '{}' unpacks to more than the {} bytes its header declares (a zip bomb?)",
+                member.path.display(),
+                member.declared_size
+            )));
+        }
+        if written > cap {
+            return Err(refused(format!(
+                "member '{}' unpacks past the {}:1 compression ratio allowed (a zip bomb?)",
+                member.path.display(),
+                limits.max_ratio
+            )));
+        }
+        if *total > limits.max_total_bytes {
+            return Err(refused(format!(
+                "the archive unpacks to more than the {} bytes allowed",
+                limits.max_total_bytes
+            )));
+        }
+        file.write_all(&buf[..n])?;
+    }
 }
 
 /// The topmost ancestor of `path` (itself included) that does not exist
@@ -1157,6 +1179,46 @@ mod tests {
             vec!["in.zip"],
             "no partial output, not even `deep/`"
         );
+    }
+
+    /// chatty's own counters, with the zip crate's size check out of the way:
+    /// a stub reader whose bytes outgrow the declared size and the ratio cap.
+    fn counted(declared_size: u64, cap: u64, bytes: usize) -> Result<Vec<u8>, String> {
+        let member = PlannedMember {
+            index: 0,
+            path: PathBuf::from("m.bin"),
+            is_dir: false,
+            declared_size,
+            compressed_size: 1,
+        };
+        let mut out = Vec::new();
+        let mut total = 0;
+        let mut buf = [0u8; 16];
+        copy_counted(
+            &mut std::io::repeat(7).take(bytes as u64),
+            &mut out,
+            &member,
+            cap,
+            &ArchiveLimits::default(),
+            &mut total,
+            &mut buf,
+        )
+        .map(|()| out)
+        .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn the_counter_stops_bytes_past_the_declared_size() {
+        assert_eq!(counted(40, u64::MAX, 40).unwrap().len(), 40);
+        let err = counted(40, u64::MAX, 41).unwrap_err();
+        assert!(err.contains("bytes its header declares"), "{err}");
+    }
+
+    #[test]
+    fn the_counter_stops_bytes_past_the_ratio_cap() {
+        assert_eq!(counted(u64::MAX, 40, 40).unwrap().len(), 40);
+        let err = counted(u64::MAX, 40, 41).unwrap_err();
+        assert!(err.contains("compression ratio"), "{err}");
     }
 
     #[test]
