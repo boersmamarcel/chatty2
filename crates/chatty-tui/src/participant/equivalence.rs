@@ -1222,11 +1222,24 @@ mod declared_roles {
         );
 
         // The profile is also what makes this worth doing: 53 schemas is what
-        // a reviewer used to carry.
+        // a reviewer used to carry. The document readers (AGE-1775) exist only
+        // when chatty-core is built with the document features and are not
+        // counted, so the bound still catches any other growth.
+        const DOC_READERS: [&str; 6] = [
+            "read_docx",
+            "read_excel",
+            "read_pptx",
+            "pdf_extract_text",
+            "pdf_info",
+            "pdf_to_image",
+        ];
+        let core = names
+            .iter()
+            .filter(|name| !DOC_READERS.contains(&name.as_str()))
+            .count();
         assert!(
-            names.len() < 20,
-            "a profiled worker carries a small tool set, got {}: {names:?}",
-            names.len()
+            core < 20,
+            "a profiled worker carries a small tool set, got {core} besides the document readers: {names:?}"
         );
 
         let _ = built.client.agent.prompt("review the diff").await;
