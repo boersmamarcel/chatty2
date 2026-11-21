@@ -108,6 +108,23 @@ const WEB: &[&str] = &["search_web", "fetch"];
 /// to queue the file).
 const ATTACH: &[&str] = &["add_attachment"];
 
+/// Reading Word, Excel, PowerPoint and PDF files (AGE-1775): how a worker
+/// handed a document reads it without a shell. They exist only when
+/// chatty-core is built with the `excel`/`docx`/`pptx`/`pdf` features and
+/// filesystem reads are on.
+const DOC_READ: &[&str] = &[
+    "read_docx",
+    "read_excel",
+    "read_pptx",
+    "pdf_extract_text",
+    "pdf_info",
+    "pdf_to_image",
+];
+
+/// Writing Word, Excel and PowerPoint files (AGE-1775). Same features, and
+/// filesystem writes on.
+const DOC_WRITE: &[&str] = &["write_docx", "write_excel", "edit_excel", "write_pptx"];
+
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
 /// shares one guest image with `math-render` compiled in, so the profile is
 /// what keeps the compiler away from the roles that have no use for it.
@@ -242,23 +259,24 @@ pub static COORDINATOR: ToolProfile = ToolProfile {
 
 /// A worker that writes code: the read set plus everything needed to change
 /// the tree and prove it builds, plus querying data files directly with SQL,
-/// plus building and consulting a playbook/skill memory (AGE-456).
+/// plus building and consulting a playbook/skill memory (AGE-456), plus
+/// reading and writing documents (AGE-1775).
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
     groups: &[
         READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, CALCULATE, MEMORY, ATTACH,
-        MESSAGES,
+        DOC_READ, DOC_WRITE, MESSAGES,
     ],
 };
 
 /// A worker that judges someone else's work: the read set plus a shell to run
 /// the tests with, plus the same data-query tool a coder used, so it can
 /// independently re-derive a claimed data-derived value instead of only
-/// judging plausibility, and `calculate` to recompute a figure exactly.
-/// No writes, no commits.
+/// judging plausibility, `calculate` to recompute a figure exactly, and the
+/// document readers (AGE-1775). No writes, no commits.
 pub static REVIEWER: ToolProfile = ToolProfile {
     name: "reviewer",
-    groups: &[READ_SET, SHELL, DATA_QUERY, CALCULATE, MESSAGES],
+    groups: &[READ_SET, SHELL, DATA_QUERY, CALCULATE, DOC_READ, MESSAGES],
 };
 
 /// A worker that turns approved texts into one PDF (AGE-946): the read set,
@@ -623,6 +641,104 @@ mod tests {
         let narrowed = WEB_RESEARCHER.narrow(&everything());
         assert!(narrowed.fetch && narrowed.search_web);
         assert!(!narrowed.fs_write && !narrowed.shell && !narrowed.browser);
+    }
+
+    /// AGE-1775: a file-input lease (a `.xlsx`, `.docx`, `.pptx` or `.pdf`
+    /// next to the task) is worked by a profiled worker, so the profile has to
+    /// let the document tools through. A coder reads and writes them; a
+    /// reviewer only reads them, since it writes nothing (AGE-456). The
+    /// settings and the build's features still decide whether they exist.
+    #[test]
+    fn coder_and_reviewer_offer_the_document_tools() {
+        let reads = [
+            "read_docx",
+            "read_excel",
+            "read_pptx",
+            "pdf_extract_text",
+            "pdf_info",
+            "pdf_to_image",
+        ];
+        let writes = ["write_docx", "write_excel", "edit_excel", "write_pptx"];
+        for tool in reads {
+            assert!(CODER.allows(tool), "a coder reads {tool}");
+            assert!(REVIEWER.allows(tool), "a reviewer reads {tool}");
+            assert!(!COORDINATOR.allows(tool), "a leader delegates {tool}");
+        }
+        for tool in writes {
+            assert!(CODER.allows(tool), "a coder writes {tool}");
+            assert!(!REVIEWER.allows(tool), "a reviewer writes nothing: {tool}");
+            assert!(!COORDINATOR.allows(tool), "a leader delegates {tool}");
+        }
+        let coder = CODER.narrow(&everything());
+        assert!(coder.excel_read && coder.excel_write && coder.docx_read && coder.docx_write);
+        assert!(coder.pptx_read && coder.pptx_write);
+        assert!(coder.pdf_extract_text && coder.pdf_info && coder.pdf_to_image);
+        let reviewer = REVIEWER.narrow(&everything());
+        assert!(reviewer.excel_read && reviewer.docx_read && reviewer.pptx_read);
+        assert!(!reviewer.excel_write && !reviewer.docx_write && !reviewer.pptx_write);
+    }
+
+    /// The tools a built `coder` agent offers the model: with the document
+    /// features compiled in it has `read_excel` and `write_docx`; without
+    /// them the build is what it was, with neither (AGE-1775).
+    #[tokio::test]
+    async fn a_built_coder_offers_document_tools_only_when_the_features_are_built() {
+        use super::super::{AgentBuildContext, AgentClient, AgentServices};
+        use crate::models::clarification_store::ClarificationStore;
+        use crate::models::execution_approval_store::ExecutionApprovalStore;
+        use crate::models::write_approval_store::WriteApprovalStore;
+        use crate::settings::models::ExecutionSettingsModel;
+        use crate::settings::models::models_store::ModelConfig;
+        use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
+
+        let _ = crate::init_repositories();
+        let workspace = tempfile::tempdir().expect("a workspace");
+        let mut context = AgentBuildContext {
+            pending_approvals: Some(ExecutionApprovalStore::new().get_pending_approvals()),
+            pending_clarifications: Some(ClarificationStore::new().get_pending_clarifications()),
+            pending_write_approvals: Some(WriteApprovalStore::new().get_pending_approvals()),
+            ..AgentBuildContext::from_services(AgentServices {
+                exec_settings: Some(ExecutionSettingsModel {
+                    workspace_dir: Some(workspace.path().to_string_lossy().into_owned()),
+                    ..ExecutionSettingsModel::default()
+                }),
+                ..AgentServices::default()
+            })
+        };
+        context.role.profile = Some(&CODER);
+        let built = AgentClient::from_model_config_with_tools(
+            &ModelConfig::new(
+                "age-1775".to_string(),
+                "Profile Fixture".to_string(),
+                ProviderType::Ollama,
+                "llama3.2".to_string(),
+            ),
+            &ProviderConfig::new("Ollama".to_string(), ProviderType::Ollama),
+            context,
+        )
+        .await
+        .expect("a coder builds without network access");
+        let offered: HashSet<String> = built
+            .client
+            .agent
+            .tool_definitions(None)
+            .await
+            .expect("tool definitions resolve")
+            .into_iter()
+            .map(|definition| definition.name.to_string())
+            .collect();
+
+        assert!(offered.contains("read_file"), "{offered:?}");
+        assert_eq!(
+            offered.contains("read_excel"),
+            cfg!(feature = "excel"),
+            "{offered:?}"
+        );
+        assert_eq!(
+            offered.contains("write_docx"),
+            cfg!(feature = "docx"),
+            "{offered:?}"
+        );
     }
 
     /// A profile naming a tool that does not exist would silently allow
