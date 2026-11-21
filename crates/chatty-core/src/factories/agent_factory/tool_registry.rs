@@ -26,6 +26,10 @@ pub struct ToolAvailability {
     pub pdf_to_image: bool,
     pub pdf_info: bool,
     pub pdf_extract_text: bool,
+    /// `list_archive` (AGE-1785): needs filesystem reads.
+    pub archive_list: bool,
+    /// `extract_archive` (AGE-1785): needs filesystem writes.
+    pub archive_extract: bool,
     pub data_query: bool,
     pub compile_typst: bool,
     pub execute_code: bool,
@@ -156,6 +160,12 @@ pub(super) fn active_native_tool_names(tools: &ToolAvailability) -> HashSet<Stri
     }
     if tools.pdf_extract_text {
         names.insert(String::from("pdf_extract_text"));
+    }
+    if tools.archive_list {
+        names.insert(String::from("list_archive"));
+    }
+    if tools.archive_extract {
+        names.insert(String::from("extract_archive"));
     }
     if tools.data_query {
         names.extend(
@@ -359,6 +369,18 @@ mod tests {
     }
 
     #[test]
+    fn includes_archive_tools() {
+        let names = active_native_tool_names(&ToolAvailability {
+            archive_list: true,
+            archive_extract: true,
+            ..Default::default()
+        });
+        for tool in ["list_archive", "extract_archive"] {
+            assert!(names.contains(tool), "{tool} missing for archive");
+        }
+    }
+
+    #[test]
     fn includes_pptx_tools() {
         let names = active_native_tool_names(&ToolAvailability {
             pptx_read: true,
@@ -497,6 +519,8 @@ mod tests {
             pdf_to_image: true,
             pdf_info: true,
             pdf_extract_text: true,
+            archive_list: true,
+            archive_extract: true,
             data_query: true,
             compile_typst: true,
             execute_code: true,

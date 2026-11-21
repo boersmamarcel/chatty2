@@ -156,6 +156,8 @@ mod map_tool_error_tests {
 
 pub mod add_attachment_tool;
 pub mod agent_todo_tool;
+#[cfg(feature = "archive")]
+pub mod archive_tool;
 pub mod ask_user_tool;
 pub mod best_of_tool;
 #[cfg(feature = "browser")]
@@ -216,6 +218,8 @@ pub mod worker_progress;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
 pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
+#[cfg(feature = "archive")]
+pub use archive_tool::{ExtractArchiveTool, ListArchiveTool};
 pub use ask_user_tool::AskUserTool;
 pub use browser_use_tool::BrowserUseTool;
 pub use calculate_tool::CalculateTool;

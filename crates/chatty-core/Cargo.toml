@@ -190,5 +190,9 @@ duckdb = ["dep:duckdb"]
 # unpacking the provisioned Chrome for Testing build, and image to decode
 # Page.startScreencast JPEG frames for the artifact viewport (AGE-155).
 browser = ["dep:chromiumoxide", "dep:which", "dep:zip", "dep:image"]
+# Zip archives for the agent (AGE-1785): `list_archive` and `extract_archive`,
+# read-only towards anything that exists, so a worker with no shell can open a
+# `.zip` attachment and read its members with the document tools.
+archive = ["dep:zip"]
 # Convenience: enable all optional tool dependencies
-all-tools = ["excel", "docx", "pdf", "pptx", "math-render", "mermaid", "duckdb", "browser"]
+all-tools = ["excel", "docx", "pdf", "pptx", "archive", "math-render", "mermaid", "duckdb", "browser"]

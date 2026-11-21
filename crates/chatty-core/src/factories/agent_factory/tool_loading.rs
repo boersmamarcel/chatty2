@@ -124,8 +124,11 @@ const GROUPS: &[GroupSpec] = &[
     },
     GroupSpec {
         name: "documents",
-        when: "to read or write PDF, Word or PowerPoint files, or compile Typst to PDF",
+        when: "to read or write PDF, Word or PowerPoint files, open a zip archive, \
+               or compile Typst to PDF",
         tools: &[
+            "list_archive",
+            "extract_archive",
             "pdf_info",
             "pdf_extract_text",
             "pdf_to_image",

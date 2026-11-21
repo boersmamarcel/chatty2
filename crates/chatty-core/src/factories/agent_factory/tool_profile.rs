@@ -125,6 +125,13 @@ const DOC_READ: &[&str] = &[
 /// filesystem writes on.
 const DOC_WRITE: &[&str] = &["write_docx", "write_excel", "edit_excel", "write_pptx"];
 
+/// Zip archives (AGE-1785): how a worker handed a `.zip` lists it and
+/// unpacks it into a fresh folder, to read the members with [`DOC_READ`].
+/// They exist only when chatty-core is built with the `archive` feature;
+/// `list_archive` needs filesystem reads, `extract_archive` writes. The
+/// extraction only ever creates a new folder: it overwrites nothing.
+const ARCHIVE: &[&str] = &["list_archive", "extract_archive"];
+
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
 /// shares one guest image with `math-render` compiled in, so the profile is
 /// what keeps the compiler away from the roles that have no use for it.
@@ -213,6 +220,8 @@ pub(super) fn narrow_availability(
         pdf_to_image: keep(tools.pdf_to_image, &["pdf_to_image"]),
         pdf_info: keep(tools.pdf_info, &["pdf_info"]),
         pdf_extract_text: keep(tools.pdf_extract_text, &["pdf_extract_text"]),
+        archive_list: keep(tools.archive_list, &["list_archive"]),
+        archive_extract: keep(tools.archive_extract, &["extract_archive"]),
         data_query: keep(
             tools.data_query,
             &[
@@ -260,23 +269,28 @@ pub static COORDINATOR: ToolProfile = ToolProfile {
 /// A worker that writes code: the read set plus everything needed to change
 /// the tree and prove it builds, plus querying data files directly with SQL,
 /// plus building and consulting a playbook/skill memory (AGE-456), plus
-/// reading and writing documents (AGE-1775).
+/// reading and writing documents (AGE-1775) and opening zip archives
+/// (AGE-1785).
 pub static CODER: ToolProfile = ToolProfile {
     name: "coder",
     groups: &[
         READ_SET, FS_WRITE, SHELL, GIT_WRITE, CODE_EXEC, DATA_QUERY, CALCULATE, MEMORY, ATTACH,
-        DOC_READ, DOC_WRITE, MESSAGES,
+        DOC_READ, DOC_WRITE, ARCHIVE, MESSAGES,
     ],
 };
 
 /// A worker that judges someone else's work: the read set plus a shell to run
 /// the tests with, plus the same data-query tool a coder used, so it can
 /// independently re-derive a claimed data-derived value instead of only
-/// judging plausibility, `calculate` to recompute a figure exactly, and the
-/// document readers (AGE-1775). No writes, no commits.
+/// judging plausibility, `calculate` to recompute a figure exactly, the
+/// document readers (AGE-1775) and the zip tools, so it can open the archive
+/// the task came with (AGE-1785). No writes, no commits: `extract_archive`
+/// only creates a new folder of the archive's own files.
 pub static REVIEWER: ToolProfile = ToolProfile {
     name: "reviewer",
-    groups: &[READ_SET, SHELL, DATA_QUERY, CALCULATE, DOC_READ, MESSAGES],
+    groups: &[
+        READ_SET, SHELL, DATA_QUERY, CALCULATE, DOC_READ, ARCHIVE, MESSAGES,
+    ],
 };
 
 /// A worker that turns approved texts into one PDF (AGE-946): the read set,
@@ -394,6 +408,8 @@ mod tests {
             pdf_to_image: true,
             pdf_info: true,
             pdf_extract_text: true,
+            archive_list: true,
+            archive_extract: true,
             data_query: true,
             compile_typst: true,
             execute_code: true,
@@ -678,6 +694,32 @@ mod tests {
         assert!(!reviewer.excel_write && !reviewer.docx_write && !reviewer.pptx_write);
     }
 
+    /// AGE-1785: a file-input lease with a `.zip` next to the task is worked
+    /// by a profiled worker with no shell, so the coder and the reviewer both
+    /// get the zip tools; a leader delegates them.
+    #[test]
+    fn coder_and_reviewer_offer_the_archive_tools() {
+        for tool in ["list_archive", "extract_archive"] {
+            assert!(CODER.allows(tool), "a coder opens archives: {tool}");
+            assert!(REVIEWER.allows(tool), "a reviewer opens archives: {tool}");
+            assert!(!COORDINATOR.allows(tool), "a leader delegates {tool}");
+            assert!(
+                !TYPESETTER.allows(tool),
+                "a typesetter has no use for {tool}"
+            );
+        }
+        for profile in [&CODER, &REVIEWER] {
+            let narrowed = profile.narrow(&everything());
+            assert!(
+                narrowed.archive_list && narrowed.archive_extract,
+                "{}",
+                profile.name()
+            );
+        }
+        let leader = COORDINATOR.narrow(&everything());
+        assert!(!leader.archive_list && !leader.archive_extract);
+    }
+
     /// The tools a built `coder` agent offers the model: with the document
     /// features compiled in it has `read_excel` and `write_docx`; without
     /// them the build is what it was, with neither (AGE-1775).
@@ -739,6 +781,14 @@ mod tests {
             cfg!(feature = "docx"),
             "{offered:?}"
         );
+        // AGE-1785: the zip tools, under the `archive` feature.
+        for tool in ["list_archive", "extract_archive"] {
+            assert_eq!(
+                offered.contains(tool),
+                cfg!(feature = "archive"),
+                "{tool}: {offered:?}"
+            );
+        }
     }
 
     /// A profile naming a tool that does not exist would silently allow

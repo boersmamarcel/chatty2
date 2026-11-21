@@ -317,6 +317,22 @@ impl ListToolsTool {
             });
         }
 
+        if tools.archive_list {
+            native_tools.push(ToolInfo {
+                name: "list_archive".to_string(),
+                description: "List the members of a zip archive (.zip) without extracting it: names, sizes, compressed sizes, directories.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
+        if tools.archive_extract {
+            native_tools.push(ToolInfo {
+                name: "extract_archive".to_string(),
+                description: "Extract a zip archive (.zip) into a new folder in the workspace and list the extracted files, to read with the other readers. Overwrites nothing; refuses zip bombs, '..' or absolute member paths and symlinks.".to_string(),
+                source: "native".to_string(),
+            });
+        }
+
         if tools.data_query {
             native_tools.extend(vec![
                 ToolInfo {
@@ -613,6 +629,8 @@ mod tests {
             pdf_to_image: false,
             pdf_info: false,
             pdf_extract_text: false,
+            archive_list: false,
+            archive_extract: false,
             data_query: false,
             compile_typst: false,
             execute_code: false,
@@ -651,6 +669,8 @@ mod tests {
             pdf_to_image: true,
             pdf_info: true,
             pdf_extract_text: true,
+            archive_list: true,
+            archive_extract: true,
             data_query: true,
             compile_typst: true,
             execute_code: true,
@@ -804,6 +824,8 @@ mod tests {
             "pdf_to_image",
             "pdf_info",
             "pdf_extract_text",
+            "list_archive",
+            "extract_archive",
             "file_structure_detector",
             "query_data",
             "describe_data",
