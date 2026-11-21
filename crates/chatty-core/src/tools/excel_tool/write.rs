@@ -1,5 +1,5 @@
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
-use rust_xlsxwriter::{Format, Workbook};
+use rust_xlsxwriter::{Format, Formula, Workbook};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use crate::services::filesystem_service::FileSystemService;
 use crate::settings::models::execution_settings::ApprovalMode;
 
 use super::ExcelToolError;
+use super::formula_eval::{CellInput, Evaluation, WorkbookModel, XlValue, evaluate};
 use super::parsing::{build_format, parse_cell_ref, parse_range, write_cell_value};
 
 // Re-use the write approval helper from filesystem_write_tool
@@ -80,6 +81,9 @@ pub struct WriteExcelOutput {
     pub sheets_written: usize,
     pub total_rows: usize,
     pub message: String,
+    /// Formula cells whose value could not be precomputed (AGE-1790).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Clone)]
@@ -114,10 +118,66 @@ impl WriteExcelTool {
     }
 }
 
-/// Write one `SheetSpec` to a workbook. Returns the number of data rows written.
+/// The cells `write_sheet` stores for `specs`, sheet by sheet, in the same
+/// order it writes them: data, then merged ranges (rust_xlsxwriter puts ""
+/// in the first cell and blanks the rest), then formulas (AGE-1790).
+/// Cell references `write_sheet` would refuse are skipped here.
+pub(super) fn workbook_model(specs: &[SheetSpec]) -> WorkbookModel {
+    let mut model = WorkbookModel::default();
+    for spec in specs {
+        let s = model.add_sheet(&spec.name);
+        for (r, row) in spec.data.iter().enumerate() {
+            for (c, val) in row.iter().enumerate() {
+                if let (Ok(r), Ok(c)) = (u32::try_from(r), u16::try_from(c)) {
+                    model.set(s, r, c, CellInput::Value(XlValue::from_json(val)));
+                }
+            }
+        }
+        for merge_range in &spec.merged_cells {
+            let Ok(((sr, sc), (er, ec))) = parse_range(merge_range) else {
+                continue;
+            };
+            for r in sr..=er {
+                for c in sc..=ec {
+                    model.set(s, r, c, CellInput::Value(XlValue::Empty));
+                }
+            }
+            model.set(s, sr, sc, CellInput::Value(XlValue::Text(String::new())));
+        }
+        for f in &spec.formulas {
+            if let Ok((r, c)) = parse_cell_ref(&f.cell) {
+                model.set(s, r, c, CellInput::Formula(f.formula.clone()));
+            }
+        }
+    }
+    model
+}
+
+/// Precompute every formula of `specs` for its cached result (AGE-1790).
+pub(super) fn evaluate_specs(specs: &[SheetSpec]) -> Evaluation {
+    let mut evaluation = evaluate(&workbook_model(specs));
+    evaluation.demote_unstorable_text();
+    evaluation
+}
+
+/// The `warning` for formulas that could not be precomputed.
+pub(super) fn formula_warning(evaluation: &Evaluation) -> Option<String> {
+    evaluation.summary().map(|s| {
+        format!(
+            "{s}. They are stored with a cached value of 0: Excel recalculates them on open, \
+             but previews and readers that trust cached values show 0."
+        )
+    })
+}
+
+/// Write one `SheetSpec` to a workbook, storing each formula's precomputed
+/// result from `evaluation` (sheet `sheet_index`). Returns the number of
+/// data rows written.
 pub(super) fn write_sheet(
     workbook: &mut Workbook,
     spec: &SheetSpec,
+    evaluation: &Evaluation,
+    sheet_index: usize,
 ) -> Result<usize, ExcelToolError> {
     let sheet = workbook
         .add_worksheet()
@@ -204,8 +264,12 @@ pub(super) fn write_sheet(
     // Formulas
     for f in &spec.formulas {
         let (r, c) = parse_cell_ref(&f.cell)?;
+        let mut formula = Formula::new(f.formula.as_str());
+        if let Some(v) = evaluation.result(sheet_index, r, c) {
+            formula = formula.set_result(v.to_cached_result());
+        }
         sheet
-            .write_formula(r, c, f.formula.as_str())
+            .write_formula(r, c, formula)
             .map_err(|e| ExcelToolError::WriteError(e.to_string()))?;
     }
 
@@ -222,6 +286,8 @@ impl Tool for WriteExcelTool {
         "Create a new Excel (.xlsx) file with structured data and formatting.\n\
                          Supports multiple sheets, bold/italic/color formatting, column widths,\n\
                          auto-filters, frozen panes, merged cells, number formats, borders, and formulas.\n\
+                         \n\
+                         Formula results are precomputed; any formula cell the tool cannot compute is listed in the result, and previews may show 0 for it until Excel recalculates.\n\
                          \n\
                          Requires user approval before writing.\n\
                          \n\
@@ -360,9 +426,11 @@ impl Tool for WriteExcelTool {
         let mut total_rows = 0;
         let sheets_count = args.sheets.len();
 
-        for spec in &args.sheets {
-            total_rows += write_sheet(&mut workbook, spec)?;
+        let evaluation = evaluate_specs(&args.sheets);
+        for (i, spec) in args.sheets.iter().enumerate() {
+            total_rows += write_sheet(&mut workbook, spec, &evaluation, i)?;
         }
+        let warning = formula_warning(&evaluation);
 
         // In memory, then never through a symlink at the target (AGE-1113).
         let bytes = workbook
@@ -379,6 +447,7 @@ impl Tool for WriteExcelTool {
                 "Created Excel file '{}' with {} sheet(s) and {} total rows.",
                 args.path, sheets_count, total_rows
             ),
+            warning,
         })
     }
 }

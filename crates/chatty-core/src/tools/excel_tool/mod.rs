@@ -1,4 +1,5 @@
 mod edit;
+mod formula_eval;
 mod parsing;
 mod read;
 mod write;
@@ -157,7 +158,8 @@ mod tests {
     use super::edit::EditExcelArgs;
     use super::parsing::*;
     use super::write::{
-        CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec, WriteExcelArgs, write_sheet,
+        CellFormatSpec, FormulaSpec, SheetFormatting, SheetSpec, WriteExcelArgs, evaluate_specs,
+        write_sheet,
     };
     use super::*;
     use calamine::{Data, Reader, open_workbook_auto};
@@ -553,7 +555,13 @@ mod tests {
             merged_cells: vec![],
             formulas: vec![],
         };
-        let rows = write_sheet(&mut workbook, &spec).unwrap();
+        let rows = write_sheet(
+            &mut workbook,
+            &spec,
+            &evaluate_specs(std::slice::from_ref(&spec)),
+            0,
+        )
+        .unwrap();
         assert_eq!(rows, 3);
 
         // Save and re-read with calamine
@@ -598,7 +606,13 @@ mod tests {
                 formula: "=A2+B2".to_string(),
             }],
         };
-        let rows = write_sheet(&mut workbook, &spec).unwrap();
+        let rows = write_sheet(
+            &mut workbook,
+            &spec,
+            &evaluate_specs(std::slice::from_ref(&spec)),
+            0,
+        )
+        .unwrap();
         assert_eq!(rows, 2);
 
         let tmp = tempfile::tempdir().unwrap();
@@ -639,7 +653,15 @@ mod tests {
             merged_cells: vec![],
             formulas: vec![],
         };
-        assert!(write_sheet(&mut workbook, &spec).is_ok());
+        assert!(
+            write_sheet(
+                &mut workbook,
+                &spec,
+                &evaluate_specs(std::slice::from_ref(&spec)),
+                0
+            )
+            .is_ok()
+        );
 
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("formatted.xlsx");
@@ -679,7 +701,13 @@ mod tests {
             merged_cells: vec![],
             formulas: vec![],
         };
-        write_sheet(&mut workbook, &spec).unwrap();
+        write_sheet(
+            &mut workbook,
+            &spec,
+            &evaluate_specs(std::slice::from_ref(&spec)),
+            0,
+        )
+        .unwrap();
         workbook.save(&output_path).unwrap();
 
         // Read back and verify the edit
@@ -1055,5 +1083,347 @@ mod tests {
             assert_eq!(range.get((1, 1)), Some(&Data::Float(age as f64)));
         }
         assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 2);
+    }
+
+    // ── Precomputed formula results (AGE-1790) ──
+
+    fn sheet(name: &str, data: Vec<Vec<Value>>, formulas: &[(&str, &str)]) -> SheetSpec {
+        SheetSpec {
+            name: name.to_string(),
+            data,
+            column_widths: vec![],
+            formatting: None,
+            cell_formats: vec![],
+            merged_cells: vec![],
+            formulas: formulas
+                .iter()
+                .map(|(cell, formula)| FormulaSpec {
+                    cell: cell.to_string(),
+                    formula: formula.to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Put `rows` into a grid starting at row `top` (0-based), column A.
+    fn grid(top: usize, rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+        let mut out = vec![Vec::new(); top];
+        out.extend(rows);
+        out
+    }
+
+    async fn write_tool(dir: &std::path::Path) -> WriteExcelTool {
+        let service = Arc::new(FileSystemService::new(dir.to_str().unwrap()).await.unwrap());
+        WriteExcelTool::new(
+            service,
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        )
+    }
+
+    async fn edit_tool(dir: &std::path::Path) -> EditExcelTool {
+        let service = Arc::new(FileSystemService::new(dir.to_str().unwrap()).await.unwrap());
+        EditExcelTool::new(
+            service,
+            ApprovalMode::AutoApproveAll,
+            WriteApprovalStore::new().get_pending_approvals(),
+        )
+    }
+
+    /// The cached value calamine reads at `cell` of `sheet`.
+    fn cached(path: &std::path::Path, sheet: &str, cell: &str) -> Data {
+        let (r, c) = parse_cell_ref(cell).unwrap();
+        let mut wb = open_workbook_auto(path).unwrap();
+        let range = wb.worksheet_range(sheet).unwrap();
+        range
+            .get_value((r, u32::from(c)))
+            .cloned()
+            .unwrap_or(Data::Empty)
+    }
+
+    fn assert_number(path: &std::path::Path, sheet: &str, cell: &str, want: f64) {
+        match cached(path, sheet, cell) {
+            Data::Float(f) => assert!((f - want).abs() < 1e-6, "{sheet}!{cell}: {f} != {want}"),
+            Data::Int(i) => assert_eq!(i as f64, want, "{sheet}!{cell}"),
+            other => panic!("{sheet}!{cell}: expected {want}, got {other:?}"),
+        }
+    }
+
+    /// The GDPval-style P&L: unit prices by VLOOKUP into an assumptions
+    /// sheet, revenue sums, cross-sheet rates, and a summary back on the
+    /// assumptions sheet that reads the P&L. Written by the stock
+    /// rust_xlsxwriter path, every one of these read back as 0.
+    fn pnl_sheets() -> Vec<SheetSpec> {
+        let n = |x: f64| serde_json::json!(x);
+        let s = |x: &str| Value::String(x.to_string());
+        let assumptions = sheet(
+            "Assumptions",
+            grid(
+                4,
+                vec![
+                    vec![s("Product"), s("Unit price")],
+                    vec![s("Widget"), n(25.0)],
+                    vec![s("Gadget"), n(40.0)],
+                    vec![s("Gizmo"), n(15.5)],
+                    vec![s("Doohickey"), n(65.0)],
+                    vec![],
+                    vec![s("COGS rate"), n(0.375)],
+                    vec![s("Opex"), n(40_893.5)],
+                    vec![s("Tax rate"), n(0.15)],
+                    vec![],
+                    vec![s("Net income (from P&L)")],
+                ],
+            ),
+            &[("B15", "='P&L'!F17")],
+        );
+        let pnl = sheet(
+            "P&L",
+            grid(
+                6,
+                vec![
+                    vec![
+                        Value::Null,
+                        Value::Null,
+                        s("Product"),
+                        s("Units"),
+                        s("Price"),
+                        s("Revenue"),
+                    ],
+                    vec![Value::Null, Value::Null, s("Widget"), n(20_000.0)],
+                    vec![Value::Null, Value::Null, s("Gadget"), n(15_000.0)],
+                    vec![Value::Null, Value::Null, s("Gizmo"), n(20_000.0)],
+                    vec![Value::Null, Value::Null, s("Doohickey"), n(4_000.0)],
+                    vec![Value::Null, Value::Null, s("Revenue")],
+                    vec![Value::Null, Value::Null, s("COGS")],
+                    vec![Value::Null, Value::Null, s("Gross profit")],
+                    vec![Value::Null, Value::Null, s("Opex")],
+                    vec![Value::Null, Value::Null, s("Pre-tax income")],
+                    vec![Value::Null, Value::Null, s("Net income")],
+                ],
+            ),
+            &[
+                ("E8", "=VLOOKUP(C8,Assumptions!$A$6:$B$9,2,FALSE)"),
+                ("E9", "=VLOOKUP(C9,Assumptions!$A$6:$B$9,2,FALSE)"),
+                ("E10", "=VLOOKUP(C10,Assumptions!$A$6:$B$9,2,FALSE)"),
+                ("E11", "=VLOOKUP(C11,Assumptions!$A$6:$B$9,2,FALSE)"),
+                ("F8", "=D8*E8"),
+                ("F9", "=D9*E9"),
+                ("F10", "=D10*E10"),
+                ("F11", "=D11*E11"),
+                ("F12", "=SUM(F8:F11)"),
+                ("F13", "=F12*Assumptions!B11"),
+                ("F14", "=F12-F13"),
+                ("F15", "=Assumptions!B12"),
+                ("F16", "=F14-F15"),
+                ("F17", "=ROUND(F16*(1-Assumptions!B13),0)"),
+            ],
+        );
+        vec![assumptions, pnl]
+    }
+
+    #[tokio::test]
+    async fn write_excel_stores_computed_formula_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = write_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                WriteExcelArgs {
+                    path: "pnl.xlsx".to_string(),
+                    sheets: pnl_sheets(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.warning, None, "every formula should be precomputed");
+
+        let path = tmp.path().join("pnl.xlsx");
+        assert_number(&path, "P&L", "E8", 25.0);
+        assert_number(&path, "P&L", "E11", 65.0);
+        assert_number(&path, "P&L", "F12", 1_670_000.0);
+        assert_number(&path, "P&L", "F14", 1_043_750.0);
+        assert_number(&path, "P&L", "F17", 852_428.0);
+        assert_number(&path, "Assumptions", "B15", 852_428.0);
+        // Literal cells are unchanged.
+        assert_eq!(
+            cached(&path, "P&L", "C8"),
+            Data::String("Widget".to_string())
+        );
+        if let Ok(dir) = std::env::var("CHATTY_XLSX_TEST_OUT") {
+            std::fs::copy(&path, std::path::Path::new(&dir).join("pnl.xlsx")).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn write_excel_lists_formulas_it_cannot_compute() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output = write_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                WriteExcelArgs {
+                    path: "x.xlsx".to_string(),
+                    sheets: vec![sheet(
+                        "Sheet1",
+                        vec![vec![serde_json::json!(1), Value::Null, Value::Null]],
+                        &[("B1", "=XLOOKUP(1,A1:A1,A1:A1)"), ("C1", "=A1*2")],
+                    )],
+                },
+            )
+            .await
+            .unwrap();
+        let warning = output.warning.expect("the XLOOKUP cell is listed");
+        assert!(
+            warning.starts_with("1 formula cell(s) could not be precomputed: Sheet1!B1."),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("Excel recalculates them on open"),
+            "{warning}"
+        );
+        let path = tmp.path().join("x.xlsx");
+        assert_number(&path, "Sheet1", "B1", 0.0);
+        assert_number(&path, "Sheet1", "C1", 2.0);
+    }
+
+    #[tokio::test]
+    async fn write_excel_lists_a_cycle_and_does_not_hang() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tool = write_tool(tmp.path()).await;
+        let mut context = ToolContext::new();
+        let call = tool.call(
+            &mut context,
+            WriteExcelArgs {
+                path: "cycle.xlsx".to_string(),
+                sheets: vec![sheet("Sheet1", vec![], &[("A1", "=B1+1"), ("B1", "=A1+1")])],
+            },
+        );
+        let output = tokio::time::timeout(std::time::Duration::from_secs(30), call)
+            .await
+            .expect("a cycle must not hang")
+            .unwrap();
+        let warning = output.warning.expect("the cycle is listed");
+        assert!(
+            warning
+                .starts_with("2 formula cell(s) could not be precomputed: Sheet1!A1, Sheet1!B1."),
+            "{warning}"
+        );
+        let path = tmp.path().join("cycle.xlsx");
+        assert_number(&path, "Sheet1", "A1", 0.0);
+        assert_number(&path, "Sheet1", "B1", 0.0);
+    }
+
+    /// edit_excel recomputes every formula over the edited workbook, in both
+    /// modes: the style-preserving one (umya) and the rewrite fallback that
+    /// `format_range` forces.
+    #[tokio::test]
+    async fn edit_excel_updates_dependent_cached_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_tool(tmp.path())
+            .await
+            .call(
+                &mut ToolContext::new(),
+                WriteExcelArgs {
+                    path: "model.xlsx".to_string(),
+                    sheets: pnl_sheets(),
+                },
+            )
+            .await
+            .unwrap();
+        let input = tmp.path().join("model.xlsx");
+        let tool = edit_tool(tmp.path()).await;
+
+        // Style-preserving: raise the Widget price; the untouched VLOOKUP,
+        // sums and the cross-sheet summary follow.
+        let output = tool
+            .call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: input.to_str().unwrap().to_string(),
+                    output_path: Some("edited.xlsx".to_string()),
+                    operations: vec![
+                        EditOperation::SetCell {
+                            sheet: "Assumptions".to_string(),
+                            cell: "B6".to_string(),
+                            value: serde_json::json!(30),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "P&L".to_string(),
+                            cell: "G12".to_string(),
+                            formula: "COUNTIF(E8:E11,\">=30\")".to_string(),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "P&L".to_string(),
+                            cell: "G13".to_string(),
+                            formula: "NOPE(F12)".to_string(),
+                        },
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let edited = tmp.path().join("edited.xlsx");
+        assert_number(&edited, "P&L", "E8", 30.0);
+        assert_number(&edited, "P&L", "F12", 1_770_000.0);
+        assert_number(&edited, "P&L", "F14", 1_106_250.0);
+        assert_number(&edited, "Assumptions", "B15", 905_553.0);
+        assert_number(&edited, "P&L", "G12", 3.0);
+        assert_number(&edited, "P&L", "G13", 0.0);
+        let warning = output.warning.expect("NOPE is listed");
+        assert!(
+            warning.starts_with("1 formula cell(s) could not be precomputed: 'P&L'!G13."),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("possibly stale if this edit changed their inputs"),
+            "{warning}"
+        );
+
+        // Rewrite fallback (format_range): calamine drops the file's
+        // formulas, so only the ones this edit sets are formulas; they are
+        // computed against the edited cells. (A sheet that starts at A1:
+        // the fallback reads calamine's range as if it did.)
+        let plain = create_test_xlsx(tmp.path(), "plain.xlsx");
+        let fallback = tool
+            .call(
+                &mut ToolContext::new(),
+                EditExcelArgs {
+                    path: plain.to_str().unwrap().to_string(),
+                    output_path: Some("rewritten.xlsx".to_string()),
+                    operations: vec![
+                        EditOperation::SetCell {
+                            sheet: "Data".to_string(),
+                            cell: "B2".to_string(),
+                            value: serde_json::json!(40),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "Data".to_string(),
+                            cell: "D2".to_string(),
+                            formula: "=B2*2".to_string(),
+                        },
+                        EditOperation::SetFormula {
+                            sheet: "Data".to_string(),
+                            cell: "D3".to_string(),
+                            formula: "=SUM(B2:B3)+D2".to_string(),
+                        },
+                        serde_json::from_value(serde_json::json!({
+                            "type": "format_range", "sheet": "Data", "range": "A1:C1", "bold": true
+                        }))
+                        .unwrap(),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let rewritten = tmp.path().join("rewritten.xlsx");
+        assert_number(&rewritten, "Data", "D2", 80.0);
+        assert_number(&rewritten, "Data", "D3", 145.0);
+        assert!(
+            !fallback
+                .warning
+                .unwrap()
+                .contains("could not be precomputed"),
+            "D2 and D3 are computed"
+        );
     }
 }
