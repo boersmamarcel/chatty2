@@ -3,6 +3,11 @@
 //! workspace, so a worker handed a `.zip` can read what is inside with the
 //! document readers.
 //!
+//! Extracted files are inputs to read, not results: the default destination
+//! and a relative `dest` are taken from the workspace root, never from the
+//! output root. Beside the archive would fail in a read-only `inputs/`
+//! folder, and under `outputs/` they would be handed in as deliverables.
+//!
 //! Extraction is read-only towards everything that exists: it writes only
 //! into a directory that did not exist before the call, never overwrites a
 //! file, never creates or follows a symlink, and refuses an archive past
@@ -28,7 +33,7 @@ use crate::models::write_approval_store::PendingWriteApprovals;
 use crate::services::filesystem_service::FileSystemService;
 use crate::settings::models::execution_settings::ApprovalMode;
 
-use super::path_utils::{approve_output_write, resolve_fresh_workspace_dir, under_output_root};
+use super::path_utils::{approve_output_write, resolve_fresh_workspace_dir};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveToolError {
@@ -105,8 +110,9 @@ pub struct ListArchiveOutput {
 #[derive(Deserialize, Serialize)]
 pub struct ExtractArchiveArgs {
     pub path: String,
-    /// A directory that does not exist yet. Defaults to the archive's name
-    /// without its extension, beside the archive.
+    /// A directory that does not exist yet, relative to the workspace root
+    /// or absolute inside it. Defaults to the archive's name without its
+    /// extension, at the workspace root.
     #[serde(default)]
     pub dest: Option<String>,
 }
@@ -503,7 +509,8 @@ impl Tool for ListArchiveTool {
 pub struct ExtractArchiveTool {
     service: Arc<FileSystemService>,
     write_approval: Option<(ApprovalMode, PendingWriteApprovals)>,
-    /// Where a relative `dest` goes, inside the workspace (AGE-1747).
+    /// The output root (AGE-1747), named in the description only:
+    /// extracted files never go under it unless `dest` says so.
     output_root: Option<PathBuf>,
     limits: ArchiveLimits,
 }
@@ -529,8 +536,8 @@ impl ExtractArchiveTool {
         self
     }
 
-    /// Place a relative `dest` under `output_root` (AGE-1747); the default
-    /// destination stays beside the archive.
+    /// Tell the model that extracted files do not go under `output_root`
+    /// (AGE-1747): a relative `dest` is still taken from the workspace root.
     pub fn with_output_root(mut self, output_root: Option<PathBuf>) -> Self {
         self.output_root = output_root;
         self
@@ -551,24 +558,36 @@ impl Tool for ExtractArchiveTool {
 
     fn description(&self) -> String {
         let limits = self.limits;
+        let not_outputs = self
+            .output_root
+            .as_deref()
+            .map_or_else(String::new, |root| {
+                format!(
+                    "\n\nExtracted files are inputs to read, not results: they are not placed \
+                 under `{}/`.",
+                    root.display()
+                )
+            });
         format!(
             "Extract a zip archive (.zip) into a NEW folder in the workspace and return the \
              extracted files. Then read each file with the matching reader (read_docx, \
              read_excel, read_pptx, pdf_extract_text, read_file).\n\
              \n\
-             The destination must not exist yet; by default it is the archive's name without \
-             .zip, beside the archive. Nothing is overwritten. Refused, with nothing written: \
-             more than {} members, more than {} MB unpacked, a member compressed more than \
-             {}:1, a member whose path is absolute or uses '..', a symlink member, an encrypted \
-             member. Archives inside the archive are extracted as files, not unpacked.\n\
+             The destination must not exist yet; by default it is a new folder at the \
+             workspace root named after the archive without .zip (inputs/data.zip -> data/). \
+             A relative dest is taken from the workspace root too. Nothing is overwritten. \
+             Refused, with nothing written: more than {} members, more than {} MB unpacked, \
+             a member compressed more than {}:1, a member whose path is absolute or uses '..', \
+             a symlink member, an encrypted member. Archives inside the archive are extracted \
+             as files, not unpacked.\n\
              \n\
              Examples:\n\
-             - Beside the archive: {{\"path\": \"attachments/data.zip\"}}\n\
-             - Into a chosen folder: {{\"path\": \"data.zip\", \"dest\": \"data_unzipped\"}}{}",
+             - Into data/ at the workspace root: {{\"path\": \"attachments/data.zip\"}}\n\
+             - Into a chosen folder: {{\"path\": \"data.zip\", \"dest\": \"data_unzipped\"}}\
+             {not_outputs}",
             limits.max_members,
             limits.max_total_bytes / (1024 * 1024),
             limits.max_ratio,
-            super::path_utils::output_root_note(self.output_root.as_deref(), "dest"),
         )
     }
 
@@ -582,7 +601,7 @@ impl Tool for ExtractArchiveTool {
                 },
                 "dest": {
                     "type": "string",
-                    "description": "Folder to extract into; must not exist yet. Defaults to the archive's name without .zip, beside the archive."
+                    "description": "Folder to extract into, relative to the workspace root or absolute within it; must not exist yet. Defaults to the archive's name without .zip, at the workspace root."
                 }
             },
             "required": ["path"]
@@ -603,10 +622,8 @@ impl Tool for ExtractArchiveTool {
         let archive = self.service.resolve_path(&args.path).await?;
         let root = self.service.workspace_root().to_path_buf();
         let dest = match args.dest.as_deref() {
-            Some(dest) => resolve_fresh_workspace_dir(
-                &root,
-                &under_output_root(self.output_root.as_deref(), dest),
-            ),
+            // Never under the output root: extracted files are inputs.
+            Some(dest) => resolve_fresh_workspace_dir(&root, dest),
             None => {
                 let stem = archive
                     .file_stem()
@@ -615,8 +632,9 @@ impl Tool for ExtractArchiveTool {
                     .ok_or_else(|| {
                         refused(format!("'{}' has no name to extract under", args.path))
                     })?;
-                let beside = archive.with_file_name(stem);
-                resolve_fresh_workspace_dir(&root, &beside.to_string_lossy())
+                // At the root, not beside the archive: its folder may be
+                // read-only (hive's `inputs/`).
+                resolve_fresh_workspace_dir(&root, &root.join(stem).to_string_lossy())
             }
         }
         .map_err(|e| {
@@ -803,7 +821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extracts_beside_the_archive_by_default_and_into_a_given_dest() {
+    async fn extracts_at_the_workspace_root_by_default_and_into_a_given_dest() {
         let (_tmp, root, service) = workspace().await;
         std::fs::create_dir(root.join("in")).unwrap();
         let zip = zip_of(&[
@@ -816,16 +834,14 @@ mod tests {
         let out = extract(&service, "in/pack.zip", None, ArchiveLimits::default())
             .await
             .unwrap();
-        assert_eq!(out.dest, root.join("in/pack").display().to_string());
+        assert_eq!(out.dest, root.join("pack").display().to_string());
         assert_eq!(
             out.files,
-            vec!["in/pack/a.txt", "in/pack/sub/b.txt", "in/pack/c.txt"]
+            vec!["pack/a.txt", "pack/sub/b.txt", "pack/c.txt"]
         );
         assert_eq!((out.file_count, out.bytes_written), (3, 10));
-        assert_eq!(
-            std::fs::read(root.join("in/pack/sub/b.txt")).unwrap(),
-            b"beta"
-        );
+        assert_eq!(std::fs::read(root.join("pack/sub/b.txt")).unwrap(), b"beta");
+        assert!(!root.join("in/pack").exists(), "not beside the archive");
 
         let out = extract(
             &service,
@@ -845,22 +861,85 @@ mod tests {
         );
     }
 
+    /// hive's layout: attachments in `inputs/`, results in `outputs/` (the
+    /// output root). Extracted files are inputs, so none land in `outputs/`.
+    async fn hive_layout() -> (tempfile::TempDir, PathBuf, ExtractArchiveTool) {
+        let (tmp, root, service) = workspace().await;
+        std::fs::create_dir_all(root.join("inputs")).unwrap();
+        std::fs::create_dir_all(root.join("outputs")).unwrap();
+        std::fs::write(
+            root.join("inputs/pack.zip"),
+            zip_of(&[("a.txt", b"a"), ("sub/b.txt", b"b")]),
+        )
+        .unwrap();
+        let tool =
+            ExtractArchiveTool::new(service).with_output_root(Some(PathBuf::from("outputs")));
+        (tmp, root, tool)
+    }
+
+    async fn call(tool: &ExtractArchiveTool, dest: Option<&str>) -> ExtractArchiveOutput {
+        tool.call(
+            &mut ToolContext::new(),
+            ExtractArchiveArgs {
+                path: "inputs/pack.zip".into(),
+                dest: dest.map(str::to_string),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
-    async fn a_relative_dest_goes_under_the_output_root() {
-        let (_tmp, root, service) = workspace().await;
-        std::fs::write(root.join("p.zip"), zip_of(&[("a.txt", b"a")])).unwrap();
-        let out = ExtractArchiveTool::new(service)
-            .with_output_root(Some(PathBuf::from("outputs")))
-            .call(
-                &mut ToolContext::new(),
-                ExtractArchiveArgs {
-                    path: "p.zip".into(),
-                    dest: Some("unz".into()),
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!(out.files, vec!["outputs/unz/a.txt"]);
+    async fn the_default_dest_ignores_the_output_root() {
+        let (_tmp, root, tool) = hive_layout().await;
+        let out = call(&tool, None).await;
+        assert_eq!(out.dest, root.join("pack").display().to_string());
+        assert_eq!(out.files, vec!["pack/a.txt", "pack/sub/b.txt"]);
+        assert_eq!(std::fs::read(root.join("pack/sub/b.txt")).unwrap(), b"b");
+        assert_eq!(std::fs::read_dir(root.join("outputs")).unwrap().count(), 0);
+        let description = tool.description();
+        assert!(
+            description.contains("at the workspace root"),
+            "{description}"
+        );
+        assert!(
+            description.contains("not placed under `outputs/`"),
+            "{description}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_relative_dest_is_taken_from_the_workspace_root() {
+        let (_tmp, root, tool) = hive_layout().await;
+        let out = call(&tool, Some("unpacked")).await;
+        assert_eq!(out.files, vec!["unpacked/a.txt", "unpacked/sub/b.txt"]);
+        assert!(root.join("unpacked/a.txt").is_file());
+        assert_eq!(std::fs::read_dir(root.join("outputs")).unwrap().count(), 0);
+    }
+
+    /// hive's `inputs/` is root-owned 0555 with 0444 files: the default
+    /// dest must not need to write there.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_archive_in_a_read_only_folder_still_extracts() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, root, tool) = hive_layout().await;
+        let inputs = root.join("inputs");
+        let mode = |path: &Path, mode| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        mode(&inputs.join("pack.zip"), 0o444);
+        mode(&inputs, 0o555);
+        if std::fs::write(inputs.join("probe"), b"").is_ok() {
+            // Running as root: permissions do not bind, nothing to test.
+            mode(&inputs, 0o755);
+            return;
+        }
+        let out = call(&tool, None).await;
+        mode(&inputs, 0o755);
+        assert_eq!(out.files, vec!["pack/a.txt", "pack/sub/b.txt"]);
+        assert!(root.join("pack/sub/b.txt").is_file());
+        assert_eq!(tree(&inputs), vec!["pack.zip"]);
     }
 
     #[tokio::test]

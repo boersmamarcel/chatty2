@@ -193,7 +193,7 @@ pub(super) fn build_preamble(
             "- {} (.zip archives: {}then read the extracted files with the readers above)",
             archive_desc.join(" / "),
             if tools.archive_extract {
-                "extract into a new folder, "
+                "extract into a new folder at the workspace root (not the output folder), "
             } else {
                 "list the members, "
             }
@@ -943,6 +943,7 @@ mod tests {
         });
         assert!(with.contains("**list_archive** / **extract_archive** (.zip archives"));
         assert!(with.contains("read the extracted files with the readers above"));
+        assert!(with.contains("new folder at the workspace root (not the output folder)"));
         let without = preamble(&ToolAvailability::default());
         assert!(!without.contains("list_archive") && !without.contains("extract_archive"));
     }
