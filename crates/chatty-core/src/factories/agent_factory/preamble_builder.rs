@@ -112,18 +112,6 @@ pub(super) fn build_preamble(
                 .to_string(),
         );
     }
-    if tools.view_image {
-        tool_sections.push(
-            "- **view_image** (look at a screenshot, chart or diagram yourself; say what you see)"
-                .to_string(),
-        );
-    }
-    if tools.view_image {
-        tool_sections.push(
-            "- **view_image** (look at a screenshot, chart or diagram yourself; say what you see)"
-                .to_string(),
-        );
-    }
     // Chart tool is always available (no filesystem/service dependencies)
     if allows("create_chart") {
         tool_sections
@@ -658,6 +646,26 @@ mod tests {
         assert!(result.contains("## Formatting Capabilities"));
         assert!(result.contains("Math (Typst/LaTeX)"));
         assert!(result.contains("Mermaid Diagrams"));
+    }
+
+    #[test]
+    fn view_image_is_listed_exactly_once() {
+        let tools = ToolAvailability {
+            view_image: true,
+            ..Default::default()
+        };
+        let result = build_preamble(
+            "",
+            &ProviderType::OpenRouter,
+            &tools,
+            &None,
+            &McpTools::none(),
+            &[],
+            &[],
+            &AgentRole::default(),
+            None,
+        );
+        assert_eq!(result.matches("view_image").count(), 1);
     }
 
     #[test]
