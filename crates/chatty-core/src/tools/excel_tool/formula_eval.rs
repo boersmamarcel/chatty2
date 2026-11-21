@@ -267,7 +267,7 @@ fn cell_name(sheet: &str, row: u32, col: u16) -> String {
     format!("{sheet}!{}{}", col_letters(col), row + 1)
 }
 
-fn col_letters(col: u16) -> String {
+pub(super) fn col_letters(col: u16) -> String {
     let mut n = u32::from(col) + 1;
     let mut out = Vec::new();
     while n > 0 {
