@@ -494,37 +494,49 @@ fn task_outcome(value: &Value) -> Result<String> {
 }
 
 impl A2aClient {
+    /// The process's client for a plain A2A call: built once and handed out
+    /// as clones, which share its two HTTP clients and their connections
+    /// (AGE-1882). Building one loads the system's root certificates twice.
     pub fn new() -> Self {
-        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
-        Self {
-            http: edge_http(Arc::clone(&lookup), Arc::new(a2a_peer), |builder| {
-                builder.timeout(Duration::from_secs(30))
-            }),
-            http_private_network: edge_http(lookup, a2a_peer_with_bypass(true), |builder| {
-                builder.timeout(Duration::from_secs(30))
-            }),
-            limits: A2aLimits::default(),
-        }
+        static SHARED: std::sync::LazyLock<A2aClient> = std::sync::LazyLock::new(|| {
+            let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
+            A2aClient {
+                http: edge_http(Arc::clone(&lookup), Arc::new(a2a_peer), |builder| {
+                    builder.timeout(Duration::from_secs(30))
+                }),
+                http_private_network: edge_http(lookup, a2a_peer_with_bypass(true), |builder| {
+                    builder.timeout(Duration::from_secs(30))
+                }),
+                limits: A2aLimits::default(),
+            }
+        });
+        SHARED.clone()
     }
 
     /// A client for driving a delegation stream.
     ///
     /// Bounds silence rather than duration — see [`DELEGATION_READ_TIMEOUT`].
+    ///
+    /// Built once for the process, like [`new`](Self::new): every agent has
+    /// a delegation tool, and each used to build these two clients again.
     pub fn for_delegation() -> Self {
-        let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
-        Self {
-            http: edge_http(
-                Arc::clone(&lookup),
-                Arc::new(a2a_peer),
-                delegation_timeouts(DELEGATION_READ_TIMEOUT),
-            ),
-            http_private_network: edge_http(
-                lookup,
-                a2a_peer_with_bypass(true),
-                delegation_timeouts(DELEGATION_READ_TIMEOUT),
-            ),
-            limits: A2aLimits::default(),
-        }
+        static SHARED: std::sync::LazyLock<A2aClient> = std::sync::LazyLock::new(|| {
+            let lookup: Arc<dyn HostLookup> = Arc::new(SystemLookup);
+            A2aClient {
+                http: edge_http(
+                    Arc::clone(&lookup),
+                    Arc::new(a2a_peer),
+                    delegation_timeouts(DELEGATION_READ_TIMEOUT),
+                ),
+                http_private_network: edge_http(
+                    lookup,
+                    a2a_peer_with_bypass(true),
+                    delegation_timeouts(DELEGATION_READ_TIMEOUT),
+                ),
+                limits: A2aLimits::default(),
+            }
+        });
+        SHARED.clone()
     }
 
     /// [`for_delegation`](Self::for_delegation) with the silence budget a test
