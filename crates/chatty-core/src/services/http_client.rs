@@ -4,7 +4,8 @@
 //! that user-agent strings, timeouts, and redirect policies are consistent
 //! across the codebase.
 
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 /// Default user-agent for outgoing HTTP requests.
@@ -31,29 +32,84 @@ pub const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKi
 /// this network returns Dutch search results and page chrome (AGE-508).
 pub const ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
 
-/// Build a standard HTTP client with the Chatty user-agent and the given
-/// timeout.
-pub fn default_client(timeout_secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .user_agent(USER_AGENT)
-        .default_headers(accept_language_header())
-        .build()
-        .expect("Failed to initialize HTTP client (TLS backend error)")
+/// The kinds of client this module hands out, as far as their settings go:
+/// two clients of one kind and one timeout are interchangeable.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Kind {
+    Default,
+    NoRedirect,
+    OpenWeb,
+    Browser,
 }
 
-/// Build an HTTP client that does **not** follow redirects.
+/// How many clients this process has built through [`shared`]. Each build
+/// reads and parses the system's root certificates (tens of milliseconds),
+/// so the tests count them.
+#[cfg(test)]
+static BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The process's one client of `kind` with `timeout_secs`, built by `build`
+/// the first time it is asked for (AGE-1882).
+///
+/// Every agent build made six clients of its own: the search tool three,
+/// the delegation tool two, the fetch tool one. Building a `reqwest`
+/// client loads the system's root certificates again each time, which was
+/// 60% of the CPU of building an agent (32 ms of 54 ms on a server, more
+/// in a guest), on every conversation opened and every worker started. A
+/// clone of a `reqwest::Client` is a handle to the same client and the
+/// same connection pool, so the tools of every agent now share both.
+///
+/// What is shared is settings and connections, nothing of a request: no
+/// cookie store, no default credentials. A caller that needs other
+/// settings (a stub resolver in a test) builds its own and is not kept.
+fn shared(
+    kind: Kind,
+    timeout_secs: u64,
+    build: impl FnOnce() -> reqwest::Client,
+) -> reqwest::Client {
+    static CLIENTS: LazyLock<Mutex<HashMap<(Kind, u64), reqwest::Client>>> =
+        LazyLock::new(Default::default);
+    let mut clients = CLIENTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    clients
+        .entry((kind, timeout_secs))
+        .or_insert_with(|| {
+            #[cfg(test)]
+            BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            build()
+        })
+        .clone()
+}
+
+/// The standard HTTP client with the Chatty user-agent and the given
+/// timeout. One per timeout for the process; see [`shared`].
+pub fn default_client(timeout_secs: u64) -> reqwest::Client {
+    shared(Kind::Default, timeout_secs, || {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .user_agent(USER_AGENT)
+            .default_headers(accept_language_header())
+            .build()
+            .expect("Failed to initialize HTTP client (TLS backend error)")
+    })
+}
+
+/// An HTTP client that does **not** follow redirects. One per timeout for
+/// the process; see [`shared`].
 ///
 /// Used by the fetch tool (to report redirects) and OAuth flows (to capture
 /// redirect URIs).
 pub fn no_redirect_client(timeout_secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .user_agent(USER_AGENT)
-        .default_headers(accept_language_header())
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("Failed to initialize HTTP client (TLS backend error)")
+    shared(Kind::NoRedirect, timeout_secs, || {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .user_agent(USER_AGENT)
+            .default_headers(accept_language_header())
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("Failed to initialize HTTP client (TLS backend error)")
+    })
 }
 
 /// [`no_redirect_client`] for open-web requests (`fetch`): every name it
@@ -63,10 +119,14 @@ pub fn no_redirect_client(timeout_secs: u64) -> reqwest::Client {
 /// (AGE-537). No proxy: a proxy would resolve the target itself, out of the
 /// guard's sight.
 pub fn open_web_client(timeout_secs: u64) -> reqwest::Client {
-    open_web_client_with(
-        timeout_secs,
-        std::sync::Arc::new(crate::services::ssrf_guard::SystemLookup),
-    )
+    // One per timeout for the process ([`shared`]): the guard is in the
+    // client's resolver, so every user of the shared client is behind it.
+    shared(Kind::OpenWeb, timeout_secs, || {
+        open_web_client_with(
+            timeout_secs,
+            std::sync::Arc::new(crate::services::ssrf_guard::SystemLookup),
+        )
+    })
 }
 
 /// [`open_web_client`] resolving through `lookup` — a stub, in tests.
@@ -134,12 +194,14 @@ pub(crate) fn mcp_oauth_client_with(
 /// Used by the DuckDuckGo fallback search which requires a realistic
 /// user-agent to avoid being blocked.
 pub fn browser_client(timeout_secs: u64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .user_agent(BROWSER_USER_AGENT)
-        .default_headers(accept_language_header())
-        .build()
-        .expect("Failed to initialize HTTP client (TLS backend error)")
+    shared(Kind::Browser, timeout_secs, || {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_secs))
+            .user_agent(BROWSER_USER_AGENT)
+            .default_headers(accept_language_header())
+            .build()
+            .expect("Failed to initialize HTTP client (TLS backend error)")
+    })
 }
 
 /// A single-entry header map carrying [`ACCEPT_LANGUAGE`], for
@@ -174,6 +236,45 @@ pub fn llm_client() -> &'static reqwest::Client {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    /// AGE-1882: asking for a client again builds nothing, whichever tool
+    /// asks; another timeout or another kind is another client.
+    #[test]
+    fn a_client_is_built_once_per_kind_and_timeout() {
+        use std::sync::atomic::Ordering;
+        // Timeouts no other test asks for, so their first use is here.
+        let (first, second) = (7_771, 7_772);
+        let makers: [fn(u64) -> reqwest::Client; 4] = [
+            default_client,
+            no_redirect_client,
+            open_web_client,
+            browser_client,
+        ];
+        for make in makers {
+            let before = BUILDS.load(Ordering::SeqCst);
+            let _ = make(first);
+            // Other tests build clients of their own meanwhile; this one's
+            // first use is at least one build.
+            assert!(BUILDS.load(Ordering::SeqCst) > before);
+        }
+        // From here on nothing this test asks for is new. Other tests may
+        // still build theirs, so compare what this thread's calls add by
+        // asking many times: far more calls than builds.
+        let before = BUILDS.load(Ordering::SeqCst);
+        for _ in 0..200 {
+            for make in makers {
+                let _ = make(first);
+            }
+        }
+        let built = BUILDS.load(Ordering::SeqCst) - before;
+        assert!(built < 100, "800 calls built {built} clients");
+        let before = BUILDS.load(Ordering::SeqCst);
+        let _ = default_client(second);
+        assert!(
+            BUILDS.load(Ordering::SeqCst) > before,
+            "another timeout is another client"
+        );
+    }
 
     #[test]
     fn llm_client_returns_same_instance() {
