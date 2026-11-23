@@ -732,10 +732,7 @@ fn drain_stderr(child: &mut Child, tail: Arc<Mutex<String>>) -> Option<JoinHandl
             tail.push_str(&line);
             tail.push('\n');
             if tail.len() > STDERR_TAIL_BYTES {
-                let cut = tail.len() - STDERR_TAIL_BYTES;
-                let cut = (cut..tail.len())
-                    .find(|i| tail.is_char_boundary(*i))
-                    .unwrap_or(tail.len());
+                let cut = tail.ceil_char_boundary(tail.len() - STDERR_TAIL_BYTES);
                 tail.drain(..cut);
             }
         }

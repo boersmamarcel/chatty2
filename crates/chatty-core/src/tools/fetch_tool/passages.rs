@@ -1,6 +1,6 @@
 use super::{
     ERROR_MAX_LENGTH, FIND_CONTEXT_AFTER, FIND_CONTEXT_BEFORE, FIND_FALLBACK_PASSAGES,
-    floor_char_boundary, html_to_text, looks_like_html,
+    html_to_text, looks_like_html,
 };
 
 /// Appended to the truncation note of a page window: the page is cached, so
@@ -16,12 +16,12 @@ pub(super) const WINDOW_HINT: &str = ", or pass `find` to jump to the passage yo
 /// with `floor_char_boundary`, `(0, n)` followed by `(n, n)` reproduce `s`
 /// with no gap and no overlap (AGE-507).
 pub(super) fn window(s: &str, start_index: usize, max_length: usize, hint: &str) -> (String, bool) {
-    let start = floor_char_boundary(s, start_index);
+    let start = s.floor_char_boundary(start_index);
     let rest = &s[start..];
     if rest.len() <= max_length {
         return (rest.to_string(), false);
     }
-    let end = floor_char_boundary(rest, max_length);
+    let end = rest.floor_char_boundary(max_length);
     // A window narrower than the character at its start floors to 0, which
     // would return nothing and name the same start_index again — a model
     // following the note would page forever. Emit one whole character instead.
@@ -81,7 +81,7 @@ pub(super) fn find_passages(
     start_index: usize,
     max_length: usize,
 ) -> (String, bool) {
-    let from = floor_char_boundary(text, start_index);
+    let from = text.floor_char_boundary(start_index);
     let pattern = query
         .split_whitespace()
         .map(regex::escape)
@@ -104,8 +104,8 @@ pub(super) fn find_passages(
     // One passage per run of nearby matches.
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for &(start, end) in &hits {
-        let span_start = floor_char_boundary(text, start.saturating_sub(FIND_CONTEXT_BEFORE));
-        let span_end = floor_char_boundary(text, end + FIND_CONTEXT_AFTER);
+        let span_start = text.floor_char_boundary(start.saturating_sub(FIND_CONTEXT_BEFORE));
+        let span_end = text.floor_char_boundary(end + FIND_CONTEXT_AFTER);
         match spans.last_mut() {
             Some(last) if span_start <= last.1 => last.1 = last.1.max(span_end),
             _ => spans.push((span_start, span_end)),
@@ -127,7 +127,7 @@ pub(super) fn find_passages(
             // Not even the first passage fits: show its head, resume after.
             // Always make progress, or a model following the note would
             // repeat the same call forever.
-            let cut = floor_char_boundary(text, start + room.max(1));
+            let cut = text.floor_char_boundary(start + room.max(1));
             let cut = if cut <= start {
                 text[start..]
                     .char_indices()
@@ -229,7 +229,7 @@ fn closest_passages(text: &str, query: &str, from: usize, max_length: usize) -> 
     for (start, end) in chosen {
         let label = format!("\n--- start_index={start} ---\n");
         let end = (end + FIND_CONTEXT_AFTER).min(start + share.saturating_sub(label.len()));
-        let end = floor_char_boundary(text, end);
+        let end = text.floor_char_boundary(end);
         out.push_str(&label);
         out.push_str(&text[start..end]);
     }
