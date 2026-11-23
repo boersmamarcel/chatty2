@@ -1,5 +1,5 @@
+use crate::settings::models::AgentConfigNotifier;
 use crate::settings::models::execution_settings::{ApprovalMode, ExecutionSettingsModel};
-use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use chatty_core::services::MemoryService;
 use gpui::{App, AsyncApp};
 use tracing::{debug, error, info, warn};
@@ -7,19 +7,24 @@ use tracing::{debug, error, info, warn};
 /// Emit `RebuildRequired` so the active conversation's agent is rebuilt
 /// with the current execution tool settings (bash, filesystem, MCP management).
 fn notify_tool_set_changed(cx: &mut App) {
-    if let Some(notifier) = cx
-        .try_global::<GlobalAgentConfigNotifier>()
-        .and_then(|g| g.try_upgrade())
-    {
+    if AgentConfigNotifier::request_rebuild(cx) {
         info!("Notifying tool set changed — triggering agent rebuild");
-        notifier.update(cx, |_notifier, cx| {
-            cx.emit(AgentConfigEvent::RebuildRequired);
-        });
     } else {
         debug!(
             "notify_tool_set_changed: GlobalAgentConfigNotifier not found — agent will not be rebuilt"
         );
     }
+}
+
+/// Save `settings` in the background, logging a failure.
+fn save_async(settings: ExecutionSettingsModel, cx: &mut App) {
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        let repo = chatty_core::execution_settings_repository();
+        if let Err(e) = repo.save(settings).await {
+            error!(error = ?e, "Failed to save execution settings");
+        }
+    })
+    .detach();
 }
 
 /// Toggle code execution enabled/disabled and persist to disk
@@ -44,13 +49,7 @@ pub fn toggle_execution(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Update workspace directory and persist to disk
@@ -68,13 +67,7 @@ pub fn set_workspace_dir(dir: Option<String>, cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Update approval mode and persist to disk
@@ -94,13 +87,7 @@ pub fn set_approval_mode(mode: ApprovalMode, cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle filesystem read tools enabled/disabled and persist to disk
@@ -122,13 +109,7 @@ pub fn toggle_filesystem_read(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle network isolation enabled/disabled and persist to disk
@@ -147,13 +128,7 @@ pub fn toggle_network_isolation(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle the built-in fetch tool enabled/disabled and persist to disk.
@@ -172,13 +147,7 @@ pub fn toggle_fetch(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Update the Docker host setting and persist to disk.
@@ -196,13 +165,7 @@ pub fn set_docker_host(host: Option<String>, cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle the built-in browser tools and persist to disk.
@@ -214,13 +177,7 @@ pub fn toggle_browser(cx: &mut App) {
     cx.refresh_windows();
     notify_tool_set_changed(cx);
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle whether the browser's open-web policy may also reach private/
@@ -243,13 +200,7 @@ pub fn toggle_allow_private_network_access(cx: &mut App) {
     cx.refresh_windows();
     notify_tool_set_changed(cx);
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle the per-conversation move between local and hosted, and persist to
@@ -268,13 +219,7 @@ pub fn toggle_hosted_conversations(cx: &mut App) {
     let settings = cx.global::<ExecutionSettingsModel>().clone();
     cx.refresh_windows();
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle Docker code execution enabled/disabled and persist to disk.
@@ -287,13 +232,7 @@ pub fn toggle_execute_code(cx: &mut App) {
     cx.refresh_windows();
     notify_tool_set_changed(cx);
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle Docker fallback for code execution enabled/disabled and persist to disk.
@@ -318,13 +257,7 @@ pub fn toggle_docker_code_execution(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle git integration tools enabled/disabled and persist to disk.
@@ -343,13 +276,7 @@ pub fn toggle_git(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle read-only access to the user's terminal (`terminal_read`,
@@ -369,13 +296,7 @@ pub fn toggle_terminal_access(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Update the shell timeout in seconds and persist to disk.
@@ -394,13 +315,7 @@ pub fn set_timeout_seconds(seconds: u32, cx: &mut App) {
     cx.refresh_windows();
 
     // 4. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Update the maximum output size in bytes and persist to disk.
@@ -419,13 +334,7 @@ pub fn set_max_output_bytes(bytes: usize, cx: &mut App) {
     cx.refresh_windows();
 
     // 4. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Update the maximum number of agentic turns and persist to disk
@@ -441,13 +350,7 @@ pub fn set_max_agent_turns(turns: u32, cx: &mut App) {
     cx.refresh_windows();
 
     // 4. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Toggle agent memory enabled/disabled and persist to disk.
@@ -487,13 +390,7 @@ pub fn toggle_memory(cx: &mut App) {
     cx.refresh_windows();
     notify_tool_set_changed(cx);
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Clear all agent memory (purge the memory store).
@@ -637,13 +534,7 @@ pub fn toggle_embedding(cx: &mut App) {
     cx.refresh_windows();
     notify_tool_set_changed(cx);
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Set the embedding provider and reinitialize the EmbeddingService.
@@ -669,13 +560,7 @@ pub fn set_embedding_provider(
     cx.refresh_windows();
     notify_tool_set_changed(cx);
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Set the embedding model name and reinitialize the EmbeddingService.
@@ -690,13 +575,7 @@ pub fn set_embedding_model(model: Option<String>, cx: &mut App) {
     cx.refresh_windows();
     notify_tool_set_changed(cx);
 
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }
 
 /// Recreate the EmbeddingService global from current settings.
@@ -783,11 +662,5 @@ pub fn toggle_filesystem_write(cx: &mut App) {
     notify_tool_set_changed(cx);
 
     // 5. Save async with error handling
-    cx.spawn(|_cx: &mut AsyncApp| async move {
-        let repo = chatty_core::execution_settings_repository();
-        if let Err(e) = repo.save(settings).await {
-            error!(error = ?e, "Failed to save execution settings");
-        }
-    })
-    .detach();
+    save_async(settings, cx);
 }

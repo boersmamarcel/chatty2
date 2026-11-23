@@ -5,6 +5,7 @@
 //! engine state mutation.
 
 use crate::engine::{ApprovalInfo, ToolCallInfo, ToolCallState};
+use crate::ui::engine_location_label;
 use crate::ui::plan;
 use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
 use chatty_core::services::AgentTaskSnapshot;
@@ -194,14 +195,5 @@ pub(super) fn source_badge_label(source: &ToolSource) -> Option<&'static str> {
         ToolSource::HiveCloud => Some("remote"),
         ToolSource::Internet { .. } => Some("remote"),
         ToolSource::ExternalService { .. } => Some("remote"),
-    }
-}
-
-pub(super) fn engine_location_label(engine: ExecutionEngine) -> &'static str {
-    match engine {
-        ExecutionEngine::Shell => "shell (local)",
-        ExecutionEngine::Monty => "monty (local)",
-        ExecutionEngine::Docker => "docker (local)",
-        ExecutionEngine::Daytona => "daytona (remote)",
     }
 }

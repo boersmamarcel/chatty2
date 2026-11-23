@@ -245,8 +245,8 @@ pub(super) async fn write_atif_export(
     };
 
     // Determine exports directory
-    let exports_dir = match dirs::config_dir() {
-        Some(config) => config.join("chatty").join("exports"),
+    let exports_dir = match chatty_core::exporters::exports_dir() {
+        Some(dir) => dir,
         None => {
             warn!("Cannot determine config directory for ATIF export");
             return;
@@ -310,8 +310,8 @@ pub(super) async fn write_jsonl_export(
     };
 
     // Determine exports directory
-    let exports_dir = match dirs::config_dir() {
-        Some(config) => config.join("chatty").join("exports"),
+    let exports_dir = match chatty_core::exporters::exports_dir() {
+        Some(dir) => dir,
         None => {
             warn!("Cannot determine config directory for JSONL export");
             return;

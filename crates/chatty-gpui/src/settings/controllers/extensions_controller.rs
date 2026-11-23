@@ -1,7 +1,7 @@
 use crate::chatty::services::mcp_service::McpService;
 use crate::settings::controllers::module_settings_controller;
+use crate::settings::models::AgentConfigNotifier;
 use crate::settings::models::marketplace_state::MarketplaceState;
-use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use chatty_core::hive::{HiveRegistryClient, HiveSession, SessionState, TokenPair};
 use chatty_core::install;
 use chatty_core::services::A2aClient;
@@ -703,12 +703,5 @@ fn save_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {
 }
 
 fn emit_rebuild_required(cx: &mut App) {
-    if let Some(notifier) = cx
-        .try_global::<GlobalAgentConfigNotifier>()
-        .and_then(|g| g.try_upgrade())
-    {
-        notifier.update(cx, |_notifier, cx| {
-            cx.emit(AgentConfigEvent::RebuildRequired);
-        });
-    }
+    AgentConfigNotifier::request_rebuild(cx);
 }

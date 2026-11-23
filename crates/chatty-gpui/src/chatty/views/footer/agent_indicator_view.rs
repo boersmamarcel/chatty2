@@ -41,7 +41,7 @@ impl RenderOnce for AgentIndicatorView {
         // 1. A2A protocol agents from ExtensionsModel
         let store = cx.global::<ExtensionsModel>();
         for (id, cfg, enabled) in store.all_a2a_agents() {
-            let is_external = !cfg.url.contains("localhost") && !cfg.url.contains("127.0.0.1");
+            let is_external = !crate::chatty::services::url_is_local(&cfg.url);
             agents.push(AgentEntry {
                 name: cfg.name,
                 kind_label: "A2A",

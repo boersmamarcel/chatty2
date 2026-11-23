@@ -13,3 +13,9 @@ mod desktop_delegation_tests;
 /// `broker_runner`: the module gateway it starts lazily is not Unix-only,
 /// only the fleet-broker socket riding on it is.
 pub mod lazy_gateway_broker;
+
+/// Whether a configured MCP or A2A `url` points at this machine, for the
+/// "External" badges. A plain substring test, as every caller had it.
+pub fn url_is_local(url: &str) -> bool {
+    url.contains("localhost") || url.contains("127.0.0.1")
+}

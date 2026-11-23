@@ -3,8 +3,7 @@ use crate::chatty::services::broker_runner;
 use crate::chatty::services::lazy_gateway_broker::{self, LazyGatewayBroker};
 use crate::settings::models::module_settings::ModuleSettingsModel;
 use crate::settings::models::{
-    AgentConfigEvent, DiscoveredModuleEntry, DiscoveredModulesModel, GlobalAgentConfigNotifier,
-    ModuleLoadStatus,
+    AgentConfigNotifier, DiscoveredModuleEntry, DiscoveredModulesModel, ModuleLoadStatus,
 };
 use anyhow::{Context, Result};
 #[cfg(unix)]
@@ -258,14 +257,7 @@ fn apply_scan_snapshot(
 
     // Notify the active agent to rebuild so it picks up newly discovered
     // (or removed) plugins and the broker's roster.
-    if let Some(notifier) = cx
-        .try_global::<GlobalAgentConfigNotifier>()
-        .and_then(|g| g.try_upgrade())
-    {
-        notifier.update(cx, |_notifier, cx| {
-            cx.emit(AgentConfigEvent::RebuildRequired);
-        });
-    }
+    AgentConfigNotifier::request_rebuild(cx);
 
     true
 }
@@ -325,14 +317,8 @@ fn apply_gateway_result(
     // active conversation's agent now so its `local_agents` picks up the
     // roster this gateway was actually built for, rather than staying
     // pinned to whatever it guessed before the gateway existed.
-    if started
-        && let Some(notifier) = cx
-            .try_global::<GlobalAgentConfigNotifier>()
-            .and_then(|g| g.try_upgrade())
-    {
-        notifier.update(cx, |_notifier, cx| {
-            cx.emit(AgentConfigEvent::RebuildRequired);
-        });
+    if started {
+        AgentConfigNotifier::request_rebuild(cx);
     }
 }
 

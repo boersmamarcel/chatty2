@@ -20,13 +20,9 @@ use crate::settings::models::extensions_store::ExtensionsModel;
 use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::models::marketplace_state::MarketplaceState;
 
-fn data_dir() -> Option<PathBuf> {
-    dirs::data_dir()
-}
-
 /// Re-read the installed teams from disk into [`MarketplaceState`].
 pub fn refresh_installed_teams(cx: &mut App) {
-    let teams = data_dir()
+    let teams = dirs::data_dir()
         .map(|dir| team_install::installed_teams(&dir))
         .unwrap_or_default();
     cx.global_mut::<MarketplaceState>().installed_teams = teams;
@@ -66,7 +62,7 @@ pub fn search_teams(query: String, cx: &mut App) {
 /// Install (or update to) `listing`'s latest version: verify every spec
 /// and locked plugin, then write them and add the leader to the roster.
 pub fn install_team(listing: AgentSpecListing, cx: &mut App) {
-    let Some(data_dir) = data_dir() else {
+    let Some(data_dir) = dirs::data_dir() else {
         cx.global_mut::<MarketplaceState>()
             .set_error("Install failed: no data directory".to_string());
         cx.refresh_windows();
@@ -146,7 +142,7 @@ pub fn install_team(listing: AgentSpecListing, cx: &mut App) {
 
 /// Remove the team led by `leader`, and the plugins only it used.
 pub fn uninstall_team(leader: String, cx: &mut App) {
-    let Some(data_dir) = data_dir() else {
+    let Some(data_dir) = dirs::data_dir() else {
         return;
     };
     let module_dir = PathBuf::from(&cx.global::<ModuleSettingsModel>().module_dir);
