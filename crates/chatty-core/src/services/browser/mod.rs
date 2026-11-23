@@ -56,7 +56,7 @@ pub use typing::MAX_TEXT_LEN;
 
 /// How a hosted guest launches Chrome (AGE-1912). The default is the desktop
 /// behaviour: Chrome's own sandbox, names resolved by the guarded proxy.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct LaunchOptions {
     /// Add `--no-sandbox --disable-dev-shm-usage`: the VM is the sandbox.
     pub no_sandbox: bool,
@@ -66,6 +66,20 @@ pub struct LaunchOptions {
     pub upstream_proxy: Option<String>,
     /// Bearer token for the upstream proxy. Never logged.
     pub upstream_token: Option<String>,
+}
+
+// The token must never reach a log line, even through `{:?}`.
+impl std::fmt::Debug for LaunchOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchOptions")
+            .field("no_sandbox", &self.no_sandbox)
+            .field("upstream_proxy", &self.upstream_proxy)
+            .field(
+                "upstream_token",
+                &self.upstream_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 /// The handle the browser tools hold.
