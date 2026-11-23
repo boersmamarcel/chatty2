@@ -2077,7 +2077,7 @@ async fn site_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, Str
                     .to_string();
                 let line = first.split(" HTTP").next().unwrap_or("").to_string();
                 log.lock().unwrap().push((line.clone(), cookie));
-                let body = if line.starts_with("GET / ") {
+                let body = if line == "GET /" {
                     "<!doctype html><title>Orders</title>\
                      <form method=post action=/save><button>Save</button></form>\
                      <button onclick=\"fetch('/orders/1',{method:'DELETE'})\">Delete</button>"
@@ -2163,6 +2163,16 @@ async fn site_modes_gate_clicks_and_requests() {
             assert!(posted, "{:?}", seen.lock().unwrap());
         }
 
+        // A submitted form leaves the page: open it again for the Delete button.
+        navigate
+            .call(
+                cx,
+                NavigateArgs {
+                    url: format!("{origin}/"),
+                },
+            )
+            .await
+            .expect("page loads again");
         let tree = snapshot.call(cx, NoArgs {}).await.expect("snapshot").tree;
         let del = click
             .call(
