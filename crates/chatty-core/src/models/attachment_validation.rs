@@ -68,6 +68,7 @@ pub fn is_image_extension(ext: &str) -> bool {
 }
 
 /// Check if a file is a PDF based on extension
+#[cfg(test)]
 pub fn is_pdf_extension(ext: &str) -> bool {
     ext.to_lowercase() == PDF_EXTENSION
 }
