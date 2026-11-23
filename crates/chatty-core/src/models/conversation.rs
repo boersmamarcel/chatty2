@@ -403,7 +403,7 @@ impl Conversation {
         attachments: Vec<PathBuf>,
     ) {
         let now = SystemTime::now();
-        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let timestamp = unix_seconds(now);
         self.entries.push(MessageEntry {
             message,
             system_trace: None,
@@ -431,7 +431,7 @@ impl Conversation {
         trace: Option<serde_json::Value>,
     ) {
         let now = SystemTime::now();
-        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let timestamp = unix_seconds(now);
         finalize_response_state(
             &mut self.entries,
             self.streaming_turn_messages.take(),
@@ -667,10 +667,7 @@ impl Conversation {
         original_text: String,
         original_timestamp: i64,
     ) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
+        let now = unix_seconds(SystemTime::now());
 
         self.regeneration_records.push(RegenerationRecord {
             message_index,
@@ -1316,7 +1313,7 @@ fn finalize_turn_state(
 ) -> TurnOutcome {
     if !text.trim().is_empty() || trace.is_some() {
         let now = SystemTime::now();
-        let timestamp = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+        let timestamp = unix_seconds(now);
         // Delegate to the same helper `finalize_response` uses, so the turn's
         // tool round-trips are persisted ahead of the final text entry
         // (AGE-247) by exactly one code path rather than two that can drift.

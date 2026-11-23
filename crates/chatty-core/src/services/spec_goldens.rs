@@ -116,7 +116,7 @@ impl GoldenRun {
         let workspace = workspace.to_string_lossy().into_owned();
         if let Some(trace) = &mut self.trace {
             mask_value(trace, &workspace);
-            *trace = canonical(std::mem::take(trace));
+            trace.sort_all_objects();
         }
         self.answer = self.answer.replace(&workspace, "<workspace>");
         self
@@ -163,31 +163,11 @@ fn mask_value(value: &mut serde_json::Value, workspace: &str) {
 /// the form a tool call's pre-serialized `input`/`output` takes; any other
 /// string (plain text, a bare scalar, malformed JSON) is left as it is.
 fn canonical_json_string(text: &mut String) {
-    if let Ok(parsed @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
+    if let Ok(mut parsed @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
         serde_json::from_str::<serde_json::Value>(text)
     {
-        *text = canonical(parsed).to_string();
-    }
-}
-
-/// Rebuild `value` with every object's keys inserted in sorted order, so its
-/// serialized form is the same whether or not `serde_json`'s map happens to
-/// preserve insertion order in this build.
-fn canonical(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Object(map) => {
-            let sorted: std::collections::BTreeMap<String, serde_json::Value> =
-                map.into_iter().map(|(k, v)| (k, canonical(v))).collect();
-            let mut out = serde_json::Map::with_capacity(sorted.len());
-            for (k, v) in sorted {
-                out.insert(k, v);
-            }
-            serde_json::Value::Object(out)
-        }
-        serde_json::Value::Array(items) => {
-            serde_json::Value::Array(items.into_iter().map(canonical).collect())
-        }
-        other => other,
+        parsed.sort_all_objects();
+        *text = parsed.to_string();
     }
 }
 

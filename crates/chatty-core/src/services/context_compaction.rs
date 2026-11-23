@@ -93,7 +93,7 @@ const FILE_WRITE_TOOLS: &[(&str, &str)] = &[
 ];
 
 /// Tools that run a command; their output is the "last command result".
-const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
+pub(crate) const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
 
 /// Markers of a shell command that writes files.
 const SHELL_WRITE_MARKERS: &[&str] = &[
