@@ -844,14 +844,8 @@ impl ShellSession {
         if output.len() <= cap {
             return false;
         }
-        let mut head_end = cap / 2;
-        while head_end > 0 && !output.is_char_boundary(head_end) {
-            head_end -= 1;
-        }
-        let mut tail_start = output.len() - (cap - cap / 2);
-        while tail_start < output.len() && !output.is_char_boundary(tail_start) {
-            tail_start += 1;
-        }
+        let head_end = output.floor_char_boundary(cap / 2);
+        let tail_start = output.ceil_char_boundary(output.len() - (cap - cap / 2));
         let omitted = tail_start - head_end;
         *output = format!(
             "{}\n... [{omitted} bytes omitted; rerun with a filter (grep/tail) to see more] ...\n{}",

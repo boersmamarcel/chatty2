@@ -73,11 +73,7 @@ fn truncate_at_char_boundary(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
     }
-    let mut end = max;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
+    &s[..s.floor_char_boundary(max)]
 }
 
 /// The system-prompt section carrying every instruction file for

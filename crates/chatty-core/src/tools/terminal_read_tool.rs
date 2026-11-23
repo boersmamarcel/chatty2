@@ -136,10 +136,7 @@ pub(crate) fn keep_tail(text: &str, cap: usize) -> (String, usize) {
     }
     if kept == 0 {
         let last = lines.last().copied().unwrap_or_default();
-        let mut start = last.len().saturating_sub(cap);
-        while start < last.len() && !last.is_char_boundary(start) {
-            start += 1;
-        }
+        let start = last.ceil_char_boundary(last.len().saturating_sub(cap));
         return (last[start..].to_string(), lines.len() - 1);
     }
     (lines[lines.len() - kept..].join("\n"), lines.len() - kept)
