@@ -54,6 +54,34 @@ pub use session::{BrowserSession, BrowserTab};
 pub use snapshot::{Snapshot, SnapshotNode};
 pub use typing::MAX_TEXT_LEN;
 
+/// How a hosted guest launches Chrome (AGE-1912). The default is the desktop
+/// behaviour: Chrome's own sandbox, names resolved by the guarded proxy.
+#[derive(Clone, Default)]
+pub struct LaunchOptions {
+    /// Add `--no-sandbox --disable-dev-shm-usage`: the VM is the sandbox.
+    pub no_sandbox: bool,
+    /// An upstream proxy URL (`http://172.16.0.1:8090`) that gets every
+    /// non-loopback request instead of local name resolution. Only used
+    /// under the open-web policy.
+    pub upstream_proxy: Option<String>,
+    /// Bearer token for the upstream proxy. Never logged.
+    pub upstream_token: Option<String>,
+}
+
+// The token must never reach a log line, even through `{:?}`.
+impl std::fmt::Debug for LaunchOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchOptions")
+            .field("no_sandbox", &self.no_sandbox)
+            .field("upstream_proxy", &self.upstream_proxy)
+            .field(
+                "upstream_token",
+                &self.upstream_token.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
 /// The handle the browser tools hold.
 ///
 /// Constructed at agent-build time and cheap — it launches nothing. The browser
@@ -70,6 +98,7 @@ pub struct BrowserManager {
     /// the pinned build; `None` otherwise. The artifact panel shows it
     /// instead of a bare "Starting browser…" (AGE-565).
     download_progress: tokio::sync::watch::Sender<Option<f32>>,
+    launch: LaunchOptions,
 }
 
 impl BrowserManager {
@@ -82,6 +111,7 @@ impl BrowserManager {
             session: Mutex::new(None),
             snapshot: Mutex::new(None),
             download_progress: tokio::sync::watch::Sender::new(None),
+            launch: LaunchOptions::default(),
         }
     }
 
@@ -101,7 +131,14 @@ impl BrowserManager {
             session: Mutex::new(None),
             snapshot: Mutex::new(None),
             download_progress: tokio::sync::watch::Sender::new(None),
+            launch: LaunchOptions::default(),
         }
+    }
+
+    /// Launch Chrome the way a hosted guest needs (AGE-1912).
+    pub fn with_launch_options(mut self, launch: LaunchOptions) -> Self {
+        self.launch = launch;
+        self
     }
 
     /// Whether this manager's policy allows navigating off-machine, so tool
@@ -162,8 +199,13 @@ impl BrowserManager {
         let chrome = provisioning::resolve_chrome(Some(&progress)).await;
         self.download_progress.send_replace(None);
         let chrome = chrome?;
-        let session =
-            BrowserSession::launch(chrome, self.profile.clone(), self.policy.clone()).await?;
+        let session = BrowserSession::launch(
+            chrome,
+            self.profile.clone(),
+            self.policy.clone(),
+            self.launch.clone(),
+        )
+        .await?;
         *guard = Some(session.clone());
         Ok(session)
     }

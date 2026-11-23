@@ -872,14 +872,25 @@ impl AgentClient {
                         internet_access,
                         "Browser tools enabled"
                     );
-                    let manager = std::sync::Arc::new(if internet_access {
-                        crate::services::browser::BrowserManager::open_web(
-                            Some(workspace),
-                            allow_private_network_access,
-                        )
-                    } else {
-                        crate::services::browser::BrowserManager::lane_a(Some(workspace))
-                    });
+                    let launch = exec_settings
+                        .as_ref()
+                        .map(|s| crate::services::browser::LaunchOptions {
+                            no_sandbox: s.browser_no_sandbox,
+                            upstream_proxy: s.browser_upstream_proxy.clone(),
+                            upstream_token: s.browser_upstream_token.clone(),
+                        })
+                        .unwrap_or_default();
+                    let manager = std::sync::Arc::new(
+                        if internet_access {
+                            crate::services::browser::BrowserManager::open_web(
+                                Some(workspace),
+                                allow_private_network_access,
+                            )
+                        } else {
+                            crate::services::browser::BrowserManager::lane_a(Some(workspace))
+                        }
+                        .with_launch_options(launch),
+                    );
                     // So the artifact viewport (AGE-155) can find this turn's
                     // session and screencast it — the tool structs below hold
                     // their own clone but never expose it back to the caller.

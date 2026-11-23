@@ -132,6 +132,20 @@ const DOC_WRITE: &[&str] = &["write_docx", "write_excel", "edit_excel", "write_p
 /// extraction only ever creates a new folder: it overwrites nothing.
 const ARCHIVE: &[&str] = &["list_archive", "extract_archive"];
 
+/// The built-in browser (AGE-1912): the eight tools of `tools/browser_tools.rs`.
+/// They exist only when `browser_enabled` and a workspace are set; a profile
+/// never turns the group on.
+const BROWSER: &[&str] = &[
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_screenshot",
+    "browser_console",
+    "browser_network",
+    "browser_resize",
+    "browser_click",
+    "browser_type",
+];
+
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
 /// shares one guest image with `math-render` compiled in, so the profile is
 /// what keeps the compiler away from the roles that have no use for it.
@@ -310,6 +324,14 @@ pub static WEB_RESEARCHER: ToolProfile = ToolProfile {
     groups: &[READ_SET, WEB, CALCULATE, MESSAGES],
 };
 
+/// A hosted worker that operates a web page (AGE-1912): the read set, the
+/// filesystem-write tools for its own workspace, the browser, attachments.
+/// No shell, no git, no code execution.
+pub static OPERATOR: ToolProfile = ToolProfile {
+    name: "operator",
+    groups: &[READ_SET, FS_WRITE, BROWSER, ATTACH, MESSAGES],
+};
+
 /// Every profile, in the order `--tools` documents them.
 pub static TOOL_PROFILES: &[&ToolProfile] = &[
     &COORDINATOR,
@@ -317,6 +339,7 @@ pub static TOOL_PROFILES: &[&ToolProfile] = &[
     &REVIEWER,
     &TYPESETTER,
     &WEB_RESEARCHER,
+    &OPERATOR,
 ];
 
 /// Joins profile names into their union: `coder+coordinator` allows what
@@ -853,5 +876,32 @@ mod tests {
         let narrowed = CODER.narrow(&nothing);
         let names: HashSet<String> = active_native_tool_names(&narrowed);
         assert_eq!(names, active_native_tool_names(&nothing));
+    }
+
+    /// The operator drives a web page and writes its own workspace: the
+    /// browser tools, no shell, no git, no code execution (AGE-1912).
+    #[test]
+    fn operator_has_the_browser_and_no_shell_or_git() {
+        assert_eq!(tool_profile("operator"), Some(&OPERATOR));
+        assert!(tool_profile_names().contains(&"operator"));
+        for tool in BROWSER {
+            assert!(OPERATOR.allows(tool), "an operator needs {tool}");
+        }
+        for tool in ["write_file", "apply_diff", "read_file", "add_attachment"] {
+            assert!(OPERATOR.allows(tool), "an operator needs {tool}");
+        }
+        // No shell, no git writes, no code execution. (The read set's
+        // read-only git history is shared by every profile.)
+        for tool in SHELL.iter().chain(GIT_WRITE) {
+            assert!(!OPERATOR.allows(tool), "an operator has no {tool}");
+        }
+        assert!(!OPERATOR.allows("execute_code"));
+        let names: Vec<_> = OPERATOR.tool_names().collect();
+        assert!(!names.iter().any(|t| t.starts_with("shell")));
+        assert!(
+            !names
+                .iter()
+                .any(|t| t.starts_with("git") && !READ_SET.contains(t))
+        );
     }
 }

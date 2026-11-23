@@ -107,6 +107,11 @@ fn pinned_install_dir() -> Option<PathBuf> {
 
 /// Resolve a usable Chrome executable, downloading the pinned build if needed.
 pub async fn resolve_chrome(progress: Option<&ProgressSink<'_>>) -> Result<PathBuf, BrowserError> {
+    if let Some(path) = env_chrome() {
+        info!(path = %path.display(), "browser: using Chrome from CHATTY_CHROME");
+        return Ok(path);
+    }
+
     if let Some(path) = cached_pinned_chrome() {
         debug!(path = %path.display(), "browser: using cached pinned Chrome");
         return Ok(path);
@@ -122,6 +127,40 @@ pub async fn resolve_chrome(progress: Option<&ProgressSink<'_>>) -> Result<PathB
         "browser: no usable Chrome found, downloading pinned Chrome for Testing"
     );
     download_pinned(progress).await
+}
+
+/// Name of the env var that points at a Chrome executable (a hosted guest has
+/// no network to download one).
+pub const CHROME_ENV: &str = "CHATTY_CHROME";
+
+/// `CHATTY_CHROME`, when it names an existing executable at or above
+/// [`MIN_CHROME_MAJOR`]; otherwise `None` and the usual order applies.
+fn env_chrome() -> Option<PathBuf> {
+    let raw = std::env::var_os(CHROME_ENV).filter(|v| !v.is_empty())?;
+    chrome_from_path(PathBuf::from(raw))
+}
+
+fn chrome_from_path(path: PathBuf) -> Option<PathBuf> {
+    if !path.is_file() {
+        debug!(path = %path.display(), "browser: CHATTY_CHROME is not a file");
+        return None;
+    }
+    match chrome_major_version(&path) {
+        Some(major) if major >= MIN_CHROME_MAJOR => Some(path),
+        Some(major) => {
+            warn!(
+                path = %path.display(),
+                major,
+                floor = MIN_CHROME_MAJOR,
+                "browser: CHATTY_CHROME is below the version floor, ignoring it"
+            );
+            None
+        }
+        None => {
+            warn!(path = %path.display(), "browser: could not read the version of CHATTY_CHROME, ignoring it");
+            None
+        }
+    }
 }
 
 /// The pinned build, if it is already unpacked and executable.
@@ -523,6 +562,36 @@ mod tests {
             parse_chrome_major("Google Chrome for Testing 152.0.7977.75"),
             Some(152)
         );
+    }
+
+    #[cfg(unix)]
+    fn fake_chrome(dir: &Path, name: &str, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho 'Google Chrome {version}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// `CHATTY_CHROME` is used as is when its version is high enough, and
+    /// falls through (None) when it is too low or missing.
+    #[cfg(unix)]
+    #[test]
+    fn chatty_chrome_is_picked_by_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = fake_chrome(dir.path(), "good", &format!("{MIN_CHROME_MAJOR}.0.1.2"));
+        let old = fake_chrome(
+            dir.path(),
+            "old",
+            &format!("{}.0.1.2", MIN_CHROME_MAJOR - 1),
+        );
+        assert_eq!(chrome_from_path(good.clone()), Some(good));
+        assert_eq!(chrome_from_path(old), None);
+        assert_eq!(chrome_from_path(dir.path().join("missing")), None);
     }
 
     #[test]

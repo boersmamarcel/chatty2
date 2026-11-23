@@ -22,6 +22,13 @@
 //!
 //! Loopback is not proxied: Chrome sends `localhost` and `127.0.0.0/8`
 //! straight to the machine, as Lane A intends.
+//!
+//! **Upstream mode** (AGE-1912): a hosted guest resolves no names. With an
+//! [`Upstream`] set, the proxy does not resolve or check anything itself: it
+//! forwards each `CONNECT` and absolute-form request to the upstream proxy
+//! with `Proxy-Authorization: Bearer <token>`, and passes the upstream's
+//! refusal (403, 407, with its body) back to Chrome. The address policy is
+//! then the upstream's job (ADR-0104). The token is never logged.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -56,6 +63,66 @@ pub(crate) fn browser_policy(allow_private_network_access: bool) -> AddressPolic
     })
 }
 
+/// The upstream proxy of a hosted guest (AGE-1912).
+#[derive(Clone)]
+pub(crate) struct Upstream {
+    host: String,
+    port: u16,
+    token: Option<String>,
+}
+
+impl Upstream {
+    /// Parse an `http://host:port` URL; an empty token counts as none.
+    pub(crate) fn parse(url: &str, token: Option<&str>) -> Result<Self, String> {
+        let parsed =
+            reqwest::Url::parse(url).map_err(|e| format!("invalid upstream proxy URL: {e}"))?;
+        if parsed.scheme() != "http" {
+            return Err("the upstream proxy must be an http:// URL".into());
+        }
+        let host = parsed
+            .host_str()
+            .ok_or("the upstream proxy URL has no host")?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let port = parsed.port_or_known_default().unwrap_or(80);
+        let token = token.filter(|t| !t.is_empty()).map(str::to_string);
+        Ok(Self { host, port, token })
+    }
+
+    async fn connect(&self) -> Result<TcpStream, String> {
+        match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            TcpStream::connect((self.host.as_str(), self.port)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(e)) => Err(format!("could not reach the upstream proxy: {e}")),
+            Err(_) => Err("connecting to the upstream proxy timed out".into()),
+        }
+    }
+
+    fn push_auth(&self, out: &mut String) {
+        if let Some(token) = &self.token {
+            out.push_str("Proxy-Authorization: Bearer ");
+            out.push_str(token);
+            out.push_str("\r\n");
+        }
+    }
+}
+
+// The token must never reach a log line.
+impl std::fmt::Debug for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Upstream")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// A running proxy; stops when dropped.
 pub(crate) struct GuardedProxy {
     addr: SocketAddr,
@@ -72,15 +139,34 @@ impl GuardedProxy {
         .await
     }
 
+    /// Start a proxy that forwards everything to `upstream` (AGE-1912).
+    pub(crate) async fn start_upstream(upstream: Upstream) -> std::io::Result<Self> {
+        Self::start_inner(
+            Arc::new(SystemLookup),
+            browser_policy(false),
+            Some(upstream),
+        )
+        .await
+    }
+
     pub(crate) async fn start_with(
         lookup: Arc<dyn HostLookup>,
         policy: AddressPolicy,
+    ) -> std::io::Result<Self> {
+        Self::start_inner(lookup, policy, None).await
+    }
+
+    async fn start_inner(
+        lookup: Arc<dyn HostLookup>,
+        policy: AddressPolicy,
+        upstream: Option<Upstream>,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let addr = listener.local_addr()?;
         let guard = Arc::new(Guard {
             resolver: GuardedResolver::new(lookup, policy.clone()),
             policy,
+            upstream,
         });
         let task = tokio::spawn(async move {
             loop {
@@ -118,6 +204,7 @@ impl Drop for GuardedProxy {
 struct Guard {
     resolver: GuardedResolver,
     policy: AddressPolicy,
+    upstream: Option<Upstream>,
 }
 
 impl Guard {
@@ -165,6 +252,14 @@ async fn handle(mut client: TcpStream, guard: &Guard) -> Result<(), String> {
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(target, 443)?;
+        if let Some(up) = &guard.upstream {
+            let authority = if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
+            return upstream_connect(&mut client, up, &authority, &rest).await;
+        }
         let mut upstream = match guard.connect(&host, port).await {
             Ok(stream) => stream,
             Err(why) => return refuse(&mut client, &why).await,
@@ -190,6 +285,9 @@ async fn handle(mut client: TcpStream, guard: &Guard) -> Result<(), String> {
     let Some(host) = url.host_str().map(str::to_string) else {
         return refuse(&mut client, "the URL has no host").await;
     };
+    if let Some(up) = &guard.upstream {
+        return upstream_forward(&mut client, up, method, target, version, lines, &rest).await;
+    }
     let port = url.port_or_known_default().unwrap_or(80);
     let mut upstream = match guard.connect(&host, port).await {
         Ok(stream) => stream,
@@ -200,6 +298,22 @@ async fn handle(mut client: TcpStream, guard: &Guard) -> Result<(), String> {
         None => url.path().to_string(),
     };
     let mut out = format!("{method} {path} {version}\r\n");
+    copy_headers(lines, &mut out);
+    out.push_str("Connection: close\r\n\r\n");
+    upstream
+        .write_all(out.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    upstream.write_all(&rest).await.map_err(|e| e.to_string())?;
+    tokio::io::copy_bidirectional(&mut client, &mut upstream)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Copy request headers except the hop-by-hop ones and any
+/// `Proxy-Authorization` Chrome sent.
+fn copy_headers<'a>(lines: impl Iterator<Item = &'a str>, out: &mut String) {
     for line in lines {
         if line.is_empty() {
             continue;
@@ -219,13 +333,101 @@ async fn handle(mut client: TcpStream, guard: &Guard) -> Result<(), String> {
         out.push_str(line);
         out.push_str("\r\n");
     }
+}
+
+/// Upstream mode, `CONNECT`: ask the upstream for the tunnel. A 2xx opens
+/// it; anything else (403, 407, ...) goes back to Chrome with its body.
+async fn upstream_connect(
+    client: &mut TcpStream,
+    up: &Upstream,
+    authority: &str,
+    rest: &[u8],
+) -> Result<(), String> {
+    let mut stream = match up.connect().await {
+        Ok(s) => s,
+        Err(why) => return refuse(client, &why).await,
+    };
+    let mut req = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n");
+    up.push_auth(&mut req);
+    req.push_str("\r\n");
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    let (head, body) = tokio::time::timeout(HEAD_TIMEOUT, read_head(&mut stream))
+        .await
+        .map_err(|_| "upstream proxy response timed out".to_string())??;
+    let text = String::from_utf8_lossy(&head).into_owned();
+    let status = text
+        .split(' ')
+        .nth(1)
+        .and_then(|c| c.parse::<u16>().ok())
+        .unwrap_or(502);
+    if (200..300).contains(&status) {
+        client
+            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            .await
+            .map_err(|e| e.to_string())?;
+        if !body.is_empty() {
+            client.write_all(&body).await.map_err(|e| e.to_string())?;
+        }
+        stream.write_all(rest).await.map_err(|e| e.to_string())?;
+        tokio::io::copy_bidirectional(client, &mut stream)
+            .await
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    // A refusal: pass the head and the body through unchanged.
+    let wanted = text
+        .split("\r\n")
+        .filter_map(|l| l.split_once(':'))
+        .find(|(n, _)| n.trim().eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+        .map(|n| n.min(MAX_HEAD_BYTES));
+    let mut out = head;
+    out.extend_from_slice(b"\r\n\r\n");
+    out.extend_from_slice(&body);
+    let mut got = body.len();
+    let mut chunk = [0u8; 4096];
+    while wanted.is_none_or(|w| got < w) && out.len() < 2 * MAX_HEAD_BYTES {
+        match tokio::time::timeout(Duration::from_secs(5), stream.read(&mut chunk)).await {
+            Ok(Ok(n)) if n > 0 => {
+                out.extend_from_slice(&chunk[..n]);
+                got += n;
+            }
+            _ => break,
+        }
+    }
+    client.write_all(&out).await.map_err(|e| e.to_string())?;
+    let _ = client.shutdown().await;
+    Ok(())
+}
+
+/// Upstream mode, absolute-form request: forward it as is, with the bearer
+/// token, and let the upstream's answer (a refusal included) flow back.
+async fn upstream_forward<'a>(
+    client: &mut TcpStream,
+    up: &Upstream,
+    method: &str,
+    target: &str,
+    version: &str,
+    lines: impl Iterator<Item = &'a str>,
+    rest: &[u8],
+) -> Result<(), String> {
+    let mut stream = match up.connect().await {
+        Ok(s) => s,
+        Err(why) => return refuse(client, &why).await,
+    };
+    let mut out = format!("{method} {target} {version}\r\n");
+    copy_headers(lines, &mut out);
+    up.push_auth(&mut out);
     out.push_str("Connection: close\r\n\r\n");
-    upstream
+    stream
         .write_all(out.as_bytes())
         .await
         .map_err(|e| e.to_string())?;
-    upstream.write_all(&rest).await.map_err(|e| e.to_string())?;
-    tokio::io::copy_bidirectional(&mut client, &mut upstream)
+    stream.write_all(rest).await.map_err(|e| e.to_string())?;
+    tokio::io::copy_bidirectional(client, &mut stream)
         .await
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -383,6 +585,94 @@ mod tests {
         let ok = send(open.addr(), &request).await;
         assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
         assert!(ok.ends_with("ok"), "{ok}");
+    }
+
+    /// A stub upstream proxy that records each request head and answers
+    /// with `reply`.
+    async fn stub_upstream(
+        reply: &'static str,
+    ) -> (u16, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match s.read(&mut chunk).await {
+                            Ok(n) if n > 0 => buf.extend_from_slice(&chunk[..n]),
+                            _ => break,
+                        }
+                    }
+                    let _ = tx.send(String::from_utf8_lossy(&buf).into_owned());
+                    let _ = s.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        (port, rx)
+    }
+
+    /// Upstream mode: the CONNECT reaches the upstream by name (nothing is
+    /// resolved here) with the bearer header, and its 403 reaches Chrome.
+    #[tokio::test]
+    async fn upstream_mode_sends_the_token_and_passes_a_refusal_back() {
+        let (port, mut seen) = stub_upstream(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: 6\r\nConnection: close\r\n\r\ndenied",
+        )
+        .await;
+        let up = Upstream::parse(&format!("http://127.0.0.1:{port}"), Some("s3cret")).unwrap();
+        assert!(!format!("{up:?}").contains("s3cret"));
+        let proxy = GuardedProxy::start_upstream(up).await.unwrap();
+
+        let reply = send(
+            proxy.addr(),
+            "CONNECT never-resolved.invalid:443 HTTP/1.1\r\nHost: never-resolved.invalid:443\r\n\r\n",
+        )
+        .await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        assert!(reply.ends_with("denied"), "{reply}");
+        let head = seen.recv().await.unwrap();
+        assert!(
+            head.starts_with("CONNECT never-resolved.invalid:443 HTTP/1.1"),
+            "{head}"
+        );
+        assert!(
+            head.contains("Proxy-Authorization: Bearer s3cret"),
+            "{head}"
+        );
+
+        // Absolute-form: forwarded as is, the token replaces Chrome's header.
+        let reply = send(
+            proxy.addr(),
+            "GET http://never-resolved.invalid/x HTTP/1.1\r\nHost: never-resolved.invalid\r\nProxy-Authorization: Bearer other\r\n\r\n",
+        )
+        .await;
+        assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+        let head = seen.recv().await.unwrap();
+        assert!(
+            head.starts_with("GET http://never-resolved.invalid/x HTTP/1.1"),
+            "{head}"
+        );
+        assert!(
+            head.contains("Bearer s3cret") && !head.contains("other"),
+            "{head}"
+        );
+    }
+
+    /// A 2xx from the upstream opens the tunnel.
+    #[tokio::test]
+    async fn upstream_mode_opens_a_tunnel_on_success() {
+        let (port, _seen) = stub_upstream("HTTP/1.1 200 OK\r\n\r\n").await;
+        let up = Upstream::parse(&format!("http://127.0.0.1:{port}"), None).unwrap();
+        let proxy = GuardedProxy::start_upstream(up).await.unwrap();
+        let reply = send(proxy.addr(), "CONNECT a.invalid:443 HTTP/1.1\r\n\r\n").await;
+        assert!(
+            reply.starts_with("HTTP/1.1 200 Connection Established"),
+            "{reply}"
+        );
     }
 
     #[test]
