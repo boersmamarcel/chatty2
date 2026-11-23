@@ -37,6 +37,7 @@ use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::add_attachment_tool::PendingArtifacts;
 
 use crate::services::browser::session::{DEFAULT_TIMEOUT_SECS, with_deadline};
+use crate::services::browser::sites;
 use crate::services::browser::snapshot::{AxNode, flatten_ax_tree};
 use crate::services::browser::{BrowserError, BrowserManager, MAX_TEXT_LEN, NavigationPolicy};
 use crate::tools::ToolError;
@@ -749,11 +750,13 @@ async fn prepare_action(
     pending_approvals: Option<&PendingApprovals>,
     r#ref: &str,
     verb: &str,
+    is_click: bool,
     label: impl FnOnce(&crate::services::browser::SnapshotNode, &str) -> String,
 ) -> Result<
     (
         Arc<crate::services::browser::BrowserSession>,
         crate::services::browser::SnapshotNode,
+        bool,
     ),
     ToolError,
 > {
@@ -777,45 +780,125 @@ async fn prepare_action(
         .ok()
         .flatten()
         .ok_or_else(|| ToolError::OperationFailed("cannot read the page URL".into()))?;
-    if action_needs_approval(&url, manager.workspace().ok()) {
-        let Some(pending) = pending_approvals else {
-            return Err(ToolError::OperationFailed(format!(
-                "{verb} on {} needs the user's approval and no approval channel is available \
-                 in this session",
-                display_url(&url)
-            )));
-        };
-        // Always asks: the shell's auto-approve modes are about commands
-        // the user chose to trust, not about acting inside their web
-        // sessions (AGE-158: per action, never generalised).
-        let approved = request_execution_approval(
-            pending,
-            &ApprovalMode::AlwaysAsk,
-            &label(&node, &url),
-            false,
-        )
-        .await
-        .map_err(|e| ToolError::OperationFailed(format!("approval failed: {e}")))?;
-        if !approved {
-            return Err(ToolError::OperationFailed(format!(
-                "the user declined to {verb} {} on {}",
-                describe(&node),
-                display_url(&url)
-            )));
+    let act_on = manager.act_on();
+    let off_lane_a = action_needs_approval(&url, manager.workspace().ok());
+    // Anything the interceptor refused before this action is not this action's.
+    session.gate().take_outcome();
+    let gate = sites::decide(
+        act_on,
+        &url,
+        off_lane_a,
+        is_click,
+        &node.role,
+        &node.name,
+        pending_approvals.is_some(),
+    );
+    let look = match gate {
+        sites::ActionGate::Proceed { look } => look,
+        sites::ActionGate::Refuse => {
+            return Err(ToolError::OperationFailed(if act_on.is_empty() {
+                format!(
+                    "{verb} on {} needs the user's approval and no approval channel is available \
+                     in this session",
+                    display_url(&url)
+                )
+            } else {
+                format!(
+                    "this run may act only on: {}",
+                    sites::granted_origins(act_on).join(", ")
+                )
+            }));
         }
-        // The card may have been open for minutes; the page the user
-        // approved must be the page that gets acted on.
-        if session.snapshot_generation() != snapshot.generation {
-            return Err(BrowserError::StaleRef(
-                r#ref.to_string(),
-                snapshot.generation,
-                session.snapshot_generation(),
+        sites::ActionGate::NeedsApproval => {
+            let title = page_title(&page).await;
+            return Err(needs_approval_error(&url, &describe(&node), &title));
+        }
+        sites::ActionGate::Ask => {
+            let pending = pending_approvals.expect("Ask only with an approval channel");
+            // Always asks: the shell's auto-approve modes are about commands
+            // the user chose to trust, not about acting inside their web
+            // sessions (AGE-158: per action, never generalised).
+            let approved = request_execution_approval(
+                pending,
+                &ApprovalMode::AlwaysAsk,
+                &label(&node, &url),
+                false,
             )
-            .into());
+            .await
+            .map_err(|e| ToolError::OperationFailed(format!("approval failed: {e}")))?;
+            if !approved {
+                return Err(ToolError::OperationFailed(format!(
+                    "the user declined to {verb} {} on {}",
+                    describe(&node),
+                    display_url(&url)
+                )));
+            }
+            // The card may have been open for minutes; the page the user
+            // approved must be the page that gets acted on.
+            if session.snapshot_generation() != snapshot.generation {
+                return Err(BrowserError::StaleRef(
+                    r#ref.to_string(),
+                    snapshot.generation,
+                    session.snapshot_generation(),
+                )
+                .into());
+            }
+            false
         }
-    }
-    Ok((session, node))
+    };
+    Ok((session, node, look))
 }
+
+/// The page's title, or empty.
+async fn page_title(page: &chromiumoxide::page::Page) -> String {
+    page.get_title().await.ok().flatten().unwrap_or_default()
+}
+
+/// The structured error an unattended run gets for a risky action
+/// (ADR-0108); hive turns it into "Needs your OK". The URL carries no query.
+fn needs_approval_error(url: &str, control: &str, title: &str) -> ToolError {
+    let mut bare = url.to_string();
+    if let Ok(mut u) = reqwest::Url::parse(url) {
+        u.set_query(None);
+        u.set_fragment(None);
+        bare = u.to_string();
+    }
+    ToolError::OperationFailed(
+        serde_json::json!({
+            "error": "needs_approval",
+            "origin": sites::origin_of(url).unwrap_or_default(),
+            "action": format!("{control} on {}", short(title, 80)),
+            "url": bare,
+        })
+        .to_string(),
+    )
+}
+
+/// After an action: look-only sites say nothing was changed; a risky request
+/// refused while unattended becomes `needs_approval`.
+async fn after_action(
+    session: &crate::services::browser::BrowserSession,
+    look: bool,
+    control: &str,
+) -> Result<(), ToolError> {
+    let gate = session.gate();
+    // The interceptor answers asynchronously; give a submit time to be seen.
+    if look || !gate.act_on().is_empty() {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    let outcome = gate.take_outcome();
+    if let Some((_, url)) = outcome.risky_blocked {
+        let title = match session.page() {
+            Ok(page) => page_title(&page).await,
+            Err(_) => String::new(),
+        };
+        return Err(needs_approval_error(&url, control, &title));
+    }
+    Ok(())
+}
+
+/// What the tool result says on a look-only site.
+const LOOK_NOTE: &str = "look only: the site was not changed";
 
 impl Tool for BrowserClickTool {
     const NAME: &'static str = "browser_click";
@@ -857,19 +940,23 @@ impl Tool for BrowserClickTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        let (session, node) = prepare_action(
+        let (session, node, look) = prepare_action(
             &self.manager,
             self.pending_approvals.as_ref(),
             &args.r#ref,
             "click",
+            true,
             |node, url| click_approval_label(&node.role, &node.name, url),
         )
         .await?;
         let clicked = describe(&node);
 
         let result = session.click(&node).await?;
+        after_action(&session, look, &clicked).await?;
         info!(r#ref = %args.r#ref, clicked = %clicked, url = %result.url, navigated = result.navigated, "browser: clicked");
-        let note = if result.navigated {
+        let note = if look {
+            LOOK_NOTE.to_string()
+        } else if result.navigated {
             "The page navigated; every ref is invalid. Call browser_snapshot before clicking \
              anything else."
                 .to_string()
@@ -968,25 +1055,31 @@ impl Tool for BrowserTypeTool {
                 "text is longer than {MAX_TEXT_LEN} characters; split it up"
             )));
         }
-        let (session, node) = prepare_action(
+        let (session, node, look) = prepare_action(
             &self.manager,
             self.pending_approvals.as_ref(),
             &args.r#ref,
             "type into",
+            false,
             |node, url| type_approval_label(&node.role, &node.name, &args.text, url),
         )
         .await?;
         let typed_into = describe(&node);
 
         let value = session.type_text(&node, &args.text).await?;
+        after_action(&session, look, &typed_into).await?;
         info!(r#ref = %args.r#ref, typed_into = %typed_into, chars = args.text.chars().count(), "browser: typed");
         Ok(TypeOutput {
             typed_into,
             value,
             snapshot_generation: session.snapshot_generation(),
-            note: "The field was not submitted. Refs stay valid; browser_click a button or \
-                   take a new browser_snapshot to continue."
-                .to_string(),
+            note: if look {
+                LOOK_NOTE.to_string()
+            } else {
+                "The field was not submitted. Refs stay valid; browser_click a button or \
+                 take a new browser_snapshot to continue."
+                    .to_string()
+            },
         })
     }
 }

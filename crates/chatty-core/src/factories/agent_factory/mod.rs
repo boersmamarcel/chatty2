@@ -879,6 +879,9 @@ impl AgentClient {
                             upstream_proxy: s.browser_upstream_proxy.clone(),
                             upstream_token: s.browser_upstream_token.clone(),
                             trace_path: s.browser_trace_path.as_ref().map(std::path::PathBuf::from),
+                            act_on: s.browser_act_on.clone(),
+                            sessions: s.browser_sessions.clone(),
+                            unattended: pending_approvals.is_none(),
                         })
                         .unwrap_or_default();
                     let manager = std::sync::Arc::new(
