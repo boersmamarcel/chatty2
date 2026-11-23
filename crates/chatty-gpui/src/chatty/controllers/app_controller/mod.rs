@@ -341,6 +341,7 @@ async fn rebuild_conversation_agent(conv_id: &str, cx: &gpui::AsyncApp) -> anyho
     let skill_service = get_skill_service(cx);
     let local_agents = cx
         .update(|cx| gateway_and_roster(cx, built_workspace_dir.as_deref()))
+        .map_err(|e| warn!(error = ?e, "Failed to read module gateway port"))
         .ok()
         .flatten();
     // The broker starts itself on this call if it has not already (BI-2,
@@ -942,14 +943,6 @@ fn extract_theme_chart_colors(cx: &gpui::App) -> [String; 5] {
 
 // ── Tool source classification ───────────────────────────────────────────────
 
-/// Classify a built-in tool call by name into a [`ToolSource`] for data-egress badges.
-///
-/// Internet-facing tools are classified here. Agent calls (invoke_agent)
-/// are classified separately by [`classify_agent_source`].
-pub(super) fn classify_tool_source(tool_name: &str) -> ToolSource {
-    chatty_core::models::message_types::classify_tool_source(tool_name)
-}
-
 /// Classify an agent invocation by agent name into a [`ToolSource`].
 ///
 /// Checks the global [`ExtensionsModel`] for non-localhost A2A agents; every
@@ -964,7 +957,7 @@ pub(super) fn classify_agent_source(agent_name: &str, cx: &App) -> ToolSource {
             .into_iter()
             .find(|(_, cfg, _)| cfg.name == agent_name)
     {
-        let is_local = cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
+        let is_local = crate::chatty::services::url_is_local(&cfg.url);
         if !is_local {
             return ToolSource::ExternalService {
                 name: cfg.name.clone(),

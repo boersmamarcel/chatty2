@@ -514,14 +514,7 @@ fn main() {
                         .detach();
                     }
 
-                    if let Some(notifier) = cx
-                        .try_global::<settings::models::GlobalAgentConfigNotifier>()
-                        .and_then(|g| g.try_upgrade())
-                    {
-                        notifier.update(cx, |_notifier, cx| {
-                            cx.emit(settings::models::AgentConfigEvent::RebuildRequired);
-                        });
-                    }
+                    settings::models::AgentConfigNotifier::request_rebuild(cx);
                 })
                 .map_err(|e| warn!(error = ?e, "Failed to update MCP servers model"))
                 .ok();
@@ -1191,14 +1184,7 @@ fn main() {
                 cx.update(|cx| {
                     info!(count, "Extensions loaded from disk");
                     cx.set_global(ext);
-                    if let Some(notifier) = cx
-                        .try_global::<settings::models::GlobalAgentConfigNotifier>()
-                        .and_then(|g| g.try_upgrade())
-                    {
-                        notifier.update(cx, |_notifier, cx| {
-                            cx.emit(settings::models::AgentConfigEvent::RebuildRequired);
-                        });
-                    }
+                    settings::models::AgentConfigNotifier::request_rebuild(cx);
                 })
                 .map_err(|e| warn!(error = ?e, "Failed to set Extensions global"))
                 .ok();

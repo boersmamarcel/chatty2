@@ -11,8 +11,8 @@
 //!   conversation, validates attachments against the selected model's
 //!   capabilities, kicks off the stream, and wires the response back through
 //!   `StreamManager`.
-//! - `regenerate_*`, `edit_message`, `delete_message` — variants that mutate
-//!   the conversation history before re-streaming.
+//! - `handle_regeneration` — mutates the conversation history before
+//!   re-streaming.
 //! - The `handle_stream_manager_event` dispatcher that turns `StreamManager`
 //!   events into UI updates on `ChatView`.
 //! - `finalize_completed_stream`, `finalize_stopped_stream`,
@@ -637,7 +637,7 @@ impl ChattyApp {
                     // system will handle visualisation via the progress channel.
                     self.active_invoke_agent_ids.insert(id);
                 } else {
-                    let source = classify_tool_source(&name);
+                    let source = chatty_core::models::message_types::classify_tool_source(&name);
                     chat_view.update(cx, |view, cx| {
                         if view.conversation_id() == Some(conversation_id) {
                             view.handle_tool_call_started(id, name, source, cx);

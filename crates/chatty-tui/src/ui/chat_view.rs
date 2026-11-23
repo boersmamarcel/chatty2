@@ -813,7 +813,7 @@ fn tool_badge_span(tc: &ToolCallInfo) -> Option<Span<'static>> {
     }
 }
 
-fn engine_location_label(
+pub(crate) fn engine_location_label(
     engine: chatty_core::models::message_types::ExecutionEngine,
 ) -> &'static str {
     match engine {

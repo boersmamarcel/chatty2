@@ -50,10 +50,7 @@ pub fn render(
 
 /// `<config dir>/chatty/exports/<id>.<ext>`, next to the desktop's exports.
 pub fn default_path(conversation_id: &str) -> Result<PathBuf> {
-    let dir = dirs::config_dir()
-        .context("cannot find the config directory")?
-        .join("chatty")
-        .join("exports");
+    let dir = chatty_core::exporters::exports_dir().context("cannot find the config directory")?;
     Ok(dir.join(format!("{conversation_id}.atif.json")))
 }
 
