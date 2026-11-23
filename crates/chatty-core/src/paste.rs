@@ -88,6 +88,7 @@ impl PasteStore {
     }
 
     /// True when `input` contains at least one token this store can expand.
+    #[cfg(test)]
     pub fn has_live_token(&self, input: &str) -> bool {
         self.expand(input) != input
     }

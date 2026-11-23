@@ -209,6 +209,7 @@ pub fn gpui_commands() -> impl Iterator<Item = &'static SlashCommandSpec> {
 }
 
 /// The subset of [`SLASH_COMMANDS`] available in the terminal UI.
+#[cfg(test)]
 pub fn tui_commands() -> impl Iterator<Item = &'static SlashCommandSpec> {
     SLASH_COMMANDS.iter().filter(|c| c.tui)
 }
