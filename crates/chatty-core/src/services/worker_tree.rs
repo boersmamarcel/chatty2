@@ -102,7 +102,6 @@ pub struct WorkerTree {
 static WORKER_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// A directory name no other worker will take.
-#[cfg(test)]
 pub fn next_worker_name(prefix: &str) -> String {
     let seq = WORKER_SEQ.fetch_add(1, Ordering::Relaxed);
     let stamp = std::time::SystemTime::now()

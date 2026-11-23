@@ -7,7 +7,7 @@
 use crate::engine::{ApprovalInfo, ToolCallInfo, ToolCallState};
 use crate::ui::engine_location_label;
 use crate::ui::plan;
-use chatty_core::models::message_types::{ExecutionEngine, ToolSource};
+use chatty_core::models::message_types::ToolSource;
 use chatty_core::services::AgentTaskSnapshot;
 use chatty_core::tools::invoke_agent_tool::InvokeAgentProgress;
 
