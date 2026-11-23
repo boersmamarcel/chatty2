@@ -1946,3 +1946,100 @@ async fn open_web_pages_load_through_the_guarded_proxy() {
         );
     }
 }
+
+/// AGE-1913. A local page with a form; the session is traced to a HAR.
+fn serve_form() -> u16 {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut s) = stream else { continue };
+            let mut buf = vec![0u8; 16384];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = if req.starts_with("POST") {
+                "<!doctype html><title>Done</title><h1>Done</h1>"
+            } else {
+                "<!doctype html><title>Form</title><form method=\"post\" action=\"/submit\">\
+                 <input name=\"name\" value=\"Ann\"><input type=\"text\" name=\"password\" value=\"hunter2\">\
+                 <button type=\"submit\">Send</button></form>"
+            };
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    port
+}
+
+async fn run_form_session(trace: Option<&str>) -> tempfile::TempDir {
+    use chatty_core::services::browser::LaunchOptions;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let workspace = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    let port = serve_form();
+    let manager = std::sync::Arc::new(BrowserManager::lane_a(Some(workspace)).with_launch_options(
+        LaunchOptions {
+            trace_path: trace.map(std::path::PathBuf::from),
+            ..Default::default()
+        },
+    ));
+    let (navigate, snapshot, .., click, _) =
+        build_browser_tools(manager.clone(), artifacts(), None);
+    let cx = &mut ToolContext::new();
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: format!("http://127.0.0.1:{port}/"),
+            },
+        )
+        .await
+        .expect("navigate");
+    let snap = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    let send = ref_of(&snap.tree, "button", "Send");
+    click
+        .call(cx, ClickArgs { r#ref: send })
+        .await
+        .expect("submit");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    manager.shutdown().await;
+    dir
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn the_session_is_written_as_a_har_with_secrets_redacted() {
+    let dir = run_form_session(Some("outputs/browser/session.har")).await;
+    let raw = std::fs::read_to_string(dir.path().join("outputs/browser/session.har"))
+        .expect("har written");
+    let har: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+    assert_eq!(har["log"]["version"], "1.2");
+    let entries = har["log"]["entries"].as_array().expect("entries");
+    let post = entries
+        .iter()
+        .find(|e| e["request"]["method"] == "POST")
+        .unwrap_or_else(|| panic!("no POST in {raw}"));
+    assert!(
+        post["request"]["url"]
+            .as_str()
+            .unwrap()
+            .ends_with("/submit")
+    );
+    let text = post["request"]["postData"]["text"]
+        .as_str()
+        .expect("postData text");
+    assert!(text.contains("name=Ann"), "{text}");
+    assert!(text.contains("password=[redacted]"), "{text}");
+    assert!(!raw.contains("hunter2"));
+    assert_eq!(post["response"]["status"], 200);
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn without_a_trace_path_no_har_is_written() {
+    let dir = run_form_session(None).await;
+    assert!(!dir.path().join("outputs").exists());
+}

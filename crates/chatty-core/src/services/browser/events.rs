@@ -12,7 +12,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use chromiumoxide::cdp::browser_protocol::log::EventEntryAdded;
-use chromiumoxide::cdp::browser_protocol::network::{EventLoadingFailed, EventResponseReceived};
+use chromiumoxide::cdp::browser_protocol::network::{
+    EventLoadingFailed, EventRequestWillBeSent, EventResponseReceived, GetRequestPostDataParams,
+};
 use chromiumoxide::cdp::js_protocol::runtime::{EventConsoleApiCalled, EventExceptionThrown};
 use chromiumoxide::page::Page;
 use futures::StreamExt;
@@ -20,6 +22,7 @@ use parking_lot::Mutex;
 use tokio::task::JoinHandle;
 
 use super::error::BrowserError;
+use super::har::{HarRecorder, ResponseInfo};
 
 /// How many entries each buffer keeps before dropping the oldest.
 const MAX_ENTRIES: usize = 1000;
@@ -64,9 +67,25 @@ pub struct EventBuffers {
     /// Entries dropped because a buffer was full, so the summary can say so.
     console_dropped: Mutex<usize>,
     network_dropped: Mutex<usize>,
+    /// The HAR trace (AGE-1913), when `browser_trace_path` is set. Not
+    /// bounded by the ring buffers above.
+    trace: Option<Arc<HarRecorder>>,
 }
 
 impl EventBuffers {
+    /// Buffers that also feed a HAR trace.
+    pub fn with_trace(trace: Option<Arc<HarRecorder>>) -> Self {
+        Self {
+            trace,
+            ..Self::default()
+        }
+    }
+
+    /// The HAR recorder, if tracing is on.
+    pub fn trace(&self) -> Option<&Arc<HarRecorder>> {
+        self.trace.as_ref()
+    }
+
     pub fn push_console(&self, entry: ConsoleEntry) {
         let mut buf = self.console.lock();
         if buf.len() == MAX_ENTRIES {
@@ -200,6 +219,17 @@ pub(super) async fn spawn_listeners(
         let buffers = buffers.clone();
         async move {
             while let Some(event) = responses.next().await {
+                if let Some(trace) = buffers.trace() {
+                    trace.on_response(
+                        event.request_id.inner(),
+                        ResponseInfo {
+                            status: event.response.status,
+                            status_text: &event.response.status_text,
+                            headers: event.response.headers.inner(),
+                            mime: &event.response.mime_type,
+                        },
+                    );
+                }
                 buffers.push_network(NetworkEntry {
                     url: event.response.url.clone(),
                     status: Some(event.response.status),
@@ -217,6 +247,9 @@ pub(super) async fn spawn_listeners(
         let buffers = buffers.clone();
         async move {
             while let Some(event) = failures.next().await {
+                if let Some(trace) = buffers.trace() {
+                    trace.on_failed(event.request_id.inner(), &event.error_text);
+                }
                 buffers.push_network(NetworkEntry {
                     // CDP reports the failure against a request id; the URL is
                     // on the matching requestWillBeSent, which we do not buffer.
@@ -228,6 +261,61 @@ pub(super) async fn spawn_listeners(
             }
         }
     }));
+
+    if buffers.trace().is_some() {
+        let mut requests = page
+            .event_listener::<EventRequestWillBeSent>()
+            .await
+            .map_err(|e| BrowserError::Protocol(format!("cannot listen for requests: {e}")))?;
+        handles.push(runtime.spawn({
+            let buffers = buffers.clone();
+            let page = page.clone();
+            async move {
+                while let Some(event) = requests.next().await {
+                    let Some(trace) = buffers.trace() else {
+                        continue;
+                    };
+                    let request = &event.request;
+                    let id = event.request_id.inner().clone();
+                    let inline = request.post_data_entries.as_ref().map(|entries| {
+                        use base64::Engine as _;
+                        let mut bytes = Vec::new();
+                        for entry in entries.iter().filter_map(|e| e.bytes.as_ref()) {
+                            let raw: &str = entry.as_ref();
+                            if let Ok(b) = base64::engine::general_purpose::STANDARD.decode(raw) {
+                                bytes.extend(b);
+                            }
+                        }
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    });
+                    let redirect = event.redirect_response.as_ref().map(|r| ResponseInfo {
+                        status: r.status,
+                        status_text: &r.status_text,
+                        headers: r.headers.inner(),
+                        mime: &r.mime_type,
+                    });
+                    let added = trace.on_request(
+                        &id,
+                        *event.wall_time.inner(),
+                        &request.method,
+                        &request.url,
+                        request.headers.inner(),
+                        inline.as_deref(),
+                        redirect,
+                    );
+                    if added
+                        && inline.is_none()
+                        && request.has_post_data == Some(true)
+                        && let Ok(data) = page
+                            .execute(GetRequestPostDataParams::new(id.clone()))
+                            .await
+                    {
+                        trace.set_post_data(&id, &data.result.post_data);
+                    }
+                }
+            }
+        }));
+    }
 
     Ok(handles)
 }

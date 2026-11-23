@@ -27,6 +27,7 @@ pub mod control;
 mod egress_proxy;
 pub mod error;
 pub mod events;
+pub mod har;
 pub mod input;
 pub mod profile;
 pub mod provisioning;
@@ -47,6 +48,7 @@ pub use click::ClickPoint;
 pub use control::ControlHolder;
 pub use error::BrowserError;
 pub use events::{ConsoleEntry, EventBuffers, NetworkEntry};
+pub use har::HarRecorder;
 pub use input::{InputModifiers, KeyInput, MouseAction, MouseButtonKind, MouseInput};
 pub use profile::{BrowserProfile, NavigationPolicy};
 pub use screencast::{ScreencastFrame, ScreencastUpdate};
@@ -66,6 +68,10 @@ pub struct LaunchOptions {
     pub upstream_proxy: Option<String>,
     /// Bearer token for the upstream proxy. Never logged.
     pub upstream_token: Option<String>,
+    /// Where to write the session as a HAR (AGE-1913). Relative to the
+    /// workspace when set by the caller; the manager makes it absolute and
+    /// drops one that would leave the workspace.
+    pub trace_path: Option<PathBuf>,
 }
 
 // The token must never reach a log line, even through `{:?}`.
@@ -74,6 +80,7 @@ impl std::fmt::Debug for LaunchOptions {
         f.debug_struct("LaunchOptions")
             .field("no_sandbox", &self.no_sandbox)
             .field("upstream_proxy", &self.upstream_proxy)
+            .field("trace_path", &self.trace_path)
             .field(
                 "upstream_token",
                 &self.upstream_token.as_ref().map(|_| "<redacted>"),
@@ -199,13 +206,17 @@ impl BrowserManager {
         let chrome = provisioning::resolve_chrome(Some(&progress)).await;
         self.download_progress.send_replace(None);
         let chrome = chrome?;
-        let session = BrowserSession::launch(
-            chrome,
-            self.profile.clone(),
-            self.policy.clone(),
-            self.launch.clone(),
-        )
-        .await?;
+        let mut launch = self.launch.clone();
+        launch.trace_path = launch.trace_path.as_deref().and_then(|rel| {
+            let resolved = har::resolve_trace_path(self.workspace.as_deref(), rel);
+            if resolved.is_none() {
+                warn!(path = %rel.display(), "browser: ignoring browser_trace_path (needs a workspace and a relative path inside it)");
+            }
+            resolved
+        });
+        let session =
+            BrowserSession::launch(chrome, self.profile.clone(), self.policy.clone(), launch)
+                .await?;
         *guard = Some(session.clone());
         Ok(session)
     }

@@ -375,7 +375,9 @@ impl BrowserSession {
         .map_err(|_| BrowserError::Timeout(DEFAULT_TIMEOUT_SECS, "opening a page".to_string()))?
         .map_err(|e| BrowserError::Launch(format!("cannot open page: {e}")))?;
 
-        let events = Arc::new(EventBuffers::default());
+        let events = Arc::new(EventBuffers::with_trace(
+            options.trace_path.clone().map(super::har::HarRecorder::new),
+        ));
         let listeners = super::events::spawn_listeners(&runtime, &page, events.clone()).await?;
 
         // Subscribe *after* opening our own page, so its creation is not
@@ -618,6 +620,7 @@ impl BrowserSession {
             self.unblocked(&page).await;
         }
         let _ = self.current_url.send(final_url.clone());
+        self.flush_trace(false).await;
         Ok(final_url)
     }
 
@@ -1215,6 +1218,7 @@ impl BrowserSession {
             .ok()
             .flatten()
             .unwrap_or_default();
+        self.flush_trace(false).await;
         Ok(ClickResult {
             point,
             url,
@@ -1231,12 +1235,14 @@ impl BrowserSession {
         self.ensure_alive()?;
         self.control.ensure_agent()?;
         let page = self.page()?;
-        with_deadline(
+        let typed = with_deadline(
             DEFAULT_TIMEOUT_SECS,
             &format!("typing into {}", node.r#ref),
             typing::type_text(&page, node, text),
         )
-        .await
+        .await;
+        self.flush_trace(false).await;
+        typed
     }
 
     /// Forward a mouse event. A no-op — not an error — when the agent
@@ -1251,7 +1257,9 @@ impl BrowserSession {
         if self.control_holder() != ControlHolder::User {
             return Ok(());
         }
-        input::dispatch_mouse(&self.active_page(), event).await
+        let sent = input::dispatch_mouse(&self.active_page(), event).await;
+        self.flush_trace(false).await;
+        sent
     }
 
     /// Forward a keyboard event. Same no-op-when-agent-owns-it rule as
@@ -1262,7 +1270,9 @@ impl BrowserSession {
         if self.control_holder() != ControlHolder::User {
             return Ok(());
         }
-        input::dispatch_key(&self.active_page(), event).await
+        let sent = input::dispatch_key(&self.active_page(), event).await;
+        self.flush_trace(false).await;
+        sent
     }
 
     /// Stop every task a tab owns. The guards live in `listeners`.
@@ -1274,8 +1284,21 @@ impl BrowserSession {
         }
     }
 
+    /// Write the HAR trace (AGE-1913): `always` at close, otherwise only when
+    /// a non-GET request went out since the last write. No-op without a trace.
+    async fn flush_trace(&self, always: bool) {
+        if let Some(trace) = self.events.trace() {
+            if always {
+                trace.flush().await;
+            } else {
+                trace.flush_if_non_get().await;
+            }
+        }
+    }
+
     /// Close the browser and stop every task this session owns.
     pub async fn shutdown(&self) {
+        self.flush_trace(true).await;
         self.stop_screencast().await;
         self.abort_tab_listeners();
         for handle in self.listeners.lock().drain(..) {

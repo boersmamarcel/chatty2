@@ -878,6 +878,7 @@ impl AgentClient {
                             no_sandbox: s.browser_no_sandbox,
                             upstream_proxy: s.browser_upstream_proxy.clone(),
                             upstream_token: s.browser_upstream_token.clone(),
+                            trace_path: s.browser_trace_path.as_ref().map(std::path::PathBuf::from),
                         })
                         .unwrap_or_default();
                     let manager = std::sync::Arc::new(
