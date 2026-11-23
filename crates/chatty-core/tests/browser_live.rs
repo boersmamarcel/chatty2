@@ -2043,3 +2043,197 @@ async fn without_a_trace_path_no_har_is_written() {
     let dir = run_form_session(None).await;
     assert!(!dir.path().join("outputs").exists());
 }
+
+// ── site grant, modes and saved session (AGE-1915) ──────────────────────────
+
+use chatty_core::services::browser::LaunchOptions;
+use chatty_core::settings::models::execution_settings::{ActOnSite, SavedSession, SiteMode};
+
+/// A loopback server that records `METHOD path` and the `Cookie` header of
+/// every request, and serves one page with a Save and a Delete button.
+async fn site_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                let first = text.lines().next().unwrap_or("").to_string();
+                let cookie = text
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("cookie:"))
+                    .unwrap_or("")
+                    .to_string();
+                let line = first.split(" HTTP").next().unwrap_or("").to_string();
+                log.lock().unwrap().push((line.clone(), cookie));
+                let body = if line.starts_with("GET / ") {
+                    "<!doctype html><title>Orders</title>\
+                     <form method=post action=/save><button>Save</button></form>\
+                     <button onclick=\"fetch('/orders/1',{method:'DELETE'})\">Delete</button>"
+                } else {
+                    "ok"
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+fn site_manager(
+    dir: &tempfile::TempDir,
+    origin: &str,
+    mode: SiteMode,
+    sessions: Vec<SavedSession>,
+) -> std::sync::Arc<BrowserManager> {
+    let workspace = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    std::sync::Arc::new(BrowserManager::lane_a(Some(workspace)).with_launch_options(
+        LaunchOptions {
+            act_on: vec![ActOnSite {
+                origin: origin.to_string(),
+                mode,
+            }],
+            sessions,
+            unattended: true,
+            ..LaunchOptions::default()
+        },
+    ))
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn site_modes_gate_clicks_and_requests() {
+    for (mode, delete_outcome) in [
+        (SiteMode::Look, "runs"),
+        (SiteMode::AskRisky, "needs_approval"),
+        (SiteMode::Any, "runs"),
+    ] {
+        let (port, seen) = site_server().await;
+        let origin = format!("http://127.0.0.1:{port}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manager = site_manager(&dir, &origin, mode, Vec::new());
+        let (navigate, snapshot, .., click, _) =
+            build_browser_tools(manager.clone(), artifacts(), None);
+        let cx = &mut ToolContext::new();
+        navigate
+            .call(
+                cx,
+                NavigateArgs {
+                    url: format!("{origin}/"),
+                },
+            )
+            .await
+            .expect("page loads");
+        let tree = snapshot.call(cx, NoArgs {}).await.expect("snapshot").tree;
+
+        let save = click
+            .call(
+                cx,
+                ClickArgs {
+                    r#ref: ref_of(&tree, "button", "Save"),
+                },
+            )
+            .await
+            .expect("Save runs in every mode");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let posted = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(l, _)| l.starts_with("POST /save"));
+        if mode == SiteMode::Look {
+            assert!(!posted, "look sends no POST: {:?}", seen.lock().unwrap());
+            assert!(save.note.contains("look only: the site was not changed"));
+        } else {
+            assert!(posted, "{:?}", seen.lock().unwrap());
+        }
+
+        let tree = snapshot.call(cx, NoArgs {}).await.expect("snapshot").tree;
+        let del = click
+            .call(
+                cx,
+                ClickArgs {
+                    r#ref: ref_of(&tree, "button", "Delete"),
+                },
+            )
+            .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let deleted = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(l, _)| l.starts_with("DELETE"));
+        match delete_outcome {
+            "needs_approval" => {
+                let err = del.expect_err("unattended risky click").to_string();
+                assert!(
+                    err.contains("needs_approval") && err.contains(&origin),
+                    "{err}"
+                );
+                assert!(!deleted, "nothing was sent");
+            }
+            _ => {
+                del.expect("click runs");
+                assert_eq!(deleted, mode == SiteMode::Any, "{:?}", seen.lock().unwrap());
+            }
+        }
+        manager.shutdown().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn a_saved_session_sends_its_cookie_and_only_for_granted_origins() {
+    let (port, seen) = site_server().await;
+    let origin = format!("http://127.0.0.1:{port}");
+    let state = |name: &str| {
+        serde_json::json!({"cookies": [{
+            "name": name, "value": "v", "domain": "127.0.0.1", "path": "/",
+            "expires": -1, "httpOnly": false, "secure": false, "sameSite": "Lax"
+        }], "origins": []})
+    };
+    let sessions = vec![
+        SavedSession {
+            origin: origin.clone(),
+            storage_state: state("granted"),
+        },
+        SavedSession {
+            origin: "http://localhost:1".into(),
+            storage_state: state("ungranted"),
+        },
+    ];
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manager = site_manager(&dir, &origin, SiteMode::AskRisky, sessions);
+    let (navigate, ..) = build_browser_tools(manager.clone(), artifacts(), None);
+    navigate
+        .call(
+            &mut ToolContext::new(),
+            NavigateArgs {
+                url: format!("{origin}/"),
+            },
+        )
+        .await
+        .expect("page loads");
+    let first = seen.lock().unwrap()[0].clone();
+    assert!(
+        first.1.contains("granted=v"),
+        "first request carried: {first:?}"
+    );
+    assert!(!first.1.contains("ungranted"), "{first:?}");
+    manager.shutdown().await;
+}

@@ -243,6 +243,8 @@ pub struct BrowserSession {
     /// (AGE-156) can mirror navigation from either side — the agent's
     /// `browser_navigate` tool or the user typing a new URL.
     current_url: watch::Sender<String>,
+    /// Site grants, request interception and the saved session (AGE-1915).
+    gate: Arc<super::gate::SiteGate>,
     /// Temp user-data dir for an ephemeral profile; removed on drop.
     _user_data: Option<tempfile::TempDir>,
 }
@@ -375,6 +377,9 @@ impl BrowserSession {
         .map_err(|_| BrowserError::Timeout(DEFAULT_TIMEOUT_SECS, "opening a page".to_string()))?
         .map_err(|e| BrowserError::Launch(format!("cannot open page: {e}")))?;
 
+        let gate = super::gate::SiteGate::new(&options);
+        gate.load_cookies(&page).await;
+        gate.load_local_storage(&page).await;
         let events = Arc::new(EventBuffers::with_trace(
             options.trace_path.clone().map(super::har::HarRecorder::new),
         ));
@@ -423,6 +428,7 @@ impl BrowserSession {
             current_url: watch::channel(String::from("about:blank")).0,
             _user_data: user_data,
             _proxy: proxy,
+            gate,
         });
 
         let watcher = targets::spawn_watcher(&session, created, destroyed);
@@ -437,8 +443,25 @@ impl BrowserSession {
                 return Err(e);
             }
         }
+        match session
+            .gate
+            .spawn_interceptor(&session.runtime, &page)
+            .await
+        {
+            Ok(Some(task)) => session.listeners.lock().push(task),
+            Ok(None) => {}
+            Err(e) => {
+                session.shutdown().await;
+                return Err(e);
+            }
+        }
 
         Ok(session)
+    }
+
+    /// The site gate: grants, modes and what it refused (AGE-1915).
+    pub fn gate(&self) -> &Arc<super::gate::SiteGate> {
+        &self.gate
     }
 
     /// The Tokio runtime every task of this session runs on.
@@ -788,6 +811,13 @@ impl BrowserSession {
                 return;
             }
         };
+        // A new tab gets the same site gate and saved storage (AGE-1915).
+        self.gate.load_local_storage(page).await;
+        match self.gate.spawn_interceptor(&self.runtime, page).await {
+            Ok(Some(task)) => self.listeners.lock().push(task),
+            Ok(None) => {}
+            Err(e) => warn!(error = %e, "browser: cannot gate the new tab's requests"),
+        }
         {
             let mut tabs = self.tabs.lock();
             // Two paths can learn about one target — the watcher's

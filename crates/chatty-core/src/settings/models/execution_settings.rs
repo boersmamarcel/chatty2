@@ -48,6 +48,70 @@ impl std::str::FromStr for ToolLoading {
     }
 }
 
+/// What a run may do on a granted site (ADR-0108).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SiteMode {
+    /// Clicks and typing run, but every non-GET request to the site is
+    /// refused: nothing is sent.
+    Look,
+    /// Risky controls and risky requests need a person's OK (the default).
+    #[default]
+    AskRisky,
+    /// No checks inside the origin.
+    Any,
+}
+
+/// One site the run may act on without asking (ADR-0105): an exact origin
+/// (scheme, host, port) and the mode that holds there. A bare string in the
+/// settings file is an origin with the default mode.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ActOnSite {
+    pub origin: String,
+    #[serde(default)]
+    pub mode: SiteMode,
+}
+
+impl<'de> Deserialize<'de> for ActOnSite {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Origin(String),
+            Full {
+                origin: String,
+                #[serde(default)]
+                mode: SiteMode,
+            },
+        }
+        Ok(match Repr::deserialize(d)? {
+            Repr::Origin(origin) => ActOnSite {
+                origin,
+                mode: SiteMode::default(),
+            },
+            Repr::Full { origin, mode } => ActOnSite { origin, mode },
+        })
+    }
+}
+
+/// A saved login for one origin (ADR-0106): Playwright's `storage_state`
+/// shape (`cookies[]`, `origins[].localStorage[]`). It is a secret: `Debug`
+/// never shows it, and nothing returns it in a tool result, log or trace.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedSession {
+    pub origin: String,
+    pub storage_state: serde_json::Value,
+}
+
+impl std::fmt::Debug for SavedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SavedSession")
+            .field("origin", &self.origin)
+            .field("storage_state", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Settings for code execution tool
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ExecutionSettingsModel {
@@ -98,6 +162,15 @@ pub struct ExecutionSettingsModel {
     /// `None` (default): no trace is recorded.
     #[serde(default)]
     pub browser_trace_path: Option<String>,
+    /// Sites the run may click and type on without asking, each with a mode
+    /// (AGE-1915, ADR-0105/0108). Only from settings, never a tool argument.
+    /// Empty by default: every action off Lane A origins asks.
+    #[serde(default)]
+    pub browser_act_on: Vec<ActOnSite>,
+    /// Saved logins (ADR-0106). Only sessions for origins in
+    /// `browser_act_on` are loaded. Secret; never logged.
+    #[serde(default)]
+    pub browser_sessions: Vec<SavedSession>,
     /// When the browser's open-web policy is active (internet access on),
     /// also allow navigation to private/internal IPs (RFC-1918, etc.) on the
     /// user's own network. Off by default: an SSRF guard refuses these the
@@ -316,6 +389,8 @@ impl Default for ExecutionSettingsModel {
             browser_upstream_proxy: None,
             browser_upstream_token: None,
             browser_trace_path: None,
+            browser_act_on: Vec::new(),
+            browser_sessions: Vec::new(),
             allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
             execute_code_enabled: false,         // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker

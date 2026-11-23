@@ -451,6 +451,8 @@ mod tests {
                 browser_upstream_proxy: Some("http://172.16.0.1:8090".to_string()),
                 browser_upstream_token: Some("token".to_string()),
                 browser_trace_path: Some("outputs/browser/session.har".to_string()),
+                browser_act_on: Vec::new(),
+                browser_sessions: Vec::new(),
                 allow_private_network_access: true,
                 execute_code_enabled: true,
                 docker_code_execution_enabled: true,

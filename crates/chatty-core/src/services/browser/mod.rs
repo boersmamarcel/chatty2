@@ -27,6 +27,7 @@ pub mod control;
 mod egress_proxy;
 pub mod error;
 pub mod events;
+pub mod gate;
 pub mod har;
 pub mod input;
 pub mod profile;
@@ -34,6 +35,7 @@ pub mod provisioning;
 pub mod registry;
 pub mod screencast;
 pub mod session;
+pub mod sites;
 pub mod snapshot;
 mod targets;
 mod typing;
@@ -72,6 +74,13 @@ pub struct LaunchOptions {
     /// workspace when set by the caller; the manager makes it absolute and
     /// drops one that would leave the workspace.
     pub trace_path: Option<PathBuf>,
+    /// Sites the run may act on without asking, with their modes
+    /// (AGE-1915). Only from settings.
+    pub act_on: Vec<crate::settings::models::execution_settings::ActOnSite>,
+    /// Saved logins. Only those for an `act_on` origin are loaded. Secret.
+    pub sessions: Vec<crate::settings::models::execution_settings::SavedSession>,
+    /// No person is attached to answer approval cards.
+    pub unattended: bool,
 }
 
 // The token must never reach a log line, even through `{:?}`.
@@ -81,6 +90,9 @@ impl std::fmt::Debug for LaunchOptions {
             .field("no_sandbox", &self.no_sandbox)
             .field("upstream_proxy", &self.upstream_proxy)
             .field("trace_path", &self.trace_path)
+            .field("act_on", &self.act_on)
+            .field("sessions", &self.sessions.len())
+            .field("unattended", &self.unattended)
             .field(
                 "upstream_token",
                 &self.upstream_token.as_ref().map(|_| "<redacted>"),
@@ -165,6 +177,16 @@ impl BrowserManager {
                 ..
             }
         )
+    }
+
+    /// The sites the run may act on, from settings (AGE-1915).
+    pub fn act_on(&self) -> &[crate::settings::models::execution_settings::ActOnSite] {
+        &self.launch.act_on
+    }
+
+    /// Whether nobody is attached to answer approval cards.
+    pub fn is_unattended(&self) -> bool {
+        self.launch.unattended
     }
 
     /// The configured workspace, which the tools need somewhere to write into.
