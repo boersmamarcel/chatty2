@@ -311,7 +311,7 @@ impl Default for ExecutionSettingsModel {
             browser_upstream_proxy: None,
             browser_upstream_token: None,
             allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
-            execute_code_enabled: false,   // Opt-in: exposes execute_code to the model
+            execute_code_enabled: false,         // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker
             docker_host: None,
             timeout_seconds: 30,

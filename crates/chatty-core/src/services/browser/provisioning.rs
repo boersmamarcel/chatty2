@@ -568,7 +568,11 @@ mod tests {
     fn fake_chrome(dir: &Path, name: &str, version: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\necho 'Google Chrome {version}'\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho 'Google Chrome {version}'\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
@@ -580,7 +584,11 @@ mod tests {
     fn chatty_chrome_is_picked_by_version() {
         let dir = tempfile::tempdir().unwrap();
         let good = fake_chrome(dir.path(), "good", &format!("{MIN_CHROME_MAJOR}.0.1.2"));
-        let old = fake_chrome(dir.path(), "old", &format!("{}.0.1.2", MIN_CHROME_MAJOR - 1));
+        let old = fake_chrome(
+            dir.path(),
+            "old",
+            &format!("{}.0.1.2", MIN_CHROME_MAJOR - 1),
+        );
         assert_eq!(chrome_from_path(good.clone()), Some(good));
         assert_eq!(chrome_from_path(old), None);
         assert_eq!(chrome_from_path(dir.path().join("missing")), None);

@@ -877,4 +877,31 @@ mod tests {
         let names: HashSet<String> = active_native_tool_names(&narrowed);
         assert_eq!(names, active_native_tool_names(&nothing));
     }
+
+    /// The operator drives a web page and writes its own workspace: the
+    /// browser tools, no shell, no git, no code execution (AGE-1912).
+    #[test]
+    fn operator_has_the_browser_and_no_shell_or_git() {
+        assert_eq!(tool_profile("operator"), Some(&OPERATOR));
+        assert!(tool_profile_names().contains(&"operator"));
+        for tool in BROWSER {
+            assert!(OPERATOR.allows(tool), "an operator needs {tool}");
+        }
+        for tool in ["write_file", "apply_diff", "read_file", "add_attachment"] {
+            assert!(OPERATOR.allows(tool), "an operator needs {tool}");
+        }
+        // No shell, no git writes, no code execution. (The read set's
+        // read-only git history is shared by every profile.)
+        for tool in SHELL.iter().chain(GIT_WRITE) {
+            assert!(!OPERATOR.allows(tool), "an operator has no {tool}");
+        }
+        assert!(!OPERATOR.allows("execute_code"));
+        let names: Vec<_> = OPERATOR.tool_names().collect();
+        assert!(!names.iter().any(|t| t.starts_with("shell")));
+        assert!(
+            !names
+                .iter()
+                .any(|t| t.starts_with("git") && !READ_SET.contains(t))
+        );
+    }
 }

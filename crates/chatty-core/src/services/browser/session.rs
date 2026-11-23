@@ -270,6 +270,7 @@ impl BrowserSession {
         chrome: std::path::PathBuf,
         profile: BrowserProfile,
         policy: NavigationPolicy,
+        options: super::LaunchOptions,
     ) -> Result<Arc<Self>, BrowserError> {
         // Launching is always under Tokio (chromiumoxide needs it to drive
         // the process); what is captured here is what later calls from
@@ -283,6 +284,12 @@ impl BrowserSession {
         // rather than showing an OS window, so this stays headless there too.
         builder = builder.new_headless_mode();
 
+        // A hosted guest: the VM is the sandbox, and Chrome's own may not
+        // start under `no_new_privs` (AGE-1912).
+        if options.no_sandbox {
+            builder = builder.arg("no-sandbox").arg("disable-dev-shm-usage");
+        }
+
         // Under the open-web policy every non-loopback request goes through
         // a proxy that resolves and checks the host itself, so the address
         // checked is the address Chrome connects to (AGE-1290).
@@ -291,13 +298,25 @@ impl BrowserSession {
                 allow_private_network_access,
                 ..
             } => {
-                let proxy = super::egress_proxy::GuardedProxy::start(*allow_private_network_access)
-                    .await
-                    .map_err(|e| {
-                        BrowserError::Launch(format!(
-                            "cannot start the browser's network guard: {e}"
-                        ))
-                    })?;
+                let started = match options.upstream_proxy.as_deref() {
+                    // Hosted guest: no local name resolution, the upstream
+                    // decides (AGE-1912).
+                    Some(url) => {
+                        let upstream = super::egress_proxy::Upstream::parse(
+                            url,
+                            options.upstream_token.as_deref(),
+                        )
+                        .map_err(BrowserError::Launch)?;
+                        super::egress_proxy::GuardedProxy::start_upstream(upstream).await
+                    }
+                    None => {
+                        super::egress_proxy::GuardedProxy::start(*allow_private_network_access)
+                            .await
+                    }
+                };
+                let proxy = started.map_err(|e| {
+                    BrowserError::Launch(format!("cannot start the browser's network guard: {e}"))
+                })?;
                 let server = proxy.proxy_server_arg();
                 builder = builder.arg(("proxy-server", server.as_str()));
                 Some(proxy)
