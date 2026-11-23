@@ -93,6 +93,11 @@ pub struct ExecutionSettingsModel {
     /// Never logged.
     #[serde(default)]
     pub browser_upstream_token: Option<String>,
+    /// Write the browser session as a HAR 1.2 file at this path, relative to
+    /// the workspace (AGE-1913; a guest sets `outputs/browser/session.har`).
+    /// `None` (default): no trace is recorded.
+    #[serde(default)]
+    pub browser_trace_path: Option<String>,
     /// When the browser's open-web policy is active (internet access on),
     /// also allow navigation to private/internal IPs (RFC-1918, etc.) on the
     /// user's own network. Off by default: an SSRF guard refuses these the
@@ -310,6 +315,7 @@ impl Default for ExecutionSettingsModel {
             browser_no_sandbox: false,
             browser_upstream_proxy: None,
             browser_upstream_token: None,
+            browser_trace_path: None,
             allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
             execute_code_enabled: false,         // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker
