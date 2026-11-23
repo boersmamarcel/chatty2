@@ -147,7 +147,7 @@ patch in after the stream completes.
 | [M0](./modules/m0-trace.md) | `RolloutBudget` extends token accounting for train vs validation rollouts |
 
 **Future product link:** conversation compaction (the per-call guard in
-`services/context_shaper.rs` and the persisted `summarize_oldest_half`) is the natural
+`services/context_shaper/` and the persisted `summarize_oldest_half`) is the natural
 place to apply ACE grow-and-refine eviction when playbook + history exceed pressure
 thresholds — the compaction ships; the playbook hook into it does not exist yet.
 
