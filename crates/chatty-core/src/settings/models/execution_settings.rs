@@ -79,6 +79,20 @@ pub struct ExecutionSettingsModel {
     /// no suitable system Chrome is installed.
     #[serde(default)]
     pub browser_enabled: bool,
+    /// Launch Chrome with `--no-sandbox --disable-dev-shm-usage` (AGE-1912).
+    /// For a hosted guest: the VM is the sandbox, and Chrome's own sandbox may
+    /// not start under `no_new_privs`. Off by default.
+    #[serde(default)]
+    pub browser_no_sandbox: bool,
+    /// Route every non-loopback browser request through this upstream HTTP
+    /// proxy (e.g. `http://172.16.0.1:8090`) instead of resolving names
+    /// locally (AGE-1912). The address policy is then the upstream's job.
+    #[serde(default)]
+    pub browser_upstream_proxy: Option<String>,
+    /// Bearer token sent to the upstream proxy as `Proxy-Authorization`.
+    /// Never logged.
+    #[serde(default)]
+    pub browser_upstream_token: Option<String>,
     /// When the browser's open-web policy is active (internet access on),
     /// also allow navigation to private/internal IPs (RFC-1918, etc.) on the
     /// user's own network. Off by default: an SSRF guard refuses these the
@@ -293,6 +307,9 @@ impl Default for ExecutionSettingsModel {
             fetch_enabled: true,           // Enabled by default for zero-config web access
             git_enabled: false,            // Opt-in: requires workspace with git repo
             browser_enabled: false,        // Opt-in: may download a Chrome build on first use
+            browser_no_sandbox: false,
+            browser_upstream_proxy: None,
+            browser_upstream_token: None,
             allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
             execute_code_enabled: false,   // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker

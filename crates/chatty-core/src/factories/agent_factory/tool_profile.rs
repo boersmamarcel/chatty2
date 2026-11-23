@@ -132,6 +132,20 @@ const DOC_WRITE: &[&str] = &["write_docx", "write_excel", "edit_excel", "write_p
 /// extraction only ever creates a new folder: it overwrites nothing.
 const ARCHIVE: &[&str] = &["list_archive", "extract_archive"];
 
+/// The built-in browser (AGE-1912): the eight tools of `tools/browser_tools.rs`.
+/// They exist only when `browser_enabled` and a workspace are set; a profile
+/// never turns the group on.
+const BROWSER: &[&str] = &[
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_screenshot",
+    "browser_console",
+    "browser_network",
+    "browser_resize",
+    "browser_click",
+    "browser_type",
+];
+
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
 /// shares one guest image with `math-render` compiled in, so the profile is
 /// what keeps the compiler away from the roles that have no use for it.
@@ -310,6 +324,14 @@ pub static WEB_RESEARCHER: ToolProfile = ToolProfile {
     groups: &[READ_SET, WEB, CALCULATE, MESSAGES],
 };
 
+/// A hosted worker that operates a web page (AGE-1912): the read set, the
+/// filesystem-write tools for its own workspace, the browser, attachments.
+/// No shell, no git, no code execution.
+pub static OPERATOR: ToolProfile = ToolProfile {
+    name: "operator",
+    groups: &[READ_SET, FS_WRITE, BROWSER, ATTACH, MESSAGES],
+};
+
 /// Every profile, in the order `--tools` documents them.
 pub static TOOL_PROFILES: &[&ToolProfile] = &[
     &COORDINATOR,
@@ -317,6 +339,7 @@ pub static TOOL_PROFILES: &[&ToolProfile] = &[
     &REVIEWER,
     &TYPESETTER,
     &WEB_RESEARCHER,
+    &OPERATOR,
 ];
 
 /// Joins profile names into their union: `coder+coordinator` allows what
