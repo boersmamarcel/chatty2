@@ -8,12 +8,12 @@
 //! - `ChatViewEvent` — events emitted up to `ChattyApp` (scroll, copy,
 //!   regenerate, edit, etc.).
 //! - Helpers for streaming text into the active assistant message
-//!   (`append_assistant_text`, `set_assistant_tool_call`, …).
+//!   (`append_assistant_text`, …).
 //!
 //! # What does NOT live here
 //!
 //! - Message data — `chatty_core::models::conversation::Message`.
-//! - The chat input field — `chat_input.rs`.
+//! - The chat input field — `chat_input/`.
 //! - Individual message rendering — `message_component.rs`.
 //! - Stream lifecycle — `chatty::models::stream_manager`; this view only
 //!   receives already-decoded text/tool-call chunks via `ChattyApp` event

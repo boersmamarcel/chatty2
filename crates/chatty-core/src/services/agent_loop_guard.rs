@@ -46,6 +46,8 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use super::context_compaction::COMMAND_TOOLS;
+
 // ── Tunables ──────────────────────────────────────────────────────────────────
 
 /// How many bytes of pure text (no tool call) in one turn triggers the soft
@@ -83,9 +85,6 @@ const FILE_WRITE_TOOLS: &[&str] = &[
     "edit_excel",
     "write_pptx",
 ];
-
-/// Tools that run a command.
-const COMMAND_TOOLS: &[&str] = &["shell_execute", "execute_code"];
 
 /// A shell command containing one of these writes files.
 const SHELL_WRITE_MARKERS: &[&str] = &[

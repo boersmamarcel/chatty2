@@ -34,7 +34,7 @@ impl PlanBlock {
 
 impl RenderOnce for PlanBlock {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (done, total, _, _) = plan_counts(&self.snapshot);
+        let (done, total, _, _) = self.snapshot.counts();
         let skipped = self.snapshot.verification_skipped;
         let last = self.snapshot.todos.len().saturating_sub(1);
 
@@ -132,7 +132,7 @@ impl PlanStrip {
 
 impl RenderOnce for PlanStrip {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (done, total, failed, current) = plan_counts(&self.snapshot);
+        let (done, total, failed, current) = self.snapshot.counts();
         let count_label = if failed > 0 {
             format!("Plan {done} of {total} · {failed} failed")
         } else if self.snapshot.verification_skipped {
@@ -242,7 +242,7 @@ impl PlanOverlay {}
 
 impl RenderOnce for PlanOverlay {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (done, total, _, _) = plan_counts(&self.snapshot);
+        let (done, total, _, _) = self.snapshot.counts();
         let meta = if self.snapshot.verification_skipped {
             format!("{done} of {total} done · verification skipped")
         } else {
@@ -352,34 +352,6 @@ impl RenderOnce for PlanOverlay {
                     ),
             )
     }
-}
-
-fn plan_counts(snapshot: &AgentTaskSnapshot) -> (usize, usize, usize, String) {
-    let done = snapshot
-        .todos
-        .iter()
-        .filter(|todo| matches!(todo.status, AgentTodoStatus::Done))
-        .count();
-    let failed = snapshot
-        .todos
-        .iter()
-        .filter(|todo| matches!(todo.status, AgentTodoStatus::Blocked))
-        .count();
-    let total = snapshot.todos.len().max(1);
-    let current = snapshot
-        .todos
-        .iter()
-        .find(|todo| matches!(todo.status, AgentTodoStatus::InProgress))
-        .map(|todo| todo.title.clone())
-        .or_else(|| {
-            snapshot
-                .todos
-                .iter()
-                .find(|todo| matches!(todo.status, AgentTodoStatus::Pending))
-                .map(|todo| todo.title.clone())
-        })
-        .unwrap_or_else(|| format!("{done}/{total} complete"));
-    (done, total, failed, current)
 }
 
 fn plan_step_row(

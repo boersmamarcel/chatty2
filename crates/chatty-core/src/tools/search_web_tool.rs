@@ -817,11 +817,7 @@ impl SearchWebTool {
         }
         let mut body = response.body;
         if body.len() > MAX_PAGE_BYTES {
-            let mut cut = MAX_PAGE_BYTES;
-            while !body.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            body.truncate(cut);
+            body.truncate(body.floor_char_boundary(MAX_PAGE_BYTES));
         }
         let text = crate::tools::fetch_tool::html_to_text(&body, Some(&final_url), None);
         Some(crate::tools::passages::strip_link_targets(&text))

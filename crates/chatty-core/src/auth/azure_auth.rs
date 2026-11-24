@@ -7,7 +7,7 @@ use azure_identity::{
 use std::sync::Arc;
 use tracing::info;
 
-const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
+pub(super) const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
 
 /// Try to resolve the user's full PATH by running their login shell.
 ///

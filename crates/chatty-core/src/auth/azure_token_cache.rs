@@ -5,7 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
-const AZURE_OPENAI_SCOPE: &str = "https://cognitiveservices.azure.com/.default";
+use super::azure_auth::AZURE_OPENAI_SCOPE;
+
 const TOKEN_REFRESH_THRESHOLD_SECS: u64 = 5 * 60; // 5 minutes
 
 /// Where fresh tokens come from: the token and its `expires_on`.

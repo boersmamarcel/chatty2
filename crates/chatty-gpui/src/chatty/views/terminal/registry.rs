@@ -484,6 +484,8 @@ mod tests {
         let config = TerminalConfig {
             shell: Some("bash".into()),
             args: vec!["--norc".into(), "--noprofile".into(), "-i".into()],
+            // The tests wait for a `$` prompt; bash's own default is `#` for root.
+            env: [("PS1".to_string(), "$ ".to_string())].into(),
             ..TerminalConfig::default()
         };
         let (handle, _events) = TerminalHandle::spawn(config).expect("bash starts");

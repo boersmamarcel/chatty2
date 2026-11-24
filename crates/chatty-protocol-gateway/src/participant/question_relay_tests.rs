@@ -324,7 +324,7 @@ async fn escalated_question_keeps_first_stamp() {
 
 /// The broker id of the one question waiting.
 fn waiting_question(calls: &BrokerCalls) -> String {
-    let questions = lock_questions(&calls.questions);
+    let questions = locked(&calls.questions);
     let mut ids = questions.keys().cloned().collect::<Vec<_>>();
     assert_eq!(ids.len(), 1, "one question waits: {ids:?}");
     ids.remove(0)

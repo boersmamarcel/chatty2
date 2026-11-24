@@ -66,10 +66,7 @@ fn truncate_output_stream(output: &mut String, max_output_bytes: usize, label: &
     }
 
     let original_len = output.len();
-    let mut end = max_output_bytes;
-    while end > 0 && !output.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = output.floor_char_boundary(max_output_bytes);
     output.truncate(end);
     output.push_str(&format!(
         "\n... [{label} truncated by {} bytes; keep prints compact]",

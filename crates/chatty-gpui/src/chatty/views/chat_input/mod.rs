@@ -526,7 +526,7 @@ impl ChatInputState {
     /// name cannot push Send out of the row (AGE-184). The full name stays
     /// available in the button's tooltip.
     pub fn selected_model_button_label(&self) -> String {
-        truncate_model_label(
+        chatty_core::presentation::tool_verb::truncate(
             &self.get_selected_model_display_name(),
             MODEL_LABEL_MAX_CHARS,
         )
@@ -542,20 +542,6 @@ impl ChatInputState {
 /// Longest model label the composer renders before eliding. Chosen so the
 /// bottom row still fits Send at roughly half window width.
 pub(crate) const MODEL_LABEL_MAX_CHARS: usize = 28;
-
-/// Cap `label` to `max_chars`, appending an ellipsis when it is elided.
-///
-/// Counts chars, not bytes, so multi-byte model names cannot panic on a
-/// slice boundary.
-pub(crate) fn truncate_model_label(label: &str, max_chars: usize) -> String {
-    if label.chars().count() <= max_chars {
-        return label.to_string();
-    }
-    let keep = max_chars.saturating_sub(1);
-    let mut out: String = label.chars().take(keep).collect();
-    out.push('\u{2026}');
-    out
-}
 
 /// Pick a model id after the available list changes.
 ///
