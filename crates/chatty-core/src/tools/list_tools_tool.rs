@@ -436,6 +436,10 @@ impl ListToolsTool {
                     "browser_type",
                     "Replace a text field's contents by its snapshot ref; asks the user first off localhost.",
                 ),
+                (
+                    "browser_select",
+                    "Choose an option in a dropdown (<select>) by its snapshot ref and the option's label or value; asks the user first off localhost.",
+                ),
             ] {
                 native_tools.push(ToolInfo {
                     name: name.to_string(),

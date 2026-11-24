@@ -167,6 +167,7 @@ const GROUPS: &[GroupSpec] = &[
             "browser_resize",
             "browser_click",
             "browser_type",
+            "browser_select",
         ],
     },
     GroupSpec {

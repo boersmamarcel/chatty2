@@ -37,6 +37,12 @@ pub struct Snapshot {
 impl Snapshot {
     /// Render as indented text — what actually goes into the model's context.
     pub fn to_text(&self) -> String {
+        self.to_text_with(&HashMap::new())
+    }
+
+    /// [`Self::to_text`], with an extra note after the lines of the refs in
+    /// `notes` (a dropdown's current option and options, AGE-2009).
+    pub fn to_text_with(&self, notes: &HashMap<String, String>) -> String {
         let mut out = String::new();
         for node in &self.nodes {
             for _ in 0..node.depth {
@@ -45,6 +51,10 @@ impl Snapshot {
             out.push_str(&format!("[{}] {}", node.r#ref, node.role));
             if !node.name.is_empty() {
                 out.push_str(&format!(" \"{}\"", node.name));
+            }
+            if let Some(note) = notes.get(&node.r#ref) {
+                out.push(' ');
+                out.push_str(note);
             }
             out.push('\n');
         }

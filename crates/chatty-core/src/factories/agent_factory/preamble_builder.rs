@@ -216,7 +216,7 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
     }
     if tools.browser {
         tool_sections.push(
-            "- **browser_navigate / browser_snapshot / browser_screenshot / browser_console /              browser_network / browser_resize / browser_click / browser_type** (built-in browser, localhost and              workspace file:// URLs only)"
+            "- **browser_navigate / browser_snapshot / browser_screenshot / browser_console /              browser_network / browser_resize / browser_click / browser_type / browser_select** (built-in browser, localhost and              workspace file:// URLs only)"
                 .to_string(),
         );
     }
@@ -311,7 +311,8 @@ immediately switch to shell_execute: write a `/tmp/solve.py` script and run it t
          old refs. To press a button, open a menu or follow a link, use `browser_click` \
          with a ref — never a `javascript:` URL, which is refused. To fill a text field, \
          use `browser_type` with a ref and the text; it replaces the field's contents and \
-         does not submit. Never type passwords or card numbers — those fields are refused; \
+         does not submit. To set a dropdown (a `<select>`, shown in the snapshot with its options), \
+         use `browser_select` with a ref and the option's label or value. Never type passwords or card numbers — those fields are refused; \
          ask the user to take control. Clicks and typing on pages outside localhost and the \
          workspace ask the user for approval each time; wait for the answer.\n\
          \n\
