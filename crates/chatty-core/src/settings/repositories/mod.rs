@@ -1,15 +1,13 @@
 //! Settings repositories — persistence layer for Chatty configuration.
 //!
 //! Standard repositories are generated via macros to eliminate boilerplate.
-//! Custom repositories (OAuth credentials, module settings) are kept as
-//! separate modules with hand-written implementations.
+//! Custom repositories (module settings) are kept as separate modules with
+//! hand-written implementations.
 
 pub mod generic_json_repository;
 pub mod in_memory_repository;
 pub mod module_settings_json_repository;
 pub mod module_settings_repository;
-pub mod oauth_credential_json_repository;
-pub mod oauth_credential_repository;
 pub mod provider_repository;
 pub mod secret_json_repository;
 
@@ -19,8 +17,6 @@ pub use provider_repository::{BoxFuture, RepositoryError, RepositoryResult};
 // Re-export custom repository types.
 pub use module_settings_json_repository::ModuleSettingsJsonRepository;
 pub use module_settings_repository::ModuleSettingsRepository;
-pub use oauth_credential_json_repository::JsonOAuthCredentialRepository;
-pub use oauth_credential_repository::OAuthCredentialRepository;
 
 // Re-export in-memory repository types (AGE-283 lease-time snapshot boot).
 pub use in_memory_repository::{
