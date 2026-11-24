@@ -99,6 +99,7 @@ tools = [
     ("browser_resize", "web", "browser_tools.rs", "feature: browser"),
     ("browser_click", "web", "browser_tools.rs", "feature: browser; by snapshot ref; approval off localhost/workspace"),
     ("browser_type", "web", "browser_tools.rs", "feature: browser; by snapshot ref; refuses password/card fields; never submits"),
+    ("browser_select", "web", "browser_tools.rs", "feature: browser; by snapshot ref; picks a <select> option by label or value"),
 ]
 for name, cat, src, notes in tools:
     print(f"| `{name}` | {cat} | `{src}` | {notes} |")
@@ -263,6 +264,15 @@ opt-in (`false`) for security.
 | `fetch_enabled` | `bool` | `true` | Built-in read-only HTTP GET |
 | `git_enabled` | `bool` | `false` | Opt-in; workspace must be a git repo |
 | `browser_enabled` | `bool` | `false` | Opt-in built-in browser tools; may download a pinned Chrome on first use |
+| `browser_no_sandbox` | `bool` | `false` | Launch Chrome with `--no-sandbox --disable-dev-shm-usage`; for a hosted guest, where the VM is the sandbox (AGE-1912) |
+| `browser_upstream_proxy` | `Option<String>` | `null` | Send every non-loopback browser request through this upstream HTTP proxy instead of resolving names locally (AGE-1912) |
+| **`browser_upstream_token`** | `Option<String>` | `null` | Secret; sent to the upstream proxy as `Proxy-Authorization: Bearer` |
+| `browser_trace_path` | `Option<String>` | `null` | Record the browser session as a HAR 1.2 file at this workspace-relative path; `null` = no trace (AGE-1913) |
+| `browser_act_on` | `Vec<ActOnSite>` | `[]` | Origins where clicks and typing need no approval, each with a `SiteMode` (`look`, `ask_risky`, `any`) (AGE-1915) |
+| **`browser_sessions`** | `Vec<SavedSession>` | `[]` | Secret; saved logins, loaded only for origins in `browser_act_on` |
+| `browser_unattended` | `bool` | `false` | Treat the run as having no approval channel: a risky browser action returns `needs_approval` at once (AGE-2038) |
+| `browser_approved_action` | `Option<ApprovedBrowserAction>` | `null` | One browser action approved out of band (written by hive); let through once, then forgotten (AGE-2043) |
+| `browser_proof_screenshots` | `bool` | `false` | Write proof pictures into `outputs/` (at an approval, after each click, at close); only on granted sites, never with a filled password field (AGE-2008) |
 | `allow_private_network_access` | `bool` | `false` | With internet access on, let the browser reach private/internal IPs (RFC-1918) on your own network; the SSRF guard refuses them otherwise. Cloud-metadata `169.254.0.0/16` stays refused regardless (AGE-459) |
 | `execute_code_enabled` | `bool` | `false` | Exposes `execute_code` to the model |
 | `docker_code_execution_enabled` | `bool` | `false` | Docker fallback for non-Monty code |
@@ -805,6 +815,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | `AZURE_TOKEN_CACHE` | `factories/agent_factory/provider_builder.rs` | `OnceLock<Option<AzureTokenCache>>` | Azure OAuth token reuse |
 | `PLUGIN_ENGINE` | `tools/plugin_tool.rs` | `OnceLock<wasmtime::Engine>` | One Wasmtime engine for every spec plugin instance (PL-U2); limits are per store |
 | `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
+| `CLIENTS` | `services/http_client.rs` | `LazyLock<Mutex<HashMap<(Kind, u64), reqwest::Client>>>` | One shared `reqwest` client per kind and timeout; building a client re-reads the system root certificates (AGE-1882) |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
 | `WRITE_SLOTS` | `settings/repositories/generic_json_repository.rs` | `LazyLock<Mutex<HashMap<PathBuf, WriteSlot>>>` | Per settings file, the last save written behind an async lock, so overlapping saves of one file never interleave and an older save never lands over a newer one (AGE-562) |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
