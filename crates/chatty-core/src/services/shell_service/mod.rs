@@ -844,14 +844,8 @@ impl ShellSession {
         if output.len() <= cap {
             return false;
         }
-        let mut head_end = cap / 2;
-        while head_end > 0 && !output.is_char_boundary(head_end) {
-            head_end -= 1;
-        }
-        let mut tail_start = output.len() - (cap - cap / 2);
-        while tail_start < output.len() && !output.is_char_boundary(tail_start) {
-            tail_start += 1;
-        }
+        let head_end = output.floor_char_boundary(cap / 2);
+        let tail_start = output.ceil_char_boundary(output.len() - (cap - cap / 2));
         let omitted = tail_start - head_end;
         *output = format!(
             "{}\n... [{omitted} bytes omitted; rerun with a filter (grep/tail) to see more] ...\n{}",
@@ -1396,6 +1390,18 @@ impl ShellSession {
         command: &str,
         timeout_override: Option<u32>,
     ) -> Result<ShellOutput> {
+        self.run(command, timeout_override, true).await
+    }
+
+    /// [`Self::execute_with_timeout`], with the output cap optional: `status`
+    /// reads the whole environment, which the cap for model-facing output
+    /// would cut the middle out of.
+    async fn run(
+        &self,
+        command: &str,
+        timeout_override: Option<u32>,
+        bound: bool,
+    ) -> Result<ShellOutput> {
         let effective_timeout_seconds =
             resolve_call_timeout_seconds(self.timeout_seconds, timeout_override);
 
@@ -1544,7 +1550,7 @@ impl ShellSession {
                 // text it capped was one `\n` longer; keep omission counts
                 // the same.
                 output.push('\n');
-                let truncated = Self::bound_output(&mut output, self.max_output_bytes);
+                let truncated = bound && Self::bound_output(&mut output, self.max_output_bytes);
                 let mut stdout = output.trim_end().to_string();
                 if let Some(note) = restart_note {
                     if !stdout.is_empty() {
@@ -1587,7 +1593,7 @@ impl ShellSession {
                 }
                 self.set_live(None);
 
-                let truncated = Self::bound_output(&mut output, self.max_output_bytes);
+                let truncated = bound && Self::bound_output(&mut output, self.max_output_bytes);
                 let mut stdout = output.trim_end().to_string();
                 if !stdout.is_empty() {
                     stdout.push('\n');
@@ -1681,7 +1687,7 @@ impl ShellSession {
 
         // Get cwd and env from the running shell
         let cwd_result = self.execute("pwd").await?;
-        let env_result = self.execute("env").await?;
+        let env_result = self.run("env", None, false).await?;
 
         let cwd = cwd_result.stdout.trim().to_string();
         let env_vars: Vec<(String, String)> = env_result

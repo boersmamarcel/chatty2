@@ -1114,17 +1114,6 @@ fn looks_like_html(body: &str) -> bool {
         || trimmed.starts_with("<html")
 }
 
-/// The largest char boundary at or before `index`, so a window never splits a
-/// multi-byte character. Both edges of a window use this one rule, which is
-/// what makes consecutive windows meet exactly (see `window`).
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    let mut end = index.min(s.len());
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    end
-}
-
 mod html;
 mod passages;
 

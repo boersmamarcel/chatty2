@@ -1,5 +1,5 @@
 use crate::global_entity::GlobalWeakEntity;
-use gpui::EventEmitter;
+use gpui::{App, EventEmitter};
 
 /// Events that signal the active agent needs to be rebuilt.
 ///
@@ -26,6 +26,21 @@ impl Default for AgentConfigNotifier {
 impl AgentConfigNotifier {
     pub fn new() -> Self {
         Self
+    }
+
+    /// Emit [`AgentConfigEvent::RebuildRequired`] on the app's notifier.
+    /// Returns `false` when there is no live notifier, so nothing rebuilds.
+    pub fn request_rebuild(cx: &mut App) -> bool {
+        let Some(notifier) = cx
+            .try_global::<GlobalAgentConfigNotifier>()
+            .and_then(|g| g.try_upgrade())
+        else {
+            return false;
+        };
+        notifier.update(cx, |_notifier, cx| {
+            cx.emit(AgentConfigEvent::RebuildRequired);
+        });
+        true
     }
 }
 

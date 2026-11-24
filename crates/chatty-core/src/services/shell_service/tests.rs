@@ -904,6 +904,30 @@ async fn characterize_state_persists() {
     );
 }
 
+/// `status` reports every variable, also when the environment is larger than
+/// the cap on model-facing output (which keeps a head and a tail and would
+/// drop the middle).
+#[tokio::test]
+async fn status_reports_the_whole_environment() {
+    let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
+    let filler = "x".repeat(SHELL_OUTPUT_DEFAULT_CAP_BYTES);
+    for name in ["CHATTY_FIRST", "CHATTY_FILLER", "CHATTY_LAST"] {
+        let value = if name == "CHATTY_FILLER" {
+            filler.as_str()
+        } else {
+            "kept"
+        };
+        session.set_env(name, value).await.unwrap();
+    }
+    let status = session.status().await.unwrap();
+    for name in ["CHATTY_FIRST", "CHATTY_FILLER", "CHATTY_LAST"] {
+        assert!(
+            status.env_vars.iter().any(|(key, _)| key == name),
+            "{name} is missing from status"
+        );
+    }
+}
+
 // ── The shell on a PTY (AGE-585) ─────────────────────────────────────────────
 
 /// A scratch git repository with two commits.

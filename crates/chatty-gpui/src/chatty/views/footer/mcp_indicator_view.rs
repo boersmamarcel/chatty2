@@ -93,8 +93,8 @@ impl RenderOnce for McpIndicatorView {
                                 servers
                                     .into_iter()
                                     .map(|(id, cfg, enabled)| {
-                                        let is_external = !cfg.url.contains("localhost")
-                                            && !cfg.url.contains("127.0.0.1");
+                                        let is_external =
+                                            !crate::chatty::services::url_is_local(&cfg.url);
                                         render_server_item(id, cfg.name, enabled, is_external)
                                     })
                                     .collect::<Vec<_>>(),

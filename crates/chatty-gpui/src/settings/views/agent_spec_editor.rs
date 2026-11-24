@@ -42,10 +42,6 @@ fn workspace_dir(cx: &App) -> Option<PathBuf> {
     workspace(cx).map(PathBuf::from)
 }
 
-fn data_dir() -> Option<PathBuf> {
-    dirs::data_dir()
-}
-
 fn taken_names(cx: &mut App) -> Vec<String> {
     AgentSpecsModel::listings(cx)
         .into_iter()
@@ -95,7 +91,7 @@ pub fn open_edit_spec(listing: &SpecListing, window: &mut Window, cx: &mut App) 
     let Some(target) = edit_target(
         &listing.source,
         workspace_dir(cx).as_deref(),
-        data_dir().as_deref(),
+        dirs::data_dir().as_deref(),
     ) else {
         return;
     };
@@ -120,7 +116,7 @@ pub fn open_duplicate_spec(listing: &SpecListing, window: &mut Window, cx: &mut 
     let Some(target) = duplicate_target(
         &listing.source,
         workspace_dir(cx).as_deref(),
-        data_dir().as_deref(),
+        dirs::data_dir().as_deref(),
     ) else {
         return;
     };
@@ -336,7 +332,7 @@ fn open_editor(
     let errors: Rc<RefCell<Vec<FieldError>>> = Rc::new(RefCell::new(Vec::new()));
     let destination = Rc::new(destination);
     let workspace = workspace_dir(cx);
-    let data = data_dir();
+    let data = dirs::data_dir();
     let base = Rc::new(base);
 
     window.open_dialog(cx, move |dialog, _window, cx| {
@@ -730,7 +726,7 @@ pub fn open_add_to_agent(module: &str, window: &mut Window, cx: &mut App) {
     let errors: Rc<RefCell<Vec<FieldError>>> = Rc::new(RefCell::new(Vec::new()));
     let listings = Rc::new(listings);
     let workspace = workspace_dir(cx);
-    let data = data_dir();
+    let data = dirs::data_dir();
 
     window.open_dialog(cx, move |dialog, _window, cx| {
         let muted = cx.theme().muted_foreground;

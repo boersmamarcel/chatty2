@@ -368,8 +368,10 @@ mod tests {
 
     #[test]
     fn open_allows_public_hosts() {
+        // IP literals, so the test needs no DNS; a name is resolved by
+        // `ssrf_guard`, whose own tests stub the lookup.
         let policy = open();
-        for url in ["http://example.com/", "https://example.com/page"] {
+        for url in ["http://93.184.216.34/", "https://93.184.216.34/page"] {
             assert!(policy.check(url).is_ok(), "{url} should be allowed");
         }
     }

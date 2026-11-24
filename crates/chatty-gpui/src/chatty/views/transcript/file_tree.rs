@@ -1,8 +1,9 @@
-//! The artifact panel's workspace explorer (AGE-476): the directory tree
-//! model behind the left-hand file column and the file operations it offers.
+//! The sidebar's workspace explorer (AGE-476, moved to the sidebar in
+//! AGE-480): the directory tree model behind Files mode and the file
+//! operations it offers.
 //!
 //! Pure filesystem and bookkeeping code; the pixels live in
-//! `file_explorer.rs`. Directories are listed lazily on expand and re-listed
+//! `sidebar_file_tree.rs`. Directories are listed lazily on expand and re-listed
 //! when their mtime moves, so a file the agent writes shows up without a
 //! refresh button being pressed — a directory's mtime changes whenever an
 //! entry is added, removed or renamed in it, which is exactly the set of

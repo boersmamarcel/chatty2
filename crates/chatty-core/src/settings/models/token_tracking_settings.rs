@@ -149,6 +149,7 @@ impl TokenTrackingSettings {
     }
 
     /// Return `true` if the given utilization ratio crosses the high threshold.
+    #[cfg(test)]
     pub fn is_high(&self, utilization: f64) -> bool {
         utilization >= self.high_threshold
     }
