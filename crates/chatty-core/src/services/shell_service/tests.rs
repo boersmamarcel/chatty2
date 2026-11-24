@@ -912,7 +912,11 @@ async fn status_reports_the_whole_environment() {
     let session = ShellSession::with_secrets(None, 30, 51200, false, vec![]);
     let filler = "x".repeat(SHELL_OUTPUT_DEFAULT_CAP_BYTES);
     for name in ["CHATTY_FIRST", "CHATTY_FILLER", "CHATTY_LAST"] {
-        let value = if name == "CHATTY_FILLER" { filler.as_str() } else { "kept" };
+        let value = if name == "CHATTY_FILLER" {
+            filler.as_str()
+        } else {
+            "kept"
+        };
         session.set_env(name, value).await.unwrap();
     }
     let status = session.status().await.unwrap();
