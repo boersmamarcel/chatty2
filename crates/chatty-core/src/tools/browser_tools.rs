@@ -768,6 +768,12 @@ fn describe(node: &crate::services::browser::SnapshotNode) -> String {
     }
 }
 
+/// Whether a person can answer an approval card: there is a channel and the
+/// host has not said nobody is behind it (AGE-2038).
+fn is_attended(manager: &BrowserManager, pending_approvals: Option<&PendingApprovals>) -> bool {
+    pending_approvals.is_some() && !manager.is_unattended()
+}
+
 /// Everything an acting tool does before it acts (AGE-489): resolve the ref
 /// against the current generation and, off Lane A origins, put the action to
 /// the user as an approval card first. `label` builds that card's text from
@@ -818,7 +824,7 @@ async fn prepare_action(
         is_click,
         &node.role,
         &node.name,
-        pending_approvals.is_some(),
+        is_attended(manager, pending_approvals),
     );
     let look = match gate {
         sites::ActionGate::Proceed { look } => look,
@@ -1559,6 +1565,46 @@ mod tests {
             !on_desktop.contains("cannot see this screenshot"),
             "{on_desktop}"
         );
+    }
+
+    fn risky_gate(unattended: bool, channel: bool) -> sites::ActionGate {
+        use crate::services::browser::LaunchOptions;
+        let m = BrowserManager::lane_a(Some(std::path::PathBuf::from("/ws"))).with_launch_options(
+            LaunchOptions {
+                unattended,
+                ..Default::default()
+            },
+        );
+        let pending: PendingApprovals = Arc::new(parking_lot::Mutex::new(
+            crate::models::execution_approval_store::PendingApprovalsState::new(),
+        ));
+        let act_on = [crate::settings::models::execution_settings::ActOnSite {
+            origin: "https://shop.example".into(),
+            mode: crate::settings::models::execution_settings::SiteMode::AskRisky,
+        }];
+        sites::decide(
+            &act_on,
+            "https://shop.example/cart",
+            true,
+            true,
+            "button",
+            "Delete account",
+            is_attended(&m, channel.then_some(&pending)),
+        )
+    }
+
+    /// AGE-2038: a host that says nobody is attached gets `needs_approval`
+    /// at once even with an approval channel; no card, no wait.
+    #[test]
+    fn an_unattended_host_with_a_channel_gets_needs_approval() {
+        assert_eq!(risky_gate(true, true), sites::ActionGate::NeedsApproval);
+    }
+
+    /// The desktop (channel, not unattended) still asks.
+    #[test]
+    fn an_attended_session_with_a_channel_still_asks() {
+        assert_eq!(risky_gate(false, true), sites::ActionGate::Ask);
+        assert_eq!(risky_gate(false, false), sites::ActionGate::NeedsApproval);
     }
 
     #[test]
