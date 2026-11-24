@@ -34,6 +34,7 @@ pub mod profile;
 pub mod provisioning;
 pub mod registry;
 pub mod screencast;
+mod select;
 pub mod session;
 pub mod sites;
 pub mod snapshot;

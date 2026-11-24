@@ -144,6 +144,7 @@ const BROWSER: &[&str] = &[
     "browser_resize",
     "browser_click",
     "browser_type",
+    "browser_select",
 ];
 
 /// Typst markup to PDF (AGE-946): the typesetter's alone. Every hosted role
@@ -261,6 +262,7 @@ pub(super) fn narrow_availability(
                 "browser_resize",
                 "browser_click",
                 "browser_type",
+                "browser_select",
             ],
         ),
         browser_use: keep(tools.browser_use, &["browser_use"]),

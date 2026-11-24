@@ -42,7 +42,7 @@ use crate::services::browser::snapshot::{AxNode, flatten_ax_tree};
 use crate::services::browser::{BrowserError, BrowserManager, MAX_TEXT_LEN, NavigationPolicy};
 use crate::tools::ToolError;
 
-/// Bundle of the eight browser tools, so the agent factory moves one value.
+/// Bundle of the nine browser tools, so the agent factory moves one value.
 pub type BrowserTools = (
     BrowserNavigateTool,
     BrowserSnapshotTool,
@@ -52,6 +52,7 @@ pub type BrowserTools = (
     BrowserResizeTool,
     BrowserClickTool,
     BrowserTypeTool,
+    BrowserSelectTool,
 );
 
 /// Build every browser tool over one shared manager. `pending_approvals` is
@@ -87,6 +88,10 @@ pub fn build_browser_tools(
             pending_approvals: pending_approvals.clone(),
         },
         BrowserTypeTool {
+            manager: manager.clone(),
+            pending_approvals: pending_approvals.clone(),
+        },
+        BrowserSelectTool {
             manager,
             pending_approvals,
         },
@@ -269,7 +274,17 @@ impl Tool for BrowserSnapshotTool {
             })?;
 
         let snapshot = flatten_ax_tree(&nodes, session.snapshot_generation());
-        let tree = snapshot.to_text();
+        // A dropdown's options are not in the tree; add them so the agent
+        // knows it is a dropdown and what browser_select can pick (AGE-2009).
+        // A page that will not answer leaves the plain tree, not an error.
+        let notes = match session.describe_selects(&snapshot.nodes).await {
+            Ok(notes) => notes,
+            Err(e) => {
+                warn!(error = %e, "browser: cannot describe dropdowns for the snapshot");
+                Default::default()
+            }
+        };
+        let tree = snapshot.to_text_with(&notes);
         let node_count = snapshot.nodes.len();
         let generation = snapshot.generation;
         self.manager.set_snapshot(snapshot).await;
@@ -370,11 +385,23 @@ impl Tool for BrowserScreenshotTool {
 
         Ok(ScreenshotOutput {
             path: path.display().to_string(),
-            note: "The screenshot is attached to your next turn — end this turn to look at it. \
-                   Do not try to read the PNG with read_file or read_binary; that returns \
-                   base64 text you cannot see."
-                .to_string(),
+            note: screenshot_note(self.manager.is_unattended()).to_string(),
         })
+    }
+}
+
+/// What the screenshot result tells the model about seeing it. The desktop
+/// attaches the image to the next turn; an unattended (hosted, headless) run
+/// has no next turn — ending it ends the job (AGE-2008) — so the image is
+/// saved for the user and the model is told to read the page instead.
+fn screenshot_note(unattended: bool) -> &'static str {
+    if unattended {
+        "You cannot see this screenshot in this job. It is saved for the user; use \
+         browser_snapshot to read the page."
+    } else {
+        "The screenshot is attached to your next turn — end this turn to look at it. \
+         Do not try to read the PNG with read_file or read_binary; that returns \
+         base64 text you cannot see."
     }
 }
 
@@ -1084,6 +1111,126 @@ impl Tool for BrowserTypeTool {
     }
 }
 
+// ── select ──────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, Serialize)]
+pub struct SelectArgs {
+    /// Element ref of the dropdown from the latest browser_snapshot, e.g. `e12`.
+    pub r#ref: String,
+    /// The option's visible label or its value.
+    pub option: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SelectOutput {
+    /// The dropdown, as the snapshot described it.
+    pub selected_in: String,
+    /// The label selected now.
+    pub selected: String,
+    pub snapshot_generation: u64,
+    pub note: String,
+}
+
+/// Set a native dropdown (`<select>`) by snapshot ref (AGE-2009).
+///
+/// Same locate-and-verify path and the same approval gate as
+/// [`BrowserTypeTool`]: pages outside localhost and the workspace ask first,
+/// and the risky-action rules of a site grant apply.
+#[derive(Clone)]
+pub struct BrowserSelectTool {
+    manager: Arc<BrowserManager>,
+    pending_approvals: Option<PendingApprovals>,
+}
+
+/// The approval-card text for choosing a dropdown option.
+fn select_approval_label(role: &str, name: &str, option: &str, url: &str) -> String {
+    format!(
+        "[browser] select \"{}\" in {role} \"{}\" on {}",
+        short(option, 60),
+        short(name, 60),
+        display_url(url)
+    )
+}
+
+impl Tool for BrowserSelectTool {
+    const NAME: &'static str = "browser_select";
+    type Error = ToolError;
+    type Args = SelectArgs;
+    type Output = SelectOutput;
+
+    fn description(&self) -> String {
+        "Choose an option in a dropdown (<select>), by its [eN] ref from the latest \
+         browser_snapshot and the option's visible label or its value. Use this instead of \
+         browser_click or browser_type for dropdowns: a click cannot open a native dropdown \
+         here, and typing into a nearby box sets nothing. It fires the input and change \
+         events a user's choice would, and returns the label now selected. An unknown \
+         option is an error that lists the available labels. On pages outside localhost and \
+         the workspace, every call first asks the user for approval."
+            .to_string()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "Element ref of the dropdown from the latest browser_snapshot, e.g. 'e12'."
+                },
+                "option": {
+                    "type": "string",
+                    "description": "The option's visible label or its value."
+                }
+            },
+            "required": ["ref", "option"]
+        })
+    }
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
+
+    async fn call(
+        &self,
+        _context: &mut ToolContext,
+        args: Self::Args,
+    ) -> Result<Self::Output, Self::Error> {
+        if args.option.chars().count() > MAX_TEXT_LEN {
+            return Err(ToolError::OperationFailed(format!(
+                "option is longer than {MAX_TEXT_LEN} characters"
+            )));
+        }
+        let (session, node, look) = prepare_action(
+            &self.manager,
+            self.pending_approvals.as_ref(),
+            &args.r#ref,
+            "select in",
+            false,
+            |node, url| select_approval_label(&node.role, &node.name, &args.option, url),
+        )
+        .await?;
+        let selected_in = describe(&node);
+
+        let selected = session.select_option(&node, &args.option).await?;
+        after_action(&session, look, &selected_in).await?;
+        info!(r#ref = %args.r#ref, selected_in = %selected_in, selected = %selected, "browser: selected");
+        Ok(SelectOutput {
+            selected_in,
+            selected,
+            snapshot_generation: session.snapshot_generation(),
+            note: if look {
+                LOOK_NOTE.to_string()
+            } else {
+                "The form was not submitted. Refs stay valid; browser_click a button or \
+                 take a new browser_snapshot to continue."
+                    .to_string()
+            },
+        })
+    }
+}
+
 // ── shared helpers ──────────────────────────────────────────────────────────
 
 /// Write the full dump to a file, returning its path. `None` when there is
@@ -1142,7 +1289,7 @@ mod tests {
 
     #[test]
     fn every_tool_has_a_definition_naming_the_browser() {
-        let (nav, snap, shot, console, net, resize, click, r#type) =
+        let (nav, snap, shot, console, net, resize, click, r#type, select) =
             build_browser_tools(manager(), artifacts(), None);
         assert_eq!(tool_definition(&nav).name, "browser_navigate");
         assert_eq!(tool_definition(&snap).name, "browser_snapshot");
@@ -1152,6 +1299,7 @@ mod tests {
         assert_eq!(tool_definition(&resize).name, "browser_resize");
         assert_eq!(tool_definition(&click).name, "browser_click");
         assert_eq!(tool_definition(&r#type).name, "browser_type");
+        assert_eq!(tool_definition(&select).name, "browser_select");
     }
 
     /// The model reached for `javascript:` URLs because nothing told it how
@@ -1172,7 +1320,7 @@ mod tests {
 
     #[test]
     fn click_schema_takes_exactly_one_ref() {
-        let (.., click, _) = build_browser_tools(manager(), artifacts(), None);
+        let (.., click, _, _) = build_browser_tools(manager(), artifacts(), None);
         let definition = tool_definition(&click);
         assert_eq!(
             definition.parameters["required"],
@@ -1279,7 +1427,7 @@ mod tests {
 
     #[test]
     fn type_schema_takes_a_ref_and_text() {
-        let (.., r#type) = build_browser_tools(manager(), artifacts(), None);
+        let (.., r#type, _) = build_browser_tools(manager(), artifacts(), None);
         let definition = tool_definition(&r#type);
         assert_eq!(
             definition.parameters["required"],
@@ -1294,7 +1442,7 @@ mod tests {
 
     #[tokio::test]
     async fn type_refuses_oversized_text_before_touching_the_browser() {
-        let (.., r#type) = build_browser_tools(manager(), artifacts(), None);
+        let (.., r#type, _) = build_browser_tools(manager(), artifacts(), None);
         let args = TypeArgs {
             r#ref: "e1".to_string(),
             text: "z".repeat(MAX_TEXT_LEN + 1),
@@ -1313,7 +1461,7 @@ mod tests {
     async fn click_without_a_snapshot_says_so_rather_than_launching_a_browser() {
         // `session()` would provision and launch Chrome; the snapshot check
         // comes first so a model mistake never costs a browser process.
-        let (.., click, _) = build_browser_tools(manager(), artifacts(), None);
+        let (.., click, _, _) = build_browser_tools(manager(), artifacts(), None);
         let args = ClickArgs {
             r#ref: "e1".to_string(),
         };
@@ -1357,7 +1505,7 @@ mod tests {
 
     #[tokio::test]
     async fn resize_rejects_out_of_range_viewports() {
-        let (_, _, _, _, _, resize, _, _) = build_browser_tools(manager(), artifacts(), None);
+        let (_, _, _, _, _, resize, _, _, _) = build_browser_tools(manager(), artifacts(), None);
         for (width, height) in [(0, 800), (800, 0), (MAX_VIEWPORT + 1, 800)] {
             let result = resize
                 .call(&mut ToolContext::new(), ResizeArgs { width, height })
@@ -1377,6 +1525,49 @@ mod tests {
         assert!(
             err.to_string().contains("workspace"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// AGE-2009: a hosted (unattended) run has no next turn to see the image
+    /// in, so it is told so; the desktop text stays as it was.
+    #[test]
+    fn the_screenshot_note_differs_between_a_headless_and_a_desktop_session() {
+        use crate::services::browser::LaunchOptions;
+
+        let desktop = manager();
+        let headless = Arc::new(
+            BrowserManager::lane_a(Some(std::path::PathBuf::from("/ws"))).with_launch_options(
+                LaunchOptions {
+                    unattended: true,
+                    ..Default::default()
+                },
+            ),
+        );
+        let on_desktop = screenshot_note(desktop.is_unattended());
+        let in_job = screenshot_note(headless.is_unattended());
+        assert_ne!(on_desktop, in_job);
+        assert_eq!(
+            in_job,
+            "You cannot see this screenshot in this job. It is saved for the user; use \
+             browser_snapshot to read the page."
+        );
+        assert!(
+            on_desktop.contains("end this turn to look at it"),
+            "{on_desktop}"
+        );
+        assert!(
+            !on_desktop.contains("cannot see this screenshot"),
+            "{on_desktop}"
+        );
+    }
+
+    #[test]
+    fn select_schema_takes_a_ref_and_an_option() {
+        let (.., select) = build_browser_tools(manager(), artifacts(), None);
+        let definition = tool_definition(&select);
+        assert_eq!(
+            definition.parameters["required"],
+            serde_json::json!(["ref", "option"])
         );
     }
 

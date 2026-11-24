@@ -344,7 +344,9 @@ impl NativeTools {
             b = add(b, profile, t);
         }
         #[cfg(feature = "browser")]
-        if let Some((nav, snap, shot, console, net, resize, click, r#type)) = self.browser_tools {
+        if let Some((nav, snap, shot, console, net, resize, click, r#type, select)) =
+            self.browser_tools
+        {
             b = add(b, profile, nav);
             b = add(b, profile, snap);
             b = add(b, profile, shot);
@@ -353,6 +355,7 @@ impl NativeTools {
             b = add(b, profile, resize);
             b = add(b, profile, click);
             b = add(b, profile, r#type);
+            b = add(b, profile, select);
         }
         if let Some(t) = self.browser_use_tool {
             b = add(b, profile, t);

@@ -51,6 +51,7 @@ use super::events::EventBuffers;
 use super::input::{self, KeyInput, MouseInput};
 use super::profile::{BrowserProfile, NavigationPolicy};
 use super::screencast::{self, Screencast, ScreencastUpdate};
+use super::select;
 use super::snapshot::SnapshotNode;
 use super::targets;
 use super::typing;
@@ -1273,6 +1274,40 @@ impl BrowserSession {
         .await;
         self.flush_trace(false).await;
         typed
+    }
+
+    /// Set a dropdown the agent saw in its latest snapshot to `option`, a
+    /// visible label or a value (AGE-2009). Same refusals as
+    /// [`Self::click`]; returns the label now selected.
+    pub async fn select_option(
+        &self,
+        node: &SnapshotNode,
+        option: &str,
+    ) -> Result<String, BrowserError> {
+        self.ensure_alive()?;
+        self.control.ensure_agent()?;
+        let page = self.page()?;
+        let selected = with_deadline(
+            DEFAULT_TIMEOUT_SECS,
+            &format!("selecting in {}", node.r#ref),
+            select::select_option(&page, node, option),
+        )
+        .await;
+        self.flush_trace(false).await;
+        selected
+    }
+
+    /// What each dropdown in `nodes` shows and offers, by ref, for the
+    /// snapshot text (AGE-2009).
+    pub async fn describe_selects(
+        &self,
+        nodes: &[SnapshotNode],
+    ) -> Result<std::collections::HashMap<String, String>, BrowserError> {
+        let page = self.page()?;
+        with_deadline(DEFAULT_TIMEOUT_SECS, "reading dropdowns", async {
+            Ok(select::describe_selects(&page, nodes).await)
+        })
+        .await
     }
 
     /// Forward a mouse event. A no-op — not an error — when the agent

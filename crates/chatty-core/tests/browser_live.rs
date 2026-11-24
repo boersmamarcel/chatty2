@@ -20,7 +20,7 @@ use chatty_core::services::browser::{
     MouseButtonKind, MouseInput, ScreencastUpdate,
 };
 use chatty_core::tools::browser_tools::{
-    ClickArgs, NavigateArgs, NoArgs, ResizeArgs, TypeArgs, build_browser_tools,
+    ClickArgs, NavigateArgs, NoArgs, ResizeArgs, SelectArgs, TypeArgs, build_browser_tools,
 };
 use rig_agent::tool::{Tool, ToolContext};
 use tokio::sync::watch;
@@ -1667,7 +1667,7 @@ fn ref_of(tree: &str, role: &str, name: &str) -> String {
 async fn click_lands_on_what_the_snapshot_showed_and_nothing_else() {
     let dir = click_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, .., click, _) =
+    let (navigate, snapshot, .., click, _, _) =
         build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
@@ -1816,7 +1816,8 @@ fn type_workspace() -> tempfile::TempDir {
 async fn typing_replaces_a_field_and_refuses_credentials() {
     let dir = type_workspace();
     let manager = manager(&dir);
-    let (navigate, snapshot, .., typing) = build_browser_tools(manager.clone(), artifacts(), None);
+    let (navigate, snapshot, .., typing, _) =
+        build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
 
     navigate
@@ -1921,6 +1922,164 @@ async fn typing_replaces_a_field_and_refuses_credentials() {
     manager.shutdown().await;
 }
 
+/// AGE-2009. A dropdown with a labelled and a valued option, a page that
+/// records the events it sees in its title, and a button under a
+/// `div.loading-mask`.
+fn select_workspace() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let many: String = (0..40)
+        .map(|i| format!("<option value=\"v{i}\">Option {i}</option>"))
+        .collect();
+    std::fs::write(
+        dir.path().join("index.html"),
+        format!(
+            r#"<!doctype html>
+<html>
+  <head><title>start</title></head>
+  <body>
+    <select id="carrier" aria-label="Carrier">
+      <option value="custom" selected>Custom</option>
+      <option value="usps">United States Postal Service</option>
+      <option value="ups">UPS</option>
+    </select>
+    <select aria-label="Many">{many}</select>
+    <div style="position: relative; width: 200px; height: 60px;">
+      <button style="position: absolute; inset: 0;">Search</button>
+      <div class="loading-mask" style="position: absolute; inset: 0; background: rgba(0,0,0,0.5);"></div>
+    </div>
+    <script>
+      const seen = [];
+      const sel = document.getElementById('carrier');
+      for (const type of ['input', 'change']) {{
+        sel.addEventListener(type, () => {{
+          seen.push(type + ':' + sel.value);
+          document.title = seen.join(',');
+        }});
+      }}
+    </script>
+  </body>
+</html>"#
+        ),
+    )
+    .expect("write fixture");
+    dir
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn select_sets_a_dropdown_by_label_and_by_value() {
+    let dir = select_workspace();
+    let manager = manager(&dir);
+    let (navigate, snapshot, .., click, _, select) =
+        build_browser_tools(manager.clone(), artifacts(), None);
+    let cx = &mut ToolContext::new();
+
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: file_url(&dir),
+            },
+        )
+        .await
+        .expect("page loads");
+    let snap = snapshot.call(cx, NoArgs {}).await.expect("snapshot");
+    // The snapshot says it is a dropdown, what is selected and what is on offer.
+    let line = snap
+        .tree
+        .lines()
+        .find(|l| l.contains("\"Carrier\""))
+        .unwrap_or_else(|| panic!("no Carrier in tree:\n{}", snap.tree));
+    assert!(line.contains("dropdown"), "{line}");
+    assert!(line.contains("selected \"Custom\""), "{line}");
+    assert!(line.contains("\"United States Postal Service\""), "{line}");
+    let carrier = ref_of(&snap.tree, "combobox", "Carrier");
+    let many = ref_of(&snap.tree, "combobox", "Many");
+    let page = manager
+        .session()
+        .await
+        .expect("session")
+        .page()
+        .expect("page");
+
+    // By visible label: the page sees input then change.
+    let out = select
+        .call(
+            cx,
+            SelectArgs {
+                r#ref: carrier.clone(),
+                option: "United States Postal Service".to_string(),
+            },
+        )
+        .await
+        .expect("select by label");
+    assert_eq!(out.selected, "United States Postal Service", "{out:?}");
+    assert_eq!(title_of(&page).await, "input:usps,change:usps");
+
+    // By value.
+    let out = select
+        .call(
+            cx,
+            SelectArgs {
+                r#ref: carrier.clone(),
+                option: "ups".to_string(),
+            },
+        )
+        .await
+        .expect("select by value");
+    assert_eq!(out.selected, "UPS", "{out:?}");
+    assert!(
+        title_of(&page).await.ends_with("input:ups,change:ups"),
+        "{}",
+        title_of(&page).await
+    );
+
+    // An unknown option lists the labels, and changes nothing.
+    let err = select
+        .call(
+            cx,
+            SelectArgs {
+                r#ref: carrier.clone(),
+                option: "fedex".to_string(),
+            },
+        )
+        .await
+        .expect_err("unknown option");
+    let message = err.to_string();
+    for label in ["Custom", "United States Postal Service", "UPS"] {
+        assert!(message.contains(&format!("\"{label}\"")), "{message}");
+    }
+    let err = select
+        .call(
+            cx,
+            SelectArgs {
+                r#ref: many,
+                option: "nope".to_string(),
+            },
+        )
+        .await
+        .expect_err("unknown option in a long list");
+    let message = err.to_string();
+    assert!(message.contains("\"Option 29\""), "{message}");
+    assert!(!message.contains("\"Option 30\""), "{message}");
+    assert!(message.contains("(and 10 more)"), "{message}");
+
+    // A refused click names what covers the button.
+    let search = ref_of(&snap.tree, "button", "Search");
+    let err = click
+        .call(cx, ClickArgs { r#ref: search })
+        .await
+        .expect_err("a covered button must not be clicked");
+    let message = err.to_string();
+    assert!(
+        message.contains("covered by `div.loading-mask`"),
+        "{message}"
+    );
+    assert!(message.contains("wait for it"), "{message}");
+
+    manager.shutdown().await;
+}
+
 /// AGE-1290: under the open-web policy Chrome reaches the internet through
 /// the guarded proxy, for HTTPS (CONNECT) and plain HTTP alike. Needs
 /// network access.
@@ -1986,7 +2145,7 @@ async fn run_form_session(trace: Option<&str>) -> tempfile::TempDir {
             ..Default::default()
         },
     ));
-    let (navigate, snapshot, .., click, _) =
+    let (navigate, snapshot, .., click, _, _) =
         build_browser_tools(manager.clone(), artifacts(), None);
     let cx = &mut ToolContext::new();
     navigate
@@ -2127,7 +2286,7 @@ async fn site_modes_gate_clicks_and_requests() {
         let origin = format!("http://127.0.0.1:{port}");
         let dir = tempfile::tempdir().expect("tempdir");
         let manager = site_manager(&dir, &origin, mode, Vec::new());
-        let (navigate, snapshot, .., click, _) =
+        let (navigate, snapshot, .., click, _, _) =
             build_browser_tools(manager.clone(), artifacts(), None);
         let cx = &mut ToolContext::new();
         navigate

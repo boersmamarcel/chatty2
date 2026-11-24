@@ -20,8 +20,8 @@
 
 use chromiumoxide::cdp::browser_protocol::accessibility::GetPartialAxTreeParams;
 use chromiumoxide::cdp::browser_protocol::dom::{
-    BackendNodeId, GetContentQuadsParams, GetDocumentParams, GetNodeForLocationParams, Node, Quad,
-    ScrollIntoViewIfNeededParams,
+    BackendNodeId, DescribeNodeParams, GetContentQuadsParams, GetDocumentParams,
+    GetNodeForLocationParams, Node, Quad, ScrollIntoViewIfNeededParams,
 };
 use chromiumoxide::cdp::browser_protocol::page::GetLayoutMetricsParams;
 use chromiumoxide::page::Page;
@@ -133,14 +133,85 @@ pub(super) async fn locate(
             .await
             .map_err(|e| BrowserError::Protocol(format!("cannot read the DOM: {e}")))?;
         if !subtree_contains(&document.result.root, &target, &hit.result.backend_node_id) {
+            let cover = describe_cover(page, hit.result.backend_node_id).await;
             return Err(BrowserError::Protocol(format!(
-                "ref {ref} is covered by another element at its centre (a dialog, banner or \
-                 overlay); dismiss that first or take a new snapshot and click what is on top"
+                "ref {ref} is covered by {cover} at its centre; wait for it to go (a loading \
+                 mask or spinner usually clears) or close it (a dialog, banner or overlay), \
+                 then take a new snapshot and try again"
             )));
         }
     }
 
     Ok((target, point))
+}
+
+/// What sits on top of a click target, for the refusal: role and accessible
+/// name when it has both (`button "Accept cookies"`), else tag and CSS classes
+/// (`div.loading-mask`). Never fails: the refusal stands either way.
+async fn describe_cover(page: &Page, hit: BackendNodeId) -> String {
+    let (role, name) = match page
+        .execute(
+            GetPartialAxTreeParams::builder()
+                .backend_node_id(hit)
+                .fetch_relatives(false)
+                .build(),
+        )
+        .await
+    {
+        Ok(live) => live
+            .result
+            .nodes
+            .iter()
+            .find(|n| n.backend_dom_node_id.as_ref() == Some(&hit))
+            .map(|n| (ax_value(n.role.as_ref()), ax_value(n.name.as_ref())))
+            .unwrap_or_default(),
+        Err(_) => Default::default(),
+    };
+    let (tag, attributes) = match page
+        .execute(DescribeNodeParams::builder().backend_node_id(hit).build())
+        .await
+    {
+        Ok(described) => (
+            described.result.node.local_name.clone(),
+            described.result.node.attributes.clone().unwrap_or_default(),
+        ),
+        Err(_) => Default::default(),
+    };
+    cover_label(&role, &name, &tag, &attributes)
+}
+
+/// Words for a covering element. `attributes` is CDP's flat
+/// `[name, value, name, value, …]` list.
+fn cover_label(role: &str, name: &str, tag: &str, attributes: &[String]) -> String {
+    let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let named_role = !matches!(
+        role,
+        "" | "generic" | "none" | "presentation" | "StaticText" | "InlineTextBox"
+    );
+    if named_role && !name.is_empty() {
+        let name: String = if name.chars().count() > 60 {
+            format!("{}…", name.chars().take(60).collect::<String>())
+        } else {
+            name
+        };
+        return format!("{role} \"{name}\"");
+    }
+    let class = attributes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .find(|[k, _]| k.eq_ignore_ascii_case("class"))
+        .map(|[_, v]| v.as_str())
+        .unwrap_or_default();
+    if tag.is_empty() {
+        return "another element".to_string();
+    }
+    let mut label = tag.to_ascii_lowercase();
+    for class in class.split_whitespace().take(4) {
+        label.push('.');
+        label.push_str(class);
+    }
+    format!("`{label}`")
 }
 
 /// Move, press, release — what a pointer does.
@@ -353,5 +424,24 @@ mod tests {
             "shadow DOM is pierced"
         );
         assert!(!subtree_contains(&root, &id(99), &id(3)), "unknown target");
+    }
+
+    #[test]
+    fn a_cover_with_a_role_and_name_is_named_by_them() {
+        assert_eq!(
+            cover_label("button", "Accept  cookies", "button", &[]),
+            "button \"Accept cookies\""
+        );
+    }
+
+    #[test]
+    fn a_nameless_cover_is_named_by_tag_and_classes() {
+        let attrs = vec!["class".to_string(), "loading-mask  dim".to_string()];
+        assert_eq!(
+            cover_label("generic", "", "DIV", &attrs),
+            "`div.loading-mask.dim`"
+        );
+        assert_eq!(cover_label("", "", "div", &[]), "`div`");
+        assert_eq!(cover_label("", "", "", &[]), "another element");
     }
 }
