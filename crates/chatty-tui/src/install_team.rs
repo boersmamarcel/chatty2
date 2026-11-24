@@ -20,6 +20,11 @@ pub async fn run(team_ref: &str) -> Result<()> {
         chatty_core::extensions_repository().load(),
         chatty_core::module_settings_repository().load(),
     );
+    for notice in
+        chatty_core::settings::repositories::secret_json_repository::unloaded_settings_notices()
+    {
+        eprintln!("chatty: {notice}");
+    }
     let mut hive = hive.unwrap_or_default();
     let mut extensions = extensions.unwrap_or_default();
     let mut module_settings = module_settings.context("Failed to load module settings")?;

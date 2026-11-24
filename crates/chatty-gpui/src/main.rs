@@ -1093,13 +1093,12 @@ fn main() {
                     // The repository now refuses to write the file (and so to
                     // delete the sign-in it references) until it loads again.
                     error!(error = %e, "Failed to load Hive settings, using defaults");
-                    let message = format!(
-                        "Hive settings were not loaded and will not be saved: {e}. Remove the offending line from hive_settings.json and restart chatty; your sign-in is kept."
-                    );
+                    let message = chatty_core::settings::repositories::secret_json_repository::unloaded_settings_notices().join("\n");
                     cx.update(|cx| {
                         cx.global_mut::<settings::models::MarketplaceState>()
                             .set_error(message);
                     })
+                    .map_err(|e| warn!(error = ?e, "Hive settings failed to load and the notice could not be shown"))
                     .ok();
                 })
                 .ok();

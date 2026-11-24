@@ -40,12 +40,30 @@ fn unloaded_reason(path: &Path) -> Option<String> {
     guard.as_ref()?.get(path).cloned()
 }
 
-/// Why a secret settings file (today `hive_settings.json`) failed to load
-/// and is therefore write-protected, or `None` when none is. For startup to
-/// show the user.
-pub fn unloaded_settings_error() -> Option<String> {
+/// One line per secret settings file (today `hive_settings.json`) that failed
+/// to load and is therefore write-protected, in path order; empty when every
+/// file loaded. Both frontends show these at startup, so they say the same
+/// thing.
+pub fn unloaded_settings_notices() -> Vec<String> {
     let guard = UNLOADED.lock().unwrap_or_else(|e| e.into_inner());
-    guard.as_ref()?.values().next().cloned()
+    let Some(map) = guard.as_ref() else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = map.iter().collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|(path, reason)| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            format!(
+                "{name} was not loaded and will not be saved: {reason}. \
+                 Fix the file and restart chatty; the secrets it references (such as your sign-in) are kept."
+            )
+        })
+        .collect()
 }
 
 /// Where a secret field's value is filed in the store.
@@ -175,7 +193,7 @@ impl SecretJsonFile {
         }
         let contents = tokio::fs::read_to_string(&self.path)
             .await
-            .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+            .map_err(|e| RepositoryError::IoError(format!("{}: {e}", self.path.display())))?;
         let value: Value = serde_json::from_str(&contents).map_err(|e| {
             RepositoryError::SerializationError(format!("{}: {e}", self.path.display()))
         })?;
@@ -520,7 +538,14 @@ mod tests {
 
         let err = repo.load().await.expect_err("runner_url is refused");
         assert!(err.to_string().contains("runner_url"), "{err}");
-        assert!(super::unloaded_settings_error().is_some());
+        let notices = super::unloaded_settings_notices();
+        let ours: Vec<_> = notices
+            .iter()
+            .filter(|notice| notice.contains(&path.display().to_string()))
+            .collect();
+        assert_eq!(ours.len(), 1, "{notices:?}");
+        assert!(ours[0].starts_with("hive_settings.json was not loaded"));
+        assert!(ours[0].contains("runner_url"), "{}", ours[0]);
 
         // What startup does next: save defaults (registry sync), save a
         // session-state change. Both are refused and touch nothing.
@@ -549,6 +574,12 @@ mod tests {
         .unwrap();
         let loaded = repo.load().await.unwrap();
         assert_eq!(loaded.token.as_deref(), Some("jwt-keep"));
+        assert!(
+            !super::unloaded_settings_notices()
+                .iter()
+                .any(|notice| notice.contains(&path.display().to_string())),
+            "a file that loads again is no longer reported"
+        );
         repo.save(loaded).await.unwrap();
     }
 
