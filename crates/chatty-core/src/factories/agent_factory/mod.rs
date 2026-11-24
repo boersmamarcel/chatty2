@@ -883,6 +883,7 @@ impl AgentClient {
                             sessions: s.browser_sessions.clone(),
                             unattended: s.browser_unattended || pending_approvals.is_none(),
                             approved_action: s.browser_approved_action.clone(),
+                            proof_screenshots: s.browser_proof_screenshots,
                         })
                         .unwrap_or_default();
                     let manager = std::sync::Arc::new(

@@ -851,7 +851,13 @@ async fn prepare_action(
                 false
             } else {
                 let title = page_title(&page).await;
-                return Err(needs_approval_error(&url, &describe(&node), &title));
+                let screenshot = manager.proof_approval(&session, &node).await;
+                return Err(needs_approval_error(
+                    &url,
+                    &describe(&node),
+                    &title,
+                    screenshot.as_deref(),
+                ));
             }
         }
         sites::ActionGate::Ask => {
@@ -909,23 +915,33 @@ fn bare_url(url: &str) -> String {
 
 /// The structured error an unattended run gets for a risky action
 /// (ADR-0108); hive turns it into "Needs your OK". The URL carries no query.
-fn needs_approval_error(url: &str, control: &str, title: &str) -> ToolError {
+/// `screenshot` names the proof picture in `outputs/` when the host asked for
+/// one (AGE-2008).
+fn needs_approval_error(
+    url: &str,
+    control: &str,
+    title: &str,
+    screenshot: Option<&str>,
+) -> ToolError {
     let bare = bare_url(url);
-    ToolError::OperationFailed(
-        serde_json::json!({
-            "error": "needs_approval",
-            "origin": sites::origin_of(url).unwrap_or_default(),
-            "action": format!("{control} on {}", short(title, 80)),
-            "url": bare,
-        })
-        .to_string(),
-    )
+    let mut body = serde_json::json!({
+        "error": "needs_approval",
+        "origin": sites::origin_of(url).unwrap_or_default(),
+        "action": format!("{control} on {}", short(title, 80)),
+        "url": bare,
+    });
+    if let Some(name) = screenshot {
+        body["screenshot"] = name.into();
+    }
+    ToolError::OperationFailed(body.to_string())
 }
 
 /// After an action: look-only sites say nothing was changed; a risky request
 /// refused while unattended becomes `needs_approval`.
 async fn after_action(
+    manager: &BrowserManager,
     session: &crate::services::browser::BrowserSession,
+    node: &crate::services::browser::SnapshotNode,
     look: bool,
     control: &str,
 ) -> Result<(), ToolError> {
@@ -940,7 +956,13 @@ async fn after_action(
             Ok(page) => page_title(&page).await,
             Err(_) => String::new(),
         };
-        return Err(needs_approval_error(&url, control, &title));
+        let screenshot = manager.proof_approval(session, node).await;
+        return Err(needs_approval_error(
+            &url,
+            control,
+            &title,
+            screenshot.as_deref(),
+        ));
     }
     Ok(())
 }
@@ -1000,7 +1022,11 @@ impl Tool for BrowserClickTool {
         let clicked = describe(&node);
 
         let result = session.click(&node).await?;
-        after_action(&session, look, &clicked).await?;
+        after_action(&self.manager, &session, &node, look, &clicked).await?;
+        if !look {
+            // A click that went through on an ask_risky or any site (AGE-2008).
+            self.manager.proof_after(&session).await;
+        }
         info!(r#ref = %args.r#ref, clicked = %clicked, url = %result.url, navigated = result.navigated, "browser: clicked");
         let note = if look {
             LOOK_NOTE.to_string()
@@ -1115,7 +1141,7 @@ impl Tool for BrowserTypeTool {
         let typed_into = describe(&node);
 
         let value = session.type_text(&node, &args.text).await?;
-        after_action(&session, look, &typed_into).await?;
+        after_action(&self.manager, &session, &node, look, &typed_into).await?;
         info!(r#ref = %args.r#ref, typed_into = %typed_into, chars = args.text.chars().count(), "browser: typed");
         Ok(TypeOutput {
             typed_into,
@@ -1235,7 +1261,7 @@ impl Tool for BrowserSelectTool {
         let selected_in = describe(&node);
 
         let selected = session.select_option(&node, &args.option).await?;
-        after_action(&session, look, &selected_in).await?;
+        after_action(&self.manager, &session, &node, look, &selected_in).await?;
         info!(r#ref = %args.r#ref, selected_in = %selected_in, selected = %selected, "browser: selected");
         Ok(SelectOutput {
             selected_in,
