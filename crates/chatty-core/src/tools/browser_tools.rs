@@ -844,9 +844,11 @@ async fn prepare_action(
             }));
         }
         sites::ActionGate::NeedsApproval => {
-            // A person approved exactly this action (AGE-2043): once.
+            // A person approved exactly this action (AGE-2043): once. It is
+            // spent in `after_action`, when the action went through, so a
+            // click refused for a covered button keeps it for the retry.
             let origin = sites::origin_of(&url).unwrap_or_default();
-            if manager.take_approved_action(&origin, &bare_url(&url), &describe(&node)) {
+            if manager.approved_action_matches(&origin, &bare_url(&url), &describe(&node)) {
                 session.gate().set_allow_risky(true);
                 false
             } else {
@@ -946,6 +948,10 @@ async fn after_action(
     control: &str,
 ) -> Result<(), ToolError> {
     let gate = session.gate();
+    // The action went through: an approval it used is spent (AGE-2043).
+    if gate.allows_risky() {
+        manager.spend_approved_action();
+    }
     // The interceptor answers asynchronously; give a submit time to be seen.
     if look || !gate.act_on().is_empty() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1702,6 +1708,20 @@ mod tests {
         ));
         assert!(!spend(&m, url, "button \"Refund $84.5\""));
         assert!(spend(&m, url, "button \"Refund $84.50\""));
+    }
+
+    /// A matching action that then fails (a covered button) keeps the
+    /// approval for the retry; it is spent only when the action goes through.
+    #[test]
+    fn a_failed_approved_action_keeps_the_approval() {
+        let m = manager_with_approval();
+        let url = "https://shop.example/orders/1037";
+        let origin = sites::origin_of(url).unwrap_or_default();
+        let control = "button \"Refund $84.50\"";
+        assert!(m.approved_action_matches(&origin, url, control));
+        assert!(m.approved_action_matches(&origin, url, control));
+        m.spend_approved_action();
+        assert!(!m.approved_action_matches(&origin, url, control));
     }
 
     #[test]
