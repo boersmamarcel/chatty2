@@ -177,6 +177,12 @@ pub struct ExecutionSettingsModel {
     /// False (default) leaves it to whether an approval channel exists.
     #[serde(default)]
     pub browser_unattended: bool,
+    /// One risky browser action a person approved on "Needs your OK"
+    /// (AGE-2043). The browser lets the matching action through once for the
+    /// session, then forgets it. Written by hive as
+    /// `{"origin":…,"action":…,"url":…}` or null.
+    #[serde(default)]
+    pub browser_approved_action: Option<ApprovedBrowserAction>,
     /// When the browser's open-web policy is active (internet access on),
     /// also allow navigation to private/internal IPs (RFC-1918, etc.) on the
     /// user's own network. Off by default: an SSRF guard refuses these the
@@ -398,6 +404,7 @@ impl Default for ExecutionSettingsModel {
             browser_act_on: Vec::new(),
             browser_sessions: Vec::new(),
             browser_unattended: false,
+            browser_approved_action: None,
             allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
             execute_code_enabled: false,         // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker
@@ -418,6 +425,48 @@ impl Default for ExecutionSettingsModel {
             terminal_access: false, // Opt-in: the terminal may show secrets
             output_root: None,      // Outputs go where the tool call says
         }
+    }
+}
+
+/// A risky browser action that was approved (AGE-2043): the same fields as
+/// the `needs_approval` error the browser returned for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovedBrowserAction {
+    /// Origin of the page, e.g. `https://shop.example`.
+    pub origin: String,
+    /// Page address without query or fragment.
+    pub url: String,
+    /// `<role "name"> on <page title>`, as `needs_approval` reported it.
+    pub action: String,
+}
+
+#[cfg(test)]
+mod approved_action_tests {
+    use super::{ApprovedBrowserAction, ExecutionSettingsModel};
+
+    #[test]
+    fn deserializes_what_hive_writes_or_null() {
+        let mut v = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
+        v["browser_approved_action"] = serde_json::json!({
+            "origin": "https://shop.example",
+            "action": "button \"Refund $84.50\" on Order 1037",
+            "url": "https://shop.example/orders/1037",
+        });
+        let m: ExecutionSettingsModel = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(
+            m.browser_approved_action,
+            Some(ApprovedBrowserAction {
+                origin: "https://shop.example".into(),
+                url: "https://shop.example/orders/1037".into(),
+                action: "button \"Refund $84.50\" on Order 1037".into(),
+            })
+        );
+        v["browser_approved_action"] = serde_json::Value::Null;
+        let m: ExecutionSettingsModel = serde_json::from_value(v.clone()).unwrap();
+        assert!(m.browser_approved_action.is_none());
+        v.as_object_mut().unwrap().remove("browser_approved_action");
+        let m: ExecutionSettingsModel = serde_json::from_value(v).unwrap();
+        assert!(m.browser_approved_action.is_none());
     }
 }
 

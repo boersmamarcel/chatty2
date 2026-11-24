@@ -817,6 +817,7 @@ async fn prepare_action(
     let off_lane_a = action_needs_approval(&url, manager.workspace().ok());
     // Anything the interceptor refused before this action is not this action's.
     session.gate().take_outcome();
+    session.gate().set_allow_risky(false);
     let gate = sites::decide(
         act_on,
         &url,
@@ -843,8 +844,15 @@ async fn prepare_action(
             }));
         }
         sites::ActionGate::NeedsApproval => {
-            let title = page_title(&page).await;
-            return Err(needs_approval_error(&url, &describe(&node), &title));
+            // A person approved exactly this action (AGE-2043): once.
+            let origin = sites::origin_of(&url).unwrap_or_default();
+            if manager.take_approved_action(&origin, &bare_url(&url), &describe(&node)) {
+                session.gate().set_allow_risky(true);
+                false
+            } else {
+                let title = page_title(&page).await;
+                return Err(needs_approval_error(&url, &describe(&node), &title));
+            }
         }
         sites::ActionGate::Ask => {
             let pending = pending_approvals.expect("Ask only with an approval channel");
@@ -887,15 +895,22 @@ async fn page_title(page: &chromiumoxide::page::Page) -> String {
     page.get_title().await.ok().flatten().unwrap_or_default()
 }
 
+/// The page address without query or fragment.
+fn bare_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_query(None);
+            u.set_fragment(None);
+            u.to_string()
+        }
+        Err(_) => url.to_string(),
+    }
+}
+
 /// The structured error an unattended run gets for a risky action
 /// (ADR-0108); hive turns it into "Needs your OK". The URL carries no query.
 fn needs_approval_error(url: &str, control: &str, title: &str) -> ToolError {
-    let mut bare = url.to_string();
-    if let Ok(mut u) = reqwest::Url::parse(url) {
-        u.set_query(None);
-        u.set_fragment(None);
-        bare = u.to_string();
-    }
+    let bare = bare_url(url);
     ToolError::OperationFailed(
         serde_json::json!({
             "error": "needs_approval",
@@ -1605,6 +1620,68 @@ mod tests {
     fn an_attended_session_with_a_channel_still_asks() {
         assert_eq!(risky_gate(false, true), sites::ActionGate::Ask);
         assert_eq!(risky_gate(false, false), sites::ActionGate::NeedsApproval);
+    }
+
+    fn manager_with_approval() -> BrowserManager {
+        use crate::services::browser::LaunchOptions;
+        use crate::settings::models::execution_settings::ApprovedBrowserAction;
+        BrowserManager::lane_a(Some(std::path::PathBuf::from("/ws"))).with_launch_options(
+            LaunchOptions {
+                unattended: true,
+                approved_action: Some(ApprovedBrowserAction {
+                    origin: "https://shop.example".into(),
+                    url: "https://shop.example/orders/1037".into(),
+                    action: "button \"Refund $84.50\" on Order 1037".into(),
+                }),
+                ..Default::default()
+            },
+        )
+    }
+
+    /// What `needs_approval_error` reports is what the approval matches on.
+    fn spend(m: &BrowserManager, url: &str, control: &str) -> bool {
+        m.take_approved_action(
+            &sites::origin_of(url).unwrap_or_default(),
+            &bare_url(url),
+            control,
+        )
+    }
+
+    /// AGE-2043: the approved click goes through once; the same click again
+    /// is `needs_approval`.
+    #[test]
+    fn an_approved_action_is_spent_once() {
+        let m = manager_with_approval();
+        let url = "https://shop.example/orders/1037?tab=1#x";
+        assert!(spend(&m, url, "button \"Refund $84.50\""));
+        assert!(!spend(&m, url, "button \"Refund $84.50\""));
+    }
+
+    /// A different button, page or origin is not the approved action, and
+    /// does not spend the approval.
+    #[test]
+    fn a_different_action_is_not_approved() {
+        let m = manager_with_approval();
+        let url = "https://shop.example/orders/1037";
+        assert!(!spend(&m, url, "button \"Delete order\""));
+        assert!(!spend(
+            &m,
+            "https://shop.example/orders/1038",
+            "button \"Refund $84.50\""
+        ));
+        assert!(!spend(
+            &m,
+            "http://shop.example/orders/1037",
+            "button \"Refund $84.50\""
+        ));
+        assert!(!spend(&m, url, "button \"Refund $84.5\""));
+        assert!(spend(&m, url, "button \"Refund $84.50\""));
+    }
+
+    #[test]
+    fn nothing_is_approved_by_default() {
+        let m = BrowserManager::lane_a(Some(std::path::PathBuf::from("/ws")));
+        assert!(!spend(&m, "https://shop.example/", "button \"Refund\""));
     }
 
     #[test]
