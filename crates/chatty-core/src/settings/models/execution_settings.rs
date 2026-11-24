@@ -171,6 +171,12 @@ pub struct ExecutionSettingsModel {
     /// `browser_act_on` are loaded. Secret; never logged.
     #[serde(default)]
     pub browser_sessions: Vec<SavedSession>,
+    /// A host (hive) says nobody is attached to this run even though an
+    /// approval channel exists (AGE-2038): a risky browser action returns
+    /// `needs_approval` at once instead of waiting for a card nobody sees.
+    /// False (default) leaves it to whether an approval channel exists.
+    #[serde(default)]
+    pub browser_unattended: bool,
     /// When the browser's open-web policy is active (internet access on),
     /// also allow navigation to private/internal IPs (RFC-1918, etc.) on the
     /// user's own network. Off by default: an SSRF guard refuses these the
@@ -391,6 +397,7 @@ impl Default for ExecutionSettingsModel {
             browser_trace_path: None,
             browser_act_on: Vec::new(),
             browser_sessions: Vec::new(),
+            browser_unattended: false,
             allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
             execute_code_enabled: false,         // Opt-in: exposes execute_code to the model
             docker_code_execution_enabled: false, // Opt-in: requires Docker
@@ -411,6 +418,20 @@ impl Default for ExecutionSettingsModel {
             terminal_access: false, // Opt-in: the terminal may show secrets
             output_root: None,      // Outputs go where the tool call says
         }
+    }
+}
+
+#[cfg(test)]
+mod browser_unattended_tests {
+    use super::ExecutionSettingsModel;
+
+    #[test]
+    fn browser_unattended_defaults_off_and_old_files_load() {
+        assert!(!ExecutionSettingsModel::default().browser_unattended);
+        let mut v = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
+        v.as_object_mut().unwrap().remove("browser_unattended");
+        let loaded: ExecutionSettingsModel = serde_json::from_value(v).unwrap();
+        assert!(!loaded.browser_unattended);
     }
 }
 

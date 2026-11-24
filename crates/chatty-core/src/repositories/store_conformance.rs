@@ -545,6 +545,7 @@ mod tests {
                 browser_trace_path: Some("outputs/browser/session.har".to_string()),
                 browser_act_on: Vec::new(),
                 browser_sessions: Vec::new(),
+                browser_unattended: false,
                 allow_private_network_access: true,
                 execute_code_enabled: true,
                 docker_code_execution_enabled: true,
