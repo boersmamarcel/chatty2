@@ -10,8 +10,10 @@ name: Update next queued PR
 # ship-auto-merge.yml arms auto/* PRs; a human arms anything else with
 # `gh pr merge --auto`. Nothing else joins.
 #
-# Closed-system: the token is a fine-grained PAT (AUTO_UPDATE_TOKEN) scoped to
-# this repository with contents + pull-requests write. GITHUB_TOKEN cannot be
+# Closed-system: the token is a short-lived installation token of the
+# hive-nurse GitHub App (secrets NURSE_APP_ID and NURSE_APP_PRIVATE_KEY),
+# scoped to this repository with contents + pull-requests write. It replaced
+# AUTO_UPDATE_TOKEN, a fine-grained PAT that expired. GITHUB_TOKEN cannot be
 # used: branch updates it makes do not trigger CI on the PR, so the refreshed
 # head would never go green. pull_request_target runs this file from main and
 # checks nothing out, so PR content never reaches the token.
@@ -45,15 +47,36 @@ jobs:
           sparse-checkout: scripts/update-next-queued-pr.sh
           sparse-checkout-cone-mode: false
 
+      - name: Check that the nurse App secrets are set
+        env:
+          # Only whether each secret is set reaches the shell, never its value.
+          HAS_APP_ID: ${{ secrets.NURSE_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.NURSE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_APP_ID" != true ] || [ "$HAS_APP_KEY" != true ]; then
+            echo "::error::The repository secrets NURSE_APP_ID and NURSE_APP_PRIVATE_KEY must both be set (the hive-nurse GitHub App, installed on this repository)."
+            exit 1
+          fi
+
+      - name: Mint a short-lived token from the nurse App
+        id: nurse-token
+        # v3.3.0, pinned by commit. No owner/repositories: the token is
+        # scoped to this repository only.
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.NURSE_APP_ID }}
+          private-key: ${{ secrets.NURSE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-checks: read
+          permission-statuses: read
+
       - name: Update the branch of the PR at the front of the queue
         env:
-          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ steps.nurse-token.outputs.token }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::AUTO_UPDATE_TOKEN is not set; see docs/RELEASE_PROCESS.md"
-            exit 1
-          fi
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::The nurse App returned no token; check NURSE_APP_ID and NURSE_APP_PRIVATE_KEY"; exit 1; }
 
           bash scripts/update-next-queued-pr.sh "$REPO"
