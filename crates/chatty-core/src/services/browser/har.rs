@@ -221,11 +221,7 @@ impl Post {
         let (mut text, params) = redact_post_data(mime, body);
         let truncated = text.len() > MAX_POST_BYTES;
         if truncated {
-            let mut end = MAX_POST_BYTES;
-            while !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
+            text.truncate(text.floor_char_boundary(MAX_POST_BYTES));
         }
         Self {
             mime: mime.to_string(),

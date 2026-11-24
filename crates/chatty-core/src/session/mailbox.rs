@@ -258,6 +258,7 @@ impl<M> Mailbox<M> {
     }
 
     /// Whether the queue is waiting for the user rather than for the turn.
+    #[cfg(test)]
     pub fn is_held(&self) -> bool {
         self.held
     }

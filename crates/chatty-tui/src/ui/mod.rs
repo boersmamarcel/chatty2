@@ -19,6 +19,7 @@ use ratatui::layout::{Constraint, Direction, Layout};
 
 use crate::engine::ChatEngine;
 
+pub(crate) use chat_view::engine_location_label;
 pub use input::InputState;
 
 /// Render the full TUI layout

@@ -59,16 +59,11 @@ impl PlanRow {
     }
 }
 
-/// `(done, total, blocked, current step)` — mirrors the desktop client's
-/// `plan_counts` so the two frontends never disagree about progress.
+/// `(done, total, blocked, current step)`: core's reading of the plan, the
+/// same one the desktop shows, with the step's title trimmed for a terminal row.
 pub fn plan_counts(snapshot: &AgentTaskSnapshot) -> (usize, usize, usize, String) {
-    let done = count(snapshot, AgentTodoStatus::Done);
-    let blocked = count(snapshot, AgentTodoStatus::Blocked);
-    let total = snapshot.todos.len().max(1);
-    let current = first_with(snapshot, AgentTodoStatus::InProgress)
-        .or_else(|| first_with(snapshot, AgentTodoStatus::Pending))
-        .unwrap_or_else(|| format!("{done}/{total} complete"));
-    (done, total, blocked, current)
+    let (done, total, blocked, current) = snapshot.counts();
+    (done, total, blocked, current.trim().to_string())
 }
 
 /// The card's rows for `snapshot` on a `width`-column terminal.
@@ -186,22 +181,6 @@ pub fn status_line(snapshot: &AgentTaskSnapshot, width: usize) -> String {
         return clip(&head, width);
     }
     format!("{head} · {}", clip(current.trim(), budget))
-}
-
-fn count(snapshot: &AgentTaskSnapshot, status: AgentTodoStatus) -> usize {
-    snapshot
-        .todos
-        .iter()
-        .filter(|todo| todo.status == status)
-        .count()
-}
-
-fn first_with(snapshot: &AgentTaskSnapshot, status: AgentTodoStatus) -> Option<String> {
-    snapshot
-        .todos
-        .iter()
-        .find(|todo| todo.status == status)
-        .map(|todo| todo.title.trim().to_string())
 }
 
 /// Columns left for a row's body once its indent, glyph and tail are paid for.

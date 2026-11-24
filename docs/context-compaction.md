@@ -20,7 +20,7 @@ flowchart LR
 ## The per-request guard
 
 Every chat agent carries a `ContextShaper`
-(`crates/chatty-core/src/services/context_shaper.rs`) as a rig `AgentHook`. Before each
+(`crates/chatty-core/src/services/context_shaper/`) as a rig `AgentHook`. Before each
 model call of a run — the first one and every call after a tool round-trip — the hook
 measures the history that call would send and, only when the request would not fit the
 model's window, hands rig a shorter history for that one request

@@ -49,6 +49,34 @@ pub struct AgentTaskSnapshot {
     pub verification_skipped: bool,
 }
 
+impl AgentTaskSnapshot {
+    /// `(done, total, blocked, current step)`: the one reading of a plan's
+    /// progress both frontends show. `total` is at least 1; the current step
+    /// is the first in-progress todo, else the first pending one, else
+    /// `"{done}/{total} complete"`.
+    pub fn counts(&self) -> (usize, usize, usize, String) {
+        let count = |status: AgentTodoStatus| {
+            self.todos
+                .iter()
+                .filter(|todo| todo.status == status)
+                .count()
+        };
+        let first = |status: AgentTodoStatus| {
+            self.todos
+                .iter()
+                .find(|todo| todo.status == status)
+                .map(|todo| todo.title.clone())
+        };
+        let done = count(AgentTodoStatus::Done);
+        let blocked = count(AgentTodoStatus::Blocked);
+        let total = self.todos.len().max(1);
+        let current = first(AgentTodoStatus::InProgress)
+            .or_else(|| first(AgentTodoStatus::Pending))
+            .unwrap_or_else(|| format!("{done}/{total} complete"));
+        (done, total, blocked, current)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentTaskResponse {
     pub message: String,

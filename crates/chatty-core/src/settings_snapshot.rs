@@ -55,21 +55,6 @@ use crate::settings::repositories::{
     InMemoryTrainingSettingsRepository, InMemoryUserSecretsRepository, RepositoryResult,
 };
 
-/// Recursively re-sort every JSON object's entries by key, in place. Arrays
-/// are recursed into but left in their original element order.
-fn canonicalize(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(items) => items.iter_mut().for_each(canonicalize),
-        serde_json::Value::Object(map) => {
-            map.values_mut().for_each(canonicalize);
-            let mut entries: Vec<_> = std::mem::take(map).into_iter().collect();
-            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-            map.extend(entries);
-        }
-        _ => {}
-    }
-}
-
 /// The union of every settings family `RepositoryRegistry` serves. A view
 /// over the existing family structs — not a second settings model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,7 +80,7 @@ impl SettingsSnapshot {
     /// feature — see the module doc comment.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut value = serde_json::to_value(self).expect("SettingsSnapshot always serializes");
-        canonicalize(&mut value);
+        value.sort_all_objects();
         serde_json::to_vec(&value).expect("canonicalized value always serializes")
     }
 }
@@ -385,8 +370,8 @@ mod tests {
 
         let mut a = a;
         let mut b = b;
-        canonicalize(&mut a);
-        canonicalize(&mut b);
+        a.sort_all_objects();
+        b.sort_all_objects();
 
         assert_eq!(
             serde_json::to_vec(&a).unwrap(),
@@ -397,7 +382,7 @@ mod tests {
     #[test]
     fn canonicalize_leaves_array_element_order_alone() {
         let mut value = serde_json::json!({"items": [3, 1, 2]});
-        canonicalize(&mut value);
+        value.sort_all_objects();
         assert_eq!(value["items"], serde_json::json!([3, 1, 2]));
     }
 

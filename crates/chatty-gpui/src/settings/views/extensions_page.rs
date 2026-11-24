@@ -186,8 +186,7 @@ fn installed_extensions_group() -> SettingGroup {
                                 _ => Some(("• Local", 0x6B7280)),
                             },
                             ExtensionKind::McpServer(cfg) => {
-                                let is_local =
-                                    cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
+                                let is_local = crate::chatty::services::url_is_local(&cfg.url);
                                 if !is_local {
                                     Some(("↗ External", 0xA855F7))
                                 } else {
@@ -195,8 +194,7 @@ fn installed_extensions_group() -> SettingGroup {
                                 }
                             }
                             ExtensionKind::A2aAgent(cfg) => {
-                                let is_local =
-                                    cfg.url.contains("localhost") || cfg.url.contains("127.0.0.1");
+                                let is_local = crate::chatty::services::url_is_local(&cfg.url);
                                 if !is_local {
                                     Some(("↗ External", 0xA855F7))
                                 } else {

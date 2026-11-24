@@ -1,19 +1,13 @@
+use crate::settings::models::AgentConfigNotifier;
 use crate::settings::models::user_secrets_store::{UserSecret, UserSecretsModel};
-use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use gpui::{App, AsyncApp};
 use tracing::{error, info, warn};
 
 /// Emit `RebuildRequired` so the active conversation's agent is rebuilt
 /// with the updated user secrets injected into the shell session.
 fn notify_secrets_changed(cx: &mut App) {
-    if let Some(notifier) = cx
-        .try_global::<GlobalAgentConfigNotifier>()
-        .and_then(|g| g.try_upgrade())
-    {
+    if AgentConfigNotifier::request_rebuild(cx) {
         info!("Notifying secrets changed — triggering agent rebuild");
-        notifier.update(cx, |_notifier, cx| {
-            cx.emit(AgentConfigEvent::RebuildRequired);
-        });
     } else {
         warn!(
             "notify_secrets_changed: GlobalAgentConfigNotifier not found — agent will not be rebuilt"

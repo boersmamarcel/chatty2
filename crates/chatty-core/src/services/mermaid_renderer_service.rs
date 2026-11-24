@@ -353,6 +353,7 @@ impl MermaidRendererService {
     }
 
     /// Clear the rendering cache
+    #[cfg(test)]
     pub fn clear_cache(&self) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.clear();
@@ -363,6 +364,7 @@ impl MermaidRendererService {
     }
 
     /// Get the number of cached items
+    #[cfg(test)]
     pub fn cache_size(&self) -> usize {
         self.cache.lock().map(|c| c.len()).unwrap_or(0)
     }
