@@ -36,7 +36,7 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::text::{TextView, TextViewStyle};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{Icon, IconName, Sizable, VirtualListScrollHandle, v_flex};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::artifact_card::reveal_path_in_os;
 use super::artifact_header::{
@@ -623,6 +623,7 @@ impl ArtifactView {
                             cx.notify();
                         }
                     })
+                    .map_err(|e| debug!(error = ?e, "Artifact panel closed before the browser error was shown"))
                     .ok();
                     return;
                 }
@@ -638,6 +639,7 @@ impl ArtifactView {
                 this.start_tab_watcher(session.clone(), cx);
                 this.start_browser_stream(session, cx);
             })
+            .map_err(|e| debug!(error = ?e, "Artifact panel closed before the browser session attached"))
             .ok();
         })
         .detach();
@@ -800,6 +802,7 @@ impl ArtifactView {
                             cx.notify();
                         }
                     })
+                    .map_err(|e| debug!(error = ?e, "Artifact panel closed before the browser error was shown"))
                     .ok();
                     return;
                 }
@@ -817,6 +820,7 @@ impl ArtifactView {
                             cx.notify();
                         }
                     })
+                    .map_err(|e| debug!(error = ?e, "Artifact panel closed before the browser session end was shown"))
                     .ok();
                     return;
                 }
@@ -970,6 +974,7 @@ impl ArtifactView {
                 this.browser_address_dirty = true;
                 cx.notify();
             })
+            .map_err(|e| debug!(error = ?e, "Artifact panel closed before the address bar updated"))
             .ok();
         })
         .detach();
@@ -992,6 +997,7 @@ impl ArtifactView {
                 this.browser_control = ControlHolder::User;
                 cx.notify();
             })
+            .map_err(|e| debug!(error = ?e, "Artifact panel closed before the reload finished"))
             .ok();
         })
         .detach();
@@ -1776,7 +1782,7 @@ impl ArtifactView {
         self.pdf_raster_width = target;
         self.pdf_reraster_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PDF_RERASTER_DEBOUNCE).await;
-            this.update(cx, |this, cx| this.reraster_pdf_page(cx)).ok();
+            this.update(cx, |this, cx| this.reraster_pdf_page(cx)).map_err(|e| debug!(error = ?e, "Artifact panel closed before the PDF page was re-rastered")).ok();
         }));
     }
 
@@ -1835,6 +1841,9 @@ impl ArtifactView {
                     }
                 }
             })
+            .map_err(
+                |e| debug!(error = ?e, "Artifact panel closed before the PDF re-raster landed"),
+            )
             .ok();
         })
         .detach();

@@ -152,7 +152,6 @@ audience: [contributor, agent]
 source_files:
   - crates/chatty-core/src/settings/repositories/mod.rs
   - crates/chatty-core/src/settings/repositories/generic_json_repository.rs
-  - crates/chatty-core/src/settings/repositories/oauth_credential_json_repository.rs
   - crates/chatty-core/src/settings/repositories/module_settings_json_repository.rs
   - crates/chatty-core/src/services/mcp_token_store.rs
   - crates/chatty-core/src/settings/models/
@@ -215,7 +214,7 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 | `models.json` | array | `ModelConfig` | `JsonModelsRepository` |
 | `mcp_servers.json` | array | `McpServerConfig` | `JsonMcpRepository` |
 | `a2a_agents.json` | array | `A2aAgentConfig` | `A2aJsonRepository` |
-| `mcp_oauth_<sanitized>.json` | object | opaque `StoredCredentials` JSON | live: `FileCredentialStore`; also `JsonOAuthCredentialRepository` |
+| `mcp_oauth_<sanitized>.json` | object | opaque `StoredCredentials` JSON | live: `FileCredentialStore` |
 
 Secrets in **bold** must never appear in logs, traces, or LLM-facing tool
 output.
@@ -514,9 +513,8 @@ Example: server `my server/with:special.chars` →
 `mcp_oauth_my_server_with_special_chars.json`.
 
 The **live writer** is `FileCredentialStore` (`mcp_token_store.rs`), used by
-`McpService`. `JsonOAuthCredentialRepository` uses the same filenames but is
-not registered in `init_repositories()`. `FileCredentialStore` writes the
-JSON directly (not the temp-file rename used by settings repos).
+`McpService`. It writes the JSON directly (not the temp-file rename used by
+settings repos).
 
 Shape is opaque `rmcp::StoredCredentials` JSON (`client_id`,
 `token_response`, `granted_scopes`, …). **Do not paste real token files

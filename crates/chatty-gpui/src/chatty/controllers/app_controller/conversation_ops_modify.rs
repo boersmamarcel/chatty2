@@ -523,6 +523,7 @@ impl ChattyApp {
                             );
                         });
                     })
+                    .map_err(|e| warn!(error = ?e, "The conversation move failed and its notice could not be shown"))
                     .ok();
                     return Ok(());
                 }
@@ -576,6 +577,7 @@ impl ChattyApp {
                     view.add_info_message(notice, cx);
                 });
             })
+            .map_err(|e| warn!(error = ?e, "The conversation moved but the view could not be refreshed"))
             .ok();
             Ok::<_, anyhow::Error>(())
         })
