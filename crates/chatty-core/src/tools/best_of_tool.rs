@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use futures::future::join_all;
-use rig_agent::tool::{Tool, ToolContext};
+use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::agent_spec::BestOfSection;
@@ -142,6 +142,12 @@ impl Tool for BestOfTool {
     type Error = BestOfError;
     type Args = BestOfArgs;
     type Output = BestOfOutput;
+
+    /// Keep the real failure text in front of the user and the model:
+    /// rig's default `map_error` redacts it to "the tool failed".
+    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
+        crate::tools::map_tool_error(Self::NAME, error)
+    }
 
     fn description(&self) -> String {
         format!(
@@ -575,5 +581,12 @@ mod tests {
         assert!(matches!(err, BestOfError::AllFailed(_)));
         let headline = invoke.stop_headline().expect("the stop channel is set");
         assert!(headline.starts_with("best_of_failed:"), "{headline}");
+        // What the model and `StopOnBudgetExhausted` read is the real reason.
+        let mapped = tool.map_error(err);
+        let feedback = mapped.model_feedback().unwrap_or_default();
+        assert!(
+            feedback.contains("best_of: every attempt failed"),
+            "{feedback}"
+        );
     }
 }
