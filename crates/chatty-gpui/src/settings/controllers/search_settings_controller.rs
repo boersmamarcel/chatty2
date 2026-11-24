@@ -1,7 +1,7 @@
 use crate::settings::models::search_settings::{SearchProvider, SearchSettingsModel};
 use crate::settings::models::{AgentConfigEvent, GlobalAgentConfigNotifier};
 use gpui::{App, AsyncApp, Global};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Emit `RebuildRequired` so the active conversation's agent is rebuilt
 /// with the current search tool settings.
@@ -183,6 +183,7 @@ pub fn test_reranker(cx: &mut App) {
             cx.set_global(RerankTestStatus::Done(result));
             cx.refresh_windows();
         })
+        .map_err(|e| warn!(error = ?e, "Reranker test finished but its result could not be shown"))
         .ok();
     })
     .detach();

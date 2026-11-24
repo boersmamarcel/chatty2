@@ -235,7 +235,7 @@ impl ModelsListView {
                                                                 ),
                                                             },
                                                         );
-                                                        cx.update(|cx| cx.refresh_windows()).ok();
+                                                        cx.update(|cx| cx.refresh_windows()).map_err(|e| tracing::debug!(error = ?e, "Provider keys sheet closed before it refreshed")).ok();
                                                     })
                                                     .detach();
                                                 })
@@ -311,7 +311,7 @@ impl ModelsListView {
                                                                 ),
                                                             },
                                                         );
-                                                        cx.update(|cx| cx.refresh_windows()).ok();
+                                                        cx.update(|cx| cx.refresh_windows()).map_err(|e| tracing::debug!(error = ?e, "Provider keys sheet closed before it refreshed")).ok();
                                                     })
                                                     .detach();
                                                 })

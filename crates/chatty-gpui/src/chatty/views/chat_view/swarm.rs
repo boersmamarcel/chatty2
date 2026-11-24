@@ -294,6 +294,7 @@ impl SwarmNodeTranscript {
                 this.sent = Some(sent.into());
                 cx.notify();
             })
+            .map_err(|e| tracing::debug!(error = ?e, "Agent transcript closed before the message result arrived"))
             .ok();
         })
         .detach();
@@ -396,6 +397,7 @@ impl SwarmNodeTranscript {
                             }
                             cx.notify();
                         })
+                        .map_err(|e| tracing::debug!(error = ?e, "Agent transcript closed before a tool row toggled"))
                         .ok();
                     })
                     .into_any_element()
@@ -446,6 +448,7 @@ impl Render for SwarmNodeTranscript {
                             this.name = name;
                             cx.notify();
                         })
+                        .map_err(|e| tracing::debug!(error = ?e, "Agent transcript closed before it navigated"))
                         .ok();
                     }));
                 if readable {

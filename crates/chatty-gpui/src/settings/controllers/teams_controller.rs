@@ -117,6 +117,9 @@ pub fn install_team(listing: AgentSpecListing, cx: &mut App) {
                         .set_error(format!("Install failed: {e}"));
                     cx.refresh_windows();
                 })
+                .map_err(
+                    |e| warn!(error = ?e, "Team install failed and the error could not be shown"),
+                )
                 .ok();
                 return;
             }
@@ -139,6 +142,7 @@ pub fn install_team(listing: AgentSpecListing, cx: &mut App) {
             cx.global_mut::<MarketplaceState>().team_notice = Some(notice(&record));
             cx.refresh_windows();
         })
+        .map_err(|e| warn!(error = ?e, "Team installed but the marketplace could not be refreshed"))
         .ok();
     })
     .detach();

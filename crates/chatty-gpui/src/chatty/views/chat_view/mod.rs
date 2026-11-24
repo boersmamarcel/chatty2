@@ -2192,6 +2192,7 @@ impl ChatView {
                         cx.notify();
                     }
                 })
+                .map_err(|e| debug!(error = ?e, "Transcript scrolled after its view closed"))
                 .ok();
             });
     }

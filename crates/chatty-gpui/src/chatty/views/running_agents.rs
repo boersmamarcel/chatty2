@@ -421,6 +421,7 @@ impl Render for RunningAgentTranscript {
                             this.name = name;
                             cx.notify();
                         })
+                        .map_err(|e| tracing::debug!(error = ?e, "Running-agents panel closed before it navigated"))
                         .ok();
                     }))
                     .into_any_element()
