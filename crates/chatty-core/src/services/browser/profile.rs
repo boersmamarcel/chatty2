@@ -89,15 +89,6 @@ impl NavigationPolicy {
             NavigationPolicy::Allowlist { origins } => check_allowlist(url, origins),
         }
     }
-
-    /// Check every hop of a redirect chain. A page cannot bounce the agent
-    /// somewhere the policy would have refused up front.
-    pub fn check_chain(&self, urls: &[String]) -> Result<(), BrowserError> {
-        for url in urls {
-            self.check(url)?;
-        }
-        Ok(())
-    }
 }
 
 /// Hostnames that count as loopback for Lane A.
@@ -345,25 +336,6 @@ mod tests {
     }
 
     #[test]
-    fn redirect_chain_is_checked_hop_by_hop() {
-        let policy = lane_a();
-        let ok = vec![
-            "http://localhost:3000/".to_string(),
-            "http://localhost:3000/login".to_string(),
-        ];
-        assert!(policy.check_chain(&ok).is_ok());
-
-        let escapes = vec![
-            "http://localhost:3000/".to_string(),
-            "http://evil.example.com/".to_string(),
-        ];
-        assert!(matches!(
-            policy.check_chain(&escapes),
-            Err(BrowserError::NavigationRefused(_))
-        ));
-    }
-
-    #[test]
     fn allowlist_matches_on_origin() {
         let policy = NavigationPolicy::Allowlist {
             origins: vec!["https://example.com".to_string()],
@@ -508,21 +480,6 @@ mod tests {
             policy.check("http://metadata.google.internal/computeMetadata/v1/"),
             Err(BrowserError::NavigationRefused(_))
         ));
-    }
-
-    /// AGE-459: a redirect to a private IP is allowed only when the toggle is on.
-    #[test]
-    fn redirect_to_private_ip_gated_by_toggle() {
-        let hops = vec![
-            "http://example.com/".to_string(),
-            "http://192.168.1.10/internal".to_string(),
-        ];
-
-        assert!(matches!(
-            open().check_chain(&hops),
-            Err(BrowserError::NavigationRefused(_))
-        ));
-        assert!(open_with_private_access().check_chain(&hops).is_ok());
     }
 
     #[cfg(unix)]

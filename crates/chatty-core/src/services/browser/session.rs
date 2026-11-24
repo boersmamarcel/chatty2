@@ -464,8 +464,8 @@ impl BrowserSession {
     }
 
     /// Err while the active tab is one the navigation policy refuses
-    /// (AGE-458). `browser_navigate` vets the URL it is given and every
-    /// redirect hop, but a page can move on its own afterwards — a script, a
+    /// (AGE-458). `browser_navigate` vets the URL it is given and the
+    /// URL it lands on, but a page can move on its own afterwards — a script, a
     /// meta refresh, an opener setting `popup.location` — and a page the
     /// policy would have refused must not become readable just because the
     /// page, rather than the agent, is what navigated.
@@ -544,8 +544,10 @@ impl BrowserSession {
         self.snapshot_generation.fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    /// Navigate, enforcing the profile's policy on the target and on every
-    /// redirect hop the browser followed to get there.
+    /// Navigate, enforcing the profile's policy on the target and on the URL
+    /// the browser landed on. Hops in between are not checked here: under the
+    /// open-web policy the egress proxy vets every request, and Lane A does
+    /// not police what a local page fetches.
     pub async fn navigate(&self, url: &str) -> Result<String, BrowserError> {
         self.ensure_alive()?;
         self.control.ensure_agent()?;

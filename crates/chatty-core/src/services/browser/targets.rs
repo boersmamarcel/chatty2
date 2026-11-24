@@ -93,7 +93,7 @@ pub(super) fn spawn_watcher(
 /// that is the first moment `document.title` is worth reading.
 ///
 /// This is the check `browser_navigate` cannot make: it vets the URL it is
-/// given and the redirect chain it lands through, but a page that moves
+/// given and the URL it lands on, but a page that moves
 /// afterwards — a script, a meta refresh, an opener assigning
 /// `popup.location` — was never re-examined. Whatever the page does, the
 /// session decides what happens next ([`BrowserSession::page_navigated`]).
