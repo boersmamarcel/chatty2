@@ -40,6 +40,9 @@ pub struct SiteGate {
     /// Only sessions whose origin is granted.
     sessions: Vec<SavedSession>,
     unattended: bool,
+    /// An approved action is running: let its risky requests through until
+    /// the next action begins (AGE-2043).
+    allow_risky: std::sync::atomic::AtomicBool,
     outcome: Mutex<GateOutcome>,
 }
 
@@ -53,6 +56,7 @@ impl SiteGate {
             act_on: options.act_on.clone(),
             sessions,
             unattended: options.unattended,
+            allow_risky: std::sync::atomic::AtomicBool::new(false),
             outcome: Mutex::new(GateOutcome::default()),
         })
     }
@@ -69,6 +73,12 @@ impl SiteGate {
             SiteMode::AskRisky => self.unattended,
             SiteMode::Any => false,
         })
+    }
+
+    /// Let risky requests through (an approved action) or refuse them again.
+    pub fn set_allow_risky(&self, allow: bool) {
+        self.allow_risky
+            .store(allow, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Take (and reset) what was refused.
@@ -221,7 +231,13 @@ impl SiteGate {
                 let id = event.request_id.clone();
                 let method = event.request.method.clone();
                 let url = event.request.url.clone();
-                let verdict = sites::judge_request(&gate.act_on, gate.unattended, &method, &url);
+                let allow_risky = gate.allow_risky.load(std::sync::atomic::Ordering::SeqCst);
+                let verdict = sites::judge_request(
+                    &gate.act_on,
+                    gate.unattended && !allow_risky,
+                    &method,
+                    &url,
+                );
                 let result = match verdict {
                     RequestVerdict::Allow => page
                         .execute(ContinueRequestParams::new(id))

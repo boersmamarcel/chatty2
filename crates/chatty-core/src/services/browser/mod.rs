@@ -82,6 +82,8 @@ pub struct LaunchOptions {
     pub sessions: Vec<crate::settings::models::execution_settings::SavedSession>,
     /// No person is attached to answer approval cards.
     pub unattended: bool,
+    /// One action a person approved (AGE-2043); consumed by the first match.
+    pub approved_action: Option<crate::settings::models::execution_settings::ApprovedBrowserAction>,
 }
 
 // The token must never reach a log line, even through `{:?}`.
@@ -119,6 +121,10 @@ pub struct BrowserManager {
     /// instead of a bare "Starting browser…" (AGE-565).
     download_progress: tokio::sync::watch::Sender<Option<f32>>,
     launch: LaunchOptions,
+    /// The approved action not yet used (AGE-2043).
+    approved_action: parking_lot::Mutex<
+        Option<crate::settings::models::execution_settings::ApprovedBrowserAction>,
+    >,
 }
 
 impl BrowserManager {
@@ -132,6 +138,7 @@ impl BrowserManager {
             snapshot: Mutex::new(None),
             download_progress: tokio::sync::watch::Sender::new(None),
             launch: LaunchOptions::default(),
+            approved_action: parking_lot::Mutex::new(None),
         }
     }
 
@@ -152,13 +159,31 @@ impl BrowserManager {
             snapshot: Mutex::new(None),
             download_progress: tokio::sync::watch::Sender::new(None),
             launch: LaunchOptions::default(),
+            approved_action: parking_lot::Mutex::new(None),
         }
     }
 
     /// Launch Chrome the way a hosted guest needs (AGE-1912).
     pub fn with_launch_options(mut self, launch: LaunchOptions) -> Self {
+        *self.approved_action.lock() = launch.approved_action.clone();
         self.launch = launch;
         self
+    }
+
+    /// Spend the approved action if it is this one: same origin, same page
+    /// address, and the same control (AGE-2043). Matching or not, a second
+    /// call finds nothing once it has matched.
+    pub fn take_approved_action(&self, origin: &str, url: &str, control: &str) -> bool {
+        let mut slot = self.approved_action.lock();
+        let hit = slot.as_ref().is_some_and(|a| {
+            a.origin == origin
+                && a.url == url
+                && (a.action == control || a.action.starts_with(&format!("{control} on ")))
+        });
+        if hit {
+            *slot = None;
+        }
+        hit
     }
 
     /// Whether this manager's policy allows navigating off-machine, so tool
