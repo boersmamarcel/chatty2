@@ -546,6 +546,7 @@ mod tests {
                 browser_act_on: Vec::new(),
                 browser_sessions: Vec::new(),
                 browser_unattended: false,
+                browser_proof_screenshots: false,
                 browser_approved_action: None,
                 allow_private_network_access: true,
                 execute_code_enabled: true,

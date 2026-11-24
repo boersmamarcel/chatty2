@@ -177,6 +177,13 @@ pub struct ExecutionSettingsModel {
     /// False (default) leaves it to whether an approval channel exists.
     #[serde(default)]
     pub browser_unattended: bool,
+    /// The browser itself takes pictures into `outputs/` (AGE-2008): the
+    /// target control at "needs your OK" (`approval-<n>.png`), the page after
+    /// each click that went through (`after-<n>.png`, newest 10), and the last
+    /// page at close (`final.png`). Only on granted sites, never with a
+    /// filled password field. False (default) writes nothing.
+    #[serde(default)]
+    pub browser_proof_screenshots: bool,
     /// One risky browser action a person approved on "Needs your OK"
     /// (AGE-2043). The browser lets the matching action through once for the
     /// session, then forgets it. Written by hive as
@@ -404,6 +411,7 @@ impl Default for ExecutionSettingsModel {
             browser_act_on: Vec::new(),
             browser_sessions: Vec::new(),
             browser_unattended: false,
+            browser_proof_screenshots: false,
             browser_approved_action: None,
             allow_private_network_access: false, // Opt-in: SSRF guard blocks private IPs by default
             execute_code_enabled: false,         // Opt-in: exposes execute_code to the model
@@ -481,6 +489,17 @@ mod browser_unattended_tests {
         v.as_object_mut().unwrap().remove("browser_unattended");
         let loaded: ExecutionSettingsModel = serde_json::from_value(v).unwrap();
         assert!(!loaded.browser_unattended);
+    }
+
+    #[test]
+    fn browser_proof_screenshots_defaults_off_and_old_files_load() {
+        assert!(!ExecutionSettingsModel::default().browser_proof_screenshots);
+        let mut v = serde_json::to_value(ExecutionSettingsModel::default()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("browser_proof_screenshots");
+        let loaded: ExecutionSettingsModel = serde_json::from_value(v).unwrap();
+        assert!(!loaded.browser_proof_screenshots);
     }
 }
 

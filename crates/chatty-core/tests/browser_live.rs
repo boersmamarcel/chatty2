@@ -2406,3 +2406,144 @@ async fn a_saved_session_sends_its_cookie_and_only_for_granted_origins() {
     assert!(!first.1.contains("ungranted"), "{first:?}");
     manager.shutdown().await;
 }
+
+// ── proof pictures the browser takes itself (AGE-2008) ──────────────────────
+
+fn proof_manager(
+    dir: &tempfile::TempDir,
+    origin: &str,
+    mode: SiteMode,
+    proof: bool,
+) -> std::sync::Arc<BrowserManager> {
+    let workspace = std::fs::canonicalize(dir.path()).expect("canonicalize");
+    std::sync::Arc::new(BrowserManager::lane_a(Some(workspace)).with_launch_options(
+        LaunchOptions {
+            act_on: vec![ActOnSite {
+                origin: origin.to_string(),
+                mode,
+            }],
+            unattended: true,
+            proof_screenshots: proof,
+            ..LaunchOptions::default()
+        },
+    ))
+}
+
+fn is_png(path: &std::path::Path) -> bool {
+    std::fs::read(path).is_ok_and(|b| b.starts_with(&[0x89, b'P', b'N', b'G']))
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn a_risky_click_that_needs_approval_names_its_picture() {
+    let (port, _seen) = site_server().await;
+    let origin = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manager = proof_manager(&dir, &origin, SiteMode::AskRisky, true);
+    let (navigate, snapshot, .., click, _, _) =
+        build_browser_tools(manager.clone(), artifacts(), None);
+    let cx = &mut ToolContext::new();
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: format!("{origin}/"),
+            },
+        )
+        .await
+        .expect("page loads");
+    let tree = snapshot.call(cx, NoArgs {}).await.expect("snapshot").tree;
+    let err = click
+        .call(
+            cx,
+            ClickArgs {
+                r#ref: ref_of(&tree, "button", "Delete"),
+            },
+        )
+        .await
+        .expect_err("unattended risky click")
+        .to_string();
+    let start = err.find('{').expect("JSON in the error");
+    let json: serde_json::Value = serde_json::from_str(&err[start..]).expect("needs_approval JSON");
+    assert_eq!(json["error"], "needs_approval");
+    assert_eq!(json["screenshot"], "approval-1.png", "{err}");
+    let outputs = dir.path().join("outputs");
+    assert!(is_png(&outputs.join("approval-1.png")));
+    manager.shutdown().await;
+    assert!(is_png(&outputs.join("final.png")), "close writes final.png");
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn changing_clicks_write_after_pictures_and_keep_the_newest_ten() {
+    let (port, _seen) = site_server().await;
+    let origin = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manager = proof_manager(&dir, &origin, SiteMode::Any, true);
+    let (navigate, snapshot, .., click, _, _) =
+        build_browser_tools(manager.clone(), artifacts(), None);
+    let cx = &mut ToolContext::new();
+    let outputs = dir.path().join("outputs");
+    for n in 1..=11 {
+        navigate
+            .call(
+                cx,
+                NavigateArgs {
+                    url: format!("{origin}/"),
+                },
+            )
+            .await
+            .expect("page loads");
+        let tree = snapshot.call(cx, NoArgs {}).await.expect("snapshot").tree;
+        click
+            .call(
+                cx,
+                ClickArgs {
+                    r#ref: ref_of(&tree, "button", "Save"),
+                },
+            )
+            .await
+            .expect("Save runs");
+        if n == 1 {
+            assert!(is_png(&outputs.join("after-1.png")));
+        }
+    }
+    assert!(!outputs.join("after-1.png").exists(), "the oldest is gone");
+    for n in 2..=11 {
+        assert!(is_png(&outputs.join(format!("after-{n}.png"))), "after-{n}");
+    }
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "launches a real browser; may download ~190MB on first run"]
+async fn with_the_setting_off_no_picture_is_written() {
+    let (port, _seen) = site_server().await;
+    let origin = format!("http://127.0.0.1:{port}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manager = proof_manager(&dir, &origin, SiteMode::Any, false);
+    let (navigate, snapshot, .., click, _, _) =
+        build_browser_tools(manager.clone(), artifacts(), None);
+    let cx = &mut ToolContext::new();
+    navigate
+        .call(
+            cx,
+            NavigateArgs {
+                url: format!("{origin}/"),
+            },
+        )
+        .await
+        .expect("page loads");
+    let tree = snapshot.call(cx, NoArgs {}).await.expect("snapshot").tree;
+    click
+        .call(
+            cx,
+            ClickArgs {
+                r#ref: ref_of(&tree, "button", "Save"),
+            },
+        )
+        .await
+        .expect("Save runs");
+    manager.shutdown().await;
+    assert!(!dir.path().join("outputs").exists());
+}

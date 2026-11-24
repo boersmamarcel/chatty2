@@ -31,6 +31,7 @@ pub mod gate;
 pub mod har;
 pub mod input;
 pub mod profile;
+mod proof;
 pub mod provisioning;
 pub mod registry;
 pub mod screencast;
@@ -84,6 +85,8 @@ pub struct LaunchOptions {
     pub unattended: bool,
     /// One action a person approved (AGE-2043); consumed by the first match.
     pub approved_action: Option<crate::settings::models::execution_settings::ApprovedBrowserAction>,
+    /// The host wants proof pictures in `outputs/` (AGE-2008).
+    pub proof_screenshots: bool,
 }
 
 // The token must never reach a log line, even through `{:?}`.
@@ -96,6 +99,7 @@ impl std::fmt::Debug for LaunchOptions {
             .field("act_on", &self.act_on)
             .field("sessions", &self.sessions.len())
             .field("unattended", &self.unattended)
+            .field("proof_screenshots", &self.proof_screenshots)
             .field(
                 "upstream_token",
                 &self.upstream_token.as_ref().map(|_| "<redacted>"),
@@ -125,6 +129,8 @@ pub struct BrowserManager {
     approved_action: parking_lot::Mutex<
         Option<crate::settings::models::execution_settings::ApprovedBrowserAction>,
     >,
+    /// Proof picture counters (AGE-2008).
+    proof: parking_lot::Mutex<proof::ProofState>,
 }
 
 impl BrowserManager {
@@ -139,6 +145,7 @@ impl BrowserManager {
             download_progress: tokio::sync::watch::Sender::new(None),
             launch: LaunchOptions::default(),
             approved_action: parking_lot::Mutex::new(None),
+            proof: parking_lot::Mutex::new(proof::ProofState::default()),
         }
     }
 
@@ -160,6 +167,7 @@ impl BrowserManager {
             download_progress: tokio::sync::watch::Sender::new(None),
             launch: LaunchOptions::default(),
             approved_action: parking_lot::Mutex::new(None),
+            proof: parking_lot::Mutex::new(proof::ProofState::default()),
         }
     }
 
@@ -299,6 +307,7 @@ impl BrowserManager {
     pub async fn shutdown(&self) {
         let session = self.session.lock().await.take();
         if let Some(session) = session {
+            self.proof_final(&session).await;
             info!("browser: shutting down session");
             session.shutdown().await;
         }
