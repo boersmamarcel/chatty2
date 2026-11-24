@@ -915,6 +915,19 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     // Create event channel
     let (event_tx, event_rx) = mpsc::unbounded_channel::<AppEvent>();
 
+    // A settings file that did not load is write-protected until it does.
+    // Said once, where the user will see it: stderr without a terminal UI, a
+    // transcript notice with one (stderr is hidden behind the full screen).
+    for notice in
+        chatty_core::settings::repositories::secret_json_repository::unloaded_settings_notices()
+    {
+        if non_interactive {
+            eprintln!("chatty: {notice}");
+        } else {
+            let _ = event_tx.send(AppEvent::Notice(notice));
+        }
+    }
+
     // A shell that runs on the host although a sandbox was expected is said
     // once: a stderr line in a headless run, a transcript notice in the TUI.
     // `sandbox_required` fails the run up front instead (AGE-918).
@@ -1630,12 +1643,8 @@ async fn start_mcp_servers() -> Option<McpService> {
     let (ext_result, hive_result) = tokio::join!(ext_repo.load(), hive_repo.load());
 
     let mut extensions = ext_result.unwrap_or_default();
-    let hive_settings = hive_result.unwrap_or_else(|e| {
-        eprintln!(
-            "chatty: hive_settings.json was not loaded and will not be modified (you appear signed out): {e}"
-        );
-        Default::default()
-    });
+    // A file that did not load was already reported at startup.
+    let hive_settings = hive_result.unwrap_or_default();
 
     let hive_added =
         chatty_core::install::ensure_default_hive_mcp(&hive_settings.registry_url, &mut extensions);
