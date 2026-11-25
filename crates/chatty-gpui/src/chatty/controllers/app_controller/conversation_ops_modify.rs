@@ -543,10 +543,11 @@ impl ChattyApp {
                         MoveOutcome::CameBack(messages) => {
                             // The local side applied every event of every
                             // hosted turn it was present for, so its history is
-                            // usually already complete *and* richer — it has
-                            // the traces the wire does not carry. The server's
-                            // copy is taken only when it is longer, which is
-                            // the case it exists for: turns this client missed.
+                            // usually already complete. The server's copy is
+                            // taken only when it is longer (turns this client
+                            // missed). `import_history` then replaces every
+                            // entry, so the local traces, timestamps and
+                            // attachment paths are dropped in that case.
                             let local_len = store
                                 .get_conversation(&conv_id)
                                 .map(|conversation| conversation.messages().len())

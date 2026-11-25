@@ -537,11 +537,10 @@ impl ChatEngine {
 
                 // This client applied every event of every hosted turn it was
                 // present for, so its local history is usually already
-                // complete *and richer* — it has the per-message traces the
-                // wire does not carry. Adopting the server's copy wholesale
-                // would throw those away. So the server's history is only
-                // taken when it is longer, which is exactly the case it exists
-                // to cover: turns that happened while this client was closed.
+                // complete. The server's history is only taken when it is
+                // longer: turns that happened while this client was closed.
+                // `import_history` then replaces every entry, so the local
+                // per-message traces are dropped in that case.
                 let local_len = self
                     .session
                     .conversation()
