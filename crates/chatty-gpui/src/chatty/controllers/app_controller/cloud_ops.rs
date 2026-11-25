@@ -122,7 +122,7 @@ impl ChattyApp {
                 if !self.is_shown(conv_id, cx) {
                     return;
                 }
-                let url = connector_settings_url(&cx.global::<HiveSettingsModel>().registry_url);
+                let url = connector_settings_url(&cx.global::<HiveSettingsModel>().hive_url);
                 self.chat_view.update(cx, |view, cx| {
                     view.show_connector_sign_in(ConnectorSignIn { connector, url }, cx);
                 });
