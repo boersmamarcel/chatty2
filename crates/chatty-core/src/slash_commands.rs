@@ -194,6 +194,22 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         tui: true,
     },
     SlashCommandSpec {
+        command: "/login",
+        description: "Sign in to Hive as this terminal app (its own sign-in, separate from the desktop's)",
+        insert_text: "/login",
+        execute_immediately: true,
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
+        command: "/logout",
+        description: "Sign this terminal app out of Hive",
+        insert_text: "/logout",
+        execute_immediately: true,
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
         command: "/quit",
         description: "Quit Chatty",
         insert_text: "/quit",

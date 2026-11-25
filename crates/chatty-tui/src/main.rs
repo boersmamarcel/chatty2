@@ -4,6 +4,7 @@ mod engine;
 mod events;
 mod export;
 mod headless;
+mod hive_auth;
 mod install_team;
 // Participant mode reaches the broker over a Unix socket; there is no Windows
 // equivalent yet, and `chatty_protocol_gateway::worker`'s server half is
@@ -508,6 +509,11 @@ enum Command {
     /// through the editor, and the model's ask_user tool is off. Logs go
     /// to stderr. Flags such as --model and --auto-approve go before `acp`.
     Acp,
+    /// Sign in to Hive as the TUI.
+    ///
+    /// Prompts for the email and password (the password without echo) and
+    /// keeps the TUI's own sign-in, separate from the desktop's.
+    Login,
 }
 
 #[tokio::main]
@@ -589,6 +595,10 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     )
     .context("Failed to initialize settings repositories (is HOME set?)")?;
 
+    if cli.command == Some(Command::Login) {
+        return hive_auth::run_login().await;
+    }
+
     if let Some(team) = &cli.install_team {
         return install_team::run(team).await;
     }
@@ -646,7 +656,7 @@ async fn run(cli: Cli, usage: headless::usage_file::UsageRecorder) -> Result<()>
     }
     let remote_agents = a2a_agents_result.unwrap_or_default();
     // Before any agent is built: every spec plugin call is metered (AGE-837).
-    engine::install_plugin_meter().await;
+    engine::install_plugin_meter(cli.participant_fd.is_none()).await;
 
     // --ollama / --openai-compat-url: auto-discover models from a running server
     // and inject ephemeral provider + model configs so no pre-configuration is needed.

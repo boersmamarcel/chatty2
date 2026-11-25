@@ -8,6 +8,9 @@ use crossterm::event::{
     EventStream, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
@@ -180,6 +183,33 @@ async fn run_loop(
                                     engine.add_system_message(e.to_string());
                                 }
                             }
+                            KeyAction::Login => {
+                                // Leave the alternate screen so the prompts
+                                // are plain terminal lines, then come back.
+                                let _ = execute!(
+                                    io::stdout(),
+                                    DisableMouseCapture,
+                                    DisableBracketedPaste,
+                                    LeaveAlternateScreen
+                                );
+                                let _ = disable_raw_mode();
+                                let outcome = crate::hive_auth::login().await;
+                                let _ = enable_raw_mode();
+                                let _ = execute!(
+                                    io::stdout(),
+                                    EnterAlternateScreen,
+                                    EnableMouseCapture,
+                                    EnableBracketedPaste
+                                );
+                                let _ = terminal.clear();
+                                engine.add_system_message(match outcome {
+                                    Ok(message) => message,
+                                    Err(e) => format!("{e:#}"),
+                                });
+                            }
+                            KeyAction::Logout => {
+                                engine.add_system_message(crate::hive_auth::logout().await);
+                            }
                             KeyAction::CopyLastResponse => {
                                 if let Err(e) = engine.copy_last_response_to_clipboard() {
                                     engine.add_system_message(e.to_string());
@@ -337,6 +367,10 @@ enum KeyAction {
     ChangeWorkingDirectory(String),
     /// `/online` — where this conversation runs, and what a move would carry.
     ShowOnlineStatus,
+    /// `/login` (AGE-2084).
+    Login,
+    /// `/logout` (AGE-2084).
+    Logout,
     /// `/online <url>` takes it online; `/online off` brings it back.
     SetOnline(Option<String>),
 }
@@ -798,6 +832,8 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
             engine.unqueue();
             None
         }
+        Command::Login => Some(KeyAction::Login),
+        Command::Logout => Some(KeyAction::Logout),
         Command::Quit => Some(KeyAction::Quit),
     }
 }

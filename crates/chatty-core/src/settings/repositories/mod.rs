@@ -383,6 +383,14 @@ define_single_secret_json_repository!(
     secrets = secret_json_repository::HIVE_SECRETS,
 );
 
+define_single_secret_json_repository!(
+    trait HiveTuiSettingsRepository,
+    struct HiveTuiSettingsJsonRepository,
+    model = crate::settings::models::hive_settings::HiveSettingsModel,
+    filename = "hive_tui_settings.json",
+    secrets = secret_json_repository::HIVE_TUI_SECRETS,
+);
+
 define_single_json_repository!(
     trait ExtensionsRepository,
     struct ExtensionsJsonRepository,
