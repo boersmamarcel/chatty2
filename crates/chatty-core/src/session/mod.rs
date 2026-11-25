@@ -39,7 +39,7 @@
 mod delegation;
 mod event;
 mod handler;
-mod hosted;
+pub(crate) mod hosted;
 #[cfg(test)]
 mod hosted_recorded;
 pub mod mailbox;
