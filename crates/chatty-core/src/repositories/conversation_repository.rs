@@ -4,6 +4,7 @@ use std::pin::Pin;
 use serde::{Deserialize, Serialize};
 
 use super::error::RepositoryResult;
+use crate::models::conversation::ConversationSync;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -42,11 +43,6 @@ fn default_none_agent_task_snapshot() -> Option<String> {
     None
 }
 
-/// Default None conversation mode for backward compatibility: absent is Local
-fn default_none_mode() -> Option<String> {
-    None
-}
-
 /// Lightweight conversation metadata used for the sidebar.
 /// Loaded at startup without deserializing full message history.
 #[derive(Debug, Clone)]
@@ -55,12 +51,14 @@ pub struct ConversationMetadata {
     pub title: String,
     pub total_cost: f64,
     pub updated_at: i64,
-    /// JSON-serialized `ConversationMode`; `None` means Local (AGE-298).
+    /// Whether the conversation is synced and where its turns run (AGE-2088),
+    /// read from the row's sync columns.
     ///
     /// Carried in the lightweight layer because the sidebar has to badge a
-    /// conversation that runs online *without* loading it — the whole point of
-    /// this layer is that the list costs no message deserialization.
-    pub mode: Option<String>,
+    /// synced or cloud conversation *without* loading it, and because the
+    /// sync engine matches the server's list against these rows — the whole
+    /// point of this layer is that neither costs a message deserialization.
+    pub sync: ConversationSync,
     /// Tool calls made over the conversation's lifetime (AGE-351).
     pub tool_call_count: u32,
     /// Prompt size of the last completed API call — the context fill the
@@ -92,8 +90,24 @@ pub struct ConversationData {
     pub working_dir: Option<String>, // Per-conversation working directory override
     #[serde(default = "default_none_agent_task_snapshot")]
     pub agent_task_snapshot: Option<String>, // JSON-serialized AgentTaskSnapshot
-    #[serde(default = "default_none_mode")]
-    pub mode: Option<String>, // JSON-serialized ConversationMode; None means Local (AGE-298)
+    /// The sync columns (AGE-2088), read and written through
+    /// [`ConversationSync::from_columns`] / [`ConversationSync::to_columns`].
+    /// All `None` is local-only, so a conversation that never syncs keeps the
+    /// bytes it had before sync existed.
+    ///
+    /// `sync`: JSON `{server_url, remote_id}`.
+    #[serde(default)]
+    pub sync: Option<String>,
+    /// JSON [`Placement`](crate::models::conversation::Placement).
+    #[serde(default)]
+    pub placement: Option<String>,
+    /// The server version this device's copy of the history is at.
+    #[serde(default)]
+    pub remote_version: Option<i64>,
+    /// When (unix ms) this device last brought its copy in line with the
+    /// server; `None` while the copy is stale or was never fetched.
+    #[serde(default)]
+    pub last_synced_at: Option<i64>,
     /// Tool calls made over the conversation's lifetime, accumulated at the
     /// turn barrier; a row from before the column reports 0 (AGE-351).
     #[serde(default)]
