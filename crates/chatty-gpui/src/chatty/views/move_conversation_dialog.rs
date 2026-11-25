@@ -18,7 +18,7 @@ use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme, Sizable, WindowExt,
+    ActiveTheme, Disableable, Sizable, WindowExt,
     button::{Button, ButtonVariants},
     h_flex, v_flex,
 };
