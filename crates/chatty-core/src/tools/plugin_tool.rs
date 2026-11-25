@@ -66,7 +66,6 @@ use crate::models::execution_approval_store::{PendingApprovals, request_executio
 use crate::services::plugin_llm::{PluginLlmProvider, PluginUsage};
 use crate::settings::models::execution_settings::ApprovalMode;
 use crate::settings::models::extensions_store::ExtensionsModel;
-use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::models::models_store::ModelConfig;
 use crate::settings::models::providers_store::ProviderConfig;
 
@@ -124,24 +123,29 @@ pub struct PluginHost {
     pub meter: Arc<ModuleMeter>,
 }
 
-/// The meter for a process that runs plugins but does not own the user's
+/// The meter for a process that runs plugins but does not own the desktop's
 /// Hive sign-in: the TUI, and a desktop worker running a delegated spec
 /// (AGE-837). Paid modules are the installed ones priced `paid`; their
 /// calls are admitted by a credit guard and reported by the process's usage
-/// collector, both on a [borrowed](HiveSession::borrowed) session — this
-/// process must not rotate a refresh token the desktop holds. Each call's
-/// report is flushed at once: a worker may exit before a periodic flush.
-pub async fn borrowed_meter(extensions: &ExtensionsModel, hive: &HiveSettingsModel) -> ModuleMeter {
-    let session = Arc::new(HiveSession::borrowed(
-        hive.registry_url.clone(),
-        hive.token_pair(),
-    ));
-    let client =
-        Arc::new(HiveRegistryClient::new(&hive.registry_url).with_session(Arc::clone(&session)));
-    let usage = UsageCollector::global(&hive.registry_url, UsageCollectorConfig::default());
-    usage.set_session(session).await;
+/// collector, both on `session` (the TUI's own, AGE-2084; `None` for a
+/// process with no sign-in of its own, which then calls unauthenticated).
+/// Each call's report is flushed at once: a worker may exit before a
+/// periodic flush.
+pub async fn session_meter(
+    extensions: &ExtensionsModel,
+    registry_url: &str,
+    session: Option<Arc<HiveSession>>,
+) -> ModuleMeter {
+    let mut client = HiveRegistryClient::new(registry_url);
+    if let Some(session) = &session {
+        client = client.with_session(Arc::clone(session));
+    }
+    let usage = UsageCollector::global(registry_url, UsageCollectorConfig::default());
+    if let Some(session) = session {
+        usage.set_session(session).await;
+    }
     ModuleMeter::new(extensions.paid_wasm_modules())
-        .with_credit_guard(Arc::new(CreditGuard::with_default_ttl(client)))
+        .with_credit_guard(Arc::new(CreditGuard::with_default_ttl(Arc::new(client))))
         .with_usage_collector(usage)
         .flushing_each_call()
 }
@@ -1374,7 +1378,7 @@ mod tests {
             refresh_token: "refresh".to_string(),
             expires_at: chrono::Utc::now() + chrono::TimeDelta::hours(1),
         };
-        let session = Arc::new(HiveSession::borrowed(server.uri(), Some(pair)));
+        let session = Arc::new(HiveSession::new(server.uri(), Some(pair)));
         let client =
             Arc::new(HiveRegistryClient::new(server.uri()).with_session(Arc::clone(&session)));
         let usage = Arc::new(UsageCollector::new(

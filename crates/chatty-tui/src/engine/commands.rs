@@ -173,6 +173,10 @@ pub enum Command {
     Unqueue,
     /// /export [path] — export the conversation as ATIF (AGE-860)
     Export(Option<String>),
+    /// /login — sign in to Hive as this TUI (AGE-2084)
+    Login,
+    /// /logout — sign the TUI out of Hive (AGE-2084)
+    Logout,
     /// /quit, /exit — quit the application
     Quit,
 }
@@ -180,20 +184,10 @@ pub enum Command {
 /// How `/msg` is used.
 pub const MSG_USAGE: &str = "Usage: /msg <agent> <text> (/swarm shows the running agents' names)";
 
-/// The Hive sign-in a `chatty-server` checks (AGE-835), borrowed from the
-/// desktop's persisted pair like the plugin meter's: this process must not
-/// rotate a refresh token the desktop holds, so once the borrowed access
-/// token expires the server answers 401 and the user signs in again there.
+/// The Hive sign-in a `chatty-server` checks (AGE-835): the TUI's own
+/// (AGE-2084), refreshed by this process. `None` when not signed in.
 async fn hosted_auth() -> Option<Arc<HiveSession>> {
-    let hive = chatty_core::hive_settings_repository()
-        .load()
-        .await
-        .unwrap_or_default();
-    let pair = hive.token_pair()?;
-    Some(Arc::new(HiveSession::borrowed(
-        hive.registry_url,
-        Some(pair),
-    )))
+    crate::hive_auth::signed_in_session().await
 }
 
 impl ChatEngine {
@@ -235,6 +229,8 @@ impl ChatEngine {
             "/now" => Some(Command::Now(arg)),
             "/unqueue" => Some(Command::Unqueue),
             "/export" => Some(Command::Export(arg)),
+            "/login" => Some(Command::Login),
+            "/logout" => Some(Command::Logout),
             "/quit" | "/exit" => Some(Command::Quit),
             _ => None,
         }
@@ -502,7 +498,11 @@ impl ChatEngine {
             return Ok(());
         };
 
-        let auth = hosted_auth().await;
+        let Some(auth) = hosted_auth().await else {
+            self.add_system_message(chatty_core::tui_hive::RUN_LOGIN.to_string());
+            return Ok(());
+        };
+        let auth = Some(auth);
         match target {
             Some(server_url) => {
                 let new_mode = take_online(
@@ -1259,6 +1259,8 @@ mod tests {
 
     #[test]
     fn parse_update_command() {
+        assert_eq!(ChatEngine::parse_command("/login"), Some(Command::Login));
+        assert_eq!(ChatEngine::parse_command("/logout"), Some(Command::Logout));
         assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
     }
 
