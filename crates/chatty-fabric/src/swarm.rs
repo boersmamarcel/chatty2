@@ -27,7 +27,7 @@ use crate::delegation::CallChain;
 pub const FORWARD_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One thing a nested run did, as the root receives it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SwarmItem {
     /// The worker's session started a turn.
@@ -69,7 +69,7 @@ pub enum SwarmItem {
 
 /// A run's captured conversation, as its terminal status carried it
 /// (RC-0, AGE-649).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "captured", rename_all = "snake_case")]
 pub enum CapturedConversation {
     /// Every message of every turn the run took, in order: chatty-core's
@@ -110,7 +110,7 @@ impl SwarmItem {
 }
 
 /// A batch of one nested node's items, tagged by the broker.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SwarmEvent {
     /// The root call this run descends from (its chain's).
     pub root_task_id: String,

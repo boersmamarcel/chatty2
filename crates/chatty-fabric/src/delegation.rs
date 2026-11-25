@@ -98,7 +98,7 @@ impl Remaining {
 }
 
 /// The chain one run was called through, as the broker stamped it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CallChain {
     /// Minted when the root starts a run; every run under it shares it.
     pub root_task_id: String,

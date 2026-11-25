@@ -1,0 +1,17 @@
+{
+  "conversations": [
+    {
+      "id": "c-2",
+      "model_id": "anthropic/claude-sonnet",
+      "title": "Second chat",
+      "turn_active": true
+    },
+    {
+      "id": "c-1",
+      "model_id": "anthropic/claude-sonnet",
+      "title": "Read the README",
+      "turn_active": false
+    }
+  ],
+  "next_cursor": "opaque-cursor-1"
+}
