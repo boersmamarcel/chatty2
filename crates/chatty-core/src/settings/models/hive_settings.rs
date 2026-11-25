@@ -13,8 +13,9 @@ pub const DEFAULT_HIVE_URL: &str = "http://localhost:8081";
 ///
 /// One address (`hive_url`, the chatty-server origin, which also proxies
 /// `/api/auth/*`) serves sign-in and hosted conversations (AGE-2085). A file
-/// written before that, with `registry_url`, loads with the value moved into
-/// `hive_url`.
+/// written before that named the module registry as `registry_url`; that
+/// loads as `registry_url_override`, so the marketplace and downloads keep
+/// going where they did, and `hive_url` is its own value (or the default).
 ///
 /// A file still carrying the removed `runner_url` (PL-H8b) fails to load with
 /// an error naming it; any other unknown key is ignored as before.
@@ -53,7 +54,7 @@ pub struct HiveSettingsModel {
 struct HiveSettingsWire {
     #[serde(default)]
     hive_url: Option<String>,
-    /// The pre-AGE-2085 name of `hive_url`.
+    /// The pre-AGE-2085 module registry address; becomes the override.
     #[serde(default)]
     registry_url: Option<String>,
     #[serde(default)]
@@ -86,11 +87,8 @@ where
 impl From<HiveSettingsWire> for HiveSettingsModel {
     fn from(wire: HiveSettingsWire) -> Self {
         Self {
-            hive_url: wire
-                .hive_url
-                .or(wire.registry_url)
-                .unwrap_or_else(default_hive_url),
-            registry_url_override: wire.registry_url_override,
+            hive_url: wire.hive_url.unwrap_or_else(default_hive_url),
+            registry_url_override: wire.registry_url_override.or(wire.registry_url),
             token: wire.token,
             refresh_token: wire.refresh_token,
             expires_at: wire.expires_at,
@@ -189,32 +187,42 @@ mod tests {
         serde_json::from_value::<HiveSettingsModel>(written).expect("what is written loads");
     }
 
-    /// AGE-2085: a file written with `registry_url` loads with it as
-    /// `hive_url`; a file with both keeps `hive_url`; saving writes only the
-    /// new name.
+    /// AGE-2085: a file written with `registry_url` (the module registry)
+    /// loads it as the override and gives `hive_url` its default; a file
+    /// with both keys keeps both; saving writes only the new names.
     #[test]
-    fn registry_url_moves_into_hive_url() {
+    fn registry_url_becomes_the_override() {
         let old: HiveSettingsModel =
-            serde_json::from_str(r#"{"registry_url":"https://old.example","username":"marcel"}"#)
+            serde_json::from_str(r#"{"registry_url":"http://localhost:8080","username":"marcel"}"#)
                 .unwrap();
-        assert_eq!(old.hive_url, "https://old.example");
-        assert_eq!(old.registry_url_override, None);
-        assert_eq!(old.registry_url(), "https://old.example");
+        assert_eq!(old.hive_url, DEFAULT_HIVE_URL);
+        assert_eq!(
+            old.registry_url_override.as_deref(),
+            Some("http://localhost:8080")
+        );
+        assert_eq!(old.registry_url(), "http://localhost:8080");
         assert_eq!(old.username.as_deref(), Some("marcel"));
 
         let both: HiveSettingsModel = serde_json::from_str(
-            r#"{"registry_url":"https://old.example","hive_url":"https://new.example"}"#,
+            r#"{"registry_url":"https://registry.example","hive_url":"https://hive.example"}"#,
         )
         .unwrap();
-        assert_eq!(both.hive_url, "https://new.example");
+        assert_eq!(both.hive_url, "https://hive.example");
+        assert_eq!(
+            both.registry_url_override.as_deref(),
+            Some("https://registry.example")
+        );
 
         let none: HiveSettingsModel = serde_json::from_str("{}").unwrap();
         assert_eq!(none.hive_url, DEFAULT_HIVE_URL);
+        assert_eq!(none.registry_url_override, None);
 
         let written = serde_json::to_value(&old).unwrap();
         assert!(written.get("registry_url").is_none(), "{written}");
-        assert_eq!(written["hive_url"], "https://old.example");
-        assert!(written.get("registry_url_override").is_none(), "{written}");
+        assert_eq!(written["hive_url"], DEFAULT_HIVE_URL);
+        assert_eq!(written["registry_url_override"], "http://localhost:8080");
+        let reloaded: HiveSettingsModel = serde_json::from_value(written).unwrap();
+        assert_eq!(reloaded.registry_url_override, old.registry_url_override);
     }
 
     /// The developer override changes the registry only, never the address
