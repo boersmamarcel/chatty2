@@ -2,7 +2,7 @@ use crate::chatty::services::mcp_service::McpService;
 use crate::settings::controllers::module_settings_controller;
 use crate::settings::models::AgentConfigNotifier;
 use crate::settings::models::marketplace_state::MarketplaceState;
-use chatty_core::hive::{HiveRegistryClient, HiveSession, SessionState, TokenPair};
+use chatty_core::hive::{ClientError, HiveRegistryClient, HiveSession, SessionState, TokenPair};
 use chatty_core::install;
 use chatty_core::services::A2aClient;
 use chatty_core::settings::models::a2a_store::A2aAgentStatus;
@@ -24,7 +24,7 @@ use tracing::{error, info, warn};
 ///
 /// Returns `true` if a new entry was added (caller should persist).
 pub fn ensure_default_hive_mcp(cx: &mut App) -> bool {
-    let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
+    let registry_url = cx.global::<HiveSettingsModel>().registry_url().to_string();
 
     let extensions = cx.global_mut::<ExtensionsModel>();
     let added = install::ensure_default_hive_mcp(&registry_url, extensions);
@@ -76,10 +76,7 @@ pub fn install_hive_session(cx: &mut App) -> Arc<HiveSession> {
     }
     let settings = cx.global::<HiveSettingsModel>();
     let pair = settings.token_pair();
-    let session = Arc::new(HiveSession::new(
-        settings.registry_url.clone(),
-        pair.clone(),
-    ));
+    let session = Arc::new(HiveSession::new(settings.hive_url.clone(), pair.clone()));
     if pair.is_none() && settings.token.is_some() {
         // An access token with no refresh token can't be kept alive: treat
         // the session as ended rather than showing a signed-in user whose
@@ -87,6 +84,9 @@ pub fn install_hive_session(cx: &mut App) -> Arc<HiveSession> {
         apply_session_state(SessionState::Revoked, cx);
     }
     cx.set_global(GlobalHiveSession(session.clone()));
+    if pair.is_some() {
+        refresh_hive_server(cx);
+    }
     // A chatty-server checks the same login session (AGE-835), so hosted
     // conversations authenticate with this one too. The store may not exist
     // yet; `ChattyApp::new` hands it the session when it creates it.
@@ -143,6 +143,7 @@ async fn sign_in(pair: TokenPair, username: String, email: String, cx: &mut Asyn
         save_hive_settings_async(settings.clone(), cx);
         sync_hive_token_to_mcp(Some(pair.token.clone()), cx);
         cx.global_mut::<MarketplaceState>().signed_out_of_hive = false;
+        cx.global_mut::<MarketplaceState>().account_error = None;
         cx.refresh_windows();
         install_hive_session(cx)
     });
@@ -152,56 +153,128 @@ async fn sign_in(pair: TokenPair, username: String, email: String, cx: &mut Asyn
     }
 }
 
-/// Log in to the Hive registry and persist credentials.
-pub fn login(email: String, password: String, cx: &mut App) {
-    let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
-    let client = HiveRegistryClient::new(&registry_url);
+/// What the user is told when sign-in or registration fails: plain words and
+/// the next step. The technical error goes to the log.
+fn sign_in_error(error: &ClientError, hive_url: &str) -> String {
+    match error {
+        ClientError::NotHive => format!(
+            "{hive_url} is not a Hive server. Check the Hive address in your settings \
+             file (hive_settings.json), then try again."
+        ),
+        ClientError::Offline(_) => format!(
+            "Could not reach {hive_url}. Check your connection and the Hive address, \
+             then try again."
+        ),
+        ClientError::InsecureUrl(_) => format!(
+            "{hive_url} must start with https:// unless it is on this computer or \
+             your own network. Change the Hive address in your settings file \
+             (hive_settings.json), then try again."
+        ),
+        ClientError::Unauthorized => {
+            "The email or password was not accepted. Check them and try again.".to_string()
+        }
+        ClientError::Http { status, .. } if *status == 401 || *status == 400 => {
+            "The email or password was not accepted. Check them and try again.".to_string()
+        }
+        ClientError::Http { status: 409, .. } => {
+            "That username or email is already registered. Sign in instead, or use a \
+             different one."
+                .to_string()
+        }
+        _ => format!("Could not finish signing in to {hive_url}. Try again in a moment."),
+    }
+}
 
-    cx.spawn(
-        async move |cx| match client.login(&email, &password).await {
+/// Record a sign-in failure where the Hive account panel shows it.
+fn show_sign_in_error(message: String, cx: &mut AsyncApp) {
+    cx.update(|cx| {
+        cx.global_mut::<MarketplaceState>().account_error = Some(message);
+        cx.refresh_windows();
+    })
+    .map_err(|e| warn!(error = ?e, "Failed to show the sign-in error"))
+    .ok();
+}
+
+/// A client for the account's Hive, after checking that the address really is
+/// a Hive server (`GET /api/version`). The version is kept for the account
+/// panel.
+async fn checked_hive_client(
+    hive_url: &str,
+    cx: &mut AsyncApp,
+) -> Result<HiveRegistryClient, ClientError> {
+    let client = HiveRegistryClient::new(hive_url);
+    let version = client.server_version().await?;
+    cx.update(|cx| {
+        cx.global_mut::<MarketplaceState>().hive_server = Some(version.server);
+        cx.refresh_windows();
+    })
+    .map_err(|e| warn!(error = ?e, "Failed to record the Hive server version"))
+    .ok();
+    Ok(client)
+}
+
+/// Look up the Hive server's version for the account panel; a server that
+/// cannot be asked just leaves the line out.
+fn refresh_hive_server(cx: &mut App) {
+    let hive_url = cx.global::<HiveSettingsModel>().hive_url.clone();
+    cx.spawn(async move |cx| {
+        let version = HiveRegistryClient::new(&hive_url).server_version().await;
+        cx.update(|cx| {
+            cx.global_mut::<MarketplaceState>().hive_server = version.ok().map(|v| v.server);
+            cx.refresh_windows();
+        })
+        .map_err(|e| warn!(error = ?e, "Failed to record the Hive server version"))
+        .ok();
+    })
+    .detach();
+}
+
+/// Log in to the account's Hive and persist credentials.
+pub fn login(email: String, password: String, cx: &mut App) {
+    let hive_url = cx.global::<HiveSettingsModel>().hive_url.clone();
+    cx.global_mut::<MarketplaceState>().account_error = None;
+
+    cx.spawn(async move |cx| {
+        let result = match checked_hive_client(&hive_url, cx).await {
+            Ok(client) => client.login(&email, &password).await,
+            Err(e) => Err(e),
+        };
+        match result {
             Ok(pair) => {
                 let username = pair.username().unwrap_or_default();
-                info!(username = %username, "Logged in to Hive registry");
+                info!(username = %username, "Logged in to Hive");
                 sign_in(pair, username, email, cx).await;
             }
             Err(e) => {
                 error!(error = ?e, "Hive login failed");
-                cx.update(|cx| {
-                    let state = cx.global_mut::<MarketplaceState>();
-                    state.set_error(format!("Login failed: {e}"));
-                    cx.refresh_windows();
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update UI after login error"))
-                .ok();
+                show_sign_in_error(sign_in_error(&e, &hive_url), cx);
             }
-        },
-    )
+        }
+    })
     .detach();
 }
 
-/// Register a new account on the Hive registry.
+/// Register a new account on the account's Hive.
 pub fn register(username: String, email: String, password: String, cx: &mut App) {
-    let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
-    let client = HiveRegistryClient::new(&registry_url);
+    let hive_url = cx.global::<HiveSettingsModel>().hive_url.clone();
+    cx.global_mut::<MarketplaceState>().account_error = None;
 
-    cx.spawn(
-        async move |cx| match client.register(&username, &email, &password).await {
+    cx.spawn(async move |cx| {
+        let result = match checked_hive_client(&hive_url, cx).await {
+            Ok(client) => client.register(&username, &email, &password).await,
+            Err(e) => Err(e),
+        };
+        match result {
             Ok(pair) => {
-                info!(username = %username, "Registered with Hive registry");
+                info!(username = %username, "Registered with Hive");
                 sign_in(pair, username, email, cx).await;
             }
             Err(e) => {
                 error!(error = ?e, "Hive registration failed");
-                cx.update(|cx| {
-                    let state = cx.global_mut::<MarketplaceState>();
-                    state.set_error(format!("Registration failed: {e}"));
-                    cx.refresh_windows();
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to update UI after registration error"))
-                .ok();
+                show_sign_in_error(sign_in_error(&e, &hive_url), cx);
             }
-        },
-    )
+        }
+    })
     .detach();
 }
 
@@ -217,15 +290,16 @@ pub fn logout(cx: &mut App) {
     settings.email = None;
     save_hive_settings_async(settings.clone(), cx);
     sync_hive_token_to_mcp(None, cx);
+    cx.global_mut::<MarketplaceState>().hive_server = None;
     cx.refresh_windows();
-    info!("Logged out from Hive registry");
+    info!("Logged out from Hive");
 }
 
 // ── Marketplace browsing ───────────────────────────────────────────────────
 
 /// Search the marketplace for extensions matching `query`.
 pub fn search_marketplace(query: String, cx: &mut App) {
-    let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
+    let registry_url = cx.global::<HiveSettingsModel>().registry_url().to_string();
     let client = HiveRegistryClient::new(&registry_url);
 
     {
@@ -290,7 +364,7 @@ pub fn install_extension(
         return;
     }
 
-    let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
+    let registry_url = cx.global::<HiveSettingsModel>().registry_url().to_string();
     let module_dir = configured_module_dir(cx);
     let mut client = HiveRegistryClient::new(&registry_url);
     if let Some(session) = hive_session(cx) {

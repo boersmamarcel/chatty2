@@ -15,13 +15,13 @@ use tokio::sync::OnceCell;
 
 static SESSION: OnceCell<Arc<HiveSession>> = OnceCell::const_new();
 
-/// The Hive URL: the desktop's `hive_settings`, which the TUI only reads.
-async fn registry_url() -> String {
+/// The Hive address: the desktop's `hive_settings`, which the TUI only reads.
+async fn hive_url() -> String {
     let desktop = chatty_core::hive_settings_repository()
         .load()
         .await
         .unwrap_or_default();
-    tui_hive::registry_url(&desktop).to_string()
+    tui_hive::hive_url(&desktop).to_string()
 }
 
 /// This process's session on the TUI's own pair. One per process: two
@@ -30,7 +30,7 @@ pub async fn session() -> Arc<HiveSession> {
     SESSION
         .get_or_init(|| async {
             tui_hive::open_session(
-                &registry_url().await,
+                &hive_url().await,
                 chatty_core::hive_tui_settings_repository(),
             )
             .await
@@ -48,7 +48,7 @@ pub async fn signed_in_session() -> Option<Arc<HiveSession>> {
 /// Prompt for email and password on the terminal (the password without
 /// echo), sign in, and return a one-line outcome.
 pub async fn login() -> Result<String> {
-    let url = registry_url().await;
+    let url = hive_url().await;
     let session = session().await;
     let (email, password) = tokio::task::spawn_blocking(move || -> Result<(String, String)> {
         let email = prompt_line("Hive email: ")?;

@@ -541,9 +541,10 @@ pub(crate) async fn install_plugin_meter(own_session: bool) {
     } else {
         None
     };
+    let hive = hive.unwrap_or_default();
     let meter = session_meter(
         &extensions.unwrap_or_default(),
-        &hive.unwrap_or_default().registry_url,
+        hive.registry_url(),
         session,
     )
     .await;
