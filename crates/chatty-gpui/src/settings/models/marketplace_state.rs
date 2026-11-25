@@ -30,6 +30,11 @@ pub struct MarketplaceState {
     /// The registry rejected the refresh token, so the Hive session ended
     /// without the user signing out. Cleared by the next sign-in.
     pub signed_out_of_hive: bool,
+    /// What went wrong the last time the user tried to sign in or register,
+    /// in words for the Hive account panel. Cleared by the next attempt.
+    pub account_error: Option<String>,
+    /// The Hive server's own version, once it has answered `/api/version`.
+    pub hive_server: Option<String>,
     pub tab: MarketplaceTab,
     /// The last team search's results.
     pub team_results: Vec<AgentSpecListing>,

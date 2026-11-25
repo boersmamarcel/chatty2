@@ -167,6 +167,27 @@ where
     }
 }
 
+// ── Server version ─────────────────────────────────────────────────────────
+
+/// What a Hive server says about itself at `GET /api/version`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerVersion {
+    /// The server's own version.
+    pub server: String,
+    /// The chatty2 revision the server was built from.
+    #[serde(default)]
+    pub chatty2_rev: Option<String>,
+    /// The wire version the server speaks.
+    #[serde(default)]
+    pub wire: Option<String>,
+    /// The oldest client version the server accepts.
+    #[serde(default)]
+    pub min_client: Option<String>,
+}
+
+/// Most a `/api/version` answer may weigh; a real one is a few hundred bytes.
+pub(crate) const MAX_VERSION_BYTES: usize = 16 * 1024;
+
 // ── Authentication ─────────────────────────────────────────────────────────
 
 /// The token pair `login`, `register` and `refresh` return: a one-hour access

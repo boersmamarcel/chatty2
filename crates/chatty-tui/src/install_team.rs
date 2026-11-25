@@ -41,7 +41,7 @@ pub async fn run(team_ref: &str) -> Result<()> {
         let listing = team_install::find_listing(&client, &name).await?;
         team_install::fetch_team(
             &client,
-            &hive.registry_url,
+            hive.registry_url(),
             &listing,
             version.as_deref(),
             &module_dir,

@@ -528,7 +528,7 @@ mod tests {
         let path = dir.path().join("hive_settings.json");
         std::fs::write(
             &path,
-            r#"{"registry_url":"https://hive.example","runner_url":"https://runner.example"}"#,
+            r#"{"hive_url":"https://hive.example","runner_url":"https://runner.example"}"#,
         )
         .unwrap();
         let repo = HiveSettingsJsonRepository::with_path_and_store(
@@ -546,7 +546,7 @@ mod tests {
         let store = Arc::new(InMemorySecretStore::new());
         store.set("hive/token", "jwt-keep").unwrap();
         store.set("hive/refresh_token", "rt-keep").unwrap();
-        let before = r#"{"registry_url":"https://hive.example","runner_url":"https://runner.example","token_ref":"hive/token","refresh_token_ref":"hive/refresh_token","username":"marcel"}"#;
+        let before = r#"{"hive_url":"https://hive.example","runner_url":"https://runner.example","token_ref":"hive/token","refresh_token_ref":"hive/refresh_token","username":"marcel"}"#;
         std::fs::write(&path, before).unwrap();
         let repo = HiveSettingsJsonRepository::with_path_and_store(path.clone(), store.clone());
 
@@ -564,7 +564,7 @@ mod tests {
         // What startup does next: save defaults (registry sync), save a
         // session-state change. Both are refused and touch nothing.
         let synced = HiveSettingsModel {
-            registry_url: "https://other.example".into(),
+            hive_url: "https://other.example".into(),
             ..Default::default()
         };
         assert!(repo.save(synced).await.is_err());
@@ -583,7 +583,7 @@ mod tests {
         // Once the line is removed the file loads and saves again.
         std::fs::write(
             &path,
-            r#"{"registry_url":"https://hive.example","token_ref":"hive/token","refresh_token_ref":"hive/refresh_token"}"#,
+            r#"{"hive_url":"https://hive.example","token_ref":"hive/token","refresh_token_ref":"hive/refresh_token"}"#,
         )
         .unwrap();
         let loaded = repo.load().await.unwrap();
@@ -604,7 +604,7 @@ mod tests {
         let store = Arc::new(InMemorySecretStore::new());
         let repo = HiveSettingsJsonRepository::with_path_and_store(path.clone(), store.clone());
         let initial: HiveSettingsModel = serde_json::from_str(
-            r#"{"registry_url":"https://hive.example","token":"jwt-old","refresh_token":"rt-old","username":"marcel"}"#,
+            r#"{"hive_url":"https://hive.example","token":"jwt-old","refresh_token":"rt-old","username":"marcel"}"#,
         )
         .unwrap();
         repo.save(initial).await.unwrap();
