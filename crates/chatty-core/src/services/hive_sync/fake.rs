@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use super::api::{ApiError, HiveConversationsApi};
-use super::wire::{ChangesPage, ConversationDetail, RemoteChange, RemoteSummary, TurnStatus};
+use super::wire::{
+    ChangesPage, ConversationDetail, FULL_SYNC_CURSOR, RemoteChange, RemoteSummary, TurnStatus,
+};
 use crate::models::conversation::Placement;
 use crate::repositories::conversation_repository::BoxFuture;
 
@@ -15,18 +17,21 @@ struct State {
     conversations: BTreeMap<String, (RemoteSummary, u64)>,
     /// Remote id → seq of its deletion.
     tombstones: BTreeMap<String, u64>,
-    /// Monotonic change counter; a cursor is the seq it was issued at.
+    /// Monotonic change counter; a cursor is the seq of the last change a
+    /// page listed.
     seq: u64,
-    /// Cursors at or below this answer 410, as if their tombstones were
-    /// pruned.
-    expired_through: u64,
-    page_size: usize,
+    /// The seq of the newest tombstone pruned. A cursor at or before it is
+    /// answered 410 if it was issued before that prune, so it may have
+    /// skipped the pruned deletion; a full sync (`since=0`) never is, and
+    /// neither is a cursor issued since, so a resync cannot loop.
+    pruned_through: u64,
 }
 
-/// An in-memory chatty-server conversation list.
-///
-/// Cursors are opaque strings (see `parse_cursor`); a page lists changes after the
-/// cursor in change order, at most `page_size` of them.
+/// An in-memory chatty-server conversation list, with HX-8's `since` mode:
+/// a cursor is `<seq of the last change listed>.<pruned_through when
+/// issued>`, a page lists the
+/// changes after the cursor in change order (tombstones included), at most
+/// `limit` of them, and an empty page echoes the cursor it was sent.
 #[derive(Clone)]
 pub struct FakeHiveConversations {
     state: Arc<Mutex<State>>,
@@ -41,17 +46,8 @@ impl Default for FakeHiveConversations {
 impl FakeHiveConversations {
     pub fn new() -> Self {
         Self {
-            state: Arc::new(Mutex::new(State {
-                page_size: 100,
-                ..State::default()
-            })),
+            state: Arc::new(Mutex::new(State::default())),
         }
-    }
-
-    /// At most `size` changes per page, to exercise paging.
-    pub fn with_page_size(self, size: usize) -> Self {
-        self.state.lock().unwrap().page_size = size.max(1);
-        self
     }
 
     /// Create a conversation, or save a new version of it.
@@ -91,60 +87,61 @@ impl FakeHiveConversations {
         }
     }
 
-    /// Prune every tombstone so far: every cursor issued until now expires.
+    /// Prune every tombstone so far: a cursor at or before the newest of
+    /// them now expires.
     pub fn prune_tombstones(&self) {
         let mut state = self.state.lock().unwrap();
+        if let Some(newest) = state.tombstones.values().copied().max() {
+            state.pruned_through = state.pruned_through.max(newest);
+        }
         state.tombstones.clear();
-        state.expired_through = state.seq;
     }
-}
-
-/// A cursor is `seq-<last change listed>@<seq when issued>`. Expiry goes by
-/// when it was issued, not by the change it points at: a full listing pages
-/// through old conversations, and its cursors must not expire for that.
-fn parse_cursor(cursor: &str) -> (u64, u64) {
-    let (after, issued) = cursor
-        .strip_prefix("seq-")
-        .and_then(|rest| rest.split_once('@'))
-        .unwrap_or(("0", "0"));
-    (after.parse().unwrap_or(0), issued.parse().unwrap_or(0))
 }
 
 impl HiveConversationsApi for FakeHiveConversations {
     fn changes_since(
         &self,
-        cursor: Option<&str>,
+        cursor: &str,
+        limit: usize,
     ) -> BoxFuture<'static, Result<ChangesPage, ApiError>> {
         let state = self.state.lock().unwrap();
-        let parsed = cursor.map(parse_cursor);
-        let result = if parsed.is_some_and(|(_, issued)| issued < state.expired_through) {
-            Err(ApiError::CursorExpired)
+        let parsed = if cursor == FULL_SYNC_CURSOR {
+            Some((0, state.pruned_through))
         } else {
-            let after = parsed.map_or(0, |(after, _)| after);
-            let mut changes: Vec<(u64, RemoteChange)> = state
-                .conversations
-                .values()
-                .filter(|(_, seq)| *seq > after)
-                .map(|(summary, seq)| (*seq, RemoteChange::Upsert(summary.clone())))
-                .collect();
-            // A listing from the start never carries tombstones: there is
-            // nothing for it to delete.
-            if cursor.is_some() {
-                changes.extend(
-                    state
-                        .tombstones
-                        .iter()
-                        .filter(|(_, seq)| **seq > after)
-                        .map(|(id, seq)| (*seq, RemoteChange::Deleted { id: id.clone() })),
-                );
+            cursor
+                .split_once('.')
+                .and_then(|(after, mark)| Some((after.parse().ok()?, mark.parse().ok()?)))
+        };
+        let result = match parsed {
+            None => Err(anyhow::anyhow!("422: malformed cursor {cursor:?}").into()),
+            Some((after, mark)) if mark < state.pruned_through && after <= state.pruned_through => {
+                Err(ApiError::CursorExpired)
             }
-            changes.sort_by_key(|(seq, _)| *seq);
-            changes.truncate(state.page_size);
-            let last = changes.last().map_or(after, |(seq, _)| *seq);
-            Ok(ChangesPage {
-                changes: changes.into_iter().map(|(_, change)| change).collect(),
-                next_cursor: Some(format!("seq-{last}@{}", state.seq)),
-            })
+            Some((after, _)) => {
+                let mut changes: Vec<(u64, RemoteChange)> = state
+                    .conversations
+                    .values()
+                    .filter(|(_, seq)| *seq > after)
+                    .map(|(summary, seq)| (*seq, RemoteChange::Upsert(summary.clone())))
+                    .chain(
+                        state
+                            .tombstones
+                            .iter()
+                            .filter(|(_, seq)| **seq > after)
+                            .map(|(id, seq)| (*seq, RemoteChange::Deleted { id: id.clone() })),
+                    )
+                    .collect();
+                changes.sort_by_key(|(seq, _)| *seq);
+                changes.truncate(limit);
+                let next_cursor = match changes.last() {
+                    Some((seq, _)) => format!("{seq}.{}", state.pruned_through),
+                    None => cursor.to_string(),
+                };
+                Ok(ChangesPage {
+                    changes: changes.into_iter().map(|(_, change)| change).collect(),
+                    next_cursor: Some(next_cursor),
+                })
+            }
         };
         Box::pin(async move { result })
     }

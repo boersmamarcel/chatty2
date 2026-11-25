@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use super::wire::{ChangesPage, RemoteChange, RemoteSummary, TurnStatus};
+use super::wire::{ChangesPage, FULL_SYNC_CURSOR, RemoteChange, RemoteSummary, TurnStatus};
 use crate::models::conversation::{ConversationSync, SyncedConversation};
 use crate::repositories::ConversationMetadata;
 
@@ -54,29 +54,29 @@ pub struct PageOutcome {
 
 /// The sync state machine for one server.
 ///
-/// It owns the cursor. A fresh engine has none, so its first pull lists every
-/// conversation from the start — a *full* pull, which is the only kind that
-/// can notice a deletion whose tombstone the server has already pruned, so
-/// it ends by deleting every synced row it did not see. The cursor lives in
-/// memory only: an app start is a full pull, which also covers anything
-/// deleted while the app was closed for longer than the tombstone window.
+/// It owns the cursor, which lives in memory only: a fresh engine starts at
+/// [`FULL_SYNC_CURSOR`], so every app start is a full sync, which lists every
+/// conversation and every tombstone the server still holds. Only a resync
+/// after a 410 also deletes the synced rows it did not see, since that is
+/// the one case where the server has pruned a tombstone this device missed.
 ///
 /// Only rows synced to *this* server are ever matched, updated or deleted. A
 /// local-only row is never touched, and neither is one synced elsewhere.
 #[derive(Clone, Debug)]
 pub struct SyncEngine {
     server_url: String,
-    cursor: Option<String>,
-    /// `Some` during a full pull: the remote ids it has listed so far.
-    full_pull: Option<HashSet<String>>,
+    cursor: String,
+    /// `Some` during a resync after a 410: the remote ids it has listed so
+    /// far.
+    resync: Option<HashSet<String>>,
 }
 
 impl SyncEngine {
     pub fn new(server_url: &str) -> Self {
         Self {
             server_url: server_url.trim_end_matches('/').to_string(),
-            cursor: None,
-            full_pull: Some(HashSet::new()),
+            cursor: FULL_SYNC_CURSOR.to_string(),
+            resync: None,
         }
     }
 
@@ -84,15 +84,16 @@ impl SyncEngine {
         &self.server_url
     }
 
-    /// Where the next page starts; `None` lists from the beginning.
-    pub fn cursor(&self) -> Option<&str> {
-        self.cursor.as_deref()
+    /// Where the next page starts; [`FULL_SYNC_CURSOR`] lists from the
+    /// beginning.
+    pub fn cursor(&self) -> &str {
+        &self.cursor
     }
 
     /// The server answered 410: start over from the beginning.
     pub fn cursor_expired(&mut self) -> Vec<SyncAction> {
-        self.cursor = None;
-        self.full_pull = Some(HashSet::new());
+        self.cursor = FULL_SYNC_CURSOR.to_string();
+        self.resync = Some(HashSet::new());
         vec![SyncAction::FullResync]
     }
 
@@ -110,18 +111,26 @@ impl SyncEngine {
         })
     }
 
-    /// Decide what one page of changes does to `local`.
+    /// Decide what one page of changes does to `local`. `limit` is the page
+    /// size the page was asked for.
     ///
     /// `local` must reflect every action returned for earlier pages of the
     /// same pull, so a conversation created on page one is matched, not
     /// created again, when page two edits it.
-    pub fn apply_page(&mut self, local: &[ConversationMetadata], page: ChangesPage) -> PageOutcome {
+    pub fn apply_page(
+        &mut self,
+        local: &[ConversationMetadata],
+        page: ChangesPage,
+        limit: usize,
+    ) -> PageOutcome {
         let mut actions = Vec::new();
-        // The end of the changes: an empty page, or a cursor that did not
-        // move (a server that would otherwise hand back the same page).
-        let caught_up = page.changes.is_empty()
-            || page.next_cursor.is_none()
-            || page.next_cursor.as_deref() == self.cursor.as_deref();
+        // The end of the changes: a page shorter than asked for (an empty
+        // one included), or a cursor that did not move.
+        let caught_up = page.changes.len() < limit
+            || page
+                .next_cursor
+                .as_deref()
+                .is_none_or(|next| next == self.cursor);
 
         for change in page.changes {
             let matched = self
@@ -135,7 +144,7 @@ impl SyncEngine {
                     }
                 }
                 RemoteChange::Upsert(summary) => {
-                    if let Some(seen) = &mut self.full_pull {
+                    if let Some(seen) = &mut self.resync {
                         seen.insert(summary.id.clone());
                     }
                     actions.extend(self.upsert(local, matched, summary));
@@ -144,11 +153,13 @@ impl SyncEngine {
         }
 
         if let Some(cursor) = page.next_cursor {
-            self.cursor = Some(cursor);
+            self.cursor = cursor;
         }
-        if caught_up && let Some(seen) = self.full_pull.take() {
-            // A full pull lists every conversation the server has; a synced
-            // row it never mentioned was deleted there.
+        if caught_up && let Some(seen) = self.resync.take() {
+            // The server pruned tombstones this device never saw, so a
+            // deletion can only show as an absence: a resync lists every
+            // conversation the server has, and a synced row it never
+            // mentioned was deleted there.
             actions.extend(
                 self.synced_here(local)
                     .filter(|(_, synced)| !seen.contains(&synced.remote_id))

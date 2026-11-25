@@ -90,7 +90,10 @@ async fn step(
     rows: &mut Vec<ConversationMetadata>,
     repo: &ConversationSqliteRepository,
 ) {
-    let actions = pull(api, engine, rows).await.expect("the pull succeeds");
+    // Two changes a page, so the steps page.
+    let actions = pull_pages(api, engine, rows, 2)
+        .await
+        .expect("the pull succeeds");
     apply_to_rows(rows, &actions);
     apply_to_repository(repo, &actions)
         .await
@@ -114,7 +117,7 @@ async fn step(
     }
     writeln!(log, "rows:").unwrap();
     log.push_str(&render_rows(rows));
-    writeln!(log, "cursor: {}", engine.cursor().unwrap_or("-")).unwrap();
+    writeln!(log, "cursor: {}", engine.cursor()).unwrap();
     writeln!(log).unwrap();
 }
 
@@ -126,7 +129,7 @@ async fn sync_engine_golden() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo = ConversationSqliteRepository::deferred_with_path(dir.path().join("c.db"));
 
-    let api = FakeHiveConversations::new().with_page_size(2);
+    let api = FakeHiveConversations::new();
     let mut engine = SyncEngine::new(&format!("{SERVER}/"));
 
     // This device: a local-only conversation, and one it took online before
@@ -155,7 +158,7 @@ async fn sync_engine_golden() {
     let mut log = String::new();
     step(
         &mut log,
-        "first pull (full)",
+        "first pull (since=0)",
         &api,
         &mut engine,
         &mut rows,
@@ -268,6 +271,34 @@ async fn rows_synced_elsewhere_are_left_alone() {
     assert!(actions.is_empty(), "{actions:?}");
 }
 
+/// A full sync at app start (`since=0`) applies the tombstones the server
+/// still holds, but deletes nothing merely because the listing did not name
+/// it: only a resync after a 410 does that.
+#[tokio::test]
+async fn a_start_full_sync_applies_tombstones_but_deletes_nothing_unseen() {
+    let api = FakeHiveConversations::new();
+    api.save("r-gone", "Deleted while closed", 1);
+    api.delete("r-gone");
+    let rows = vec![
+        ConversationMetadata {
+            sync: ConversationSync::cloud(SERVER, "r-gone", None),
+            ..local_only("gone", "Deleted while closed", 1)
+        },
+        ConversationMetadata {
+            sync: ConversationSync::cloud(SERVER, "r-unlisted", None),
+            ..local_only("unlisted", "Not in the listing", 2)
+        },
+    ];
+    let mut engine = SyncEngine::new(SERVER);
+    let actions = pull(&api, &mut engine, &rows).await.unwrap();
+    assert_eq!(
+        actions,
+        vec![SyncAction::ApplyTombstone {
+            local_id: "gone".into()
+        }]
+    );
+}
+
 /// A failed pull applies nothing, so it must not move the cursor past the
 /// changes it never delivered.
 #[tokio::test]
@@ -275,7 +306,7 @@ async fn a_failed_pull_keeps_the_cursor() {
     let api = FakeHiveConversations::new();
     let mut engine = SyncEngine::new(SERVER);
     pull(&api, &mut engine, &[]).await.unwrap();
-    let cursor = engine.cursor().map(str::to_string);
+    let cursor = engine.cursor().to_string();
 
     // Two expiries in one pull: the second is an error.
     api.save("r-1", "x", 1);
@@ -284,7 +315,8 @@ async fn a_failed_pull_keeps_the_cursor() {
     impl HiveConversationsApi for AlwaysGone {
         fn changes_since(
             &self,
-            _: Option<&str>,
+            _: &str,
+            _: usize,
         ) -> crate::repositories::conversation_repository::BoxFuture<
             'static,
             Result<ChangesPage, ApiError>,
@@ -305,7 +337,7 @@ async fn a_failed_pull_keeps_the_cursor() {
         pull(&AlwaysGone, &mut engine, &[]).await,
         Err(ApiError::CursorExpired)
     ));
-    assert_eq!(engine.cursor().map(str::to_string), cursor);
+    assert_eq!(engine.cursor(), cursor);
 }
 
 // ── Bringing a conversation back keeps its traces ───────────────────────────

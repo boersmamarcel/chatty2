@@ -12,8 +12,8 @@ use crate::session::hosted::{SIGN_IN_TO_HIVE, send_to_server};
 /// Why a read failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
-    /// 410: the cursor is older than the server's tombstone window. The
-    /// caller pulls again from the start.
+    /// 410 (`cursor_expired`): the cursor is at or before the newest
+    /// tombstone the server pruned. The caller pulls again from the start.
     #[error("the sync cursor expired; a full resync is needed")]
     CursorExpired,
     /// 401 after the session's one refresh.
@@ -28,11 +28,13 @@ pub enum ApiError {
 
 /// The server's conversation list and detail, as a sync pull reads them.
 pub trait HiveConversationsApi: Send + Sync {
-    /// One page of conversations changed after `cursor`; `None` lists from
-    /// the start.
+    /// At most `limit` conversations changed after `cursor`, oldest first;
+    /// [`FULL_SYNC_CURSOR`](super::wire::FULL_SYNC_CURSOR) lists from the
+    /// start.
     fn changes_since(
         &self,
-        cursor: Option<&str>,
+        cursor: &str,
+        limit: usize,
     ) -> BoxFuture<'static, Result<ChangesPage, ApiError>>;
 
     /// One conversation, in full.
@@ -95,20 +97,18 @@ impl HttpHiveConversationsApi {
 impl HiveConversationsApi for HttpHiveConversationsApi {
     fn changes_since(
         &self,
-        cursor: Option<&str>,
+        cursor: &str,
+        limit: usize,
     ) -> BoxFuture<'static, Result<ChangesPage, ApiError>> {
         let base = format!("{}/api/conversations", self.server_url);
-        let url = match cursor {
-            Some(cursor) => match reqwest::Url::parse_with_params(&base, [("since", cursor)]) {
-                Ok(url) => url.to_string(),
-                Err(error) => {
-                    let error = anyhow::anyhow!("bad server URL {base}: {error}");
-                    return Box::pin(async move { Err(error.into()) });
-                }
-            },
-            None => base,
-        };
-        self.get(url, false)
+        let limit = limit.to_string();
+        match reqwest::Url::parse_with_params(&base, [("since", cursor), ("limit", &limit)]) {
+            Ok(url) => self.get(url.to_string(), false),
+            Err(error) => {
+                let error = anyhow::anyhow!("bad server URL {base}: {error}");
+                Box::pin(async move { Err(error.into()) })
+            }
+        }
     }
 
     fn conversation(
@@ -146,6 +146,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/conversations"))
             .and(query_param("since", "c 1"))
+            .and(query_param("limit", "50"))
             .and(header("authorization", "Bearer tok"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "conversations": [{"id": "r-1", "deleted": true}],
@@ -157,7 +158,7 @@ mod tests {
         let api =
             HttpHiveConversationsApi::new(&format!("{}/", server.uri()), Some(signed_in(&server)));
 
-        let page = api.changes_since(Some("c 1")).await.expect("a page");
+        let page = api.changes_since("c 1", 50).await.expect("a page");
         assert_eq!(
             page.changes,
             vec![RemoteChange::Deleted { id: "r-1".into() }]
@@ -186,7 +187,7 @@ mod tests {
         let api = HttpHiveConversationsApi::new(&server.uri(), None);
 
         assert!(matches!(
-            api.changes_since(Some("old")).await,
+            api.changes_since("old", 50).await,
             Err(ApiError::CursorExpired)
         ));
         assert!(matches!(

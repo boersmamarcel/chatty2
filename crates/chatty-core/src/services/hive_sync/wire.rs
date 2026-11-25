@@ -6,11 +6,17 @@
 //! deliberately tolerant — unknown fields are ignored, and fields HX-8 adds
 //! are optional — so a server a release behind or ahead still decodes.
 //!
-//! * `GET /api/conversations?since=<cursor>` → [`ChangesPage`]: conversations
-//!   changed after the cursor, oldest first, each with its `version` and
-//!   `turn_status`; a deleted one as `{id, deleted: true}`; `next_cursor` at
-//!   the end. No `since` lists everything. A cursor older than the server's
-//!   tombstone window is answered 410.
+//! * `GET /api/conversations?since=<cursor>&limit=<n>` → [`ChangesPage`]:
+//!   conversations changed after the cursor, oldest first, each the full
+//!   summary plus `version` and `turn_status` (archived ones too, with
+//!   `archived: true`); a deleted one as `{id, deleted: true}`; and
+//!   `next_cursor`, which is never null in this mode and echoes the cursor
+//!   sent when the page is empty. A full sync is `since=0`
+//!   ([`FULL_SYNC_CURSOR`]); the plain list without `since` pages with a
+//!   different cursor that must never be sent as `since`. A cursor at or
+//!   before the newest tombstone the server has pruned is answered 410
+//!   (`cursor_expired`); `since` combined with another list filter, or a
+//!   malformed cursor, is a 422.
 //! * `GET /api/conversations/{id}` → [`ConversationDetail`], which adds
 //!   `version`, `placement` and `turn_status` to the conversation.
 
@@ -21,6 +27,13 @@ use serde::{Deserialize, Deserializer};
 
 use crate::models::conversation::Placement;
 use crate::repositories::ConversationData;
+
+/// The `since` cursor of a full sync: every conversation and every tombstone
+/// the server still holds.
+pub const FULL_SYNC_CURSOR: &str = "0";
+
+/// Changes asked for per page. A shorter page is the last one.
+pub const PAGE_LIMIT: usize = 100;
 
 /// Whether a conversation's turn is running, from the server's per-user
 /// registry of running turns (HX-8). Live state: shown, never persisted.

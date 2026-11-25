@@ -30,7 +30,10 @@ pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi};
 pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeHiveConversations;
-pub use wire::{ChangesPage, ConversationDetail, RemoteChange, RemoteSummary, TurnStatus};
+pub use wire::{
+    ChangesPage, ConversationDetail, FULL_SYNC_CURSOR, PAGE_LIMIT, RemoteChange, RemoteSummary,
+    TurnStatus,
+};
 
 use crate::models::conversation::ConversationSync;
 use crate::repositories::error::RepositoryResult;
@@ -59,12 +62,22 @@ pub async fn pull<A: HiveConversationsApi + ?Sized>(
     engine: &mut SyncEngine,
     local: &[ConversationMetadata],
 ) -> Result<Vec<SyncAction>, ApiError> {
+    pull_pages(api, engine, local, PAGE_LIMIT).await
+}
+
+/// [`pull`] with `limit` changes asked for per page.
+async fn pull_pages<A: HiveConversationsApi + ?Sized>(
+    api: &A,
+    engine: &mut SyncEngine,
+    local: &[ConversationMetadata],
+    limit: usize,
+) -> Result<Vec<SyncAction>, ApiError> {
     let start = engine.clone();
     let mut rows = local.to_vec();
     let mut actions = Vec::new();
     let mut restarted = false;
     for _ in 0..MAX_PAGES_PER_PULL {
-        let page = match api.changes_since(engine.cursor()).await {
+        let page = match api.changes_since(engine.cursor(), limit).await {
             Ok(page) => page,
             Err(ApiError::CursorExpired) if !restarted => {
                 restarted = true;
@@ -78,7 +91,7 @@ pub async fn pull<A: HiveConversationsApi + ?Sized>(
                 return Err(error);
             }
         };
-        let outcome = engine.apply_page(&rows, page);
+        let outcome = engine.apply_page(&rows, page, limit);
         apply_to_rows(&mut rows, &outcome.actions);
         actions.extend(outcome.actions);
         if outcome.caught_up {
