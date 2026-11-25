@@ -36,71 +36,94 @@ pub fn extensions_page() -> SettingPage {
 
 fn hive_account_group() -> SettingGroup {
     SettingGroup::new()
-        .title("Hive Account")
+        .title("Hive account")
         .items(vec![SettingItem::render(|_options, _window, cx| {
             let settings = cx.global::<HiveSettingsModel>();
             let is_logged_in = settings.token.is_some();
             let username = settings.username.clone().unwrap_or_default();
-            let registry_url = settings.registry_url.clone();
-            let signed_out_of_hive = cx.global::<MarketplaceState>().signed_out_of_hive;
+            let hive_url = settings.hive_url.clone();
+            let state = cx.global::<MarketplaceState>();
+            let signed_out_of_hive = state.signed_out_of_hive;
+            let account_error = state.account_error.clone();
+            let server_version = state.hive_server.clone();
+            let muted = cx.theme().muted_foreground;
 
-            if is_logged_in {
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().foreground)
-                            .child(format!("Signed in as {username}")),
-                    )
-                    .child(
+            let status = if is_logged_in {
+                format!("Signed in as {username}")
+            } else if signed_out_of_hive {
+                "Your Hive session ended. Sign in again to keep using your account.".to_string()
+            } else {
+                "Not signed in. Sign in to sync your conversations and install from the marketplace."
+                    .to_string()
+            };
+
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(if is_logged_in {
+                            cx.theme().foreground
+                        } else {
+                            muted
+                        })
+                        .child(status),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("Hive address: {hive_url}")),
+                )
+                .when_some(server_version.filter(|_| is_logged_in), |this, version| {
+                    this.child(
                         div()
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("({registry_url})")),
+                            .text_color(muted)
+                            .child(format!("Server version: {version}")),
                     )
-                    .child(
-                        Button::new("hive-logout")
-                            .small()
-                            .label("Sign Out")
-                            .on_click(|_, _window, cx| {
-                                extensions_controller::logout(cx);
-                            }),
-                    )
-                    .into_any_element()
-            } else {
-                h_flex()
-                    .w_full()
-                    .items_center()
-                    .gap_3()
-                    .child(
+                })
+                .when_some(account_error, |this, message| {
+                    this.child(
                         div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(if signed_out_of_hive {
-                                "Signed out of Hive — sign in again"
-                            } else {
-                                "Not signed in"
-                            }),
+                            .text_xs()
+                            .text_color(cx.theme().danger)
+                            .child(message),
                     )
-                    .child(Button::new("hive-login").small().label("Sign In").on_click(
-                        |_, window, cx| {
-                            show_login_dialog(window, cx);
-                        },
-                    ))
-                    .child(
-                        Button::new("hive-register")
-                            .small()
-                            .ghost()
-                            .label("Register")
-                            .on_click(|_, window, cx| {
-                                show_register_dialog(window, cx);
-                            }),
-                    )
-                    .into_any_element()
-            }
+                })
+                .child(if is_logged_in {
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("hive-logout")
+                                .small()
+                                .label("Sign out")
+                                .on_click(|_, _window, cx| {
+                                    extensions_controller::logout(cx);
+                                }),
+                        )
+                        .into_any_element()
+                } else {
+                    h_flex()
+                        .gap_2()
+                        .child(Button::new("hive-login").small().label("Sign in").on_click(
+                            |_, window, cx| {
+                                show_login_dialog(window, cx);
+                            },
+                        ))
+                        .child(
+                            Button::new("hive-register")
+                                .small()
+                                .ghost()
+                                .label("Create account")
+                                .on_click(|_, window, cx| {
+                                    show_register_dialog(window, cx);
+                                }),
+                        )
+                        .into_any_element()
+                })
+                .into_any_element()
         })])
 }
 
@@ -893,7 +916,7 @@ fn show_login_dialog(window: &mut Window, cx: &mut App) {
 
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
-            .title("Sign In to Hive")
+            .title("Sign in to Hive")
             .w(px(400.))
             .child(
                 v_flex()
@@ -930,7 +953,7 @@ fn show_register_dialog(window: &mut Window, cx: &mut App) {
 
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
-            .title("Register on Hive")
+            .title("Create a Hive account")
             .w(px(450.))
             .child(
                 v_flex()
@@ -942,7 +965,7 @@ fn show_register_dialog(window: &mut Window, cx: &mut App) {
             .child(
                 Button::new("do-register")
                     .primary()
-                    .label("Register")
+                    .label("Create account")
                     .on_click({
                         let username_input = username_input.clone();
                         let email_input = email_input.clone();

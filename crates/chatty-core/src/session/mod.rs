@@ -39,9 +39,12 @@
 mod delegation;
 mod event;
 mod handler;
-mod hosted;
+pub(crate) mod hosted;
+#[cfg(test)]
+mod hosted_recorded;
 pub mod mailbox;
 mod move_conversation;
+pub mod schema;
 /// Dispatching a turn to wherever its conversation runs (AGE-298).
 pub mod transport;
 

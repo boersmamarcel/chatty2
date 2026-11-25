@@ -30,7 +30,7 @@ pub fn refresh_installed_teams(cx: &mut App) {
 
 /// Search the published teams; an empty query lists them all.
 pub fn search_teams(query: String, cx: &mut App) {
-    let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
+    let registry_url = cx.global::<HiveSettingsModel>().registry_url().to_string();
     let client = HiveRegistryClient::new(&registry_url);
     refresh_installed_teams(cx);
     {
@@ -76,7 +76,7 @@ pub fn install_team(listing: AgentSpecListing, cx: &mut App) {
         cx.refresh_windows();
         return;
     };
-    let registry_url = cx.global::<HiveSettingsModel>().registry_url.clone();
+    let registry_url = cx.global::<HiveSettingsModel>().registry_url().to_string();
     let module_dir = PathBuf::from(&cx.global::<ModuleSettingsModel>().module_dir);
     let client = HiveRegistryClient::new(&registry_url).with_session(session);
     {

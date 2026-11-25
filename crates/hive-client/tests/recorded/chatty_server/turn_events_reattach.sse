@@ -1,0 +1,9 @@
+event: turn_attached
+data: {"dropped":0,"started_at_ms":1795627398000}
+
+event: text
+data: {"Text":"It starts with the title: chatty."}
+
+event: turn_ended
+data: "TurnEnded"
+

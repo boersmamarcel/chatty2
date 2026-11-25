@@ -1,0 +1,9 @@
+event: turn_started
+data: "TurnStarted"
+
+event: stream_error
+data: {"code":"workspace_push_failed","commit":"abc123","message":"the workspace could not be pushed"}
+
+event: turn_ended
+data: "TurnEnded"
+

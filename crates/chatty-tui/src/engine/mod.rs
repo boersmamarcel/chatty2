@@ -536,7 +536,7 @@ pub(crate) async fn install_plugin_meter(own_session: bool) {
     // The root process owns the sign-in and refreshes it. A participant
     // worker borrows the root's pair and never refreshes: a second process
     // spending the refresh token would be reuse (AGE-2084).
-    let registry_url = hive.unwrap_or_default().registry_url;
+    let registry_url = hive.unwrap_or_default().registry_url().to_string();
     let session = if own_session {
         Some(crate::hive_auth::session().await)
     } else {

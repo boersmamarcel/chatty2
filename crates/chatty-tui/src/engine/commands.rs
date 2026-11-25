@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use chatty_core::agent_spec::SpecListing;
 use chatty_core::hive::HiveSession;
-use chatty_core::models::conversation::ConversationMode;
+use chatty_core::models::conversation::ConversationSync;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
 use chatty_core::session::{
     BRING_BACK_SUMMARY, Delegation, HostedSession, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted,
@@ -449,17 +449,13 @@ impl ChatEngine {
     /// already a deliberate act and the terminal has just shown the table.
     pub fn online_status(&self) -> String {
         let mut out = String::new();
-        match self.conversation_mode() {
-            ConversationMode::Local => {
+        match self.conversation_sync().cloud_on() {
+            None => {
                 out.push_str("This conversation runs locally.\n");
                 out.push_str("  /online <server-url>  take it online\n\n");
                 push_move_summary(&mut out, &TAKE_ONLINE_SUMMARY);
             }
-            ConversationMode::Hosted {
-                server_url,
-                remote_id,
-                ..
-            } => {
+            Some((server_url, remote_id)) => {
                 out.push_str(&format!(
                     "This conversation runs on {server_url} (as {remote_id}).\n"
                 ));
@@ -470,11 +466,11 @@ impl ChatEngine {
         out
     }
 
-    /// Where this conversation's turns run.
-    pub fn conversation_mode(&self) -> ConversationMode {
+    /// Whether this conversation is synced, and where its turns run.
+    pub fn conversation_sync(&self) -> ConversationSync {
         self.session
             .conversation()
-            .map(|conv| conv.mode().clone())
+            .map(|conv| conv.sync().clone())
             .unwrap_or_default()
     }
 
@@ -488,7 +484,7 @@ impl ChatEngine {
     /// of is unreachable rather than half-adopted.
     pub async fn set_online(&mut self, target: Option<String>) -> Result<()> {
         let going_online = target.is_some();
-        let mode = self.conversation_mode();
+        let mode = self.conversation_sync();
         if let Some(reason) = refuse_reason(self.is_streaming, &mode, going_online) {
             self.add_system_message(reason.to_string());
             return Ok(());
@@ -514,13 +510,13 @@ impl ChatEngine {
                 .await
                 .context("Failed to take the conversation online")?;
                 let (url, remote_id) = new_mode
-                    .hosted_on()
+                    .cloud_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
-                    .expect("take_online returns a hosted mode");
+                    .expect("take_online returns a cloud placement");
 
                 self.hosted = Some(HostedSession::new(&url, &remote_id).with_auth(auth));
                 if let Some(conv) = self.session.conversation_mut() {
-                    conv.set_mode(new_mode);
+                    conv.set_sync(new_mode);
                 }
                 self.add_system_message(format!(
                     "This conversation now runs on {url}. Its history stays on this machine too — /online off brings it back."
@@ -528,7 +524,7 @@ impl ChatEngine {
             }
             None => {
                 let (server_url, remote_id) = mode
-                    .hosted_on()
+                    .cloud_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
                     .expect("refuse_reason rejected a local conversation already");
                 let remote = fetch_hosted(&server_url, &remote_id, auth.as_deref())
@@ -537,10 +533,10 @@ impl ChatEngine {
 
                 // This client applied every event of every hosted turn it was
                 // present for, so its local history is usually already
-                // complete. The server's history is only taken when it is
-                // longer: turns that happened while this client was closed.
-                // `import_history` then replaces every entry, so the local
-                // per-message traces are dropped in that case.
+                // complete. The server's history is only adopted when it is
+                // longer, which is exactly the case it exists to cover: turns
+                // that happened while this client was closed. Adopting it
+                // keeps the traces either side has (AGE-2088).
                 let local_len = self
                     .session
                     .conversation()
@@ -552,11 +548,13 @@ impl ChatEngine {
                         self.append_missed_message(message);
                     }
                     if let Some(conv) = self.session.conversation_mut() {
-                        conv.import_history(remote.messages);
+                        let local_id = conv.id().to_string();
+                        conv.replace_from_remote(remote.to_conversation_data(&local_id))
+                            .context("Failed to adopt the hosted conversation's history")?;
                     }
                 }
                 if let Some(conv) = self.session.conversation_mut() {
-                    conv.set_mode(ConversationMode::Local);
+                    conv.set_sync(ConversationSync::LocalOnly);
                 }
                 self.hosted = None;
                 self.add_system_message(match missed {

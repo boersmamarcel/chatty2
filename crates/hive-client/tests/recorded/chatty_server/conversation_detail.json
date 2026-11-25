@@ -1,0 +1,61 @@
+{
+  "id": "c-1",
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "What does the README say?",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "function": {
+            "arguments": {
+              "path": "README.md"
+            },
+            "name": "read_file"
+          },
+          "id": {
+            "provider": "call_1"
+          },
+          "type": "toolcall"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "call": {
+            "provider": "call_1"
+          },
+          "content": [
+            {
+              "text": "# chatty",
+              "type": "text"
+            }
+          ],
+          "name": "read_file",
+          "type": "toolresult"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "It starts with the title: chatty.",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    }
+  ],
+  "model_id": "anthropic/claude-sonnet",
+  "title": "Read the README",
+  "turn_active": false
+}
