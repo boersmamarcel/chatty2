@@ -28,22 +28,28 @@ pub struct PageFacts<'a> {
     pub html: &'a str,
 }
 
-/// Markers of a captcha frame, as (needle in lowercase HTML, vendor).
-const CAPTCHA_FRAMES: &[(&str, &str)] = &[
+/// Markers of a block page that only a check serves, as (needle in lowercase
+/// HTML, vendor). These count on any page.
+const BLOCK_MARKERS: &[(&str, &str)] = &[
+    ("geo.captcha-delivery.com/captcha", "datadome"),
+    ("captcha-delivery.com/captcha", "datadome"),
+    ("id=\"px-captcha\"", "perimeterx"),
+    ("captcha.px-cdn.net", "perimeterx"),
+];
+
+/// Markers of a captcha widget, as (needle in lowercase HTML, vendor). Shops
+/// load these scripts on ordinary pages too (reCAPTCHA v3, Turnstile on a
+/// login form), so they count only on a page the server refused (403, 429 or
+/// 503): there the widget is the check, not a side note.
+const CAPTCHA_WIDGETS: &[(&str, &str)] = &[
     ("google.com/recaptcha/", "recaptcha"),
     ("recaptcha.net/recaptcha/", "recaptcha"),
     ("hcaptcha.com/captcha/", "hcaptcha"),
-    ("newassets.hcaptcha.com", "hcaptcha"),
     (
         "challenges.cloudflare.com/cdn-cgi/challenge-platform",
         "turnstile",
     ),
     ("challenges.cloudflare.com/turnstile", "turnstile"),
-    ("captcha-delivery.com", "datadome"),
-    ("geo.captcha-delivery.com", "datadome"),
-    ("captcha.px-cdn.net", "perimeterx"),
-    ("perimeterx.net", "perimeterx"),
-    ("px-captcha", "perimeterx"),
 ];
 
 /// The check `page` is, if it is one. A plain 403/503 page without these
@@ -76,8 +82,19 @@ pub fn detect(page: &PageFacts<'_>) -> Option<SiteCheck> {
         });
     }
 
-    // A captcha frame on the page.
-    CAPTCHA_FRAMES
+    // A block page's own markers.
+    if let Some(&(_, vendor)) = BLOCK_MARKERS
+        .iter()
+        .find(|(needle, _)| html.contains(needle))
+    {
+        return Some(SiteCheck { vendor });
+    }
+
+    // A captcha widget, only where the server refused the page.
+    if !matches!(page.status, Some(403 | 429 | 503)) {
+        return None;
+    }
+    CAPTCHA_WIDGETS
         .iter()
         .find(|(needle, _)| html.contains(needle))
         .map(|&(_, vendor)| SiteCheck { vendor })
@@ -181,11 +198,45 @@ mod tests {
         for (html, want) in cases {
             let page = format!("<html><body>{html}</body></html>");
             assert_eq!(
+                vendor(facts(403, "https://shop.example/", "Shop", &page)),
+                Some(want),
+                "{html}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_page_marker_counts_on_any_status() {
+        for (html, want) in [
+            (
+                "<iframe src=\"https://geo.captcha-delivery.com/captcha/?initialCid=x\"></iframe>",
+                "datadome",
+            ),
+            ("<div id=\"px-captcha\"></div>", "perimeterx"),
+        ] {
+            let page = format!("<html><body>{html}</body></html>");
+            assert_eq!(
                 vendor(facts(200, "https://shop.example/", "Shop", &page)),
                 Some(want),
                 "{html}"
             );
         }
+    }
+
+    #[test]
+    fn an_ordinary_shop_page_with_captcha_or_sensor_scripts_is_not_a_check() {
+        let html = "<html><head><title>Boodschappen</title>\
+            <script src=\"https://www.google.com/recaptcha/api.js?render=k\"></script>\
+            <script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script>\
+            <script src=\"https://client.perimeterx.net/PX1/main.min.js\"></script>\
+            <script src=\"https://js.datadome.co/tags.js\"></script>\
+            <script src=\"/cdn-cgi/challenge-platform/scripts/jsd/main.js\"></script>\
+            </head><body><iframe src=\"https://www.google.com/recaptcha/api2/anchor?k=1&size=invisible\"></iframe>\
+            Producten</body></html>";
+        assert_eq!(
+            vendor(facts(200, "https://www.jumbo.com/", "Boodschappen", html)),
+            None
+        );
     }
 
     #[test]
