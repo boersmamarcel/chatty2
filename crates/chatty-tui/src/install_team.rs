@@ -49,9 +49,9 @@ pub async fn run(team_ref: &str) -> Result<()> {
         .await
     }
     .await;
-    // A refresh during the fetch rotated the pair; the session's saver writes
-    // it, so give that a moment before the process exits.
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // A refresh during the fetch rotated the pair; wait for the saver to
+    // write it before the process exits.
+    crate::hive_auth::flush().await;
     let team = team?;
 
     let record = team_install::apply_team(

@@ -251,3 +251,29 @@ async fn usage_events_survive_a_401() {
     assert_eq!(last["events"].as_array().unwrap().len(), 1);
     assert_eq!(last["events"][0]["module_name"], "m");
 }
+
+/// A borrowed session (a delegated worker's) uses the access token it was
+/// given as it is: even an expiring one never reaches `/api/auth/refresh`.
+#[tokio::test]
+async fn a_borrowed_session_never_refreshes() {
+    let server = MockServer::start().await;
+    mock_refresh(&server, "r1", "t2", "r2", 0).await;
+    mock_balance(&server, "t1", 200).await;
+
+    let session = Arc::new(HiveSession::borrowed(
+        server.uri(),
+        Some(pair("t1", "r1", TimeDelta::seconds(5))),
+    ));
+    assert_eq!(session.access_token().await.as_deref(), Some("t1"));
+    let client = HiveRegistryClient::new(server.uri()).with_session(session);
+    client.get_credit_balance().await.expect("balance");
+
+    let refreshes = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/api/auth/refresh")
+        .count();
+    assert_eq!(refreshes, 0);
+}

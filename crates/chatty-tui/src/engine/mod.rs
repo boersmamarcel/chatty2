@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
 use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
-use chatty_core::hive::ModuleMeter;
+use chatty_core::hive::{HiveSession, ModuleMeter};
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
@@ -533,22 +533,35 @@ pub(crate) async fn install_plugin_meter(own_session: bool) {
         chatty_core::extensions_repository().load(),
         chatty_core::hive_settings_repository().load(),
     );
-    // A participant worker has no sign-in of its own: the TUI's pair belongs
-    // to the root process, and a second process spending its refresh token
-    // would be reuse (AGE-2084).
+    // The root process owns the sign-in and refreshes it. A participant
+    // worker borrows the root's pair and never refreshes: a second process
+    // spending the refresh token would be reuse (AGE-2084).
+    let registry_url = hive.unwrap_or_default().registry_url().to_string();
     let session = if own_session {
         Some(crate::hive_auth::session().await)
     } else {
-        None
+        Some(Arc::new(HiveSession::borrowed(
+            registry_url.clone(),
+            owner_pair().await,
+        )))
     };
-    let hive = hive.unwrap_or_default();
-    let meter = session_meter(
-        &extensions.unwrap_or_default(),
-        hive.registry_url(),
-        session,
-    )
-    .await;
+    let meter = session_meter(&extensions.unwrap_or_default(), &registry_url, session).await;
     let _ = PLUGIN_METER.set(Arc::new(meter));
+}
+
+/// The pair of the process that owns the login: the TUI's when one is
+/// stored, else the desktop's.
+async fn owner_pair() -> Option<chatty_core::hive::TokenPair> {
+    if let Ok(tui) = chatty_core::hive_tui_settings_repository().load().await
+        && let Some(pair) = tui.token_pair()
+    {
+        return Some(pair);
+    }
+    chatty_core::hive_settings_repository()
+        .load()
+        .await
+        .ok()
+        .and_then(|desktop| desktop.token_pair())
 }
 
 /// Where a spec's plugins are found (PL-U2, AGE-616): the module

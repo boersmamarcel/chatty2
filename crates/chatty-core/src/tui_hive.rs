@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use hive_client::{HiveRegistryClient, HiveSession, SessionState};
+use tokio::sync::watch;
 
 use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::repositories::HiveTuiSettingsRepository;
@@ -26,13 +27,15 @@ pub const RUN_LOGIN: &str = "Not signed in to Hive. Run `chatty-tui login` (or /
 pub async fn open_session(
     hive_url: &str,
     repo: Arc<dyn HiveTuiSettingsRepository>,
-) -> Arc<HiveSession> {
+) -> (Arc<HiveSession>, SaveFlush) {
     let mut stored = repo.load().await.unwrap_or_default();
     let session = Arc::new(HiveSession::new(hive_url, stored.token_pair()));
     let mut changes = session.subscribe();
+    let (saved_tx, saved) = watch::channel(changes.borrow().clone());
     tokio::spawn(async move {
         while changes.changed().await.is_ok() {
-            let pair = match &*changes.borrow_and_update() {
+            let state = changes.borrow_and_update().clone();
+            let pair = match &state {
                 SessionState::SignedIn(pair) => Some(pair.clone()),
                 SessionState::SignedOut | SessionState::Revoked => None,
             };
@@ -40,9 +43,31 @@ pub async fn open_session(
             if let Err(e) = repo.save(stored.clone()).await {
                 tracing::warn!(error = ?e, "Failed to save the TUI's Hive sign-in");
             }
+            saved_tx.send_replace(state);
         }
     });
-    session
+    let flush = SaveFlush {
+        session: session.clone(),
+        saved,
+    };
+    (session, flush)
+}
+
+/// Waits for the saver [`open_session`] started to catch up with the session.
+#[derive(Clone)]
+pub struct SaveFlush {
+    session: Arc<HiveSession>,
+    saved: watch::Receiver<SessionState>,
+}
+
+impl SaveFlush {
+    /// Returns once the saver has handled the session's current state, so a
+    /// rotated pair is on disk before the process exits.
+    pub async fn flush(&self) {
+        let want = self.session.subscribe().borrow().clone();
+        let mut saved = self.saved.clone();
+        let _ = saved.wait_for(|state| *state == want).await;
+    }
 }
 
 /// Whether `session` holds a pair.
@@ -127,7 +152,7 @@ mod tests {
         tui_settings.set_token_pair(Some(&pair("tui-access-1", "tui-refresh-1", 0)));
         tui_repo.save(tui_settings).await.unwrap();
 
-        let session = open_session(hive_url(&desktop_settings), tui_repo.clone()).await;
+        let (session, flush) = open_session(hive_url(&desktop_settings), tui_repo.clone()).await;
         assert_eq!(
             session.access_token().await.as_deref(),
             Some("tui-access-2")
@@ -147,17 +172,10 @@ mod tests {
             "{bodies:?}"
         );
 
-        // The rotation is saved (by the background task).
-        let mut saved = None;
-        for _ in 0..50 {
-            let loaded = tui_repo.load().await.unwrap();
-            if loaded.refresh_token.as_deref() == Some("tui-refresh-2") {
-                saved = Some(loaded);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        assert!(saved.is_some(), "the rotated pair was not persisted");
+        // The rotation is saved once the flush returns.
+        flush.flush().await;
+        let saved = tui_repo.load().await.unwrap();
+        assert_eq!(saved.refresh_token.as_deref(), Some("tui-refresh-2"));
 
         // The desktop's own file is untouched.
         let desktop_after = desktop.load().await.unwrap();
@@ -177,9 +195,28 @@ mod tests {
                 dir.path().join("hive_tui_settings.json"),
             ),
         );
-        let session = open_session("http://127.0.0.1:1", repo).await;
+        let (session, _flush) = open_session("http://127.0.0.1:1", repo).await;
         assert!(!is_signed_in(&session));
         assert_eq!(session.access_token().await, None);
+    }
+
+    /// A login's pair is on disk when `flush` returns, with no sleep.
+    #[tokio::test]
+    async fn flush_waits_for_the_login_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo: Arc<dyn HiveTuiSettingsRepository> = Arc::new(
+            crate::settings::repositories::HiveTuiSettingsJsonRepository::with_path(
+                dir.path().join("hive_tui_settings.json"),
+            ),
+        );
+        let (session, flush) = open_session("http://127.0.0.1:1", repo.clone()).await;
+        session
+            .sign_in(pair("login-access", "login-refresh", 60))
+            .await;
+        flush.flush().await;
+        let saved = repo.load().await.unwrap();
+        assert_eq!(saved.refresh_token.as_deref(), Some("login-refresh"));
+        assert_eq!(saved.token.as_deref(), Some("login-access"));
     }
 
     /// AGE-2085: `/login` refuses an address that is not a Hive server before
