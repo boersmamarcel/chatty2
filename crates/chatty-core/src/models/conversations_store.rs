@@ -1037,7 +1037,8 @@ mod tests {
                 .answer_broker_input("approval-1", InputAnswer::Approval(true))
                 .is_none()
         );
-        store.remember_input("a", "approval-1", "n1");
+        let nonce = uuid::Uuid::new_v4().to_string();
+        store.remember_input("a", "approval-1", &nonce);
         assert!(
             store
                 .answer_broker_input("approval-1", InputAnswer::Approval(true))

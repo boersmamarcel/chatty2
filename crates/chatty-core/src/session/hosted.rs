@@ -1744,18 +1744,22 @@ mod tests {
     #[tokio::test]
     async fn pending_inputs_decode_by_their_tag_and_an_answer_carries_its_nonce() {
         let server = MockServer::start().await;
+        // Generated per run: the point is that the answer echoes the nonce it
+        // was given, whatever it is.
+        let n1 = uuid::Uuid::new_v4().to_string();
+        let n2 = uuid::Uuid::new_v4().to_string();
         Mock::given(method("GET"))
             .and(path("/api/conversations/c-1/inputs"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"id": "approval-1", "nonce": "n1", "request": {"approval": approval()}},
-                {"id": "question-2", "nonce": "n2", "request": {"question": question()}},
+                {"id": "approval-1", "nonce": n1, "request": {"approval": approval()}},
+                {"id": "question-2", "nonce": n2, "request": {"question": question()}},
             ])))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
             .and(path("/api/conversations/c-1/inputs/approval-1"))
             .and(body_json(
-                serde_json::json!({"nonce": "n1", "approved": true}),
+                serde_json::json!({"nonce": n1, "approved": true}),
             ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
             .expect(1)
@@ -1764,7 +1768,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/conversations/c-1/inputs/question-2"))
             .and(body_json(serde_json::json!({
-                "nonce": "n2",
+                "nonce": n2,
                 "answers": [{"id": "q1", "answer": "SQLite", "custom": false}]
             })))
             .respond_with(ResponseTemplate::new(409))
@@ -1776,12 +1780,12 @@ mod tests {
         let inputs = session.fetch_inputs().await.unwrap();
         assert_eq!(inputs.len(), 2);
         assert_eq!(inputs[0].request, BrokerRequest::Approval(approval()));
-        assert_eq!(inputs[1].nonce, "n2");
+        assert_eq!(inputs[1].nonce, n2);
         assert_eq!(inputs[1].request, BrokerRequest::Question(question()));
 
         assert_eq!(
             session
-                .answer_input("approval-1", "n1", InputAnswer::Approval(true))
+                .answer_input("approval-1", &n1, InputAnswer::Approval(true))
                 .await,
             AnswerOutcome::Accepted
         );
@@ -1793,7 +1797,7 @@ mod tests {
         }];
         assert_eq!(
             session
-                .answer_input("question-2", "n2", InputAnswer::Answers(answers))
+                .answer_input("question-2", &n2, InputAnswer::Answers(answers))
                 .await,
             AnswerOutcome::Stale
         );
