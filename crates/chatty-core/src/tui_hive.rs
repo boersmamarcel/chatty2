@@ -188,7 +188,8 @@ mod tests {
     async fn sign_in_refuses_an_address_that_is_not_a_hive_server() {
         let server = MockServer::start().await; // answers 404 to everything
         let session = HiveSession::new(server.uri(), None);
-        let err = sign_in(&session, &server.uri(), "me@example.com", "pw")
+        let password = uuid::Uuid::new_v4().to_string();
+        let err = sign_in(&session, &server.uri(), "me@example.com", &password)
             .await
             .expect_err("not a Hive server");
         assert!(format!("{err:#}").contains("not a Hive server"), "{err:#}");
