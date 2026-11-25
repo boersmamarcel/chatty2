@@ -18,17 +18,17 @@ use crate::settings::repositories::HiveTuiSettingsRepository;
 /// What a signed-out TUI tells the user instead of surfacing a 401.
 pub const RUN_LOGIN: &str = "Not signed in to Hive. Run `chatty-tui login` (or /login).";
 
-/// The TUI's session against `registry_url`, starting from the pair it
+/// The TUI's session against `hive_url`, starting from the pair it
 /// persisted last time. Every later change (a refresh, a login, a logout, a
 /// revocation) is saved by a background task, so a rotated refresh token is
 /// never lost. Make one per process and share it: two sessions would spend
 /// the same refresh token twice.
 pub async fn open_session(
-    registry_url: &str,
+    hive_url: &str,
     repo: Arc<dyn HiveTuiSettingsRepository>,
 ) -> Arc<HiveSession> {
     let mut stored = repo.load().await.unwrap_or_default();
-    let session = Arc::new(HiveSession::new(registry_url, stored.token_pair()));
+    let session = Arc::new(HiveSession::new(hive_url, stored.token_pair()));
     let mut changes = session.subscribe();
     tokio::spawn(async move {
         while changes.changed().await.is_ok() {
@@ -51,13 +51,19 @@ pub fn is_signed_in(session: &HiveSession) -> bool {
 }
 
 /// Sign in with email and password and install the pair on `session`.
+/// The address must answer `GET /api/version` like a Hive server first
+/// (AGE-2085), the same check the desktop makes.
 pub async fn sign_in(
     session: &HiveSession,
-    registry_url: &str,
+    hive_url: &str,
     email: &str,
     password: &str,
 ) -> Result<()> {
-    let pair = HiveRegistryClient::new(registry_url)
+    let client = HiveRegistryClient::new(hive_url);
+    client.server_version().await.with_context(|| {
+        format!("Could not use {hive_url}; check the Hive address in hive_settings.json")
+    })?;
+    let pair = client
         .login(email, password)
         .await
         .context("Hive sign-in failed")?;
@@ -65,9 +71,9 @@ pub async fn sign_in(
     Ok(())
 }
 
-/// The Hive URL: the desktop's `hive_settings`, which the TUI only reads.
-pub fn registry_url(desktop: &HiveSettingsModel) -> &str {
-    &desktop.registry_url
+/// The Hive address: the desktop's `hive_settings`, which the TUI only reads.
+pub fn hive_url(desktop: &HiveSettingsModel) -> &str {
+    &desktop.hive_url
 }
 
 #[cfg(test)]
@@ -105,7 +111,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let desktop = HiveSettingsJsonRepository::with_path(dir.path().join("hive_settings.json"));
         let mut desktop_settings = HiveSettingsModel {
-            registry_url: server.uri(),
+            hive_url: server.uri(),
             ..Default::default()
         };
         desktop_settings.set_token_pair(Some(&pair("desktop-access", "desktop-refresh", 60)));
@@ -121,7 +127,7 @@ mod tests {
         tui_settings.set_token_pair(Some(&pair("tui-access-1", "tui-refresh-1", 0)));
         tui_repo.save(tui_settings).await.unwrap();
 
-        let session = open_session(registry_url(&desktop_settings), tui_repo.clone()).await;
+        let session = open_session(hive_url(&desktop_settings), tui_repo.clone()).await;
         assert_eq!(
             session.access_token().await.as_deref(),
             Some("tui-access-2")
@@ -174,5 +180,22 @@ mod tests {
         let session = open_session("http://127.0.0.1:1", repo).await;
         assert!(!is_signed_in(&session));
         assert_eq!(session.access_token().await, None);
+    }
+
+    /// AGE-2085: `/login` refuses an address that is not a Hive server before
+    /// it sends a password.
+    #[tokio::test]
+    async fn sign_in_refuses_an_address_that_is_not_a_hive_server() {
+        let server = MockServer::start().await; // answers 404 to everything
+        let session = HiveSession::new(server.uri(), None);
+        let err = sign_in(&session, &server.uri(), "me@example.com", "pw")
+            .await
+            .expect_err("not a Hive server");
+        assert!(format!("{err:#}").contains("not a Hive server"), "{err:#}");
+        let received = server.received_requests().await.unwrap();
+        assert!(
+            received.iter().all(|r| r.url.path() == "/api/version"),
+            "no credentials were sent: {received:?}"
+        );
     }
 }

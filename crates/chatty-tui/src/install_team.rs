@@ -34,7 +34,7 @@ pub async fn run(team_ref: &str) -> Result<()> {
             chatty_core::tui_hive::RUN_LOGIN
         );
     };
-    let client = HiveRegistryClient::new(&hive.registry_url).with_session(session);
+    let client = HiveRegistryClient::new(hive.registry_url()).with_session(session);
     let module_dir = PathBuf::from(&module_settings.module_dir);
 
     let team = async {
