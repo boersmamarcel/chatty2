@@ -1,4 +1,5 @@
 use crate::assets::CustomIcon;
+use chatty_core::models::CloudMark;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::popover::Popover;
@@ -27,6 +28,8 @@ pub struct ConversationItem {
     cost_usd: Option<f64>,
     /// Runs on a `chatty-server` rather than in this process (AGE-298).
     is_hosted: bool,
+    /// What the cloud run is doing, when it is news (HX-10).
+    cloud_mark: Option<CloudMark>,
 }
 
 impl ConversationItem {
@@ -42,6 +45,7 @@ impl ConversationItem {
             is_collapsed: false,
             cost_usd: None,
             is_hosted: false,
+            cloud_mark: None,
         }
     }
 
@@ -91,6 +95,13 @@ impl ConversationItem {
 
     pub fn hosted(mut self, is_hosted: bool) -> Self {
         self.is_hosted = is_hosted;
+        self
+    }
+
+    /// The cloud run's status mark: running, waiting for the user, done or
+    /// failed (HX-10).
+    pub fn cloud_mark(mut self, mark: Option<CloudMark>) -> Self {
+        self.cloud_mark = mark;
         self
     }
 }
@@ -163,6 +174,24 @@ impl RenderOnce for ConversationItem {
                                     Icon::new(IconName::Globe)
                                         .size(px(11.0))
                                         .text_color(cx.theme().muted_foreground),
+                                )
+                            })
+                            .when_some(self.cloud_mark, |d, mark| {
+                                // Shown even when collapsed, like the globe:
+                                // a run waiting for an answer is the reason
+                                // to open the sidebar at all.
+                                let (label, color) = cloud_mark_look(mark, cx);
+                                d.child(
+                                    div()
+                                        .id(ElementId::Name(format!("cloud-mark-{}", self.id).into()))
+                                        .flex_shrink_0()
+                                        .size(px(8.0))
+                                        .rounded_full()
+                                        .bg(color)
+                                        .tooltip(move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(label)
+                                                .build(window, cx)
+                                        }),
                                 )
                             })
                             .child(
@@ -348,5 +377,15 @@ impl RenderOnce for ConversationItem {
                     )
                 },
             )
+    }
+}
+
+/// What a cloud mark says and the colour it is drawn in.
+pub fn cloud_mark_look(mark: CloudMark, cx: &App) -> (&'static str, Hsla) {
+    match mark {
+        CloudMark::Running => ("Running in the cloud", cx.theme().info),
+        CloudMark::WaitingForYou => ("Waiting for you", cx.theme().warning),
+        CloudMark::Done => ("Done", cx.theme().success),
+        CloudMark::Failed => ("Something went wrong", cx.theme().danger),
     }
 }

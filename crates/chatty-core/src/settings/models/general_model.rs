@@ -23,6 +23,20 @@ pub struct GeneralSettingsModel {
     /// same reason as `sidebar_mode`.
     #[serde(default)]
     pub terminal: TerminalSettings,
+    /// Show an OS notification when a cloud conversation this device opened
+    /// finishes or waits for the user (HX-12). On by default, and left out of
+    /// the file while on, so existing files and the settings snapshot's
+    /// canonical bytes are unchanged.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub notify_cloud_conversations: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Default scrollback of a dock terminal, in lines.
@@ -91,6 +105,7 @@ impl Default for GeneralSettingsModel {
             dark_mode: None,
             sidebar_mode: SidebarMode::default(),
             terminal: TerminalSettings::default(),
+            notify_cloud_conversations: true,
         }
     }
 }
@@ -133,5 +148,23 @@ mod tests {
         assert_eq!(loaded.terminal.share_default, TerminalShareDefault::ReadRun);
         let saved = serde_json::to_value(&loaded).unwrap();
         assert_eq!(saved["terminal"]["share_default"], "read_run");
+    }
+
+    /// HX-12: the notification switch is on for files saved before it
+    /// existed, and an on switch is not written out.
+    #[test]
+    fn cloud_notifications_default_on_and_are_not_serialized_while_on() {
+        let loaded: GeneralSettingsModel = serde_json::from_str(r#"{"font_size":14.0}"#).unwrap();
+        assert!(loaded.notify_cloud_conversations);
+        let json = serde_json::to_string(&loaded).unwrap();
+        assert!(!json.contains("notify_cloud_conversations"), "{json}");
+
+        let off = GeneralSettingsModel {
+            notify_cloud_conversations: false,
+            ..loaded
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        let back: GeneralSettingsModel = serde_json::from_str(&json).unwrap();
+        assert!(!back.notify_cloud_conversations);
     }
 }

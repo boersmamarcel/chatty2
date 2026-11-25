@@ -478,6 +478,16 @@ impl Render for SidebarView {
                     .collect()
             })
             .unwrap_or_default();
+        // The cloud run's status mark, from the last pull (HX-10).
+        let cloud_marks: std::collections::HashMap<String, chatty_core::models::CloudMark> = cx
+            .try_global::<crate::chatty::models::ConversationsStore>()
+            .map(|store| {
+                self.conversations
+                    .iter()
+                    .filter_map(|(id, _, _)| store.cloud_mark(id).map(|mark| (id.clone(), mark)))
+                    .collect()
+            })
+            .unwrap_or_default();
         // AGE-308: the move between local and hosted is developer-only until
         // online mode is account-scoped, so the menu simply does not offer it.
         let move_enabled = crate::chatty::controllers::app_controller::move_ui_enabled(cx);
@@ -607,6 +617,7 @@ impl Render for SidebarView {
                                                         }
                                                     })
                                                     .hosted(hosted_ids.contains(id))
+                                                    .cloud_mark(cloud_marks.get(id).copied())
                                                     .when(move_enabled, |item| {
                                                         item.on_move({
                                                             let entity = sidebar_entity.clone();

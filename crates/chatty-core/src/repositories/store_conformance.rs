@@ -398,6 +398,7 @@ mod tests {
                     dock_height: 420.0,
                     ..Default::default()
                 },
+                notify_cloud_conversations: true,
             },
         )
         .await;
