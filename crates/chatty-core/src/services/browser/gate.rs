@@ -81,6 +81,11 @@ impl SiteGate {
             .store(allow, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Whether risky requests are let through right now (an approved action).
+    pub fn allows_risky(&self) -> bool {
+        self.allow_risky.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Take (and reset) what was refused.
     pub fn take_outcome(&self) -> GateOutcome {
         std::mem::take(&mut *self.outcome.lock())
