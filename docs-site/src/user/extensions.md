@@ -6,7 +6,7 @@
 
 ## Hive marketplace
 
-Hive is the registry Chatty installs extensions from; the address it is talking to is shown next to **Hive Account**. **Sign In** or **Register** (username, email, password) to install from it; the session lasts thirty days.
+Hive is the registry Chatty installs extensions from; the **Hive account** panel shows who is signed in, the Hive address, the server's version and a **Sign out** button. **Sign In** or **Register** (username, email, password) to install from it; the session lasts thirty days. Before it sends a password, Chatty checks that the address answers as a Hive server; if not, you get "This address is not a Hive server". The address is one setting, `hive_url` in `hive_settings.json` (an older `registry_url` there is carried over to it); the panel shows it read-only.
 
 **Browse Marketplace** searches the registry. Each result shows its type and pricing; **Install** downloads it into your module directory (the one set in the module settings) and adds it to your **Installed** list, **Uninstall** removes it. Chatty refuses a module whose name or version is malformed, whose download is over 64 MiB, or that is published as remote-only (running modules on the Hive runner is no longer supported), and remembers each installed module's checksum: if its file changes on disk afterwards, it no longer loads. Installed items carry two kinds of badge:
 
