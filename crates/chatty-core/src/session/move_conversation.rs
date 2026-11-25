@@ -1,7 +1,7 @@
 //! Moving one conversation between local and hosted (AGE-298).
 //!
 //! Both directions are a transfer of history followed by a single flip of
-//! [`ConversationMode`]. That order is the whole safety property: nothing
+//! [`ConversationSync`]. That order is the whole safety property: nothing
 //! local is touched until the far side has accepted the history and named it,
 //! so a client killed mid-upload leaves the local conversation exactly as it
 //! was and no half-imported hosted one behind it. Re-running a move that
@@ -18,11 +18,10 @@
 use anyhow::{Context, Result, bail};
 use hive_client::HiveSession;
 use rig_core::completion::Message;
-use serde::Deserialize;
 
 use super::hosted::{SIGN_IN_TO_HIVE, send_to_server};
 
-use crate::models::conversation::ConversationMode;
+use crate::models::conversation::ConversationSync;
 
 /// What a move will and will not carry, for the confirmation the user sees.
 ///
@@ -67,24 +66,14 @@ pub const BRING_BACK_SUMMARY: MoveSummary = MoveSummary {
     )],
 };
 
-/// The server's `ConversationDetail`, as much of it as a move needs.
-#[derive(Debug, Deserialize)]
-pub struct RemoteConversation {
-    pub id: String,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub model_id: String,
-    #[serde(default)]
-    pub turn_active: bool,
-    #[serde(default)]
-    pub messages: Vec<Message>,
-}
+/// The server's `ConversationDetail`. Its shape lives with the rest of the
+/// sync API's in [`crate::services::hive_sync::wire`].
+pub type RemoteConversation = crate::services::hive_sync::ConversationDetail;
 
-/// Upload a local conversation's history and return the mode that now
-/// describes it.
+/// Upload a local conversation's history and return the sync state that now
+/// describes it: synced, with its turns in the cloud.
 ///
-/// The caller flips the conversation to the returned mode *and only then*
+/// The caller flips the conversation to the returned state *and only then*
 /// persists it. Until this returns `Ok`, nothing local has changed.
 ///
 /// `turn_active` is the caller's: the move is refused mid-turn because a
@@ -99,7 +88,7 @@ pub async fn take_online(
     title: &str,
     messages: &[Message],
     auth: Option<&HiveSession>,
-) -> Result<ConversationMode> {
+) -> Result<ConversationSync> {
     let http = reqwest::Client::new();
     let server_url = server_url.trim_end_matches('/');
     let url = format!("{server_url}/api/conversations");
@@ -126,11 +115,11 @@ pub async fn take_online(
         .await
         .context("the server's reply to the import was not a conversation")?;
 
-    Ok(ConversationMode::Hosted {
-        server_url: server_url.to_string(),
-        remote_id: created.id,
-        model_id: Some(created.model_id),
-    })
+    Ok(ConversationSync::cloud(
+        server_url,
+        created.id,
+        Some(created.model_id),
+    ))
 }
 
 /// Fetch a hosted conversation's history so the caller can rebuild the local
@@ -174,7 +163,7 @@ pub const HOSTED_DISABLED: &str = "Hosted conversations are not enabled.";
 /// Why a move cannot happen right now, in words the UI can show as-is.
 pub fn refuse_reason(
     turn_active: bool,
-    mode: &ConversationMode,
+    sync: &ConversationSync,
     going_online: bool,
 ) -> Option<&'static str> {
     if turn_active {
@@ -182,7 +171,7 @@ pub fn refuse_reason(
         // in the stores of the session that raised it.
         return Some("This conversation is mid-turn. Wait for it to finish, or stop it first.");
     }
-    match (mode.is_hosted(), going_online) {
+    match (sync.runs_in_cloud(), going_online) {
         (true, true) => Some("This conversation is already running online."),
         (false, false) => Some("This conversation is already running locally."),
         _ => None,
@@ -195,17 +184,13 @@ mod tests {
 
     #[test]
     fn a_move_is_refused_mid_turn_in_either_direction() {
-        let local = ConversationMode::Local;
+        let local = ConversationSync::LocalOnly;
         assert!(
             refuse_reason(true, &local, true)
                 .unwrap()
                 .contains("mid-turn")
         );
-        let hosted = ConversationMode::Hosted {
-            server_url: "http://localhost:8081".into(),
-            remote_id: "r-1".into(),
-            model_id: None,
-        };
+        let hosted = ConversationSync::cloud("http://localhost:8081", "r-1", None);
         assert!(
             refuse_reason(true, &hosted, false)
                 .unwrap()
@@ -217,23 +202,15 @@ mod tests {
     fn a_move_to_where_it_already_is_is_refused_not_repeated() {
         // Idempotence at the UI edge: taking an online conversation online
         // again must not mint a second hosted copy of it.
-        let hosted = ConversationMode::Hosted {
-            server_url: "http://localhost:8081".into(),
-            remote_id: "r-1".into(),
-            model_id: None,
-        };
+        let hosted = ConversationSync::cloud("http://localhost:8081", "r-1", None);
         assert!(refuse_reason(false, &hosted, true).is_some());
-        assert!(refuse_reason(false, &ConversationMode::Local, false).is_some());
+        assert!(refuse_reason(false, &ConversationSync::LocalOnly, false).is_some());
     }
 
     #[test]
     fn a_legitimate_move_is_allowed_in_both_directions() {
-        let hosted = ConversationMode::Hosted {
-            server_url: "http://localhost:8081".into(),
-            remote_id: "r-1".into(),
-            model_id: None,
-        };
-        assert!(refuse_reason(false, &ConversationMode::Local, true).is_none());
+        let hosted = ConversationSync::cloud("http://localhost:8081", "r-1", None);
+        assert!(refuse_reason(false, &ConversationSync::LocalOnly, true).is_none());
         assert!(refuse_reason(false, &hosted, false).is_none());
     }
 
@@ -285,7 +262,7 @@ mod tests {
         let mode = take_online(&server.uri(), "t", &[], Some(&hive))
             .await
             .expect("the server accepts an authenticated import");
-        assert_eq!(mode.hosted_on().map(|(_, id)| id), Some("r-9"));
+        assert_eq!(mode.cloud_on().map(|(_, id)| id), Some("r-9"));
     }
 
     /// Signed out, the move fails with the instruction that fixes it.

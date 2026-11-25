@@ -495,6 +495,7 @@ mod tests {
                 expires_at: Some("2026-09-27T10:00:00Z".parse().unwrap()),
                 username: Some("marcel".to_string()),
                 email: Some("marcel@example.com".to_string()),
+                ..Default::default()
             },
             mcp_servers: vec![McpServerConfig {
                 name: "server-a".to_string(),

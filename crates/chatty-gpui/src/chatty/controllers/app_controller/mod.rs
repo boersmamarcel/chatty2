@@ -47,6 +47,7 @@ use chatty_core::session::{
 mod conversation_ops;
 mod conversation_ops_modify;
 mod export_ops;
+mod hive_sync_ops;
 mod message_ops;
 mod message_ops_internals;
 mod slash_commands;
@@ -463,6 +464,8 @@ pub struct ChattyApp {
     /// Every live agent across conversations, for the footer chip and its
     /// panel (TB-6, AGE-748).
     pub running_agents: Entity<crate::chatty::views::running_agents::RunningAgentsModel>,
+    /// Pulls of the conversation list from the Hive account (AGE-2088).
+    hive_sync: hive_sync_ops::HiveSyncState,
 }
 
 impl ChattyApp {
@@ -510,6 +513,7 @@ impl ChattyApp {
             _mcp_notifier: mcp_notifier,
             active_invoke_agent_ids: std::collections::HashSet::new(),
             mailboxes: std::collections::HashMap::new(),
+            hive_sync: hive_sync_ops::HiveSyncState::default(),
         };
 
         // Store entity in global state for later access
@@ -524,6 +528,7 @@ impl ChattyApp {
 
         // Set up callbacks
         app.setup_callbacks(cx);
+        Self::start_hive_sync(window, cx);
 
         // Initialize chat input with available models
         app.initialize_models(cx);
