@@ -194,10 +194,9 @@ mod tests {
     /// new name.
     #[test]
     fn registry_url_moves_into_hive_url() {
-        let old: HiveSettingsModel = serde_json::from_str(
-            r#"{"registry_url":"https://old.example","username":"marcel"}"#,
-        )
-        .unwrap();
+        let old: HiveSettingsModel =
+            serde_json::from_str(r#"{"registry_url":"https://old.example","username":"marcel"}"#)
+                .unwrap();
         assert_eq!(old.hive_url, "https://old.example");
         assert_eq!(old.registry_url_override, None);
         assert_eq!(old.registry_url(), "https://old.example");

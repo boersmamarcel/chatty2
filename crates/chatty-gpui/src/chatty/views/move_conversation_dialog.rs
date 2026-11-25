@@ -20,8 +20,7 @@ use gpui::*;
 use gpui_component::{
     ActiveTheme, Sizable, WindowExt,
     button::{Button, ButtonVariants},
-    h_flex,
-    v_flex,
+    h_flex, v_flex,
 };
 
 use crate::chatty::controllers::GlobalChattyApp;
@@ -34,10 +33,7 @@ pub struct MoveConversationView {
 }
 
 impl MoveConversationView {
-    pub fn new(
-        conv_id: String,
-        going_online: bool,
-    ) -> Self {
+    pub fn new(conv_id: String, going_online: bool) -> Self {
         Self {
             conv_id,
             going_online,
