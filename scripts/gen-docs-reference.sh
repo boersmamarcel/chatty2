@@ -99,6 +99,7 @@ tools = [
     ("browser_resize", "web", "browser_tools.rs", "feature: browser"),
     ("browser_click", "web", "browser_tools.rs", "feature: browser; by snapshot ref; approval off localhost/workspace"),
     ("browser_type", "web", "browser_tools.rs", "feature: browser; by snapshot ref; refuses password/card fields; never submits"),
+    ("browser_select", "web", "browser_tools.rs", "feature: browser; by snapshot ref; chooses a dropdown option by label or value; approval off localhost/workspace"),
 ]
 for name, cat, src, notes in tools:
     print(f"| `{name}` | {cat} | `{src}` | {notes} |")
@@ -131,6 +132,8 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/stop <agent>` | Stop one agent of the swarm and every agent it started; the rest keeps running (TB-7, AGE-749) | — | Yes |
 | `/msg <agent> <text>` | Message a running agent; it reads the message at its next tool call (TM-5, AGE-750) | — | Yes |
 | `/online [url\|off]` | Where this conversation runs; move it to a `chatty-server` or back. Refuses unless `hosted_conversations_enabled` (developer setting, AGE-308) | — | Yes |
+| `/login` | Sign in to Hive as this terminal app: its own sign-in, separate from the desktop's (AGE-2084) | — | Yes |
+| `/logout` | Sign this terminal app out of Hive and revoke its refresh token | — | Yes |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads (`Ctrl+R`) | — | Yes |
 | `/paste [n]` | Print the full text of an elided long paste | — | Yes |
 | `/now <text>` | Cancel the running turn and send `<text>` next | — | Yes |
@@ -207,6 +210,7 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 | `training_settings.json` | object | `TrainingSettingsModel` | `TrainingSettingsJsonRepository` |
 | `user_secrets.json` | object | `UserSecretsModel` | `UserSecretsJsonRepository` |
 | `hive_settings.json` | object | `HiveSettingsModel` | `HiveSettingsJsonRepository` |
+| `hive_tui_settings.json` | object | `HiveSettingsModel` | `HiveTuiSettingsJsonRepository` |
 | `extensions.json` | object | `ExtensionsModel` | `ExtensionsJsonRepository` |
 | `token_tracking.json` | object | `TokenTrackingSettings` | `TokenTrackingJsonRepository` |
 | `module_settings.json` | object | `ModuleSettingsModel` | `ModuleSettingsJsonRepository` |
@@ -263,6 +267,15 @@ opt-in (`false`) for security.
 | `fetch_enabled` | `bool` | `true` | Built-in read-only HTTP GET |
 | `git_enabled` | `bool` | `false` | Opt-in; workspace must be a git repo |
 | `browser_enabled` | `bool` | `false` | Opt-in built-in browser tools; may download a pinned Chrome on first use |
+| `browser_no_sandbox` | `bool` | `false` | Launch Chrome with `--no-sandbox --disable-dev-shm-usage`, for a hosted guest where the VM is the sandbox (AGE-1912) |
+| `browser_upstream_proxy` | `Option<String>` | `null` | Send every non-loopback browser request through this upstream HTTP proxy instead of resolving names locally; the address policy is then the upstream's (AGE-1912) |
+| `browser_upstream_token` | `Option<String>` | `null` | Bearer token sent to the upstream proxy as `Proxy-Authorization`; never logged |
+| `browser_trace_path` | `Option<String>` | `null` | Write the browser session as a HAR 1.2 file at this path, relative to the workspace; `null` records nothing (AGE-1913) |
+| `browser_act_on` | `Vec<ActOnSite>` | `[]` | Sites the run may click and type on without asking, each `{origin, mode}` (a bare string is an origin with the default mode); only from settings, never a tool argument (AGE-1915) |
+| `browser_sessions` | `Vec<SavedSession>` | `[]` | Saved logins (`{origin, storage_state}`); only origins in `browser_act_on` are loaded. Secret; never logged |
+| `browser_unattended` | `bool` | `false` | A host says nobody is attached: a risky browser action returns `needs_approval` at once instead of waiting for a card (AGE-2038) |
+| `browser_proof_screenshots` | `bool` | `false` | The browser writes pictures into `outputs/`: the control at "needs your OK", the page after each click, the last page at close. Only on granted sites, never with a filled password field (AGE-2008) |
+| `browser_approved_action` | `Option<ApprovedBrowserAction>` | `null` | One risky action a person approved (`{origin, action, url}`); the browser lets the matching action through once, then forgets it (AGE-2043) |
 | `allow_private_network_access` | `bool` | `false` | With internet access on, let the browser reach private/internal IPs (RFC-1918) on your own network; the SSRF guard refuses them otherwise. Cloud-metadata `169.254.0.0/16` stays refused regardless (AGE-459) |
 | `execute_code_enabled` | `bool` | `false` | Exposes `execute_code` to the model |
 | `docker_code_execution_enabled` | `bool` | `false` | Docker fallback for non-Monty code |
@@ -791,6 +804,7 @@ Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This pag
 | `user_secrets_repository()` | secrets | User-provided secret values |
 | `module_settings_repository()` | modules | WASM module settings |
 | `hive_settings_repository()` | hive | Hive registry / billing |
+| `hive_tui_settings_repository()` | hive TUI sign-in | The terminal app's own Hive token pair (`hive_tui_settings.json`), kept apart from the desktop's so neither replays the other's refresh token (AGE-2084); static `HIVE_TUI_REPOSITORY` |
 | `extensions_repository()` | extensions | Browser extension config |
 | `token_tracking_repository()` | token tracking | Compaction share / context-window thresholds (ADR-0007) |
 
@@ -806,6 +820,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | `PLUGIN_ENGINE` | `tools/plugin_tool.rs` | `OnceLock<wasmtime::Engine>` | One Wasmtime engine for every spec plugin instance (PL-U2); limits are per store |
 | `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
+| `CLIENTS` | `services/http_client.rs` | `LazyLock<Mutex<HashMap<(Kind, u64), reqwest::Client>>>` | One shared `reqwest::Client` per kind and timeout, so agents and tools reuse certificates and connections instead of rebuilding them |
 | `WRITE_SLOTS` | `settings/repositories/generic_json_repository.rs` | `LazyLock<Mutex<HashMap<PathBuf, WriteSlot>>>` | Per settings file, the last save written behind an async lock, so overlapping saves of one file never interleave and an older save never lands over a newer one (AGE-562) |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |
 | `LIVE_SANDBOXES` | `sandbox/manager.rs` | `LazyLock<Mutex<HashMap<u64, SandboxMap>>>` | Holds every live `SandboxManager`'s container map so `shutdown_all()` can destroy them at process exit — a manager's `Drop` can only spawn a detached task, which dies with the runtime |

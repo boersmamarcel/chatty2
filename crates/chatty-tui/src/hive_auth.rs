@@ -8,12 +8,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use chatty_core::hive::HiveSession;
-use chatty_core::tui_hive;
+use chatty_core::tui_hive::{self, SaveFlush};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use tokio::sync::OnceCell;
 
-static SESSION: OnceCell<Arc<HiveSession>> = OnceCell::const_new();
+static SESSION: OnceCell<(Arc<HiveSession>, SaveFlush)> = OnceCell::const_new();
 
 /// The Hive URL: the desktop's `hive_settings`, which the TUI only reads.
 async fn registry_url() -> String {
@@ -27,6 +27,15 @@ async fn registry_url() -> String {
 /// This process's session on the TUI's own pair. One per process: two
 /// sessions would spend the same refresh token twice.
 pub async fn session() -> Arc<HiveSession> {
+    session_and_flush().await.0
+}
+
+/// Wait until every change to the session is saved, before the process exits.
+pub async fn flush() {
+    session_and_flush().await.1.flush().await;
+}
+
+async fn session_and_flush() -> (Arc<HiveSession>, SaveFlush) {
     SESSION
         .get_or_init(|| async {
             tui_hive::open_session(
@@ -72,9 +81,9 @@ pub async fn logout() -> String {
 /// `chatty-tui login`: sign in, then exit.
 pub async fn run_login() -> Result<()> {
     let outcome = login().await;
-    // Give the session's saver a moment to write the pair before exit.
+    // The pair must be on disk before exit.
     if outcome.is_ok() {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        flush().await;
     }
     println!("{}", outcome?);
     Ok(())
