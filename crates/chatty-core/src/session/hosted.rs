@@ -193,27 +193,56 @@ impl HostedSession {
 
         Ok(async move {
             emit(SessionEvent::TurnStarted);
-            let sent = drive_turn(
-                &http,
-                auth.as_deref(),
-                &url,
-                body,
-                &cancel_flag,
-                &mut emit,
-                &frame_sink,
-            );
-            if let Err(error) = sent.await {
-                emit(SessionEvent::Error(error));
+            // The server's stream carries its own `TurnStarted` and
+            // `TurnEnded` (the wire is a serialization of `SessionEvent`), so
+            // forwarding both and adding ours would hand the owner two of each
+            // and finalize the turn twice. The client's `TurnStarted` is
+            // already out; the server's `TurnEnded` is the one, emitted where
+            // the server put it so a `FollowUp` after it stays after it. Ours
+            // is only for a turn the server never ended.
+            let mut ended = false;
+            let sent = {
+                let mut forward = |event: SessionEvent| match event {
+                    SessionEvent::TurnStarted => {}
+                    SessionEvent::TurnEnded => {
+                        if !ended {
+                            ended = true;
+                            turn_active.store(false, Ordering::Relaxed);
+                            emit(SessionEvent::TurnEnded);
+                        }
+                    }
+                    other => emit(other),
+                };
+                drive_turn(
+                    &http,
+                    auth.as_deref(),
+                    &url,
+                    body,
+                    &cancel_flag,
+                    &mut forward,
+                    &frame_sink,
+                )
+                .await
+            };
+            if let Err(error) = sent {
+                if ended {
+                    tracing::warn!(%error, "a hosted turn's stream failed after it ended");
+                } else {
+                    emit(SessionEvent::Error(error));
+                }
             }
-            // Released before `TurnEnded`, so an owner that starts the next
-            // turn from its finalize — which the todo protocol's follow-up
-            // does — is not refused by a turn that has already finished.
-            turn_active.store(false, Ordering::Relaxed);
-            // The local session emits `TurnEnded` on every path, including the
-            // ones where the stream never opened. A hosted turn that the
-            // server never accepted must look the same to the owner, or the
-            // frontend never finalizes and the user message dangles.
-            emit(SessionEvent::TurnEnded);
+            if !ended {
+                // Released before `TurnEnded`, so an owner that starts the next
+                // turn from its finalize — which the todo protocol's follow-up
+                // does — is not refused by a turn that has already finished.
+                turn_active.store(false, Ordering::Relaxed);
+                // The local session emits `TurnEnded` on every path, including
+                // the ones where the stream never opened. A hosted turn that
+                // the server never accepted must look the same to the owner,
+                // or the frontend never finalizes and the user message
+                // dangles.
+                emit(SessionEvent::TurnEnded);
+            }
         })
     }
 

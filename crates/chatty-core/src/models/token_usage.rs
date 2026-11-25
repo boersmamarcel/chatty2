@@ -8,7 +8,7 @@ use crate::settings::models::providers_store::ProviderType;
 /// model id as it was sent to that provider. A usage line is a fact — tokens,
 /// model, time — and its price is looked up from this when it is read
 /// ([`price`]), never carried with it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelRef {
     pub provider: ProviderType,
     pub model_id: String,
@@ -51,7 +51,7 @@ impl From<&ModelRef> for chatty_fabric::wire::WireModelRef {
 /// whether the provider reports cache reads as a subset of its input count
 /// (OpenAI-compatible) or separately from it (Anthropic). The normalisation
 /// happens once, in `llm_service`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct ApiCallUsage {
     /// One-based index of the request within the exchange; 0 for the
     /// aggregate and for a call outside the model loop (a compaction
@@ -219,7 +219,7 @@ fn line_cost(line: &TokenUsage, book: &PriceBook) -> Option<f64> {
 }
 
 /// Token usage for a single message exchange
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TokenUsage {
     /// Uncached input tokens across every request in the exchange.
     ///

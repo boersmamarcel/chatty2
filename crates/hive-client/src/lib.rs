@@ -77,7 +77,7 @@ pub use error::ClientError;
 pub use metering::{CallUsage, ModuleMeter};
 pub use models::{
     BegunDownload, CreateExternalKey, ExternalKey, ExternalKeyScope, MAX_DOWNLOAD_BYTES,
-    StepUpAction, StepUpRequest, TokenPair,
+    ServerVersion, StepUpAction, StepUpRequest, TokenPair,
 };
 pub use secure_url::ensure_secure_url;
 pub use session::{HiveSession, SessionState, send_authed};

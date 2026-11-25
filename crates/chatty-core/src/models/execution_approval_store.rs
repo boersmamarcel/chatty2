@@ -15,7 +15,7 @@ pub enum ApprovalDecision {
 /// Which store an approval belongs to: a command (shell, git, browser,
 /// plugin) or a filesystem write. Spelled as `human.approve`'s `kind`
 /// (EN-2a).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalKind {
     Exec,
@@ -26,7 +26,7 @@ pub enum ApprovalKind {
 /// broker-assigned name and the chain of spec names it runs under, root
 /// first. The broker stamps it from the asking worker's connection
 /// (EN-2a), so the human's card names the agent that actually asked.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApprovalAsker {
     pub agent: String,
     pub chain: Vec<String>,
@@ -36,7 +36,7 @@ pub struct ApprovalAsker {
 /// the command or the path, a write's diff stat, and — once the broker has
 /// forwarded it to the root — who asked. The notification's `command` is the
 /// line a card shows.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ApprovalDetail {
     pub kind: ApprovalKind,
     pub command_or_path: String,

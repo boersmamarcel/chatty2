@@ -119,6 +119,32 @@ impl HiveRegistryClient {
         }
     }
 
+    // ── Server identity ────────────────────────────────────────────────────
+
+    /// Ask the server who it is (`GET /api/version`). An origin that does not
+    /// answer with a Hive version — another website, a plain 404, an HTML
+    /// page — is [`ClientError::NotHive`]; one that cannot be reached at all
+    /// is [`ClientError::Offline`].
+    pub async fn server_version(&self) -> Result<crate::models::ServerVersion, ClientError> {
+        use crate::net::{Overflow, read_capped};
+
+        self.ensure_secure()?;
+        let url = format!("{}/api/version", self.base_url);
+        let resp = self.http.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(ClientError::NotHive);
+        }
+        let body = read_capped(
+            resp.bytes_stream(),
+            crate::models::MAX_VERSION_BYTES,
+            Overflow::Error,
+            |_| {},
+        )
+        .await
+        .map_err(|_| ClientError::NotHive)?;
+        serde_json::from_slice(&body.bytes).map_err(|_| ClientError::NotHive)
+    }
+
     // ── Authentication ─────────────────────────────────────────────────────
 
     /// Register a new account on the Hive registry.
@@ -890,5 +916,52 @@ mod tests {
         // https:// is always fine, wherever the host is.
         let https = HiveRegistryClient::new("https://registry.hive.dev");
         assert!(https.ensure_secure().is_ok());
+    }
+
+    /// AGE-2085: sign-in checks the address first. A Hive server answers
+    /// `/api/version`; anything else is refused with a plain message.
+    #[tokio::test]
+    async fn server_version_accepts_hive_and_refuses_anything_else() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let hive = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "server": "1.4.0",
+                "chatty2_rev": "abc1234",
+                "wire": "v3",
+                "min_client": "0.9.0"
+            })))
+            .mount(&hive)
+            .await;
+        let version = HiveRegistryClient::new(hive.uri())
+            .server_version()
+            .await
+            .expect("a Hive server answers");
+        assert_eq!(version.server, "1.4.0");
+        assert_eq!(version.min_client.as_deref(), Some("0.9.0"));
+
+        // A server with no such route (404), a web page, and JSON that names
+        // no server are all "not a Hive server".
+        for response in [
+            ResponseTemplate::new(404),
+            ResponseTemplate::new(200).set_body_string("<html>hello</html>"),
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})),
+        ] {
+            let other = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/version"))
+                .respond_with(response)
+                .mount(&other)
+                .await;
+            let err = HiveRegistryClient::new(other.uri())
+                .server_version()
+                .await
+                .expect_err("not a Hive server");
+            assert!(matches!(err, ClientError::NotHive), "{err:?}");
+            assert_eq!(err.to_string(), "This address is not a Hive server");
+        }
     }
 }

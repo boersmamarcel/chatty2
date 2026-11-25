@@ -1656,8 +1656,10 @@ async fn start_mcp_servers() -> Option<McpService> {
     // A file that did not load was already reported at startup.
     let hive_settings = hive_result.unwrap_or_default();
 
-    let hive_added =
-        chatty_core::install::ensure_default_hive_mcp(&hive_settings.registry_url, &mut extensions);
+    let hive_added = chatty_core::install::ensure_default_hive_mcp(
+        hive_settings.registry_url(),
+        &mut extensions,
+    );
     if hive_added
         && !servers.iter().any(|s| s.name == "hive")
         && let Some(hive) = extensions

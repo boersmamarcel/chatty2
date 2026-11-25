@@ -95,9 +95,9 @@ impl ChattyApp {
         let Some(session) = hive_session(cx) else {
             return;
         };
-        // One Hive URL per account (plan D5): the registry's origin is the
-        // chatty-server's.
-        let server_url = settings.registry_url.trim_end_matches('/').to_string();
+        // One Hive URL per account (plan D5, AGE-2085): `hive_url` is the
+        // chatty-server's origin.
+        let server_url = settings.hive_url.trim_end_matches('/').to_string();
         let mut engine = match self.hive_sync.engine.take() {
             Some(engine) if engine.server_url() == server_url => engine,
             _ => SyncEngine::new(&server_url),
