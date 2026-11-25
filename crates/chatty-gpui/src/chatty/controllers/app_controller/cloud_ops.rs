@@ -197,7 +197,12 @@ impl ChattyApp {
                 store.turn_status(conv_id),
                 TurnStatus::Running | TurnStatus::WaitingForYou
             );
-        if busy && !self.turn_is_active(conv_id, cx) {
+        let cooling = self
+            .hive_sync
+            .attach_failed_at
+            .get(conv_id)
+            .is_some_and(|at| at.elapsed() < super::hive_sync_ops::ATTACH_COOLDOWN);
+        if busy && !cooling && !self.turn_is_active(conv_id, cx) {
             let accept_gap = self.hive_sync.accept_gap.remove(conv_id);
             self.attach_cloud_conversation(conv_id, accept_gap, cx);
         }
@@ -400,6 +405,11 @@ impl ChattyApp {
         accept_gap: bool,
         cx: &mut Context<Self>,
     ) {
+        if matches!(outcome, AttachOutcome::Lost | AttachOutcome::Busy) {
+            self.hive_sync
+                .attach_failed_at
+                .insert(conv_id.to_string(), std::time::Instant::now());
+        }
         cx.update_global::<ConversationsStore, _>(|store, _| match outcome {
             AttachOutcome::NeedsDetail => {}
             AttachOutcome::Lost => {

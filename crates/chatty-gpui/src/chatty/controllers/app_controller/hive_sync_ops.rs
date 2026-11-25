@@ -21,6 +21,10 @@ use super::*;
 use crate::settings::controllers::extensions_controller::hive_session;
 use crate::settings::models::hive_settings::HiveSettingsModel;
 
+/// How long a failed follow of a running turn waits before the next try; a
+/// pull after that retries it.
+pub(super) const ATTACH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What the app keeps between pulls.
 #[derive(Default)]
 pub(super) struct HiveSyncState {
@@ -45,6 +49,11 @@ pub(super) struct HiveSyncState {
     pub(super) accept_gap: HashSet<String>,
     /// Conversations whose detail is being fetched.
     pub(super) detail_in_flight: HashSet<String>,
+    /// When following a conversation's turn last failed (the connection was
+    /// lost, or the server had no room for another viewer). It is not
+    /// followed again for [`ATTACH_COOLDOWN`]: the server's status can say
+    /// "running" the whole time, and retrying at once would spin.
+    pub(super) attach_failed_at: std::collections::HashMap<String, std::time::Instant>,
 }
 
 impl ChattyApp {
