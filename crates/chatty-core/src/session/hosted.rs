@@ -36,6 +36,8 @@ use anyhow::{Context, Result, bail};
 use futures::StreamExt;
 use hive_client::HiveSession;
 
+use chatty_fabric::{ApprovalRequest, AskRequest};
+
 use super::event::SessionEvent;
 use super::{TurnInput, TurnKind};
 use crate::models::clarification_store::ClarificationAnswer;
@@ -74,6 +76,16 @@ pub struct HostedSession {
     /// `None` to send them bare (signed out, or a test against a server
     /// that does not check).
     auth: Option<Arc<HiveSession>>,
+    /// Where the frames that are not a [`SessionEvent`] go (HX-2). Logging
+    /// unless the owner installs its own with [`set_frame_sink`](Self::set_frame_sink).
+    frame_sink: FrameSink,
+}
+
+/// The owner's side channel for [`HostedFrame`]s that are not session events.
+pub type FrameSink = Arc<dyn Fn(HostedFrame) + Send + Sync>;
+
+fn log_frame(frame: HostedFrame) {
+    tracing::debug!(?frame, "hosted frame outside the session event stream");
 }
 
 impl HostedSession {
@@ -93,7 +105,14 @@ impl HostedSession {
             cancel_flag: None,
             turn_active: Arc::new(AtomicBool::new(false)),
             auth: None,
+            frame_sink: Arc::new(log_frame),
         }
+    }
+
+    /// Hand the frames that are not session events (broker approvals and
+    /// questions, connector sign-in, the attach marker) to `sink`.
+    pub fn set_frame_sink(&mut self, sink: FrameSink) {
+        self.frame_sink = sink;
     }
 
     /// Authenticate every request as the user signed in to `auth`.
@@ -167,13 +186,22 @@ impl HostedSession {
         );
         let http = self.http.clone();
         let auth = self.auth.clone();
+        let frame_sink = self.frame_sink.clone();
         self.cancel_flag = Some(cancel_flag.clone());
         self.turn_active.store(true, Ordering::Relaxed);
         let turn_active = self.turn_active.clone();
 
         Ok(async move {
             emit(SessionEvent::TurnStarted);
-            let sent = drive_turn(&http, auth.as_deref(), &url, body, &cancel_flag, &mut emit);
+            let sent = drive_turn(
+                &http,
+                auth.as_deref(),
+                &url,
+                body,
+                &cancel_flag,
+                &mut emit,
+                &frame_sink,
+            );
             if let Err(error) = sent.await {
                 emit(SessionEvent::Error(error));
             }
@@ -263,6 +291,7 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
     body: serde_json::Value,
     cancel_flag: &Arc<AtomicBool>,
     emit: &mut F,
+    frame_sink: &FrameSink,
 ) -> std::result::Result<(), StreamError> {
     let response = send_to_server(auth, url, || {
         http.post(url).timeout(CONNECT_TIMEOUT).json(&body)
@@ -310,14 +339,16 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
         })?;
         for (name, data) in frames.push(&chunk) {
             match decode_frame(&name, &data) {
-                Ok(Some(event)) => emit(event),
-                // A frame that carried no event is still reported: a hole the
-                // client cannot see is worse than an error it can.
-                Ok(None) => {}
-                Err(error) => emit(SessionEvent::Error(StreamError::new(
-                    StreamErrorKind::Other,
-                    error,
-                ))),
+                Ok(HostedFrame::Session(event)) => emit(event),
+                // A frame the server could not serialize is reported: a hole
+                // the client cannot see is worse than an error it can.
+                Ok(HostedFrame::StreamError(error)) | Err(error) => emit(SessionEvent::Error(
+                    StreamError::new(StreamErrorKind::Other, error),
+                )),
+                Ok(HostedFrame::Unknown(name)) => {
+                    tracing::debug!(%name, "skipping an unknown hosted frame");
+                }
+                Ok(frame) => frame_sink(frame),
             }
         }
     }
@@ -350,28 +381,143 @@ pub(crate) async fn send_to_server(
         .with_context(|| format!("could not reach the server at {url}"))
 }
 
-/// One `event:`/`data:` frame off the wire, as a [`SessionEvent`].
+/// One frame off a hosted turn's wire (HX-2).
 ///
-/// `Ok(None)` is a frame that carries no session event: the server's
-/// `stream_error`, or a future variant this build does not know. Both are
-/// reported to the caller rather than dropped.
-fn decode_frame(name: &str, data: &str) -> std::result::Result<Option<SessionEvent>, String> {
-    if name == "stream_error" {
-        let message = serde_json::from_str::<serde_json::Value>(data)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-            })
-            .unwrap_or_else(|| "the server could not serialize an event".to_string());
-        return Err(message);
+/// Most are a [`SessionEvent`]; the rest are the server's own, which a client
+/// that only knew session events used to turn into an error.
+#[derive(Debug, Clone)]
+pub enum HostedFrame {
+    Session(SessionEvent),
+    /// First frame of a re-attach: when the turn started and how many of its
+    /// earliest frames the server's attach buffer no longer holds.
+    Attached {
+        started_at_ms: u64,
+        dropped: u64,
+    },
+    /// An approval or question the root must answer, with the `nonce` its
+    /// answer has to carry.
+    BrokerInput {
+        id: String,
+        nonce: String,
+        request: BrokerRequest,
+    },
+    /// The input `id` was answered (here or elsewhere) or withdrawn.
+    BrokerInputSettled {
+        id: String,
+        outcome: InputOutcome,
+    },
+    ConnectorNeedsSignIn {
+        connector: String,
+    },
+    /// The server could not serialize an event; its message.
+    StreamError(String),
+    /// A frame name this build does not know. Skipped, never an error.
+    Unknown(String),
+}
+
+/// What a [`HostedFrame::BrokerInput`] asks. The live frames carry the request
+/// untagged (the frame name says which), so the kind is chosen at decode.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BrokerRequest {
+    Approval(ApprovalRequest),
+    Question(AskRequest),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputOutcome {
+    Approved,
+    Denied,
+    Answered,
+    Withdrawn,
+}
+
+/// One `event:`/`data:` frame off the wire.
+///
+/// `Err` is a frame of a known kind that does not decode. A name this build
+/// does not know, carrying well-formed JSON, is [`HostedFrame::Unknown`].
+fn decode_frame(name: &str, data: &str) -> std::result::Result<HostedFrame, String> {
+    use serde::Deserialize;
+    use serde::de::DeserializeOwned;
+
+    fn parse<T: DeserializeOwned>(name: &str, data: &str) -> std::result::Result<T, String> {
+        serde_json::from_str(data)
+            .map_err(|error| format!("could not decode a {name} event: {error}"))
     }
-    match serde_json::from_str::<SessionEvent>(data) {
-        Ok(event) => Ok(Some(event)),
-        Err(error) => Err(format!("could not decode a {name} event: {error}")),
+    #[derive(Deserialize)]
+    struct Attached {
+        started_at_ms: u64,
+        dropped: u64,
     }
+    #[derive(Deserialize)]
+    struct Input<R> {
+        id: String,
+        nonce: String,
+        request: R,
+    }
+    #[derive(Deserialize)]
+    struct Settled {
+        id: String,
+        outcome: InputOutcome,
+    }
+    #[derive(Deserialize)]
+    struct Connector {
+        connector: String,
+    }
+
+    Ok(match name {
+        "stream_error" => HostedFrame::StreamError(
+            serde_json::from_str::<serde_json::Value>(data)
+                .ok()
+                .and_then(|value| value.get("message")?.as_str().map(str::to_string))
+                .unwrap_or_else(|| "the server could not serialize an event".to_string()),
+        ),
+        "turn_attached" => {
+            let a: Attached = parse(name, data)?;
+            HostedFrame::Attached {
+                started_at_ms: a.started_at_ms,
+                dropped: a.dropped,
+            }
+        }
+        "broker_approval" => {
+            let i: Input<ApprovalRequest> = parse(name, data)?;
+            HostedFrame::BrokerInput {
+                id: i.id,
+                nonce: i.nonce,
+                request: BrokerRequest::Approval(i.request),
+            }
+        }
+        "broker_question" => {
+            let i: Input<AskRequest> = parse(name, data)?;
+            HostedFrame::BrokerInput {
+                id: i.id,
+                nonce: i.nonce,
+                request: BrokerRequest::Question(i.request),
+            }
+        }
+        "broker_input_settled" => {
+            let s: Settled = parse(name, data)?;
+            HostedFrame::BrokerInputSettled {
+                id: s.id,
+                outcome: s.outcome,
+            }
+        }
+        "connector_needs_sign_in" => {
+            let c: Connector = parse(name, data)?;
+            HostedFrame::ConnectorNeedsSignIn {
+                connector: c.connector,
+            }
+        }
+        _ => match serde_json::from_str::<SessionEvent>(data) {
+            Ok(event) => HostedFrame::Session(event),
+            // Well-formed JSON that is no session event is a frame from a
+            // newer server; garbage is still reported.
+            Err(_) if serde_json::from_str::<serde_json::Value>(data).is_ok() => {
+                HostedFrame::Unknown(name.to_string())
+            }
+            Err(error) => return Err(format!("could not decode a {name} event: {error}")),
+        },
+    })
 }
 
 /// An incremental SSE parser: bytes in, complete `(event, data)` pairs out.
@@ -486,7 +632,7 @@ mod tests {
         );
         let (name, data) = &out[0];
         match decode_frame(name, data) {
-            Ok(Some(SessionEvent::Text(t))) => assert_eq!(t, "café"),
+            Ok(HostedFrame::Session(SessionEvent::Text(t))) => assert_eq!(t, "café"),
             other => panic!("unexpected decode: {other:?}"),
         }
     }
@@ -520,9 +666,11 @@ mod tests {
             SessionEvent::FollowUp("next".into()),
         ] {
             let data = serde_json::to_string(&event).unwrap();
-            let decoded = decode_frame("whatever", &data).unwrap();
+            let Ok(HostedFrame::Session(decoded)) = decode_frame("whatever", &data) else {
+                panic!("{event:?} did not decode as a session event");
+            };
             assert_eq!(
-                serde_json::to_string(&decoded.unwrap()).unwrap(),
+                serde_json::to_string(&decoded).unwrap(),
                 data,
                 "a {event:?} did not survive the wire"
             );
@@ -531,12 +679,15 @@ mod tests {
 
     #[test]
     fn a_stream_error_frame_becomes_an_error_not_a_dropped_event() {
-        let err = decode_frame(
+        let frame = decode_frame(
             "stream_error",
-            r#"{"message":"failed to serialize a text event"}"#,
+            r#"{"message":"failed to serialize a text event","code":"x"}"#,
         )
-        .unwrap_err();
-        assert_eq!(err, "failed to serialize a text event");
+        .unwrap();
+        assert!(
+            matches!(&frame, HostedFrame::StreamError(m) if m == "failed to serialize a text event"),
+            "{frame:?}"
+        );
     }
 
     #[test]
@@ -596,6 +747,122 @@ mod tests {
         assert!(
             seen.contains(&"error"),
             "the failure must be said: {seen:?}"
+        );
+    }
+
+    fn approval() -> ApprovalRequest {
+        ApprovalRequest {
+            kind: chatty_fabric::ApprovalKind::Exec,
+            command_or_path: "cargo test".into(),
+            diff_stat: None,
+            asker: None,
+        }
+    }
+
+    fn question() -> AskRequest {
+        AskRequest {
+            questions: vec![chatty_fabric::Question {
+                id: "q1".into(),
+                question: "Which database?".into(),
+                options: vec!["SQLite".into()],
+            }],
+            asker: None,
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn every_server_frame_kind_decodes_to_its_variant() {
+        use serde_json::json;
+        let cases = [
+            (
+                "turn_attached",
+                json!({"started_at_ms": 1700000000000u64, "dropped": 3}),
+                HostedFrame::Attached {
+                    started_at_ms: 1700000000000,
+                    dropped: 3,
+                },
+            ),
+            (
+                "broker_approval",
+                json!({"id": "approval-1", "nonce": "n1", "request": approval()}),
+                HostedFrame::BrokerInput {
+                    id: "approval-1".into(),
+                    nonce: "n1".into(),
+                    request: BrokerRequest::Approval(approval()),
+                },
+            ),
+            (
+                "broker_question",
+                json!({"id": "question-1", "nonce": "n2", "request": question()}),
+                HostedFrame::BrokerInput {
+                    id: "question-1".into(),
+                    nonce: "n2".into(),
+                    request: BrokerRequest::Question(question()),
+                },
+            ),
+            (
+                "broker_input_settled",
+                json!({"id": "approval-1", "outcome": "withdrawn"}),
+                HostedFrame::BrokerInputSettled {
+                    id: "approval-1".into(),
+                    outcome: InputOutcome::Withdrawn,
+                },
+            ),
+            (
+                "connector_needs_sign_in",
+                json!({"connector": "github"}),
+                HostedFrame::ConnectorNeedsSignIn {
+                    connector: "github".into(),
+                },
+            ),
+        ];
+        for (name, data, expected) in cases {
+            let decoded = decode_frame(name, &data.to_string()).unwrap();
+            assert_eq!(format!("{decoded:?}"), format!("{expected:?}"), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_frame_is_skipped_and_the_turn_still_ends() {
+        let frame = decode_frame("from_the_future", r#"{"anything":1}"#).unwrap();
+        assert!(matches!(&frame, HostedFrame::Unknown(n) if n == "from_the_future"));
+    }
+
+    #[tokio::test]
+    async fn non_session_frames_reach_the_sink_and_never_end_the_turn() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let body = "event: from_the_future\ndata: {\"x\":1}\n\n\
+                        event: connector_needs_sign_in\ndata: {\"connector\":\"github\"}\n\n";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        let mut session = HostedSession::new(format!("http://{addr}"), "c-1");
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        session.set_frame_sink(Arc::new(move |frame| sink.lock().unwrap().push(frame)));
+        let events = run_turn(&mut session).await;
+        server.join().unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            matches!(seen.as_slice(), [HostedFrame::ConnectorNeedsSignIn { connector }] if connector == "github"),
+            "{seen:?}"
+        );
+        assert!(matches!(events.first(), Some(SessionEvent::TurnStarted)));
+        assert!(matches!(events.last(), Some(SessionEvent::TurnEnded)));
+        assert!(
+            !events.iter().any(|e| matches!(e, SessionEvent::Error(_))),
+            "{events:?}"
         );
     }
 
