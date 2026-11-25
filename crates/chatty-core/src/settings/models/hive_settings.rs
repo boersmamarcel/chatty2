@@ -2,10 +2,10 @@ use chrono::{DateTime, Utc};
 use hive_client::TokenPair;
 use serde::{Deserialize, Serialize};
 
-/// The production Hive. ASSUMPTION (AGE-2085): the repository names no
-/// production origin, so this is a placeholder; change it here once the
-/// real address is confirmed.
-pub const DEFAULT_HIVE_URL: &str = "https://hive.dev";
+/// The Hive address a new install starts with: the local development
+/// chatty-server. No production origin is configured yet; it is set here at
+/// go-live (AGE-2085).
+pub const DEFAULT_HIVE_URL: &str = "http://localhost:8081";
 
 /// Settings for the Hive connection and account.
 ///
