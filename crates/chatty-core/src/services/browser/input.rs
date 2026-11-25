@@ -157,17 +157,24 @@ pub(super) async fn dispatch_key(page: &Page, input: KeyInput) -> Result<(), Bro
                 return Ok(());
             };
             let modifier_bits = modifiers.bits();
-            for kind in [
-                DispatchKeyEventType::RawKeyDown,
-                DispatchKeyEventType::KeyUp,
-            ] {
-                let params = DispatchKeyEventParams::builder()
-                    .r#type(kind)
+            let text = key_text(mapping.key, modifier_bits);
+            let down = if text.is_some() {
+                DispatchKeyEventType::KeyDown
+            } else {
+                DispatchKeyEventType::RawKeyDown
+            };
+            for kind in [down, DispatchKeyEventType::KeyUp] {
+                let mut builder = DispatchKeyEventParams::builder()
+                    .r#type(kind.clone())
                     .key(mapping.key)
                     .code(mapping.code)
                     .windows_virtual_key_code(mapping.vk)
                     .native_virtual_key_code(mapping.vk)
-                    .modifiers(modifier_bits)
+                    .modifiers(modifier_bits);
+                if let (Some(text), DispatchKeyEventType::KeyDown) = (text, &kind) {
+                    builder = builder.text(text).unmodified_text(text);
+                }
+                let params = builder
                     .build()
                     .map_err(|e| BrowserError::Protocol(format!("invalid key event: {e}")))?;
                 page.execute(params)
@@ -176,6 +183,16 @@ pub(super) async fn dispatch_key(page: &Page, input: KeyInput) -> Result<(), Bro
             }
             Ok(())
         }
+    }
+}
+
+/// The text a key's down event carries, when it has one. Enter needs it:
+/// without a keypress the page never submits the form a user pressed
+/// Enter in (a `rawKeyDown` has no text). Modified Enter stays a shortcut.
+fn key_text(key: &str, modifier_bits: i64) -> Option<&'static str> {
+    match key {
+        "Enter" if modifier_bits == 0 => Some("\r"),
+        _ => None,
     }
 }
 
@@ -328,6 +345,13 @@ letter_table!(ascii_digit_key, ascii_digit_code,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enter_carries_a_carriage_return_so_forms_submit() {
+        assert_eq!(key_text("Enter", 0), Some("\r"));
+        assert_eq!(key_text("Enter", 2), None);
+        assert_eq!(key_text("Tab", 0), None);
+    }
 
     #[test]
     fn maps_named_keys() {
