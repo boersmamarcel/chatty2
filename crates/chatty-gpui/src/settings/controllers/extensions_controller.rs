@@ -117,6 +117,8 @@ fn apply_session_state(state: SessionState, cx: &mut App) {
             }
             settings.set_token_pair(Some(&pair));
             save_hive_settings_async(settings.clone(), cx);
+            // A refresh rotates the token; the "hive" MCP server must follow.
+            sync_hive_token_to_mcp(Some(pair.token.clone()), cx);
         }
         SessionState::Revoked => {
             let settings = cx.global_mut::<HiveSettingsModel>();
@@ -628,6 +630,8 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
 /// If the server is currently enabled and connected, it is reconnected so
 /// the new credentials take effect immediately.
 fn sync_hive_token_to_mcp(token: Option<String>, cx: &mut App) {
+    #[cfg(test)]
+    tests::SYNCED_TOKENS.lock().unwrap().push(token.clone());
     // The token goes into the persisted/connect list only, never into
     // ExtensionsModel (which is saved to extensions.json).
     let updated_servers = cx
@@ -674,6 +678,10 @@ fn save_extensions_async(model: ExtensionsModel, cx: &mut App) {
 }
 
 fn save_hive_settings_async(model: HiveSettingsModel, cx: &mut App) {
+    // Unit tests have no repository registry; they only observe the sync.
+    if cfg!(test) {
+        return;
+    }
     cx.spawn(|_cx: &mut AsyncApp| async move {
         let repo = chatty_core::hive_settings_repository();
         if let Err(e) = repo.save(model).await {
@@ -704,4 +712,31 @@ fn save_servers_async(servers: Vec<McpServerConfig>, cx: &mut App) {
 
 fn emit_rebuild_required(cx: &mut App) {
     AgentConfigNotifier::request_rebuild(cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    pub(super) static SYNCED_TOKENS: Mutex<Vec<Option<String>>> = Mutex::new(Vec::new());
+
+    #[gpui::test]
+    fn refreshed_session_token_is_synced_to_hive_mcp(cx: &mut gpui::TestAppContext) {
+        let pair: TokenPair = serde_json::from_value(serde_json::json!({
+            "token": "fresh-token",
+            "refresh_token": "fresh-refresh",
+            "expires_at": "2030-01-01T00:00:00Z",
+        }))
+        .unwrap();
+        cx.update(|cx| {
+            cx.set_global(HiveSettingsModel::default());
+            cx.set_global(ExtensionsModel::default());
+            apply_session_state(SessionState::SignedIn(pair), cx);
+        });
+        assert_eq!(
+            SYNCED_TOKENS.lock().unwrap().as_slice(),
+            [Some("fresh-token".to_string())]
+        );
+    }
 }

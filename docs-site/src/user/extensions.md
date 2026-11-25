@@ -6,7 +6,7 @@
 
 ## Hive marketplace
 
-Hive is the registry Chatty installs extensions from; the address it is talking to is shown next to **Hive Account**. **Sign In** or **Register** (username, email, password) to install from it and to run cloud modules; the session lasts thirty days.
+Hive is the registry Chatty installs extensions from; the address it is talking to is shown next to **Hive Account**. **Sign In** or **Register** (username, email, password) to install from it; the session lasts thirty days.
 
 **Browse Marketplace** searches the registry. Each result shows its type and pricing; **Install** downloads it into your module directory (the one set in the module settings) and adds it to your **Installed** list, **Uninstall** removes it. Chatty refuses a module whose name or version is malformed, whose download is over 64 MiB, or that is published as remote-only (running modules on the Hive runner is no longer supported), and remembers each installed module's checksum: if its file changes on disk afterwards, it no longer loads. Installed items carry two kinds of badge:
 
@@ -14,7 +14,6 @@ Hive is the registry Chatty installs extensions from; the address it is talking 
 |-------|---------|
 | **MCP** / **Plugin** / **A2A** | What kind of extension it is — a tool server, a WASM plugin, or a remote agent |
 | **• Local** | A module that runs on this machine |
-| **☁ Cloud** / **☁ Cloud Only** | Runs on the Hive runner; cloud-only modules cannot be switched local |
 | **↗ External** | An MCP server or agent at an external URL |
 | **Paid** | Not free — check the pricing before enabling |
 | **Trust: signed** / **Trust: local** | Where a loaded module's code comes from: signed by its publisher and installed from Hive, or copied in by hand |
@@ -25,7 +24,7 @@ The **Teams** tab next to the plugin listing finds published agent teams and ins
 
 If an older `hive_settings.json` still contains a `runner_url` entry, Chatty shows an error on this page and leaves the file (and your Hive sign-in) untouched; delete the `runner_url` line from the file to continue.
 
-Each row has **Enable** / **Disable** (🟢 enabled, ⏸ disabled), and modules that support both modes offer **Switch to Local** / **Switch to Cloud**.
+Each row has **Enable** / **Disable** (🟢 enabled, ⏸ disabled).
 
 ## Built-in catalog
 

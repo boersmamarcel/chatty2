@@ -432,6 +432,20 @@ pub(crate) const HIVE_SECRETS: &[SecretField] = &[
     },
 ];
 
+/// `hive_tui_settings.json`: the TUI's own sign-in (AGE-2084). Distinct refs
+/// from [`HIVE_SECRETS`], so the TUI and the desktop each rotate their own
+/// refresh token and neither can replay the other's.
+pub(crate) const HIVE_TUI_SECRETS: &[SecretField] = &[
+    SecretField {
+        field: "token",
+        key: SecretKey::Fixed("hive-tui/token"),
+    },
+    SecretField {
+        field: "refresh_token",
+        key: SecretKey::Fixed("hive-tui/refresh_token"),
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::super::{

@@ -29,7 +29,7 @@ use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
-use chatty_core::tools::plugin_tool::{PluginHost, borrowed_meter};
+use chatty_core::tools::plugin_tool::{PluginHost, session_meter};
 
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -525,7 +525,7 @@ static PLUGIN_METER: OnceLock<Arc<ModuleMeter>> = OnceLock::new();
 /// Hive sign-in (AGE-837): a spec's paid plugin is admitted and reported
 /// exactly like a call through the desktop's gateway. Later calls are
 /// no-ops.
-pub(crate) async fn install_plugin_meter() {
+pub(crate) async fn install_plugin_meter(own_session: bool) {
     if PLUGIN_METER.get().is_some() {
         return;
     }
@@ -533,7 +533,20 @@ pub(crate) async fn install_plugin_meter() {
         chatty_core::extensions_repository().load(),
         chatty_core::hive_settings_repository().load(),
     );
-    let meter = borrowed_meter(&extensions.unwrap_or_default(), &hive.unwrap_or_default()).await;
+    // A participant worker has no sign-in of its own: the TUI's pair belongs
+    // to the root process, and a second process spending its refresh token
+    // would be reuse (AGE-2084).
+    let session = if own_session {
+        Some(crate::hive_auth::session().await)
+    } else {
+        None
+    };
+    let meter = session_meter(
+        &extensions.unwrap_or_default(),
+        &hive.unwrap_or_default().registry_url,
+        session,
+    )
+    .await;
     let _ = PLUGIN_METER.set(Arc::new(meter));
 }
 
