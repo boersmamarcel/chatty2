@@ -168,12 +168,12 @@ impl ChattyApp {
         self.route(&conv_id, arrival, cx);
     }
 
-    fn active_conversation_id(&self, cx: &App) -> Option<String> {
+    pub(super) fn active_conversation_id(&self, cx: &App) -> Option<String> {
         cx.try_global::<ConversationsStore>()
             .and_then(|store| store.active_id().cloned())
     }
 
-    fn turn_is_active(&self, conv_id: &str, cx: &App) -> bool {
+    pub(super) fn turn_is_active(&self, conv_id: &str, cx: &App) -> bool {
         cx.try_global::<GlobalStreamManager>()
             .and_then(|g| g.get())
             .map(|mgr| mgr.read(cx).is_streaming(conv_id))

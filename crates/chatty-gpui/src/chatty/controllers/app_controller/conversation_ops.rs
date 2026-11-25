@@ -43,13 +43,31 @@ impl ChattyApp {
             exec.workspace_dir = Some(normalize_workspace_string(working_dir));
         }
 
-        // Look up model config by ID
-        let model_config = models.get_model(&data.model_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Model '{}' not found (may have been deleted)",
-                data.model_id
-            )
-        })?;
+        // Look up model config by ID. A conversation that runs in the cloud
+        // names the server's model, which this device usually has no entry
+        // for, and its turns never use the local agent built here: any local
+        // model stands in for it, so the conversation can be opened at all.
+        let mut data = data;
+        let runs_in_cloud =
+            chatty_core::models::conversation::ConversationSync::of_data(&data).runs_in_cloud();
+        let model_config = match models.get_model(&data.model_id) {
+            Some(model_config) => model_config,
+            None if runs_in_cloud => {
+                let stand_in = models.models().first().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Add a model in Settings to open this cloud conversation on this device"
+                    )
+                })?;
+                data.model_id = stand_in.id.clone();
+                stand_in
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found (may have been deleted)",
+                    data.model_id
+                ));
+            }
+        };
 
         // Find matching provider
         let provider_config = providers
@@ -655,7 +673,7 @@ impl ChattyApp {
     }
 
     /// Display a conversation that is already loaded in the ConversationsStore.
-    fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
         // Clear stale invoke_agent IDs from the previous conversation to
         // prevent suppressing ToolCallBlocks that happen to share an ID.
         self.active_invoke_agent_ids.clear();
@@ -785,6 +803,10 @@ impl ChattyApp {
             self.sidebar_view.update(cx, |sidebar, cx| {
                 sidebar.reroot_for_conversation(skills_dir, cx);
             });
+
+            // A conversation that runs in the cloud: bring it up to date,
+            // load what its run waits on, follow its turn (HX-10, HX-11).
+            self.on_cloud_conversation_shown(&conv_id, cx);
         }
     }
 }

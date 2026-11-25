@@ -92,7 +92,10 @@ pub use handler::{
     BREVITY_FOLLOW_UP, CUT_OFF_FOLLOW_UP, MALFORMED_TOOL_CALL_FOLLOW_UP, SessionStreamHandler,
     TurnPolicy, UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX,
 };
-pub use hosted::HostedSession;
+pub use hosted::{
+    AnswerOutcome, AttachOutcome, BrokerRequest, FrameSink, HostedFrame, HostedSession,
+    InputAnswer, InputOutcome, PendingInput, connector_settings_url,
+};
 pub use mailbox::{Arrival, Decision, Mailbox, Queued, QueuedId, Refusal, TurnEnd};
 pub use move_conversation::{
     BRING_BACK_SUMMARY, HOSTED_DISABLED, MoveSummary, RemoteConversation, TAKE_ONLINE_SUMMARY,

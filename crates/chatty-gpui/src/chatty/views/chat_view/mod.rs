@@ -139,6 +139,9 @@ pub struct ChatView {
     collapsed_turns: HashMap<usize, bool>,
     pending_approval: Option<PendingApprovalInfo>,
     pending_clarification: Option<PendingClarificationInfo>,
+    /// Connectors a cloud run needs the user to sign in to, each with the page
+    /// that does it (HX-11). Shown as a card until the conversation changes.
+    connector_sign_ins: Vec<ConnectorSignIn>,
     /// Free-text answer boxes for the clarification popover, one per question
     /// slot. Built up front because `InputState::new` needs a `Window`, which
     /// the stream-event handler that receives the questions does not have.
@@ -648,6 +651,7 @@ impl ChatView {
             collapsed_turns: HashMap::new(),
             pending_approval: None,
             pending_clarification: None,
+            connector_sign_ins: Vec::new(),
             clarification_inputs,
             clarification_inputs_dirty: false,
             collapsed_tool_calls: HashMap::new(),
@@ -3139,6 +3143,55 @@ static DEBUG_UI_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(||
         .unwrap_or(false)
 });
 
+/// "Sign in to X to continue": a connector a cloud run could not use
+/// because the user has not signed in to it (HX-11). The desktop never holds
+/// hosted connector tokens, so the button opens the page on Hive where the
+/// user does it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectorSignIn {
+    pub connector: String,
+    /// Where the button goes; `None` when the Hive address is not http(s),
+    /// in which case the card says where to sign in instead.
+    pub url: Option<String>,
+}
+
+/// The card's headline.
+pub fn connector_sign_in_title(connector: &str) -> String {
+    format!("Sign in to {connector} to continue")
+}
+
+fn render_connector_sign_in(sign_in: &ConnectorSignIn) -> impl IntoElement {
+    use gpui_component::Sizable as _;
+    use gpui_component::alert::Alert;
+    use gpui_component::button::{Button, ButtonVariants};
+    let connector = sign_in.connector.clone();
+    let id = ElementId::Name(format!("connector-sign-in-{connector}").into());
+    let body = match &sign_in.url {
+        Some(_) => "The cloud run is paused until you connect it.".to_string(),
+        None => "Open Hive in your browser and connect it under Settings, Connectors.".to_string(),
+    };
+    div()
+        .id(id.clone())
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .child(Alert::warning(id, body).title(connector_sign_in_title(&connector)))
+        .when_some(sign_in.url.clone(), |this, url| {
+            this.child(
+                div().flex().flex_row().child(
+                    Button::new(ElementId::Name(
+                        format!("connector-sign-in-open-{connector}").into(),
+                    ))
+                    .primary()
+                    .small()
+                    .label("Open connector settings")
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                ),
+            )
+        })
+}
+
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.prepare_render(window, cx);
@@ -3234,6 +3287,9 @@ impl Render for ChatView {
             .when_some(self.render_debug_overlay(cx), |this, overlay| {
                 this.child(overlay)
             })
+            .children(self.connector_sign_ins.iter().map(|sign_in| {
+                div().px_4().child(render_connector_sign_in(sign_in))
+            }))
             .when_some(self.active_approval_for_display(), |this, pending| {
                 let view_entity = cx.entity();
                 let approval = chatty_core::models::message_types::ApprovalBlock {
@@ -4860,6 +4916,63 @@ mod delegation_run_tests {
             assert_eq!(view.read(cx).delegation_run_name(idx), None);
         });
     }
+    /// HX-11: a cloud run's approval is known once raised, settled by its id
+    /// (here or elsewhere), and a connector card names the connector.
+    #[gpui::test]
+    fn a_cloud_input_card_is_known_until_it_is_settled(cx: &mut gpui::TestAppContext) {
+        let (view, _window) = harness(cx);
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.set_conversation_id("conv-a".into(), cx);
+                v.start_assistant_message(cx);
+                assert!(!v.knows_input("approval-1"));
+                v.handle_approval_requested(
+                    "approval-1".into(),
+                    "[shell] cargo test".into(),
+                    false,
+                    Some(
+                        chatty_core::models::execution_approval_store::ApprovalAsker {
+                            agent: "coder".into(),
+                            chain: vec!["root".into(), "coder".into()],
+                        },
+                    ),
+                    cx,
+                );
+                assert!(v.knows_input("approval-1"));
+                assert_eq!(
+                    v.active_approval_for_display()
+                        .and_then(|p| p.asker)
+                        .map(|a| a.agent),
+                    Some("coder".to_string()),
+                    "the asker is the card's title"
+                );
+                v.settle_input("approval-1", false, cx);
+                assert!(!v.knows_input("approval-1"));
+                assert!(v.active_approval_for_display().is_none());
+
+                v.show_connector_sign_in(
+                    super::ConnectorSignIn {
+                        connector: "GitHub".into(),
+                        url: Some("https://hive.example/settings/connectors".into()),
+                    },
+                    cx,
+                );
+                v.show_connector_sign_in(
+                    super::ConnectorSignIn {
+                        connector: "GitHub".into(),
+                        url: Some("https://hive.example/settings/connectors".into()),
+                    },
+                    cx,
+                );
+                assert_eq!(v.connector_sign_ins.len(), 1, "one card per connector");
+                assert_eq!(
+                    super::connector_sign_in_title("GitHub"),
+                    "Sign in to GitHub to continue"
+                );
+            });
+        });
+    }
+
     /// AGE-828: the pending approval is one card, however often the reader
     /// leaves the conversation and comes back mid-stream.
     #[gpui::test]

@@ -303,6 +303,247 @@ impl HostedSession {
             }
         }
     }
+
+    /// Join the turn that is already running on the server — one started
+    /// from the web, another device, or this one before it lost its
+    /// connection (HX-10).
+    ///
+    /// The server replays the frames the turn has produced so far and then
+    /// follows it live, so this is the same `TurnStarted` … `TurnEnded` pair
+    /// [`begin_turn`](Self::begin_turn) gives, with two differences. The
+    /// server's own `TurnStarted`/`TurnEnded` frames are swallowed and
+    /// replaced by this client's, so the pair is exactly one even across a
+    /// reconnect. And whatever a reconnect replays that was already emitted
+    /// is skipped: text by characters, every other event by count (the
+    /// server compacts text deltas but never reorders or merges anything
+    /// else), so a dropped connection that comes back shows no repeated
+    /// output.
+    ///
+    /// A connection that drops or goes quiet for [`AttachTiming::idle`] is
+    /// re-opened after a short wait, a handful of times, before the turn is
+    /// reported lost. `accept_gap` says whether to follow a turn whose
+    /// earliest frames the server no longer holds (`dropped > 0`): without it
+    /// that replay cannot be trusted, so this ends at once with
+    /// [`AttachOutcome::NeedsDetail`] and the owner fetches the conversation
+    /// instead (and may attach again with `accept_gap`).
+    pub fn attach<F: FnMut(SessionEvent)>(
+        &mut self,
+        cancel_flag: Arc<AtomicBool>,
+        accept_gap: bool,
+        emit: F,
+    ) -> Result<impl Future<Output = AttachOutcome> + use<F>> {
+        self.attach_with_timing(cancel_flag, accept_gap, AttachTiming::default(), emit)
+    }
+
+    fn attach_with_timing<F: FnMut(SessionEvent)>(
+        &mut self,
+        cancel_flag: Arc<AtomicBool>,
+        accept_gap: bool,
+        timing: AttachTiming,
+        mut emit: F,
+    ) -> Result<impl Future<Output = AttachOutcome> + use<F>> {
+        if self.is_turn_active() {
+            bail!("a turn is already running");
+        }
+        let url = format!(
+            "{}/api/conversations/{}/turn/events",
+            self.server_url, self.remote_id
+        );
+        let http = self.http.clone();
+        let auth = self.auth.clone();
+        let frame_sink = self.frame_sink.clone();
+        self.cancel_flag = Some(cancel_flag.clone());
+        self.turn_active.store(true, Ordering::Relaxed);
+        let turn_active = self.turn_active.clone();
+
+        Ok(async move {
+            emit(SessionEvent::TurnStarted);
+            let outcome = drive_attach(
+                &http,
+                auth.as_deref(),
+                &url,
+                &cancel_flag,
+                accept_gap,
+                timing,
+                &mut emit,
+                &frame_sink,
+            )
+            .await;
+            turn_active.store(false, Ordering::Relaxed);
+            emit(SessionEvent::TurnEnded);
+            outcome
+        })
+    }
+
+    /// The approvals and questions the conversation's run is waiting on
+    /// (HX-11): what to show for an input raised before this client attached.
+    pub fn fetch_inputs(&self) -> impl Future<Output = Result<Vec<PendingInput>>> + use<> {
+        let http = self.http.clone();
+        let auth = self.auth.clone();
+        let url = format!(
+            "{}/api/conversations/{}/inputs",
+            self.server_url, self.remote_id
+        );
+        async move {
+            let response = send_to_server(auth.as_deref(), &url, || http.get(&url)).await?;
+            let status = response.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                bail!(SIGN_IN_TO_HIVE);
+            }
+            if !status.is_success() {
+                bail!("the server answered {status} for {url}");
+            }
+            let wire: Vec<PendingInputWire> = response
+                .json()
+                .await
+                .with_context(|| format!("unexpected reply from {url}"))?;
+            Ok(wire.into_iter().map(PendingInput::from).collect())
+        }
+    }
+
+    /// Answer an input the run is waiting on, with the nonce it came with.
+    /// A `409` means the input was settled already, here or elsewhere: that is
+    /// an outcome, not a failure.
+    pub fn answer_input(
+        &self,
+        id: &str,
+        nonce: &str,
+        answer: InputAnswer,
+    ) -> impl Future<Output = AnswerOutcome> + use<> {
+        let http = self.http.clone();
+        let auth = self.auth.clone();
+        let url = format!(
+            "{}/api/conversations/{}/inputs/{}",
+            self.server_url, self.remote_id, id
+        );
+        let body = match answer {
+            InputAnswer::Approval(approved) => {
+                serde_json::json!({ "nonce": nonce, "approved": approved })
+            }
+            InputAnswer::Answers(answers) => {
+                let answers: Vec<chatty_fabric::Answer> = answers
+                    .into_iter()
+                    .map(|answer| chatty_fabric::Answer {
+                        id: answer.id,
+                        answer: answer.answer,
+                        custom: answer.custom,
+                    })
+                    .collect();
+                serde_json::json!({ "nonce": nonce, "answers": answers })
+            }
+        };
+        async move {
+            match send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await {
+                Ok(response) if response.status().is_success() => AnswerOutcome::Accepted,
+                Ok(response) if response.status() == reqwest::StatusCode::CONFLICT => {
+                    AnswerOutcome::Stale
+                }
+                Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
+                    AnswerOutcome::Failed(SIGN_IN_TO_HIVE.to_string())
+                }
+                Ok(response) => {
+                    AnswerOutcome::Failed(format!("the server answered {}", response.status()))
+                }
+                Err(error) => AnswerOutcome::Failed(format!("{error:#}")),
+            }
+        }
+    }
+}
+
+/// How an [`attach`](HostedSession::attach) ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachOutcome {
+    /// The turn finished (or the owner cancelled). The server has the whole
+    /// conversation now.
+    Ended,
+    /// No turn was running on the server (`204`): it finished before this
+    /// client got there. Fetch the conversation to see how it ended.
+    NotRunning,
+    /// The server already has as many viewers attached as it allows (`429`).
+    Busy,
+    /// The server no longer holds the start of the turn, so its replay would
+    /// leave a hole: fetch the conversation, then attach with `accept_gap`.
+    NeedsDetail,
+    /// The connection could not be kept; an `Error` event said so.
+    Lost,
+}
+
+/// The waits [`HostedSession::attach`] uses. Separate so a test need not sit
+/// through them.
+#[derive(Debug, Clone, Copy)]
+struct AttachTiming {
+    /// A connection that delivers nothing for this long is replaced. The
+    /// stream is otherwise unbounded, and a laptop that slept leaves a
+    /// connection that never errors.
+    idle: std::time::Duration,
+    /// The wait before reconnect number one; each next one doubles it.
+    backoff: std::time::Duration,
+    /// Reconnects in a row that delivered nothing before giving up.
+    retries: u32,
+}
+
+impl Default for AttachTiming {
+    fn default() -> Self {
+        Self {
+            idle: std::time::Duration::from_secs(60),
+            backoff: std::time::Duration::from_secs(1),
+            retries: 5,
+        }
+    }
+}
+
+/// An approval or question the server's run is waiting on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingInput {
+    pub id: String,
+    /// What the answer has to carry.
+    pub nonce: String,
+    pub request: BrokerRequest,
+}
+
+/// The answer to a [`PendingInput`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputAnswer {
+    Approval(bool),
+    Answers(Vec<ClarificationAnswer>),
+}
+
+/// What the server made of an [`InputAnswer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerOutcome {
+    Accepted,
+    /// `409`: already answered or withdrawn, here or on another device.
+    Stale,
+    Failed(String),
+}
+
+/// `GET …/inputs` rows: the request is externally tagged, so the kind is the
+/// key.
+#[derive(serde::Deserialize)]
+struct PendingInputWire {
+    id: String,
+    nonce: String,
+    request: PendingRequestWire,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingRequestWire {
+    Approval(ApprovalRequest),
+    Question(AskRequest),
+}
+
+impl From<PendingInputWire> for PendingInput {
+    fn from(wire: PendingInputWire) -> Self {
+        PendingInput {
+            id: wire.id,
+            nonce: wire.nonce,
+            request: match wire.request {
+                PendingRequestWire::Approval(request) => BrokerRequest::Approval(request),
+                PendingRequestWire::Question(request) => BrokerRequest::Question(request),
+            },
+        }
+    }
 }
 
 /// POST the turn and drain its SSE body into `emit`.
@@ -384,6 +625,206 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
     Ok(())
 }
 
+/// Follow the server's replay-then-live stream of the running turn into
+/// `emit`, re-opening it when it drops. See [`HostedSession::attach`].
+#[allow(clippy::too_many_arguments)]
+async fn drive_attach<F: FnMut(SessionEvent)>(
+    http: &reqwest::Client,
+    auth: Option<&HiveSession>,
+    url: &str,
+    cancel_flag: &Arc<AtomicBool>,
+    accept_gap: bool,
+    timing: AttachTiming,
+    emit: &mut F,
+    frame_sink: &FrameSink,
+) -> AttachOutcome {
+    // What the owner has been given, across every connection of this attach.
+    let mut emitted_text = 0usize;
+    let mut emitted_other = 0usize;
+    let mut first_dropped: Option<u64> = None;
+    let mut failures = 0u32;
+
+    let lost = |emit: &mut F, message: String| {
+        emit(SessionEvent::Error(StreamError::new(
+            StreamErrorKind::Transport,
+            message,
+        )));
+        AttachOutcome::Lost
+    };
+
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return AttachOutcome::Ended;
+        }
+        let sent = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            send_to_server(auth, url, || {
+                http.get(url)
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+            }),
+        )
+        .await;
+        let response = match sent {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                failures += 1;
+                if failures > timing.retries {
+                    return lost(emit, format!("{error:#}"));
+                }
+                tokio::time::sleep(timing.backoff * 2u32.pow(failures - 1)).await;
+                continue;
+            }
+            Err(_) => {
+                failures += 1;
+                if failures > timing.retries {
+                    return lost(emit, "the server did not answer in time".to_string());
+                }
+                continue;
+            }
+        };
+
+        let status = response.status();
+        if status == reqwest::StatusCode::NO_CONTENT {
+            // Never attached: it ended before we got here. Attached before:
+            // it ended while we were reconnecting.
+            return if first_dropped.is_some() {
+                AttachOutcome::Ended
+            } else {
+                AttachOutcome::NotRunning
+            };
+        }
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            emit(SessionEvent::Error(StreamError::new(
+                StreamErrorKind::RateLimited,
+                "This conversation is already open in several places. Close one, then try again."
+                    .to_string(),
+            )));
+            return AttachOutcome::Busy;
+        }
+        if !status.is_success() {
+            let kind = if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                StreamErrorKind::Auth
+            } else {
+                StreamErrorKind::ProviderStatus(status.as_u16())
+            };
+            let message = if status == reqwest::StatusCode::UNAUTHORIZED {
+                SIGN_IN_TO_HIVE.to_string()
+            } else {
+                format!("the server refused to share the running turn ({status})")
+            };
+            emit(SessionEvent::Error(StreamError::new(kind, message)));
+            return AttachOutcome::Lost;
+        }
+
+        // What this connection has replayed so far, to line up with what the
+        // owner already has.
+        let mut seen_text = 0usize;
+        let mut seen_other = 0usize;
+        let mut frames = SseFrames::default();
+        let mut body = response.bytes_stream();
+        let mut delivered = false;
+        let mut ended = false;
+        loop {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return AttachOutcome::Ended;
+            }
+            let chunk = match tokio::time::timeout(timing.idle, body.next()).await {
+                Ok(Some(Ok(chunk))) => chunk,
+                // Closed, failed or quiet: reconnect unless the turn ended.
+                Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
+            };
+            for (name, data) in frames.push(&chunk) {
+                delivered = true;
+                match decode_frame(&name, &data) {
+                    Ok(HostedFrame::Attached {
+                        started_at_ms,
+                        dropped,
+                    }) => {
+                        match first_dropped {
+                            None => {
+                                if dropped > 0 && !accept_gap {
+                                    return AttachOutcome::NeedsDetail;
+                                }
+                                first_dropped = Some(dropped);
+                            }
+                            // The buffer moved on while we were away: the
+                            // replay no longer lines up with what was shown.
+                            Some(first) if first != dropped => {
+                                return lost(
+                                    emit,
+                                    "Lost track of the cloud run while reconnecting. Reopen the conversation to pick it up again."
+                                        .to_string(),
+                                );
+                            }
+                            Some(_) => {}
+                        }
+                        frame_sink(HostedFrame::Attached {
+                            started_at_ms,
+                            dropped,
+                        });
+                    }
+                    Ok(HostedFrame::Session(SessionEvent::TurnStarted)) => {}
+                    Ok(HostedFrame::Session(SessionEvent::TurnEnded)) => ended = true,
+                    Ok(HostedFrame::Session(SessionEvent::Text(text))) => {
+                        seen_text += text.chars().count();
+                        let new = seen_text.saturating_sub(emitted_text);
+                        if new > 0 {
+                            let total = text.chars().count();
+                            let fresh: String = text.chars().skip(total - new).collect();
+                            emitted_text += new;
+                            emit(SessionEvent::Text(fresh));
+                        }
+                    }
+                    Ok(HostedFrame::Session(event)) => {
+                        seen_other += 1;
+                        if seen_other > emitted_other {
+                            emitted_other = seen_other;
+                            emit(event);
+                        }
+                    }
+                    Ok(HostedFrame::StreamError(error)) | Err(error) => emit(SessionEvent::Error(
+                        StreamError::new(StreamErrorKind::Other, error),
+                    )),
+                    Ok(HostedFrame::Unknown(name)) => {
+                        tracing::debug!(%name, "skipping an unknown hosted frame");
+                    }
+                    Ok(frame) => frame_sink(frame),
+                }
+            }
+            if ended {
+                return AttachOutcome::Ended;
+            }
+        }
+
+        // The connection ended without the turn ending.
+        if delivered {
+            failures = 0;
+        } else {
+            failures += 1;
+        }
+        if failures > timing.retries {
+            return lost(
+                emit,
+                "Lost the connection to the cloud run. Reopen the conversation to pick it up again."
+                    .to_string(),
+            );
+        }
+        tokio::time::sleep(timing.backoff * 2u32.pow(failures.saturating_sub(1))).await;
+    }
+}
+
+/// Where a user signs in to a connector the cloud run needs (HX-11): the
+/// Hive settings page. `None` unless `hive_url` is `http(s)`, since this is
+/// opened through the system's opener.
+pub fn connector_settings_url(hive_url: &str) -> Option<String> {
+    let base = hive_url.trim().trim_end_matches('/');
+    let lower = base.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        .then(|| format!("{base}/settings/connectors"))
+}
+
 /// What a 401 from a `chatty-server` means to the user: the server checks
 /// the Hive sign-in, and this process has none it would accept.
 pub const SIGN_IN_TO_HIVE: &str = "The server needs you signed in to Hive (Settings → Extensions → \
@@ -437,6 +878,11 @@ pub enum HostedFrame {
     },
     ConnectorNeedsSignIn {
         connector: String,
+    },
+    /// Never on the wire: this client's answer to input `id` was refused as
+    /// stale (`409`) — it was settled already, here or elsewhere.
+    InputStale {
+        id: String,
     },
     /// The server could not serialize an event; its message.
     StreamError(String),
@@ -1048,5 +1494,327 @@ mod tests {
             })
             .expect("the turn is refused");
         assert!(error.message.contains("plain http://"), "{}", error.message);
+    }
+
+    // ── attach (HX-10) and inputs (HX-11) ───────────────────────────────────
+
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const EVENTS: &str = "/api/conversations/c-1/turn/events";
+
+    fn sse_session(event: &SessionEvent) -> String {
+        format!(
+            "event: session\ndata: {}\n\n",
+            serde_json::to_string(event).unwrap()
+        )
+    }
+
+    fn sse_attached(dropped: u64) -> String {
+        format!("event: turn_attached\ndata: {{\"started_at_ms\":1,\"dropped\":{dropped}}}\n\n")
+    }
+
+    fn sse(parts: &[String]) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(parts.concat(), "text/event-stream")
+    }
+
+    fn fast() -> AttachTiming {
+        AttachTiming {
+            idle: std::time::Duration::from_millis(500),
+            backoff: std::time::Duration::from_millis(1),
+            retries: 3,
+        }
+    }
+
+    async fn attach_once(
+        server: &MockServer,
+        accept_gap: bool,
+    ) -> (AttachOutcome, Vec<SessionEvent>, HostedSession) {
+        let mut session = HostedSession::new(server.uri(), "c-1");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        let outcome = session
+            .attach_with_timing(
+                Arc::new(AtomicBool::new(false)),
+                accept_gap,
+                fast(),
+                move |e| sink.borrow_mut().push(e),
+            )
+            .expect("attach starts")
+            .await;
+        let events = seen.take();
+        (outcome, events, session)
+    }
+
+    fn names(events: &[SessionEvent]) -> Vec<String> {
+        events
+            .iter()
+            .map(|event| match event {
+                SessionEvent::Text(t) => format!("text:{t}"),
+                SessionEvent::ToolCallStarted { id, .. } => format!("tool:{id}"),
+                SessionEvent::ToolCallResult { id, .. } => format!("result:{id}"),
+                SessionEvent::TurnStarted => "start".into(),
+                SessionEvent::TurnEnded => "end".into(),
+                SessionEvent::Error(_) => "error".into(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    fn tool(id: &str) -> SessionEvent {
+        SessionEvent::ToolCallStarted {
+            id: id.into(),
+            name: "read_file".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn attach_replays_the_turn_as_one_started_ended_pair() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(sse(&[
+                sse_attached(0),
+                sse_session(&SessionEvent::TurnStarted),
+                sse_session(&SessionEvent::Text("Hello".into())),
+                sse_session(&tool("t1")),
+                sse_session(&SessionEvent::TurnEnded),
+            ]))
+            .mount(&server)
+            .await;
+        let (outcome, events, session) = attach_once(&server, false).await;
+        assert_eq!(outcome, AttachOutcome::Ended);
+        assert_eq!(names(&events), ["start", "text:Hello", "tool:t1", "end"]);
+        assert!(!session.is_turn_active(), "the attach released the session");
+    }
+
+    /// A connection that drops mid-turn is re-opened, and what the server
+    /// replays that was already shown is skipped: text by characters (the
+    /// server compacts deltas, so the split differs), everything else by count.
+    #[tokio::test]
+    async fn a_dropped_connection_reattaches_without_repeating_what_was_shown() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(sse(&[
+                sse_attached(0),
+                sse_session(&SessionEvent::TurnStarted),
+                sse_session(&SessionEvent::Text("Hel".into())),
+            ]))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(sse(&[
+                sse_attached(0),
+                sse_session(&SessionEvent::TurnStarted),
+                sse_session(&SessionEvent::Text("Hello".into())),
+                sse_session(&tool("t1")),
+                sse_session(&SessionEvent::Text(", world".into())),
+                sse_session(&SessionEvent::TurnEnded),
+            ]))
+            .mount(&server)
+            .await;
+        let (outcome, events, _) = attach_once(&server, false).await;
+        assert_eq!(outcome, AttachOutcome::Ended);
+        assert_eq!(
+            names(&events),
+            [
+                "start",
+                "text:Hel",
+                "text:lo",
+                "tool:t1",
+                "text:, world",
+                "end"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_attach_replaying_everything_shows_each_event_once() {
+        let server = MockServer::start().await;
+        let first = [
+            sse_attached(0),
+            sse_session(&tool("t1")),
+            sse_session(&SessionEvent::Text("a".into())),
+        ];
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(sse(&first))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(sse(&[
+                sse_attached(0),
+                sse_session(&tool("t1")),
+                sse_session(&SessionEvent::Text("a".into())),
+                sse_session(&SessionEvent::ToolCallResult {
+                    id: "t1".into(),
+                    result: "ok".into(),
+                }),
+                sse_session(&SessionEvent::TurnEnded),
+            ]))
+            .mount(&server)
+            .await;
+        let (_, events, _) = attach_once(&server, false).await;
+        assert_eq!(
+            names(&events),
+            ["start", "tool:t1", "text:a", "result:t1", "end"]
+        );
+    }
+
+    /// `dropped > 0`: the replay is missing the turn's start, so it is not
+    /// trusted — the owner is told to fetch the detail, and only a pair
+    /// (nothing from the replay) reaches it.
+    #[tokio::test]
+    async fn a_replay_with_dropped_frames_asks_for_the_detail_instead() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(sse(&[
+                sse_attached(7),
+                sse_session(&SessionEvent::Text("late".into())),
+                sse_session(&SessionEvent::TurnEnded),
+            ]))
+            .mount(&server)
+            .await;
+        let (outcome, events, _) = attach_once(&server, false).await;
+        assert_eq!(outcome, AttachOutcome::NeedsDetail);
+        assert_eq!(names(&events), ["start", "end"]);
+
+        // After the detail, the gap is accepted and the live frames follow.
+        let (outcome, events, _) = attach_once(&server, true).await;
+        assert_eq!(outcome, AttachOutcome::Ended);
+        assert_eq!(names(&events), ["start", "text:late", "end"]);
+    }
+
+    #[tokio::test]
+    async fn attach_with_no_turn_running_or_too_many_viewers_still_ends_cleanly() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(204))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+        let (outcome, events, _) = attach_once(&server, false).await;
+        assert_eq!(outcome, AttachOutcome::NotRunning);
+        assert_eq!(names(&events), ["start", "end"]);
+
+        let (outcome, events, _) = attach_once(&server, false).await;
+        assert_eq!(outcome, AttachOutcome::Busy);
+        assert_eq!(names(&events), ["start", "error", "end"]);
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_never_comes_back_ends_the_turn_with_an_error() {
+        // Nothing listens here, so every reconnect fails.
+        let mut session = HostedSession::new("http://127.0.0.1:1", "c-1");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        let outcome = session
+            .attach_with_timing(Arc::new(AtomicBool::new(false)), false, fast(), move |e| {
+                sink.borrow_mut().push(e)
+            })
+            .unwrap()
+            .await;
+        assert_eq!(outcome, AttachOutcome::Lost);
+        assert_eq!(names(&seen.borrow()), ["start", "error", "end"]);
+    }
+
+    #[tokio::test]
+    async fn attach_is_refused_while_a_turn_is_running() {
+        let mut session = HostedSession::new("http://127.0.0.1:1", "c-1");
+        let _turn = session.begin_turn(&TurnInput::text("hi"), |_| {}).unwrap();
+        assert!(
+            session
+                .attach(Arc::new(AtomicBool::new(false)), false, |_| {})
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_inputs_decode_by_their_tag_and_an_answer_carries_its_nonce() {
+        let server = MockServer::start().await;
+        // Generated per run: the point is that the answer echoes the nonce it
+        // was given, whatever it is.
+        let n1 = uuid::Uuid::new_v4().to_string();
+        let n2 = uuid::Uuid::new_v4().to_string();
+        Mock::given(method("GET"))
+            .and(path("/api/conversations/c-1/inputs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": "approval-1", "nonce": n1, "request": {"approval": approval()}},
+                {"id": "question-2", "nonce": n2, "request": {"question": question()}},
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/c-1/inputs/approval-1"))
+            .and(body_json(
+                serde_json::json!({"nonce": n1, "approved": true}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/c-1/inputs/question-2"))
+            .and(body_json(serde_json::json!({
+                "nonce": n2,
+                "answers": [{"id": "q1", "answer": "SQLite", "custom": false}]
+            })))
+            .respond_with(ResponseTemplate::new(409))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let session = HostedSession::new(server.uri(), "c-1");
+        let inputs = session.fetch_inputs().await.unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].request, BrokerRequest::Approval(approval()));
+        assert_eq!(inputs[1].nonce, n2);
+        assert_eq!(inputs[1].request, BrokerRequest::Question(question()));
+
+        assert_eq!(
+            session
+                .answer_input("approval-1", &n1, InputAnswer::Approval(true))
+                .await,
+            AnswerOutcome::Accepted
+        );
+        // 409: settled elsewhere — an outcome, not a failure.
+        let answers = vec![ClarificationAnswer {
+            id: "q1".into(),
+            answer: "SQLite".into(),
+            custom: false,
+        }];
+        assert_eq!(
+            session
+                .answer_input("question-2", &n2, InputAnswer::Answers(answers))
+                .await,
+            AnswerOutcome::Stale
+        );
+    }
+
+    #[test]
+    fn the_connector_card_opens_hives_connector_settings_over_http_or_https_only() {
+        assert_eq!(
+            connector_settings_url("https://hive.example/").as_deref(),
+            Some("https://hive.example/settings/connectors")
+        );
+        assert_eq!(
+            connector_settings_url("http://localhost:8080").as_deref(),
+            Some("http://localhost:8080/settings/connectors")
+        );
+        assert_eq!(connector_settings_url("file:///etc/passwd"), None);
+        assert_eq!(connector_settings_url("javascript:alert(1)"), None);
+        assert_eq!(connector_settings_url(""), None);
     }
 }

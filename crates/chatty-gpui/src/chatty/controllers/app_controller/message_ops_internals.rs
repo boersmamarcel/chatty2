@@ -175,6 +175,83 @@ pub(super) async fn run_llm_stream(
     Ok(())
 }
 
+/// Parameters for following a cloud turn another client started (HX-10).
+pub(super) struct AttachParams {
+    pub(super) conv_id: String,
+    pub(super) chat_view: Entity<ChatView>,
+    pub(super) stream_manager: Option<Entity<crate::chatty::models::StreamManager>>,
+    pub(super) cancel_flag: Arc<AtomicBool>,
+    pub(super) weak_ctrl: gpui::WeakEntity<ChattyApp>,
+    /// Follow a turn whose earliest frames the server dropped.
+    pub(super) accept_gap: bool,
+}
+
+/// Follow the cloud turn running for `conv_id` and pump what it does through
+/// the same sink a turn started here uses, so `StreamManager`, the text
+/// coalescing, Stop and the composer's queue behave identically.
+///
+/// What differs from [`run_llm_stream`]: the server owns this turn, so the
+/// session is *not* opened for one — nothing here commits a user message or
+/// a reply to the local conversation (the finalize finds no turn to finish).
+/// When the turn ends, [`ChattyApp::finish_cloud_attach`] brings the
+/// server's copy of the conversation in, which is what holds the reply.
+/// A `FollowUp` event is dropped: the client that started the turn answers
+/// it, and a viewer doing so too would run it twice.
+pub(super) async fn run_attach_stream(
+    params: AttachParams,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<()> {
+    let AttachParams {
+        conv_id,
+        chat_view,
+        stream_manager,
+        cancel_flag,
+        weak_ctrl,
+        accept_gap,
+    } = params;
+
+    let text_batch = TextBatch::shared(conv_id.clone());
+    if let Some(sm) = stream_manager.as_ref() {
+        sm.update(cx, |sm, _cx| {
+            sm.attach_text_batch(&conv_id, text_batch.clone());
+        })
+        .map_err(|e| warn!(error = ?e, conv_id = %conv_id, "Failed to attach the text batch"))
+        .ok();
+    }
+    let mut sink = DesktopSink {
+        conv_id: conv_id.clone(),
+        cx: cx.clone(),
+        chat_view,
+        stream_manager,
+        weak_ctrl: weak_ctrl.clone(),
+        text_batch,
+        delegation_call: UNTAGGED_CALL,
+    };
+    debug!(conv_id = %conv_id, accept_gap, "Attaching to the running cloud turn");
+    let turn = cx
+        .update_global::<ConversationsStore, _>(|store, _cx| {
+            let hosted = store
+                .hosted_mut(&conv_id)
+                .ok_or_else(|| anyhow::anyhow!("Conversation is not running in the cloud"))?;
+            hosted.attach(cancel_flag, accept_gap, move |event| {
+                if !matches!(event, SessionEvent::FollowUp(_)) {
+                    sink.handle(event);
+                }
+            })
+        })
+        .map_err(|e| anyhow::anyhow!(e.to_string()))??;
+    let outcome = turn.await;
+    weak_ctrl
+        .update(cx, |app, cx| {
+            app.finish_cloud_attach(&conv_id, outcome, accept_gap, cx)
+        })
+        .map_err(
+            |e| warn!(error = ?e, conv_id = %conv_id, "The app closed before an attach finished"),
+        )
+        .ok();
+    Ok(())
+}
+
 /// The desktop's half of the session seam: one [`SessionEvent`] in, the
 /// conversation model, `StreamManager` and the views updated.
 ///

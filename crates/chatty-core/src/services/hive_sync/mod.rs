@@ -22,6 +22,7 @@ mod api;
 mod engine;
 #[cfg(any(test, feature = "test-support"))]
 mod fake;
+mod notify;
 pub mod wire;
 
 use std::time::Duration;
@@ -30,6 +31,7 @@ pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi};
 pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeHiveConversations;
+pub use notify::{CloudNotice, TransitionDetector};
 pub use wire::{
     ChangesPage, ConversationDetail, FULL_SYNC_CURSOR, PAGE_LIMIT, RemoteChange, RemoteSummary,
     TurnStatus,
