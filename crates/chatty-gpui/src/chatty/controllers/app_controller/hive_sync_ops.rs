@@ -1,16 +1,21 @@
 //! Pulling the conversation list from the user's Hive account (AGE-2088).
 //!
-//! While signed in (and, until HX-10's sidebar lands, with the hosted
-//! conversations developer switch on), the app pulls once the local rows have loaded, on every
+//! While signed in, the app pulls once the local rows have loaded, on every
 //! window activation, and every [`PULL_INTERVAL`] while it is open. A laptop
 //! that wakes from sleep fires the overdue interval timer at once, so a wake
 //! is a pull too. There is no background process: a closed app pulls nothing.
 //!
 //! The pull only *reads* the server. What it changes is this device's cache:
 //! the sidebar rows, the loaded conversations' sync state, and the persisted
-//! rows. Showing the result (badges, live status) is HX-10.
+//! rows. The sidebar shows each cloud conversation's live status (HX-10), a
+//! turn that started elsewhere is followed (`cloud_ops`), and a finish or a
+//! wait the user should hear about becomes a notification (HX-12).
 
-use chatty_core::services::hive_sync::{self, HttpHiveConversationsApi, PULL_INTERVAL, SyncEngine};
+use std::collections::HashSet;
+
+use chatty_core::services::hive_sync::{
+    self, HttpHiveConversationsApi, PULL_INTERVAL, SyncEngine, TransitionDetector,
+};
 
 use super::*;
 use crate::settings::controllers::extensions_controller::hive_session;
@@ -28,6 +33,18 @@ pub(super) struct HiveSyncState {
     /// The last failure, so a server that keeps failing is logged once per
     /// distinct error rather than every interval.
     last_error: Option<String>,
+    /// Cloud conversations this device opened: only these notify (HX-12).
+    pub(super) engaged: HashSet<String>,
+    /// Remembers each conversation's last status, so only a change notifies.
+    pub(super) detector: TransitionDetector,
+    /// Inputs a cloud run waited on that are done, so a replayed frame does
+    /// not bring their cards back (HX-11).
+    pub(super) settled_inputs: HashSet<String>,
+    /// Conversations whose next follow of the running turn accepts a replay
+    /// with dropped frames, because their detail was just fetched (HX-10).
+    pub(super) accept_gap: HashSet<String>,
+    /// Conversations whose detail is being fetched.
+    pub(super) detail_in_flight: HashSet<String>,
 }
 
 impl ChattyApp {
@@ -62,12 +79,6 @@ impl ChattyApp {
         if !self.hive_sync.rows_loaded || self.hive_sync.in_flight {
             return;
         }
-        // Behind the same developer switch as the move until the sidebar can
-        // show a synced conversation and fetch its history (HX-10): a pulled
-        // row has no history until then.
-        if !super::conversation_ops_modify::move_ui_enabled(cx) {
-            return;
-        }
         let settings = cx.global::<HiveSettingsModel>();
         if !settings.is_logged_in() {
             return;
@@ -96,14 +107,23 @@ impl ChattyApp {
                     match result {
                         Ok(actions) => {
                             app.hive_sync.last_error = None;
-                            if actions.is_empty() {
-                                return Vec::new();
+                            let kept = if actions.is_empty() {
+                                Vec::new()
+                            } else {
+                                debug!(count = actions.len(), "Applying a Hive sync pull");
+                                let kept = cx.update_global::<ConversationsStore, _>(|store, _| {
+                                    store.apply_sync_actions(&actions)
+                                });
+                                app.refresh_sidebar(cx);
+                                kept
+                            };
+                            app.notify_cloud_changes(&actions, cx);
+                            // A turn started elsewhere while this conversation
+                            // is open, or one whose connection a sleep cut,
+                            // is followed again.
+                            if let Some(active) = app.active_conversation_id(cx) {
+                                app.attach_if_running(&active, cx);
                             }
-                            debug!(count = actions.len(), "Applying a Hive sync pull");
-                            let kept = cx.update_global::<ConversationsStore, _>(|store, _| {
-                                store.apply_sync_actions(&actions)
-                            });
-                            app.refresh_sidebar(cx);
                             kept
                         }
                         Err(error) => {

@@ -44,6 +44,7 @@ use chatty_core::session::{
     AgentSession, AgentSessionConfig, SessionEvent, TurnInput, TurnKind, turn_transport,
 };
 
+mod cloud_ops;
 mod conversation_ops;
 mod conversation_ops_modify;
 mod export_ops;
@@ -529,6 +530,7 @@ impl ChattyApp {
         // Set up callbacks
         app.setup_callbacks(cx);
         Self::start_hive_sync(window, cx);
+        Self::start_cloud_frames(cx);
 
         // Initialize chat input with available models
         app.initialize_models(cx);

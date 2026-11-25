@@ -201,6 +201,26 @@ impl Render for SettingsView {
                             )
                             .description("Adjust the default font size."),
                         ]),
+                        SettingGroup::new().title("Notifications").items(vec![
+                            SettingItem::new(
+                                "Cloud conversations",
+                                SettingField::switch(
+                                    |cx: &App| {
+                                        cx.global::<GeneralSettingsModel>()
+                                            .notify_cloud_conversations
+                                    },
+                                    |val: bool, cx: &mut App| {
+                                        general_settings_controller::update_cloud_notifications(
+                                            cx, val,
+                                        );
+                                    },
+                                )
+                                .default_value(true),
+                            )
+                            .description(
+                                "Tell me when a conversation running in the cloud finishes or needs an answer from me.",
+                            ),
+                        ]),
                         #[cfg(not(target_os = "macos"))]
                         cli_group(),
                     ]),
