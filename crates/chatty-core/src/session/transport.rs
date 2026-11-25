@@ -1,7 +1,7 @@
 //! Dispatching one turn to wherever the conversation runs (AGE-298).
 //!
-//! [`ConversationMode`](crate::models::conversation::ConversationMode) is what
-//! is *persisted*; these are the two lines of code that mode actually selects.
+//! A conversation's [`Placement`](crate::models::conversation::Placement) is
+//! what is *persisted*; these are the two lines of code it actually selects.
 //!
 //! # What is and is not different about a hosted conversation
 //!
@@ -39,8 +39,8 @@ use crate::models::write_approval_store::WriteApprovalDecision;
 
 /// Start a turn, in-process or on the server.
 ///
-/// `hosted` is `Some` exactly when the conversation's mode is
-/// [`Hosted`](crate::models::conversation::ConversationMode::Hosted). The
+/// `hosted` is `Some` exactly when the conversation's placement is
+/// [`Cloud`](crate::models::conversation::Placement::Cloud). The
 /// future is `Send` when `F` is, so each frontend can spawn it on its own
 /// executor.
 pub fn begin_turn<F: FnMut(SessionEvent)>(

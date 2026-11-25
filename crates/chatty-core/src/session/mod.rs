@@ -39,7 +39,7 @@
 mod delegation;
 mod event;
 mod handler;
-mod hosted;
+pub(crate) mod hosted;
 pub mod mailbox;
 mod move_conversation;
 /// Dispatching a turn to wherever its conversation runs (AGE-298).

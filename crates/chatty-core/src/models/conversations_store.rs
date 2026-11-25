@@ -9,16 +9,7 @@ use crate::models::write_approval_store::WriteApprovalDecision;
 use crate::repositories::ConversationMetadata;
 use crate::session::{AgentSession, HostedSession};
 
-use super::conversation::{Conversation, ConversationMode};
-
-/// The mode as the row and the metadata layer carry it: `None` for Local, so
-/// a conversation that never moves is stored exactly as it was before AGE-298.
-fn serialize_mode(mode: &ConversationMode) -> Option<String> {
-    match mode {
-        ConversationMode::Local => None,
-        hosted => serde_json::to_string(hosted).ok(),
-    }
-}
+use super::conversation::{Conversation, ConversationSync};
 
 /// Maximum number of full conversation objects kept in memory.
 /// When the cache exceeds this limit, the least recently used conversations are evicted.
@@ -42,10 +33,10 @@ pub struct ConversationsStore {
     /// Full conversation data, populated on demand when the user selects a conversation.
     /// Bounded to `MAX_CACHED_CONVERSATIONS` entries via LRU eviction.
     sessions: HashMap<String, AgentSession>,
-    /// The hosted client for each loaded conversation whose mode is
-    /// `Hosted` (AGE-298). Keyed like `sessions` and derived from the
-    /// conversation's own mode when it is loaded, so the two cannot disagree
-    /// about where a conversation runs. A conversation always has a session;
+    /// The hosted client for each loaded conversation whose turns run in the
+    /// cloud (AGE-298, AGE-2088). Keyed like `sessions` and derived from the
+    /// conversation's own sync state when it is loaded, so the two cannot
+    /// disagree about where a conversation runs. A conversation always has a session;
     /// it has an entry here as well only while it runs elsewhere.
     hosted: HashMap<String, HostedSession>,
     /// The Hive sign-in every hosted client authenticates with (AGE-835): a
@@ -99,36 +90,40 @@ impl ConversationsStore {
         self.metadata.iter().map(|m| m.id.clone()).collect()
     }
 
-    /// Does this conversation run on a server (AGE-298)?
+    /// Do this conversation's turns run on a server (AGE-298)?
     ///
-    /// Answered from the metadata layer, so the sidebar can badge a hosted
+    /// Answered from the metadata layer, so the sidebar can badge a cloud
     /// conversation without loading it — which is the point of that layer.
     /// A loaded conversation is asked directly, because it is the fresher of
     /// the two right after a move.
     pub fn is_hosted(&self, id: &str) -> bool {
         if let Some(conversation) = self.get_conversation(id) {
-            return conversation.mode().is_hosted();
+            return conversation.sync().runs_in_cloud();
         }
         self.metadata
             .iter()
             .find(|m| m.id == id)
-            .and_then(|m| m.mode.as_deref())
-            .and_then(|json| serde_json::from_str::<ConversationMode>(json).ok())
-            .is_some_and(|mode| mode.is_hosted())
+            .is_some_and(|m| m.sync.runs_in_cloud())
+    }
+
+    /// Every conversation's metadata row, newest first: the local side of a
+    /// sync pull (AGE-2088).
+    pub fn metadata(&self) -> &[ConversationMetadata] {
+        &self.metadata
     }
 
     /// Insert or update a single metadata entry and re-sort by updated_at descending.
     pub fn upsert_metadata(&mut self, id: &str, title: &str, total_cost: f64, updated_at: i64) {
-        // The mode is not a parameter: every caller of this is reporting a
-        // title/cost change after a turn, and none of them knows where the
-        // conversation runs. It is set by a move, through
-        // [`set_conversation_mode`](Self::set_conversation_mode), and read
+        // The sync state is not a parameter: every caller of this is
+        // reporting a title/cost change after a turn, and none of them knows
+        // where the conversation runs. It is set by a move or a pull, through
+        // [`set_conversation_sync`](Self::set_conversation_sync), and read
         // back from the row on the next load. The turn totals (AGE-351) are
         // taken from the loaded conversation the same way: the session
         // accumulates them at the turn barrier, and the row carries them.
         let loaded = self.get_conversation(id).map(|conversation| {
             (
-                conversation.mode().clone(),
+                conversation.sync().clone(),
                 conversation.tool_call_count(),
                 conversation.context_tokens(),
             )
@@ -137,19 +132,19 @@ impl ConversationsStore {
             entry.title = title.to_string();
             entry.total_cost = total_cost;
             entry.updated_at = updated_at;
-            if let Some((mode, tool_call_count, context_tokens)) = loaded {
-                entry.mode = serialize_mode(&mode);
+            if let Some((sync, tool_call_count, context_tokens)) = loaded {
+                entry.sync = sync;
                 entry.tool_call_count = tool_call_count;
                 entry.context_tokens = context_tokens;
             }
         } else {
-            let (mode, tool_call_count, context_tokens) = loaded.unwrap_or_default();
+            let (sync, tool_call_count, context_tokens) = loaded.unwrap_or_default();
             self.metadata.push(ConversationMetadata {
                 id: id.to_string(),
                 title: title.to_string(),
                 total_cost,
                 updated_at,
-                mode: serialize_mode(&mode),
+                sync,
                 tool_call_count,
                 context_tokens,
             });
@@ -181,23 +176,11 @@ impl ConversationsStore {
             tracing::warn!("Ignoring a session with no conversation");
             return;
         };
-        // The hosted client is derived from the conversation's own mode, here
-        // and nowhere else, so "where the row says it runs" and "where turns
-        // actually go" cannot drift apart (AGE-298).
-        match session.conversation().map(|c| c.mode().clone()) {
-            Some(ConversationMode::Hosted {
-                server_url,
-                remote_id,
-                ..
-            }) => {
-                let client =
-                    HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
-                self.hosted.insert(id.clone(), client);
-            }
-            _ => {
-                self.hosted.remove(&id);
-            }
-        }
+        // The hosted client is derived from the conversation's own sync
+        // state, here and nowhere else, so "where the row says it runs" and
+        // "where turns actually go" cannot drift apart (AGE-298).
+        let sync = session.conversation().map(|c| c.sync().clone());
+        self.follow_placement(&id, sync.as_ref());
         self.sessions.insert(id.clone(), session);
         self.touch_access_order(&id);
         self.evict_if_needed();
@@ -238,28 +221,102 @@ impl ConversationsStore {
         Some((session, self.hosted.get_mut(id)))
     }
 
-    /// Record where a conversation runs after a move completed.
+    /// Record a conversation's new sync state after a move or a pull
+    /// completed.
     ///
-    /// Called with the conversation's new mode *after* the history transfer
-    /// succeeded — never before, so a failed move leaves both the row and this
-    /// map describing the place the conversation is still running.
-    pub fn set_conversation_mode(&mut self, id: &str, mode: ConversationMode) {
-        match &mode {
-            ConversationMode::Hosted {
-                server_url,
-                remote_id,
-                ..
-            } => {
-                let client =
-                    HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
-                self.hosted.insert(id.to_string(), client);
-            }
-            ConversationMode::Local => {
-                self.hosted.remove(id);
-            }
+    /// Called *after* the history transfer succeeded — never before, so a
+    /// failed move leaves the row, the metadata and the hosted client all
+    /// describing the place the conversation is still running.
+    pub fn set_conversation_sync(&mut self, id: &str, sync: ConversationSync) {
+        self.follow_placement(id, Some(&sync));
+        if let Some(entry) = self.metadata.iter_mut().find(|m| m.id == id) {
+            entry.sync = sync.clone();
         }
         if let Some(conversation) = self.get_conversation_mut(id) {
-            conversation.set_mode(mode);
+            conversation.set_sync(sync);
+        }
+    }
+
+    /// Apply a sync pull's actions to the in-memory layer (AGE-2088): the
+    /// sidebar's metadata, every loaded conversation's title and sync state,
+    /// and the hosted clients that follow the placement.
+    ///
+    /// Returns the actions to carry out on the persisted rows: every one,
+    /// less the tombstones of a conversation that is open or streaming,
+    /// which are left for a later pull rather than pulled out from under the
+    /// user (a full pull at the next start deletes them).
+    pub fn apply_sync_actions(
+        &mut self,
+        actions: &[crate::services::hive_sync::SyncAction],
+    ) -> Vec<crate::services::hive_sync::SyncAction> {
+        use crate::services::hive_sync::{SyncAction, apply_to_rows};
+
+        let kept: Vec<SyncAction> = actions
+            .iter()
+            .filter(|action| match action {
+                SyncAction::ApplyTombstone { local_id } => {
+                    let busy = self.active_conversation_id.as_deref() == Some(local_id.as_str())
+                        || self.streaming_ids.contains(local_id);
+                    if busy {
+                        tracing::info!(
+                            conv_id = %local_id,
+                            "Not deleting an open conversation the server deleted; a later pull will"
+                        );
+                    }
+                    !busy
+                }
+                _ => true,
+            })
+            .cloned()
+            .collect();
+
+        apply_to_rows(&mut self.metadata, &kept);
+        for action in &kept {
+            match action {
+                SyncAction::UpsertMetadata(remote) => {
+                    self.follow_placement(&remote.local_id, Some(&remote.sync));
+                    if let Some(conversation) = self.get_conversation_mut(&remote.local_id) {
+                        conversation.set_title(remote.title.clone());
+                        conversation.set_sync(remote.sync.clone());
+                    }
+                }
+                SyncAction::MarkDetailStale { local_id } => {
+                    if let Some(conversation) = self.get_conversation_mut(local_id)
+                        && let ConversationSync::Synced(synced) = conversation.sync()
+                    {
+                        let mut synced = synced.clone();
+                        synced.last_synced_at = None;
+                        conversation.set_sync(ConversationSync::Synced(synced));
+                    }
+                }
+                SyncAction::ApplyTombstone { local_id } => {
+                    self.sessions.remove(local_id);
+                    self.hosted.remove(local_id);
+                    self.access_order.retain(|id| id != local_id);
+                }
+                SyncAction::FullResync => {}
+            }
+        }
+        kept
+    }
+
+    /// Keep the hosted client in step with where `id`'s turns run: present
+    /// exactly while its placement is the cloud.
+    fn follow_placement(&mut self, id: &str, sync: Option<&ConversationSync>) {
+        match sync.and_then(ConversationSync::cloud_on) {
+            Some((server_url, remote_id)) => {
+                let unchanged = self.hosted.get(id).is_some_and(|client| {
+                    client.server_url() == server_url && client.remote_id() == remote_id
+                });
+                if !unchanged {
+                    let client = HostedSession::new(server_url, remote_id)
+                        .with_auth(self.hosted_auth.clone());
+                    self.hosted.insert(id.to_string(), client);
+                }
+            }
+            None => {
+                self.hosted.remove(id);
+            }
         }
     }
 
@@ -276,7 +333,7 @@ impl ConversationsStore {
             let evict_id = self.find_lru_evictable();
             if let Some(id) = evict_id {
                 self.sessions.remove(&id);
-                // The hosted client is rebuilt from the conversation's mode
+                // The hosted client is rebuilt from the conversation's sync state
                 // when it is loaded again, so it is cache, not state.
                 self.hosted.remove(&id);
                 self.access_order.retain(|s| s != &id);
@@ -636,32 +693,25 @@ mod tests {
             .iter_mut()
             .find(|m| m.id == "conv-1")
             .unwrap()
-            .mode = Some(
-            r#"{"kind":"hosted","server_url":"http://localhost:8081","remote_id":"r-1"}"#
-                .to_string(),
-        );
+            .sync = ConversationSync::cloud("http://localhost:8081", "r-1", None);
 
         assert!(store.is_hosted("conv-1"));
         assert!(!store.is_hosted("conv-0"));
         assert!(!store.is_hosted("never-seen"));
     }
 
-    /// The hosted client follows the mode: a move online creates it, a move
-    /// back removes it, and a delete never leaves one behind. Both maps are
-    /// written from the same call so they cannot disagree about where a
+    /// The hosted client follows the placement: a move online creates it, a
+    /// move back removes it, and a delete never leaves one behind. Both maps
+    /// are written from the same call so they cannot disagree about where a
     /// conversation runs.
     #[test]
-    fn the_hosted_client_follows_the_conversation_mode() {
+    fn the_hosted_client_follows_the_conversation_placement() {
         let mut store = ConversationsStore::new();
         insert_dummy(&mut store, "a");
 
-        store.set_conversation_mode(
+        store.set_conversation_sync(
             "a",
-            ConversationMode::Hosted {
-                server_url: "http://localhost:8081/".to_string(),
-                remote_id: "r-1".to_string(),
-                model_id: None,
-            },
+            ConversationSync::cloud("http://localhost:8081/", "r-1", None),
         );
         let hosted = store
             .get_hosted("a")
@@ -669,19 +719,51 @@ mod tests {
         assert_eq!(hosted.server_url(), "http://localhost:8081");
         assert_eq!(hosted.remote_id(), "r-1");
 
-        store.set_conversation_mode("a", ConversationMode::Local);
+        store.set_conversation_sync("a", ConversationSync::LocalOnly);
         assert!(store.get_hosted("a").is_none(), "back home, no client");
 
-        store.set_conversation_mode(
+        store.set_conversation_sync(
             "a",
-            ConversationMode::Hosted {
-                server_url: "http://localhost:8081".to_string(),
-                remote_id: "r-2".to_string(),
-                model_id: None,
-            },
+            ConversationSync::cloud("http://localhost:8081", "r-2", None),
         );
         store.delete_conversation("a");
         assert!(store.get_hosted("a").is_none(), "deleted, no client");
+    }
+
+    /// A pull reaches the sidebar rows and the hosted clients, but never
+    /// deletes the conversation the user has open.
+    #[test]
+    fn sync_actions_update_rows_and_spare_the_open_conversation() {
+        use crate::services::hive_sync::{RemoteRow, SyncAction, TurnStatus};
+
+        let mut store = make_store_with_n_entries(3);
+        store.set_active("conv-2".to_string());
+        let cloud = ConversationSync::cloud("https://hive.example", "r-9", None);
+        let kept = store.apply_sync_actions(&[
+            SyncAction::UpsertMetadata(RemoteRow {
+                local_id: "r-9".into(),
+                title: "From the web".into(),
+                model_id: None,
+                updated_at: 100,
+                sync: cloud.clone(),
+                turn_status: TurnStatus::Running,
+            }),
+            SyncAction::ApplyTombstone {
+                local_id: "conv-0".into(),
+            },
+            SyncAction::ApplyTombstone {
+                local_id: "conv-2".into(),
+            },
+        ]);
+
+        assert_eq!(
+            kept.len(),
+            2,
+            "the open conversation's tombstone is held back"
+        );
+        assert_eq!(store.all_metadata_ids(), vec!["r-9", "conv-2", "conv-1"]);
+        assert!(store.is_hosted("r-9"));
+        assert_eq!(store.metadata()[0].sync, cloud);
     }
 
     #[test]

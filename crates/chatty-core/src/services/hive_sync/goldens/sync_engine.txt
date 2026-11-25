@@ -1,0 +1,65 @@
+## first pull (since=0)
+- upsert took-online "Taken online" t=40 synced https://hive.example r-old v0 cloud stale turn=Idle
+- stale took-online
+rows:
+  mine "Local notes" t=50 local-only
+  took-online "Taken online" t=40 synced https://hive.example r-old v0 cloud stale
+cursor: 1.0
+
+## added on the server (paged)
+- upsert r-new "Started on the web" t=100 synced https://hive.example r-new v0 cloud stale turn=Idle
+- upsert r-web2 "Another web chat" t=110 synced https://hive.example r-web2 v0 cloud stale turn=Idle
+- upsert r-web3 "A third" t=120 synced https://hive.example r-web3 v0 cloud stale turn=Idle
+rows:
+  r-web3 "A third" t=120 synced https://hive.example r-web3 v0 cloud stale
+  r-web2 "Another web chat" t=110 synced https://hive.example r-web2 v0 cloud stale
+  r-new "Started on the web" t=100 synced https://hive.example r-new v0 cloud stale
+  mine "Local notes" t=50 local-only
+  took-online "Taken online" t=40 synced https://hive.example r-old v0 cloud stale
+cursor: 4.0
+
+## edited on the server
+- upsert r-new "Renamed on the web" t=130 synced https://hive.example r-new v0 cloud stale turn=Idle
+- stale r-new
+- upsert took-online "Taken online, continued" t=140 synced https://hive.example r-old v0 cloud stale turn=Idle
+- stale took-online
+rows:
+  took-online "Taken online, continued" t=140 synced https://hive.example r-old v0 cloud stale
+  r-new "Renamed on the web" t=130 synced https://hive.example r-new v0 cloud stale
+  r-web3 "A third" t=120 synced https://hive.example r-web3 v0 cloud stale
+  r-web2 "Another web chat" t=110 synced https://hive.example r-web2 v0 cloud stale
+  mine "Local notes" t=50 local-only
+cursor: 6.0
+
+## deleted on the server
+- tombstone r-web2
+rows:
+  took-online "Taken online, continued" t=140 synced https://hive.example r-old v0 cloud stale
+  r-new "Renamed on the web" t=130 synced https://hive.example r-new v0 cloud stale
+  r-web3 "A third" t=120 synced https://hive.example r-web3 v0 cloud stale
+  mine "Local notes" t=50 local-only
+cursor: 7.0
+
+## nothing changed
+rows:
+  took-online "Taken online, continued" t=140 synced https://hive.example r-old v0 cloud stale
+  r-new "Renamed on the web" t=130 synced https://hive.example r-new v0 cloud stale
+  r-web3 "A third" t=120 synced https://hive.example r-web3 v0 cloud stale
+  mine "Local notes" t=50 local-only
+cursor: 7.0
+
+## cursor expired (410 → full resync)
+- full-resync
+- upsert r-new "Renamed on the web" t=130 synced https://hive.example r-new v0 cloud stale turn=Idle
+- stale r-new
+- upsert took-online "Taken online, continued" t=140 synced https://hive.example r-old v0 cloud stale turn=Idle
+- stale took-online
+- upsert r-late "Created while away" t=150 synced https://hive.example r-late v0 cloud stale turn=Idle
+- tombstone r-web3
+rows:
+  r-late "Created while away" t=150 synced https://hive.example r-late v0 cloud stale
+  took-online "Taken online, continued" t=140 synced https://hive.example r-old v0 cloud stale
+  r-new "Renamed on the web" t=130 synced https://hive.example r-new v0 cloud stale
+  mine "Local notes" t=50 local-only
+cursor: 9.8
+
