@@ -192,7 +192,12 @@ impl Tool for BrowserNavigateTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let session = self.manager.session().await?;
-        let url = session.navigate(&args.url).await?;
+        let url = navigate_checked(
+            self.manager.is_unattended(),
+            || async { session.navigate(&args.url).await.map_err(ToolError::from) },
+            || inspect_page(&session),
+        )
+        .await?;
         info!(url = %url, "browser: navigated");
         Ok(NavigateOutput {
             url,
@@ -938,6 +943,104 @@ fn needs_approval_error(
     ToolError::OperationFailed(body.to_string())
 }
 
+/// The main document as the site-check detector sees it, with its verdict.
+struct CheckedPage {
+    url: String,
+    title: String,
+    vendor: &'static str,
+}
+
+/// Longest slice of the document the detector reads.
+const CHECK_HTML_CAP: usize = 200_000;
+
+/// Read the main document and say whether it is a site's bot check
+/// (AGE-2047). A page that cannot be read is not a check.
+async fn inspect_page(session: &crate::services::browser::BrowserSession) -> Option<CheckedPage> {
+    let page = session.page().ok()?;
+    let status = page
+        .evaluate("(performance.getEntriesByType('navigation')[0] || {}).responseStatus || 0")
+        .await
+        .ok()
+        .and_then(|v| v.into_value::<u32>().ok())
+        .filter(|s| *s > 0)
+        .map(|s| s as u16);
+    let html = page
+        .evaluate("document.documentElement ? document.documentElement.outerHTML : ''")
+        .await
+        .ok()
+        .and_then(|v| v.into_value::<String>().ok())
+        .unwrap_or_default();
+    let html: String = html.chars().take(CHECK_HTML_CAP).collect();
+    let url = page.url().await.ok().flatten().unwrap_or_default();
+    let title = page_title(&page).await;
+    let check = crate::services::browser::site_check::detect(
+        &crate::services::browser::site_check::PageFacts {
+            status,
+            url: &url,
+            title: &title,
+            html: &html,
+        },
+    )?;
+    Some(CheckedPage {
+        url,
+        title,
+        vendor: check.vendor,
+    })
+}
+
+/// Navigate exactly once, then look at the page. A site check ends the call
+/// with an error; the browser never navigates again on its own.
+async fn navigate_checked<N, NF, I, IF>(
+    unattended: bool,
+    navigate: N,
+    inspect: I,
+) -> Result<String, ToolError>
+where
+    N: FnOnce() -> NF,
+    NF: std::future::Future<Output = Result<String, ToolError>>,
+    I: FnOnce() -> IF,
+    IF: std::future::Future<Output = Option<CheckedPage>>,
+{
+    let url = navigate().await?;
+    match inspect().await {
+        Some(check) => Err(site_check_error(&check, unattended)),
+        None => Ok(url),
+    }
+}
+
+/// What the agent is told when the page is a site's bot check. Unattended it
+/// is the structured `needs_human` error (same shape and bare URL as
+/// `needs_approval_error`); attended it asks the user in words.
+fn site_check_error(check: &CheckedPage, unattended: bool) -> ToolError {
+    let origin = sites::origin_of(&check.url).unwrap_or_default();
+    let host = origin
+        .split_once("://")
+        .map_or(origin.as_str(), |(_, h)| h)
+        .trim_start_matches("www.")
+        .to_string();
+    if !unattended {
+        return ToolError::OperationFailed(format!(
+            "{host} shows a check that a person must pass. Open it in the browser view and \
+             tell me when done. This site wants a person to pass a check. Stop and report; \
+             do not retry."
+        ));
+    }
+    let body = serde_json::json!({
+        "error": "needs_human",
+        "kind": "site_check",
+        "origin": origin,
+        "url": bare_url(&check.url),
+        "title": check.title,
+        "vendor": check.vendor,
+        "note": SITE_CHECK_NOTE,
+    });
+    ToolError::OperationFailed(body.to_string())
+}
+
+/// The agent's instruction when a site wants a person.
+const SITE_CHECK_NOTE: &str =
+    "This site wants a person to pass a check. Stop and report; do not retry.";
+
 /// After an action: look-only sites say nothing was changed; a risky request
 /// refused while unattended becomes `needs_approval`.
 async fn after_action(
@@ -1029,6 +1132,9 @@ impl Tool for BrowserClickTool {
 
         let result = session.click(&node).await?;
         after_action(&self.manager, &session, &node, look, &clicked).await?;
+        if let Some(check) = inspect_page(&session).await {
+            return Err(site_check_error(&check, self.manager.is_unattended()));
+        }
         if !look {
             // A click that went through on an ask_risky or any site (AGE-2008).
             self.manager.proof_after(&session).await;
@@ -1642,6 +1748,65 @@ mod tests {
 
     /// AGE-2038: a host that says nobody is attached gets `needs_approval`
     /// at once even with an approval channel; no card, no wait.
+    fn checked(url: &str) -> CheckedPage {
+        CheckedPage {
+            url: url.to_string(),
+            title: "Access Denied".to_string(),
+            vendor: "akamai",
+        }
+    }
+
+    #[test]
+    fn unattended_site_check_is_needs_human_with_a_bare_url() {
+        let ToolError::OperationFailed(msg) =
+            site_check_error(&checked("https://www.ah.nl/x?q=1#f"), true);
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["error"], "needs_human");
+        assert_eq!(v["kind"], "site_check");
+        assert_eq!(v["origin"], "https://www.ah.nl");
+        assert_eq!(v["url"], "https://www.ah.nl/x");
+        assert_eq!(v["title"], "Access Denied");
+        assert_eq!(v["vendor"], "akamai");
+        assert!(msg.contains("do not retry"));
+    }
+
+    #[test]
+    fn attended_site_check_asks_the_user() {
+        let ToolError::OperationFailed(msg) =
+            site_check_error(&checked("https://www.ah.nl/"), false);
+        assert!(msg.contains("ah.nl shows a check that a person must pass"));
+        assert!(msg.contains("do not retry"));
+    }
+
+    #[tokio::test]
+    async fn needs_human_is_not_retried_by_the_browser() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let navigations = AtomicUsize::new(0);
+        let r = navigate_checked(
+            true,
+            || async {
+                navigations.fetch_add(1, Ordering::SeqCst);
+                Ok("https://www.ah.nl/".to_string())
+            },
+            || async { Some(checked("https://www.ah.nl/")) },
+        )
+        .await;
+        let ToolError::OperationFailed(msg) = r.unwrap_err();
+        assert!(msg.contains("needs_human"));
+        assert_eq!(navigations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_normal_page_navigates_through() {
+        let r = navigate_checked(
+            true,
+            || async { Ok("http://localhost/".to_string()) },
+            || async { None },
+        )
+        .await;
+        assert_eq!(r.unwrap(), "http://localhost/");
+    }
+
     #[test]
     fn an_unattended_host_with_a_channel_gets_needs_approval() {
         assert_eq!(risky_gate(true, true), sites::ActionGate::NeedsApproval);

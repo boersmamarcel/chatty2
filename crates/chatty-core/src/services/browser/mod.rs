@@ -37,6 +37,7 @@ pub mod registry;
 pub mod screencast;
 mod select;
 pub mod session;
+pub mod site_check;
 pub mod sites;
 pub mod snapshot;
 mod targets;
