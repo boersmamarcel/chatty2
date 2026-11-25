@@ -1,0 +1,9 @@
+event: turn_started
+data: "TurnStarted"
+
+event: connector_needs_sign_in
+data: {"connector":"notion"}
+
+event: turn_ended
+data: "TurnEnded"
+

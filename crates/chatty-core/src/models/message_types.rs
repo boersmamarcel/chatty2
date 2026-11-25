@@ -96,7 +96,7 @@ pub enum ThinkingState {
 }
 
 /// Where a tool call executes — used to render data-egress badges in the UI.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default, schemars::JsonSchema)]
 pub enum ToolSource {
     /// Executes locally; no data leaves Chatty.
     #[default]

@@ -1,0 +1,12 @@
+event: turn_started
+data: "TurnStarted"
+
+event: broker_approval
+data: {"id":"approval-1","nonce":"nonce-7f3a","request":{"command_or_path":"cargo test -p chatty-core","kind":"exec"}}
+
+event: broker_input_settled
+data: {"id":"approval-1","outcome":"approved"}
+
+event: turn_ended
+data: "TurnEnded"
+

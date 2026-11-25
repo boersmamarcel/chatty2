@@ -1,0 +1,27 @@
+event: turn_started
+data: "TurnStarted"
+
+event: text
+data: {"Text":"Let me look. "}
+
+event: tool_call_started
+data: {"ToolCallStarted":{"id":"call_1","name":"read_file"}}
+
+event: tool_call_input
+data: {"ToolCallInput":{"arguments":"{\"path\":\"README.md\"}","id":"call_1"}}
+
+event: tool_call_result
+data: {"ToolCallResult":{"id":"call_1","result":"# chatty"}}
+
+event: text
+data: {"Text":"It starts with the title: chatty."}
+
+event: api_call_usage
+data: {"ApiCallUsage":{"cache_read_tokens":0,"cache_write_tokens":0,"duration_ms":850,"input_tokens":120,"model":{"model_id":"anthropic/claude-sonnet","provider":"open_router"},"output_tokens":18,"reasoning_tokens":0,"turn":1}}
+
+event: turn_messages
+data: {"TurnMessages":[{"content":[{"text":"What does the README say?","type":"text"}],"role":"user"},{"content":[{"function":{"arguments":{"path":"README.md"},"name":"read_file"},"id":{"provider":"call_1"},"type":"toolcall"}],"role":"assistant"},{"content":[{"call":{"provider":"call_1"},"content":[{"text":"# chatty","type":"text"}],"name":"read_file","type":"toolresult"}],"role":"user"},{"content":[{"text":"It starts with the title: chatty.","type":"text"}],"role":"assistant"}]}
+
+event: turn_ended
+data: "TurnEnded"
+

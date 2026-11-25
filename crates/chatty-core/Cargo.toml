@@ -13,6 +13,8 @@ rmcp.workspace = true
 # Persistence layer
 serde.workspace = true
 serde_json.workspace = true
+# `SessionEvent`'s schema export (AGE-2103): derives only, no runtime cost.
+schemars.workspace = true
 bytes.workspace = true
 tokio.workspace = true
 sqlx.workspace = true

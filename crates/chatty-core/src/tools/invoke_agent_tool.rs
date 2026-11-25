@@ -55,7 +55,7 @@ tokio::task_local! {
 pub const LOCAL_AGENT_NAME: &str = "local-agent";
 
 /// Progress events emitted by the invoke_agent tool during streaming execution.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub enum InvokeAgentProgress {
     /// Agent invocation started.
     Started {
@@ -134,7 +134,9 @@ pub enum InvokeAgentProgress {
 }
 
 /// What a run is waiting on the human for (TB-6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitingOn {
     /// An execution or write approval (`human.approve`).

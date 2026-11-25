@@ -1,0 +1,1196 @@
+{
+  "$defs": {
+    "ApiCallUsage": {
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SystemTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cache_read_tokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_write_tokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "duration_ms": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "input_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reasoning_tokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "turn": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn",
+        "input_tokens",
+        "output_tokens"
+      ],
+      "type": "object"
+    },
+    "ApprovalAsker": {
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "chain": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agent",
+        "chain"
+      ],
+      "type": "object"
+    },
+    "ApprovalDetail": {
+      "properties": {
+        "asker": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalAsker"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "command_or_path": {
+          "type": "string"
+        },
+        "diff_stat": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/ApprovalKind"
+        }
+      },
+      "required": [
+        "kind",
+        "command_or_path"
+      ],
+      "type": "object"
+    },
+    "ApprovalKind": {
+      "enum": [
+        "exec",
+        "write"
+      ],
+      "type": "string"
+    },
+    "CallChain": {
+      "properties": {
+        "chain": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deadline": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SystemTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "depth": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining": {
+          "$ref": "#/$defs/Remaining",
+          "default": {}
+        },
+        "root_spec": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root_task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_task_id",
+        "chain",
+        "depth"
+      ],
+      "type": "object"
+    },
+    "CapturedConversation": {
+      "oneOf": [
+        {
+          "properties": {
+            "captured": {
+              "const": "messages",
+              "type": "string"
+            },
+            "messages": true
+          },
+          "required": [
+            "captured",
+            "messages"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "captured": {
+              "const": "too_large",
+              "type": "string"
+            }
+          },
+          "required": [
+            "captured",
+            "bytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ClarifyingQuestion": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "question": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "options"
+      ],
+      "type": "object"
+    },
+    "InvokeAgentProgress": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Started": {
+              "properties": {
+                "agent_name": {
+                  "type": "string"
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "source": {
+                  "$ref": "#/$defs/ToolSource"
+                }
+              },
+              "required": [
+                "agent_name",
+                "prompt",
+                "source"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Started"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Step": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Step"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Finished": {
+              "properties": {
+                "result": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "success": {
+                  "type": "boolean"
+                },
+                "usage": {
+                  "items": {
+                    "$ref": "#/$defs/TokenUsage"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "success"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Finished"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Swarm": {
+              "$ref": "#/$defs/SwarmEvent"
+            }
+          },
+          "required": [
+            "Swarm"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Admitted": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "Admitted"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Waiting": {
+              "properties": {
+                "agent": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "on": {
+                  "$ref": "#/$defs/WaitingOn"
+                }
+              },
+              "required": [
+                "id",
+                "agent",
+                "on"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Waiting"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Resumed": {
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Resumed"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Conversation": {
+              "$ref": "#/$defs/CapturedConversation"
+            }
+          },
+          "required": [
+            "Conversation"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Call": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "Call"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "Heartbeat",
+          "type": "string"
+        }
+      ]
+    },
+    "ModelRef": {
+      "properties": {
+        "model_id": {
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/ProviderType"
+        }
+      },
+      "required": [
+        "provider",
+        "model_id"
+      ],
+      "type": "object"
+    },
+    "ProviderType": {
+      "oneOf": [
+        {
+          "enum": [
+            "ollama",
+            "azure_openai"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "open_router",
+          "type": "string"
+        }
+      ]
+    },
+    "Remaining": {
+      "additionalProperties": false,
+      "properties": {
+        "seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "StreamError": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/StreamErrorKind"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "StreamErrorKind": {
+      "oneOf": [
+        {
+          "const": "Auth",
+          "type": "string"
+        },
+        {
+          "const": "RateLimited",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ProviderStatus": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "ProviderStatus"
+          ],
+          "type": "object"
+        },
+        {
+          "const": "Transport",
+          "type": "string"
+        },
+        {
+          "const": "MalformedToolCall",
+          "type": "string"
+        },
+        {
+          "const": "Stalled",
+          "type": "string"
+        },
+        {
+          "const": "EmptyCompletion",
+          "type": "string"
+        },
+        {
+          "const": "Cancelled",
+          "type": "string"
+        },
+        {
+          "const": "UnknownToolCall",
+          "type": "string"
+        },
+        {
+          "const": "BudgetExhausted",
+          "type": "string"
+        },
+        {
+          "const": "Other",
+          "type": "string"
+        }
+      ]
+    },
+    "SwarmEvent": {
+      "properties": {
+        "chain": {
+          "$ref": "#/$defs/CallChain"
+        },
+        "inner": {
+          "items": {
+            "$ref": "#/$defs/SwarmItem"
+          },
+          "type": "array"
+        },
+        "node": {
+          "type": "string"
+        },
+        "root_task_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_task_id",
+        "node",
+        "chain",
+        "inner"
+      ],
+      "type": "object"
+    },
+    "SwarmItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "turn_started",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call_started",
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "name"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call_result",
+              "type": "string"
+            },
+            "result": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "result"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "tool_call_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "error"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "usage",
+              "type": "string"
+            },
+            "usage": true
+          },
+          "required": [
+            "kind",
+            "usage"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "ended",
+              "type": "string"
+            },
+            "state": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "conversation": {
+              "$ref": "#/$defs/CapturedConversation"
+            },
+            "kind": {
+              "const": "conversation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "conversation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SystemTime": {
+      "properties": {
+        "nanos_since_epoch": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "secs_since_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "secs_since_epoch",
+        "nanos_since_epoch"
+      ],
+      "type": "object"
+    },
+    "TokenUsage": {
+      "properties": {
+        "api_turn_count": {
+          "default": 1,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SystemTime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cache_read_tokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_write_tokens": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "calls": {
+          "items": {
+            "$ref": "#/$defs/ApiCallUsage"
+          },
+          "type": "array"
+        },
+        "delegated_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "estimated_cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_tokens": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "plugin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ],
+      "type": "object"
+    },
+    "ToolSource": {
+      "oneOf": [
+        {
+          "const": "Local",
+          "type": "string"
+        },
+        {
+          "const": "HiveCloud",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Internet": {
+              "properties": {
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Internet"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "ExternalService": {
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "ExternalService"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WaitingOn": {
+      "oneOf": [
+        {
+          "const": "approval",
+          "type": "string"
+        },
+        {
+          "const": "answer",
+          "type": "string"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "const": "TurnStarted",
+      "type": "string"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "Text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "Text"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ToolCallStarted": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "ToolCallStarted"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ToolCallInput": {
+          "properties": {
+            "arguments": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "arguments"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "ToolCallInput"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ToolCallResult": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "result": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "result"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "ToolCallResult"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ToolCallError": {
+          "properties": {
+            "error": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "error"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "ToolCallError"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ApprovalRequested": {
+          "properties": {
+            "command": {
+              "type": "string"
+            },
+            "detail": {
+              "$ref": "#/$defs/ApprovalDetail"
+            },
+            "id": {
+              "type": "string"
+            },
+            "is_sandboxed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "command",
+            "is_sandboxed",
+            "detail"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "ApprovalRequested"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ApprovalResolved": {
+          "properties": {
+            "approved": {
+              "type": "boolean"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "approved"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "ApprovalResolved"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ClarificationRequested": {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "questions": {
+              "items": {
+                "$ref": "#/$defs/ClarifyingQuestion"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "questions"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "ClarificationRequested"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "ApiCallUsage": {
+          "$ref": "#/$defs/ApiCallUsage"
+        }
+      },
+      "required": [
+        "ApiCallUsage"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "TokenUsage": {
+          "$ref": "#/$defs/TokenUsage"
+        }
+      },
+      "required": [
+        "TokenUsage"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "PluginUsage": {
+          "$ref": "#/$defs/TokenUsage"
+        }
+      },
+      "required": [
+        "PluginUsage"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "TurnMessages": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "TurnMessages"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "Delegation": {
+          "$ref": "#/$defs/InvokeAgentProgress"
+        }
+      },
+      "required": [
+        "Delegation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "SwarmEvent": {
+          "$ref": "#/$defs/SwarmEvent"
+        }
+      },
+      "required": [
+        "SwarmEvent"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "Error": {
+          "$ref": "#/$defs/StreamError"
+        }
+      },
+      "required": [
+        "Error"
+      ],
+      "type": "object"
+    },
+    {
+      "const": "Cancelled",
+      "type": "string"
+    },
+    {
+      "const": "TurnEnded",
+      "type": "string"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "FollowUp": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "FollowUp"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "SessionEvent"
+}
