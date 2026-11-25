@@ -36,10 +36,7 @@ pub struct MoveSummary {
 /// Taking a conversation online is a data egress: the user confirms it with
 /// this in front of them.
 pub const TAKE_ONLINE_SUMMARY: MoveSummary = MoveSummary {
-    moves: &[
-        "Message history, traces, timestamps and token usage",
-        "The model, by id — the server picks its own if it does not have that one",
-    ],
+    moves: &["Message history: the title and the messages themselves"],
     does_not_move: &[
         (
             "Workspace files",
@@ -170,8 +167,8 @@ pub async fn fetch_hosted(
 /// conversations are off (AGE-308).
 ///
 /// The move is developer-only until online mode is account-scoped: today it
-/// carries the transcript and nothing else, and the server does not import
-/// history, so a moved conversation cannot answer "what did we discuss".
+/// carries the title and messages and nothing else (no traces, timestamps,
+/// usage or model choice), so it is a developer preview.
 pub const HOSTED_DISABLED: &str = "Hosted conversations are not enabled.";
 
 /// Why a move cannot happen right now, in words the UI can show as-is.
