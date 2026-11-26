@@ -118,7 +118,10 @@ impl ChattyApp {
         else {
             return;
         };
-        if synced {
+        // A create still owed is still owed: a first turn the loop guard
+        // follows up runs a second turn before the create could go (AGE-2124).
+        let owed = self.hive_push.creates.contains(conv_id);
+        if synced || owed {
             self.hive_push.queue.enqueue(conv_id);
         } else if first_turn && cx.global::<HiveSettingsModel>().syncs_new_conversations() {
             self.hive_push.creates.insert(conv_id.to_string());
@@ -331,7 +334,8 @@ impl ChattyApp {
         };
         let store = cx.global::<ConversationsStore>();
         if store.is_streaming(&local_id) {
-            self.hive_push.creates.remove(&local_id);
+            // Mid-turn: its finalizer queues it again, and a create it is
+            // owed stays owed (`push_after_turn`).
             return Step::Skip;
         }
         let loaded = store
