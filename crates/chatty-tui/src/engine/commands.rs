@@ -520,7 +520,7 @@ impl ChatEngine {
                 let (url, remote_id) = new_mode
                     .cloud_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
-                    .expect("take_online returns a cloud placement");
+                    .expect("send_to_cloud returns a cloud placement");
 
                 self.hosted = Some(HostedSession::new(&url, &remote_id).with_auth(auth));
                 if let Some(conv) = self.session.conversation_mut() {
