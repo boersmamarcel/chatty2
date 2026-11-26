@@ -37,7 +37,15 @@ Sign in on the other device. The conversation is in the sidebar; open it to see 
 
 To run it on that device instead, open the **⋯** menu and choose **Continue on this device…**. Chatty fetches the latest messages, tool activity and usage, and the next reply runs on that device, with its own models and files. If the cloud's model isn't set up there, the conversation uses one that is. The cloud copy, and any files the cloud run saved, stay in your Hive account.
 
-A conversation is changed in one place at a time. If you send it from a device while another device has it open, chatty tells you where it is and offers **Continue on this device** to take it over.
+A conversation is changed in one place at a time. If you send it from a device while another device has it open, or when a sync shows another device has taken it, a line under the conversation says so (for example "running on Work laptop") with a **Continue here** button to take it back.
+
+## Files from a cloud run
+
+Files a cloud run saved appear as file cards on the reply that produced them. Click a card to open it in the artifact panel.
+
+## Resume an interrupted reply
+
+If the cloud restarts while a reply is being written, the conversation is marked **Interrupted** in the sidebar. Open it and choose **Resume** under the conversation to continue the reply. If the server says it is restarting, wait a few seconds and try again.
 
 ## Notifications
 
