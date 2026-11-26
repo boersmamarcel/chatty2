@@ -48,6 +48,7 @@ mod cloud_ops;
 mod conversation_ops;
 mod conversation_ops_modify;
 mod export_ops;
+mod hive_followups_ops;
 mod hive_push_ops;
 mod hive_sync_ops;
 mod message_ops;
@@ -774,6 +775,8 @@ impl ChattyApp {
                     debug!(?id, "ChatViewEvent::SendQueuedNow received");
                     app.send_queued_now(*id, cx);
                 }
+                ChatViewEvent::ContinueHere => app.continue_here(cx),
+                ChatViewEvent::ResumeTurn => app.resume_turn(cx),
                 ChatViewEvent::WithdrawQueued(id) => {
                     debug!(?id, "ChatViewEvent::WithdrawQueued received");
                     app.withdraw(*id, cx);

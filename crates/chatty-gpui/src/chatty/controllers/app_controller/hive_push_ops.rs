@@ -49,6 +49,8 @@ pub(super) struct HivePushState {
     /// Local conversations whose next queue turn creates them on the account
     /// instead of pushing history.
     creates: std::collections::HashSet<String>,
+    /// A lookup of this device's id is running (HX-22).
+    device_lookup: bool,
 }
 
 /// Where a create gets the conversation from.
@@ -57,6 +59,23 @@ enum CreateFrom {
     Loaded(Box<chatty_core::models::conversation::ConversationSnapshot>),
     /// Only its saved row.
     Stored,
+}
+
+impl HivePushState {
+    /// The server's words for a conversation another device holds, as of the
+    /// last push it refused (HX-22).
+    pub(super) fn held_message(&self, id: &str) -> Option<Option<String>> {
+        self.held_by.get(id).map(|held| held.message.clone())
+    }
+
+    pub(super) fn set_device_lookup(&mut self, running: bool) {
+        self.device_lookup = running;
+    }
+
+    /// Whether this device's id is being looked up now.
+    pub(super) fn device_lookup_running(&self) -> bool {
+        self.device_lookup
+    }
 }
 
 /// One step of the push loop, read from the store.
@@ -475,6 +494,7 @@ impl ChattyApp {
                 // The server's own words, as they are.
                 self.notify_window(held_by.notice(), cx);
                 self.hive_push.held_by.insert(local_id, held_by);
+                self.refresh_follow_up(cx);
                 false
             }
             PushEvent::SignedOut | PushEvent::Offline => true,

@@ -22,6 +22,10 @@ pub enum ApiError {
     /// 404 on a detail: the conversation is gone.
     #[error("the conversation does not exist on the server")]
     NotFound,
+    /// A resume the server refused (404 or 409); the text is the server's
+    /// own `message`, written for the user.
+    #[error("{0}")]
+    Refused(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -42,6 +46,11 @@ pub trait HiveConversationsApi: Send + Sync {
         &self,
         remote_id: &str,
     ) -> BoxFuture<'static, Result<ConversationDetail, ApiError>>;
+
+    /// Resume the turn the server kept after a restart (HX-20). The reply is
+    /// an SSE stream of the turn's frames; only its status is read, and the
+    /// caller follows the turn with `attach()`.
+    fn resume(&self, remote_id: &str) -> BoxFuture<'static, Result<(), ApiError>>;
 }
 
 /// The API over HTTP, authenticated as the Hive sign-in through
@@ -120,6 +129,43 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
             true,
         )
     }
+
+    fn resume(&self, remote_id: &str) -> BoxFuture<'static, Result<(), ApiError>> {
+        let http = self.http.clone();
+        let auth = self.auth.clone();
+        let url = format!(
+            "{}/api/conversations/{remote_id}/turn/resume",
+            self.server_url
+        );
+        Box::pin(async move {
+            let response = send_to_server(auth.as_deref(), &url, || {
+                http.post(&url).json(&serde_json::json!({}))
+            })
+            .await?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(ApiError::SignedOut);
+            }
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return Err(ApiError::Refused(
+                    "The server is restarting. Try again in a few seconds.".to_string(),
+                ));
+            }
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT {
+                let message = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body.get("message")?.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "This turn can't be resumed any more.".to_string());
+                return Err(ApiError::Refused(message));
+            }
+            Err(anyhow::anyhow!("the server answered {status} for {url}").into())
+        })
+    }
 }
 
 #[cfg(test)]
@@ -196,5 +242,46 @@ mod tests {
         ));
         let signed_out = api.conversation("locked").await.unwrap_err();
         assert_eq!(signed_out.to_string(), SIGN_IN_TO_HIVE);
+    }
+    #[tokio::test]
+    async fn resume_posts_to_the_route_and_a_refusal_carries_the_servers_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/ok/turn/resume"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/gone/turn/resume"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(
+                serde_json::json!({"error": "not_interrupted", "message": "That turn already finished."}),
+            ))
+            .mount(&server)
+            .await;
+        let api = HttpHiveConversationsApi::new(&server.uri(), Some(signed_in(&server)));
+
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/draining/turn/resume"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_json(serde_json::json!({"error": "draining"})),
+            )
+            .mount(&server)
+            .await;
+        api.resume("ok").await.unwrap();
+        match api.resume("draining").await {
+            Err(ApiError::Refused(message)) => {
+                assert_eq!(
+                    message,
+                    "The server is restarting. Try again in a few seconds."
+                )
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        match api.resume("gone").await {
+            Err(ApiError::Refused(message)) => assert_eq!(message, "That turn already finished."),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 }
