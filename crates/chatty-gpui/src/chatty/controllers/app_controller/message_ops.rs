@@ -1293,6 +1293,11 @@ impl ChattyApp {
                             if let Some(app) = weak.upgrade() {
                                 app.update(cx, |app, cx| {
                                     app.persist_conversation(&conv_id_for_title, cx);
+                                    // The title reaches the account too (AGE-2124):
+                                    // the push after the turn ran before it, and a
+                                    // pull would otherwise put the account's "New
+                                    // Chat" back over it.
+                                    app.push_after_turn(&conv_id_for_title, cx);
                                 })
                                 .map_err(|e| {
                                     warn!(error = ?e, "Failed to persist conversation after title generation")

@@ -334,9 +334,30 @@ impl ConversationsStore {
     ) -> Vec<crate::services::hive_sync::SyncAction> {
         use crate::services::hive_sync::{SyncAction, apply_to_rows};
 
+        let this_device = self.this_device.clone();
+        let known: std::collections::HashSet<String> =
+            self.metadata.iter().map(|row| row.id.clone()).collect();
         let kept: Vec<SyncAction> = actions
             .iter()
             .filter(|action| match action {
+                // A conversation the account says this device holds, but that
+                // this device does not have: it was kept on this device only
+                // (its row is local-only now) or deleted here. Bringing the
+                // account's copy back made a duplicate (AGE-2124).
+                SyncAction::UpsertMetadata(remote) if !known.contains(&remote.local_id) => {
+                    let held_here = matches!(
+                        (remote.sync.placement(), this_device.as_deref()),
+                        (Some(crate::models::conversation::Placement::Device { device_id }), Some(this))
+                            if device_id == this
+                    );
+                    if held_here {
+                        tracing::info!(
+                            conv_id = %remote.local_id,
+                            "Not importing a conversation the account says this device holds; it is local-only or deleted here"
+                        );
+                    }
+                    !held_here
+                }
                 SyncAction::ApplyTombstone { local_id } => {
                     let busy = self.active_conversation_id.as_deref() == Some(local_id.as_str())
                         || self.streaming_ids.contains(local_id);
@@ -1005,6 +1026,47 @@ mod tests {
         );
         store.delete_conversation("a");
         assert!(store.get_hosted("a").is_none(), "deleted, no client");
+    }
+
+    /// AGE-2124: a conversation the account says this device holds, but that
+    /// this device does not have (kept on this device only, or deleted
+    /// here), is not brought back as a duplicate. One held elsewhere is.
+    #[test]
+    fn a_pull_does_not_bring_back_a_conversation_held_here_but_gone_here() {
+        use crate::models::conversation::{Placement, SyncedConversation};
+        use crate::services::hive_sync::{RemoteRow, SyncAction, TurnStatus};
+
+        let mut store = make_store_with_n_entries(1);
+        store.set_this_device(Some("desk-1".into()));
+        let held = |device: &str, remote: &str| {
+            ConversationSync::Synced(SyncedConversation {
+                server_url: "https://hive.example".into(),
+                remote_id: remote.into(),
+                version: 2,
+                placement: Placement::Device {
+                    device_id: device.into(),
+                },
+                last_synced_at: None,
+            })
+        };
+        let row = |id: &str, sync: ConversationSync| {
+            SyncAction::UpsertMetadata(RemoteRow {
+                local_id: id.into(),
+                title: "New Chat".into(),
+                model_id: None,
+                updated_at: 100,
+                sync,
+                turn_status: TurnStatus::Idle,
+                device_name: None,
+            })
+        };
+        let kept = store.apply_sync_actions(&[
+            row("r-mine", held("desk-1", "r-mine")),
+            row("r-theirs", held("tui-2", "r-theirs")),
+        ]);
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(store.all_metadata_ids().contains(&"r-theirs".to_string()));
+        assert!(!store.all_metadata_ids().contains(&"r-mine".to_string()));
     }
 
     /// A pull reaches the sidebar rows and the hosted clients, but never

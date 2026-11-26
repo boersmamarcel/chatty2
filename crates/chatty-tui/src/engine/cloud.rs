@@ -154,6 +154,20 @@ impl ChatEngine {
                                 !matches!(action, SyncAction::ApplyTombstone { local_id }
                                     if open.as_deref() == Some(local_id.as_str()))
                             })
+                            // Held by this device but not here: kept on this
+                            // device only or deleted here; not brought back as a
+                            // duplicate (AGE-2124).
+                            .filter(|action| match action {
+                                SyncAction::UpsertMetadata(row) => {
+                                    local.iter().any(|known| known.id == row.local_id)
+                                        || !matches!(
+                                            (row.sync.placement(), self.cloud.this_device.as_deref()),
+                                            (Some(chatty_core::models::conversation::Placement::Device { device_id }), Some(this))
+                                                if device_id == this
+                                        )
+                                }
+                                _ => true,
+                            })
                             .collect();
                         for action in &actions {
                             if let SyncAction::UpsertMetadata(row) = action {
