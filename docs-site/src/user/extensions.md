@@ -6,7 +6,7 @@
 
 ## Hive marketplace
 
-Hive is the registry Chatty installs extensions from; the **Hive account** panel shows who is signed in, the Hive address, the server's version and a **Sign out** button. **Sign In** or **Register** (username, email, password) to install from it; the session lasts thirty days. Before it sends a password, Chatty checks that the address answers as a Hive server; if not, you get "This address is not a Hive server". The address is one setting, `hive_url` in `hive_settings.json` (an older `registry_url` there is carried over to it); the panel shows it read-only.
+Hive is the registry Chatty installs extensions from; the **Hive account** panel shows who is signed in, the Hive address, the server's version and a **Sign out** button. **Sign In** or **Register** (username, email, password) to install from it; the session lasts thirty days. Before it sends a password, Chatty checks that the address answers as a Hive server; if not, you get "This address is not a Hive server". The Sign In and Register dialogs have an address field, pre-filled with the current address and saved before you sign in. It is one setting, `hive_url` in `hive_settings.json` (an older `registry_url` there is carried over to it). Passwords are masked; the eye button shows them. Settings search finds the panel as "Hive account".
 
 **Browse Marketplace** searches the registry. Each result shows its type and pricing; **Install** downloads it into your module directory (the one set in the module settings) and adds it to your **Installed** list, **Uninstall** removes it. Chatty refuses a module whose name or version is malformed, whose download is over 64 MiB, or that is published as remote-only (running modules on the Hive runner is no longer supported), and remembers each installed module's checksum: if its file changes on disk afterwards, it no longer loads. Installed items carry two kinds of badge:
 
@@ -53,6 +53,10 @@ The server appears under **Installed** with an **↗ External** badge. The agent
 
 > [!TIP]
 > Servers to try, with their start commands, are collected on the [curated MCP catalog](../dev/architecture/curated-mcp-catalog.md) page. Write your own against the [MCP specification](https://modelcontextprotocol.io/).
+
+## Add a remote A2A agent
+
+**Add Custom Extension → Add A2A Agent**, then give it a name and the agent's URL. It is added enabled, and Chatty fetches its agent card.
 
 ## Remote A2A agents and private networks
 
