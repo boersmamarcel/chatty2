@@ -139,6 +139,8 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/model [query]` | Switch / list models | — | Yes |
 | `/tools [name]` | Open tool picker or toggle by name | — | Yes |
 | `/modules …` | Module runtime settings | — | Yes |
+| `/login` | Sign in to Hive with the terminal app's own account: prompts for email and password (not echoed); the pair is kept in `hive_tui_settings.json`, never the desktop's (AGE-2084) | — | Yes |
+| `/logout` | Sign the terminal app out of Hive and revoke its refresh token; the desktop's session is untouched (AGE-2084) | — | Yes |
 | `/update` | CLI auto-update | — | Yes |
 | `/quit` `/exit` | Quit the application | — | Yes |
 
@@ -352,12 +354,15 @@ Source: `settings/models/hive_settings.rs`.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `registry_url` | `String` | `http://localhost:8080` | `DEFAULT_REGISTRY_URL` |
+| `hive_url` | `String` | `default_hive_url()` | The one Hive address: sign-in, hosted conversations and the marketplace (AGE-2085) |
+| `registry_url_override` | `Option<String>` | `null` | Developer setting: a different module registry for the marketplace and downloads; an old `registry_url` in a file loads here. Read through `registry_url()`, which falls back to `hive_url` |
 | **`token`** | `Option<String>` | `null` | One-hour access JWT. Secret *(store: `token_ref` → `hive/token`)*. `is_logged_in()` = token present |
 | **`refresh_token`** | `Option<String>` | `null` | 30-day refresh token, rotated on every refresh. Secret *(store: `refresh_token_ref` → `hive/refresh_token`)* |
 | `expires_at` | `Option<DateTime>` | `null` | When `token` expires |
 | `username` | `Option<String>` | `null` | Cached for UI |
 | `email` | `Option<String>` | `null` | Cached for re-login |
+| `sync_new_conversations` | `bool` | `true` | Sync a conversation started while signed in; omitted from the file while on (AGE-2088) |
+| `sync_existing_offered` | `bool` | `false` | The one-time offer to sync earlier conversations has been shown; omitted while false |
 
 ---
 
@@ -367,6 +372,14 @@ Source: `tui_hive.rs`. The terminal app's own Hive sign-in, the same shape as
 `hive_settings.json` but a separate pair (secret refs `hive-tui/token` and
 `hive-tui/refresh_token`), so the TUI never spends the desktop's single-use
 refresh token.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `hive_url` | `String` | `default_hive_url()` | Same field as the desktop's; the TUI's session talks to the address it was signed in to |
+| **`token`** | `Option<String>` | `null` | One-hour access JWT. Secret *(store: `token_ref` → `hive-tui/token`)* |
+| **`refresh_token`** | `Option<String>` | `null` | Refresh token, single use. Secret *(store: `refresh_token_ref` → `hive-tui/refresh_token`)*; refreshed only by the TUI's own `HiveSession`, whose every change is saved (`SaveFlush`); a delegated worker borrows the pair and never refreshes it |
+| `expires_at`, `username`, `email` | — | `null` | As in `hive_settings.json` |
+| `registry_url_override`, `sync_*` | — | — | Present (same model) but only `hive_url` and the sign-in fields are used by the TUI |
 
 ---
 
@@ -785,6 +798,7 @@ Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This pag
 |------|------|------|-----------|
 | `MCP_UPDATE_SENDER` | `OnceLock<mpsc::Sender<Vec<McpServerConfig>>>` | Startup | Cross-cutting MCP config change notifications |
 | `MCP_SERVICE` | `OnceLock<McpService>` | Startup | Tool context has no UI handle; needs shared MCP client |
+| `HIVE_TUI_REPOSITORY` | `OnceLock<Arc<dyn HiveTuiSettingsRepository>>` | Startup (`init_repositories`) | The TUI's own Hive sign-in (`hive_tui_settings.json`); not a `RepositoryRegistry` field, so a hosted guest never snapshots it (AGE-2084) |
 
 ## Repository registry (`chatty-core/src/lib.rs`)
 
@@ -801,6 +815,7 @@ Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This pag
 | `user_secrets_repository()` | secrets | User-provided secret values |
 | `module_settings_repository()` | modules | WASM module settings |
 | `hive_settings_repository()` | hive | Hive registry / billing |
+| `hive_tui_settings_repository()` | hive (TUI) | The terminal app's own Hive sign-in |
 | `extensions_repository()` | extensions | Browser extension config |
 | `token_tracking_repository()` | token tracking | Compaction share / context-window thresholds (ADR-0007) |
 
