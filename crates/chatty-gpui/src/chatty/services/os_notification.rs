@@ -35,8 +35,26 @@ fn notify_send_args(title: &str, body: &str, with_action: bool) -> Vec<String> {
         args.push("--wait".to_string());
     }
     // `--` so a title that starts with a dash is not read as an option.
-    args.extend(["--".to_string(), title.to_string(), body.to_string()]);
+    args.extend(["--".to_string(), title.to_string(), markup_escaped(body)]);
     args
+}
+
+/// `text` as notification body markup: the freedesktop spec lets a server
+/// read the body as a small HTML subset, so a conversation title like
+/// `Q&A <draft>` is shown as written instead of being parsed (or dropped as
+/// broken markup), and a title cannot add a link.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn markup_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Did the user click the notification, going by `notify-send --wait`'s
@@ -133,6 +151,15 @@ mod tests {
         assert_eq!(args[dashdash + 1], "--urgency=critical");
         assert!(args.contains(&"--wait".to_string()));
         assert!(!notify_send_args("t", "b", false).contains(&"--wait".to_string()));
+    }
+
+    #[test]
+    fn the_body_is_escaped_as_markup() {
+        let args = notify_send_args("Chatty", "Finished: Q&A <a href=\"x\">draft</a>", false);
+        assert_eq!(
+            args.last().unwrap(),
+            "Finished: Q&amp;A &lt;a href=\"x\"&gt;draft&lt;/a&gt;"
+        );
     }
 
     #[test]

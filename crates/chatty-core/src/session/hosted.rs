@@ -213,6 +213,7 @@ impl HostedSession {
         let http = self.http.clone();
         let auth = self.auth.clone();
         let frame_sink = self.frame_sink.clone();
+        let remote_id = self.remote_id.clone();
         self.cancel_flag = Some(cancel_flag.clone());
         self.turn_active.store(true, Ordering::Relaxed);
         let turn_active = self.turn_active.clone();
@@ -251,6 +252,7 @@ impl HostedSession {
                             &http,
                             auth.as_deref(),
                             &url,
+                            &remote_id,
                             body,
                             &cancel_flag,
                             &mut forward,
@@ -263,8 +265,11 @@ impl HostedSession {
             };
             if let Err(error) = sent {
                 if ended {
-                    tracing::warn!(%error, "a hosted turn's stream failed after it ended");
+                    tracing::warn!(target: LOG_TARGET, remote_id, %error, "a hosted turn's stream failed after it ended");
                 } else {
+                    // The kind only: a refusal's message quotes the server's
+                    // body, which the refusal's own line has the code of.
+                    tracing::warn!(target: LOG_TARGET, remote_id, kind = ?error.kind, "a hosted turn failed");
                     emit(SessionEvent::Error(error));
                 }
             }
@@ -296,9 +301,16 @@ impl HostedSession {
             "{}/api/conversations/{}/cancel",
             self.server_url, self.remote_id
         );
+        let remote_id = self.remote_id.clone();
         async move {
-            if let Err(error) = send_to_server(auth.as_deref(), &url, || http.post(&url)).await {
-                tracing::warn!(?error, "failed to cancel a hosted turn");
+            match send_to_server(auth.as_deref(), &url, || http.post(&url)).await {
+                Ok(response) if !response.status().is_success() => {
+                    log_refused("a turn's cancel", &remote_id, response).await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(target: LOG_TARGET, remote_id, error = format!("{error:#}"), "failed to cancel a hosted turn");
+                }
             }
         }
     }
@@ -311,11 +323,17 @@ impl HostedSession {
             "{}/api/conversations/{}/approvals/{}",
             self.server_url, self.remote_id, id
         );
+        let remote_id = self.remote_id.clone();
         async move {
             let body = serde_json::json!({ "approved": approved });
-            let sent = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await;
-            if let Err(error) = sent {
-                tracing::warn!(?error, "failed to resolve a hosted approval");
+            match send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await {
+                Ok(response) if !response.status().is_success() => {
+                    log_refused("an approval", &remote_id, response).await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(target: LOG_TARGET, remote_id, error = format!("{error:#}"), "failed to resolve a hosted approval");
+                }
             }
         }
     }
@@ -332,11 +350,17 @@ impl HostedSession {
             "{}/api/conversations/{}/clarifications/{}",
             self.server_url, self.remote_id, id
         );
+        let remote_id = self.remote_id.clone();
         async move {
             let body = serde_json::json!({ "answers": answers });
-            let sent = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await;
-            if let Err(error) = sent {
-                tracing::warn!(?error, "failed to answer a hosted clarification");
+            match send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await {
+                Ok(response) if !response.status().is_success() => {
+                    log_refused("a clarification answer", &remote_id, response).await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(target: LOG_TARGET, remote_id, error = format!("{error:#}"), "failed to answer a hosted clarification");
+                }
             }
         }
     }
@@ -389,6 +413,7 @@ impl HostedSession {
         let http = self.http.clone();
         let auth = self.auth.clone();
         let frame_sink = self.frame_sink.clone();
+        let remote_id = self.remote_id.clone();
         self.cancel_flag = Some(cancel_flag.clone());
         self.turn_active.store(true, Ordering::Relaxed);
         let turn_active = self.turn_active.clone();
@@ -399,6 +424,7 @@ impl HostedSession {
                 &http,
                 auth.as_deref(),
                 &url,
+                &remote_id,
                 &cancel_flag,
                 accept_gap,
                 timing,
@@ -421,13 +447,15 @@ impl HostedSession {
             "{}/api/conversations/{}/inputs",
             self.server_url, self.remote_id
         );
+        let remote_id = self.remote_id.clone();
         async move {
             let response = send_to_server(auth.as_deref(), &url, || http.get(&url)).await?;
             let status = response.status();
-            if status == reqwest::StatusCode::UNAUTHORIZED {
-                bail!(SIGN_IN_TO_HIVE);
-            }
             if !status.is_success() {
+                log_refused("the pending inputs", &remote_id, response).await;
+                if status == reqwest::StatusCode::UNAUTHORIZED {
+                    bail!(SIGN_IN_TO_HIVE);
+                }
                 bail!("the server answered {status} for {url}");
             }
             let wire: Vec<PendingInputWire> = response
@@ -469,19 +497,26 @@ impl HostedSession {
                 serde_json::json!({ "nonce": nonce, "answers": answers })
             }
         };
+        let remote_id = self.remote_id.clone();
         async move {
             match send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body)).await {
                 Ok(response) if response.status().is_success() => AnswerOutcome::Accepted,
                 Ok(response) if response.status() == reqwest::StatusCode::CONFLICT => {
                     AnswerOutcome::Stale
                 }
-                Ok(response) if response.status() == reqwest::StatusCode::UNAUTHORIZED => {
-                    AnswerOutcome::Failed(SIGN_IN_TO_HIVE.to_string())
-                }
                 Ok(response) => {
-                    AnswerOutcome::Failed(format!("the server answered {}", response.status()))
+                    let status = response.status();
+                    log_refused("an input's answer", &remote_id, response).await;
+                    if status == reqwest::StatusCode::UNAUTHORIZED {
+                        AnswerOutcome::Failed(SIGN_IN_TO_HIVE.to_string())
+                    } else {
+                        AnswerOutcome::Failed(format!("the server answered {status}"))
+                    }
                 }
-                Err(error) => AnswerOutcome::Failed(format!("{error:#}")),
+                Err(error) => {
+                    tracing::warn!(target: LOG_TARGET, remote_id, error = format!("{error:#}"), "failed to answer a hosted input");
+                    AnswerOutcome::Failed(format!("{error:#}"))
+                }
             }
         }
     }
@@ -530,13 +565,29 @@ impl Default for AttachTiming {
 }
 
 /// An approval or question the server's run is waiting on.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Debug` leaves the nonce out: it authorizes the answer, so it must not
+/// reach a log line.
+#[derive(Clone, PartialEq)]
 pub struct PendingInput {
     pub id: String,
     /// What the answer has to carry.
     pub nonce: String,
     pub request: BrokerRequest,
 }
+
+impl std::fmt::Debug for PendingInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingInput")
+            .field("id", &self.id)
+            .field("nonce", &REDACTED)
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
+/// What a `Debug` of a [`HostedFrame`] or [`PendingInput`] shows for a nonce.
+const REDACTED: &str = "<redacted>";
 
 /// The answer to a [`PendingInput`].
 #[derive(Debug, Clone, PartialEq)]
@@ -583,14 +634,6 @@ impl From<PendingInputWire> for PendingInput {
     }
 }
 
-/// POST the turn and drain its SSE body into `emit`.
-///
-/// Errors returned here become one `Error` event; `TurnEnded` is the caller's
-/// responsibility either way. The [`StreamErrorKind`] is what the recovery
-/// table reads (AGE-244 / D5), so a server we could not reach has to be
-/// `Transport` and not `Other`: the two get different treatment on the
-/// headless surface, and a hosted turn is exactly the case where the network
-/// is the thing that failed.
 /// Upload a turn's attachments to the conversation the turn URL names, so
 /// the server has them when the turn starts (HX-15).
 async fn upload_for_turn(
@@ -619,14 +662,25 @@ async fn upload_for_turn(
                 crate::services::hive_files::FilesError::SignedOut => StreamErrorKind::Auth,
                 _ => StreamErrorKind::Transport,
             };
+            tracing::warn!(target: LOG_TARGET, remote_id, %error, "Could not upload a hosted turn's attachments");
             StreamError::new(kind, format!("could not upload the attachments: {error}"))
         })
 }
 
+/// POST the turn and drain its SSE body into `emit`.
+///
+/// Errors returned here become one `Error` event; `TurnEnded` is the caller's
+/// responsibility either way. The [`StreamErrorKind`] is what the recovery
+/// table reads (AGE-244 / D5), so a server we could not reach has to be
+/// `Transport` and not `Other`: the two get different treatment on the
+/// headless surface, and a hosted turn is exactly the case where the network
+/// is the thing that failed.
+#[allow(clippy::too_many_arguments)]
 async fn drive_turn<F: FnMut(SessionEvent)>(
     http: &reqwest::Client,
     auth: Option<&HiveSession>,
     url: &str,
+    remote_id: &str,
     body: serde_json::Value,
     cancel_flag: &Arc<AtomicBool>,
     emit: &mut F,
@@ -636,11 +690,21 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
         http.post(url).timeout(CONNECT_TIMEOUT).json(&body)
     })
     .await
-    .map_err(|error| StreamError::new(StreamErrorKind::Transport, format!("{error:#}")))?;
+    .map_err(|error| {
+        tracing::warn!(target: LOG_TARGET, remote_id, error = format!("{error:#}"), "Could not send a hosted turn");
+        StreamError::new(StreamErrorKind::Transport, format!("{error:#}"))
+    })?;
 
     let status = response.status();
     if !status.is_success() {
         let detail = response.text().await.unwrap_or_default();
+        tracing::warn!(
+            target: LOG_TARGET,
+            remote_id,
+            status = status.as_u16(),
+            error_code = error_code(&detail).as_deref(),
+            "The server refused a hosted turn"
+        );
         // The server's status stands in for the provider's here: the client
         // cannot see past it, and 401/429 mean the same thing either way.
         // A spent budget is terminal (AGE-903): `402 cap_exceeded`.
@@ -701,6 +765,7 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
     http: &reqwest::Client,
     auth: Option<&HiveSession>,
     url: &str,
+    remote_id: &str,
     cancel_flag: &Arc<AtomicBool>,
     accept_gap: bool,
     timing: AttachTiming,
@@ -714,6 +779,7 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
     let mut failures = 0u32;
 
     let lost = |emit: &mut F, message: String| {
+        tracing::warn!(target: LOG_TARGET, remote_id, %message, "Gave up following a cloud turn");
         emit(SessionEvent::Error(StreamError::new(
             StreamErrorKind::Transport,
             message,
@@ -737,6 +803,7 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 failures += 1;
+                tracing::info!(target: LOG_TARGET, remote_id, attempt = failures, error = format!("{error:#}"), "Could not reach a cloud turn; retrying");
                 if failures > timing.retries {
                     return lost(emit, format!("{error:#}"));
                 }
@@ -745,6 +812,7 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
             }
             Err(_) => {
                 failures += 1;
+                tracing::info!(target: LOG_TARGET, remote_id, attempt = failures, "A cloud turn did not answer in time; retrying");
                 if failures > timing.retries {
                     return lost(emit, "the server did not answer in time".to_string());
                 }
@@ -763,6 +831,7 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
             };
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            tracing::info!(target: LOG_TARGET, remote_id, status = 429, "Too many viewers on a cloud turn");
             emit(SessionEvent::Error(StreamError::new(
                 StreamErrorKind::RateLimited,
                 "This conversation is already open in several places. Close one, then try again."
@@ -771,6 +840,7 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
             return AttachOutcome::Busy;
         }
         if !status.is_success() {
+            tracing::warn!(target: LOG_TARGET, remote_id, status = status.as_u16(), attempt = failures, "The server refused to share a cloud turn");
             let kind = if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
@@ -873,6 +943,7 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
         } else {
             failures += 1;
         }
+        tracing::info!(target: LOG_TARGET, remote_id, attempt = failures, delivered, "A cloud turn's stream closed before the turn ended; reconnecting");
         if failures > timing.retries {
             return lost(
                 emit,
@@ -920,11 +991,49 @@ pub(crate) async fn send_to_server(
         .with_context(|| format!("could not reach the server at {url}"))
 }
 
+/// The `tracing` target of every Hive sync, push, hand-off, reattach and
+/// file-transfer failure line, so `RUST_LOG=chatty::hive=debug` (or one
+/// grep for a `remote_id`) follows a conversation across all of them.
+pub const LOG_TARGET: &str = "chatty::hive";
+
+/// The `error` code of a Hive JSON error body (`{"error": "held_elsewhere",
+/// "message": …}`), for a log line. Only the code: the message can quote
+/// user content. `None` when the body is not such an object or the code is
+/// not a short identifier.
+pub fn error_code(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let code = value.get("error")?.as_str()?;
+    (!code.is_empty()
+        && code.len() <= 64
+        && code
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+    .then(|| code.to_string())
+}
+
+/// Log a refused hosted request (any non-2xx answer) with the conversation's
+/// remote id, the status and the server's error code, reading the body for
+/// the code only.
+async fn log_refused(what: &str, remote_id: &str, response: reqwest::Response) {
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    tracing::warn!(
+        target: LOG_TARGET,
+        remote_id,
+        status,
+        error_code = error_code(&body).as_deref(),
+        "The server refused {what}"
+    );
+}
+
 /// One frame off a hosted turn's wire (HX-2).
 ///
 /// Most are a [`SessionEvent`]; the rest are the server's own, which a client
 /// that only knew session events used to turn into an error.
-#[derive(Debug, Clone)]
+///
+/// `Debug` shows a [`BrokerInput`](Self::BrokerInput)'s nonce as
+/// `<redacted>`, so a frame can be logged as it is.
+#[derive(Clone)]
 pub enum HostedFrame {
     Session(SessionEvent),
     /// First frame of a re-attach: when the turn started and how many of its
@@ -957,6 +1066,40 @@ pub enum HostedFrame {
     StreamError(String),
     /// A frame name this build does not know. Skipped, never an error.
     Unknown(String),
+}
+
+impl std::fmt::Debug for HostedFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Session(event) => f.debug_tuple("Session").field(event).finish(),
+            Self::Attached {
+                started_at_ms,
+                dropped,
+            } => f
+                .debug_struct("Attached")
+                .field("started_at_ms", started_at_ms)
+                .field("dropped", dropped)
+                .finish(),
+            Self::BrokerInput { id, request, .. } => f
+                .debug_struct("BrokerInput")
+                .field("id", id)
+                .field("nonce", &REDACTED)
+                .field("request", request)
+                .finish(),
+            Self::BrokerInputSettled { id, outcome } => f
+                .debug_struct("BrokerInputSettled")
+                .field("id", id)
+                .field("outcome", outcome)
+                .finish(),
+            Self::ConnectorNeedsSignIn { connector } => f
+                .debug_struct("ConnectorNeedsSignIn")
+                .field("connector", connector)
+                .finish(),
+            Self::InputStale { id } => f.debug_struct("InputStale").field("id", id).finish(),
+            Self::StreamError(message) => f.debug_tuple("StreamError").field(message).finish(),
+            Self::Unknown(name) => f.debug_tuple("Unknown").field(name).finish(),
+        }
+    }
 }
 
 /// What a [`HostedFrame::BrokerInput`] asks. The live frames carry the request
@@ -1365,6 +1508,43 @@ mod tests {
             let decoded = decode_frame(name, &data.to_string()).unwrap();
             assert_eq!(format!("{decoded:?}"), format!("{expected:?}"), "{name}");
         }
+    }
+
+    #[test]
+    fn error_code_reads_only_a_short_identifier() {
+        assert_eq!(
+            error_code(r#"{"error":"held_elsewhere","message":"Running on Work laptop"}"#)
+                .as_deref(),
+            Some("held_elsewhere")
+        );
+        assert_eq!(error_code("<html>oops</html>"), None);
+        assert_eq!(error_code(r#"{"error":"the user wrote: hello"}"#), None);
+        assert_eq!(error_code(r#"{"message":"no code"}"#), None);
+    }
+
+    /// The nonce authorizes an answer: a frame or pending input logged with
+    /// `{:?}` (the default frame sink does) must not carry it.
+    #[test]
+    fn debug_output_never_shows_an_input_nonce() {
+        use serde_json::json;
+        let nonce = "nonce-5f1c0a77";
+        let data = json!({"id": "approval-1", "nonce": nonce, "request": approval()});
+        let frame = decode_frame("broker_approval", &data.to_string()).unwrap();
+        let HostedFrame::BrokerInput { nonce: kept, .. } = &frame else {
+            panic!("a broker input: {frame:?}");
+        };
+        assert_eq!(kept, nonce, "the nonce is still there to answer with");
+        let shown = format!("{frame:?}");
+        assert!(!shown.contains(nonce), "{shown}");
+        assert!(shown.contains("approval-1"), "{shown}");
+
+        let input = PendingInput {
+            id: "approval-1".into(),
+            nonce: nonce.into(),
+            request: BrokerRequest::Approval(approval()),
+        };
+        let shown = format!("{input:?}");
+        assert!(!shown.contains(nonce), "{shown}");
     }
 
     #[test]
