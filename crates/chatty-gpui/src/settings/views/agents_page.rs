@@ -20,13 +20,10 @@ use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 pub fn agents_page() -> SettingPage {
     SettingPage::new("Agents")
         .description(
-            "Every local agent is a spec: <workspace>/.chatty/agents/<name>.toml, \
-             <data dir>/chatty/agents/<name>.toml, or a preset. The broker serves \
-             local-agent and your own exposed specs; a preset joins when one of them \
-             delegates to it or module settings name it. list_agents, invoke_agent and \
-             /agent <name> reach them by name. New spec, Edit and Duplicate write the file \
-             for you and the broker serves it at once; editing a preset saves a copy in the \
-             workspace that shadows it. A file edited by hand shows after Reload.",
+            "The agents Chatty can hand work to. Each one has a role, a model and the \
+             tools it may use. Start a task with /agent <name>, or let an agent ask \
+             another for help. New spec, Edit and Duplicate save your changes and take \
+             effect at once; editing a built-in agent saves your own copy of it.",
         )
         .resettable(false)
         .groups(vec![specs_group(), remote_agents_group()])

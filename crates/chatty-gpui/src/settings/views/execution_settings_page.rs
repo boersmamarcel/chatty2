@@ -98,10 +98,9 @@ pub fn execution_settings_page() -> SettingPage {
                     .description(
                         "When internet access is on, also let the browser navigate to private \
                          IPs on your own network (e.g. 192.168.x.x, 10.x.x.x) — useful for \
-                         reaching another machine on your LAN. Off by default: these are blocked \
-                         as a server-side request forgery (SSRF) protection, same as any other \
-                         private target. Cloud-metadata addresses (169.254.x.x) stay blocked \
-                         either way.",
+                         reaching another machine on your LAN. Off by default, so a web page \
+                         cannot use the AI to reach devices on your network. Cloud-metadata \
+                         addresses (169.254.x.x) stay blocked either way.",
                     ),
                     SettingItem::new(
                         "Enable Code Execution Tool",
@@ -114,7 +113,7 @@ pub fn execution_settings_page() -> SettingPage {
                         .default_value(false),
                     )
                     .description(
-                        "Expose the execute_code tool. Python may run through Monty; enabling Docker fallback below allows broader language and package support.",
+                        "Let the AI run short pieces of code to calculate or check things. Python runs in a built-in sandbox; turn on Docker below for other languages and packages.",
                     ),
                     SettingItem::new(
                         "Enable Docker Fallback",

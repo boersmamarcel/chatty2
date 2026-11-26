@@ -220,7 +220,7 @@ impl ChatView {
                                 .line_height(relative(1.4))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(
-                                    "A desktop AI workspace with live skills, tools, modules, MCP servers, agents, and web-connected workflows.",
+                                    "Ask for a task in plain words. Chatty can read your files, search the web and hand work to other agents.",
                                 ),
                         ),
                 )
