@@ -140,6 +140,8 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/model [query]` | Switch / list models | — | Yes |
 | `/tools [name]` | Open tool picker or toggle by name | — | Yes |
 | `/modules …` | Module runtime settings | — | Yes |
+| `/conversations` | List saved and cloud conversations, newest first, with where each runs (local/synced/cloud) and the cloud turn's mark; pulls the account's list when signed in to Hive (HX-19) | — | Yes |
+| `/open <n\|id>` | Open a saved conversation by its number in `/conversations` or its id: reads a stale synced copy first, follows a running cloud turn, loads its pending approvals and questions (HX-19) | — | Yes |
 | `/login` | Sign in to Hive with the terminal app's own account: prompts for email and password (not echoed); the pair is kept in `hive_tui_settings.json`, never the desktop's (AGE-2084) | — | Yes |
 | `/logout` | Sign the terminal app out of Hive and revoke its refresh token; the desktop's session is untouched (AGE-2084) | — | Yes |
 | `/update` | CLI auto-update | — | Yes |

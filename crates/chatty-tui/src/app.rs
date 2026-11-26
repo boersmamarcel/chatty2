@@ -182,6 +182,13 @@ async fn run_loop(
                                     engine.add_system_message(e.to_string());
                                 }
                             }
+                            KeyAction::ListConversations => {
+                                let list = engine.conversations_command().await;
+                                engine.add_system_message(list);
+                            }
+                            KeyAction::OpenConversation(arg) => {
+                                engine.open_command(&arg).await;
+                            }
                             KeyAction::Login => {
                                 // Leave the alternate screen so the prompts
                                 // are plain terminal lines, then come back.
@@ -366,6 +373,10 @@ enum KeyAction {
     ChangeWorkingDirectory(String),
     /// `/online` — where this conversation runs, and what a move would carry.
     ShowOnlineStatus,
+    /// `/conversations` (HX-19).
+    ListConversations,
+    /// `/open <n|id>` (HX-19).
+    OpenConversation(String),
     /// `/login` (AGE-2084).
     Login,
     /// `/logout` (AGE-2084).
@@ -822,6 +833,14 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         }
         Command::Unqueue => {
             engine.unqueue();
+            None
+        }
+        Command::Conversations => Some(KeyAction::ListConversations),
+        Command::Open(Some(arg)) => Some(KeyAction::OpenConversation(arg)),
+        Command::Open(None) => {
+            engine.add_system_message(
+                "Usage: /open <number|id> (/conversations lists them)".to_string(),
+            );
             None
         }
         Command::Login => Some(KeyAction::Login),

@@ -36,13 +36,7 @@ use crate::chatty::views::ConnectorSignIn;
 use crate::settings::models::GeneralSettingsModel;
 use crate::settings::models::hive_settings::HiveSettingsModel;
 
-/// What the sidebar and the composer tell the user when the cloud conversation
-/// could not be brought up to date.
-const COULD_NOT_UPDATE: &str = "Couldn't reach the cloud to update this conversation. \
-     Check your connection; it updates again the next time you open it.";
-
-/// Shown when an answer was refused because the input was settled already.
-pub(super) const ALREADY_ANSWERED: &str = "Already answered elsewhere.";
+use chatty_core::services::hive_sync::{ALREADY_ANSWERED, COULD_NOT_UPDATE, NO_LONGER_EXISTS};
 
 impl ChattyApp {
     /// Route the frames cloud conversations send that are not session events
@@ -230,9 +224,7 @@ impl ChattyApp {
                         warn!(conv_id = %conv_id, error = %error, "Could not fetch a cloud conversation");
                         let notice = match error {
                             ApiError::SignedOut => error.to_string(),
-                            ApiError::NotFound => "This conversation no longer exists in the \
-                                cloud. It will disappear from your list shortly."
-                                .to_string(),
+                            ApiError::NotFound => NO_LONGER_EXISTS.to_string(),
                             _ => COULD_NOT_UPDATE.to_string(),
                         };
                         if app.is_shown(&conv_id, cx) {

@@ -38,6 +38,9 @@ use crate::events::AppEvent;
 
 #[cfg(test)]
 mod characterization;
+mod cloud;
+#[cfg(test)]
+mod cloud_tests;
 mod commands;
 pub mod helpers;
 mod transcript;
@@ -516,6 +519,8 @@ pub struct ChatEngine {
     event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Monotonically increasing counter to discard stale background init results.
     init_generation: u64,
+    /// What the cloud commands keep between calls (HX-19).
+    cloud: cloud::CloudState,
 }
 
 /// This process's plugin meter, installed once at start-up.
@@ -753,6 +758,7 @@ impl ChatEngine {
             pastes: PasteStore::default(),
             event_tx,
             init_generation: 0,
+            cloud: Default::default(),
         }
     }
 
@@ -1317,6 +1323,9 @@ impl ChatEngine {
                 self.session.note_plugin_usage(usage);
                 EngineAction::Redraw
             }
+            // The server's own record of a followed turn is replaced by its
+            // copy of the conversation, not parked for a local finalize.
+            AppEvent::TurnMessages(_) if self.is_following_cloud() => EngineAction::None,
             AppEvent::TurnMessages(messages) => {
                 self.session.set_turn_messages(messages);
                 EngineAction::None
@@ -1427,6 +1436,18 @@ impl ChatEngine {
             // The swarm tree's input (TB-1): `SwarmTrace::apply` folds it
             // with the turn's other events (TB-2); `/swarm` renders it (TB-5).
             AppEvent::SwarmEvent(_) => EngineAction::None,
+            AppEvent::CloudFrame(frame) => {
+                self.handle_cloud_frame(frame);
+                EngineAction::Redraw
+            }
+            AppEvent::CloudAttachEnded(outcome) => {
+                self.finish_cloud_attach(outcome);
+                EngineAction::Redraw
+            }
+            AppEvent::CloudDetail(result) => {
+                self.finish_cloud_detail(*result);
+                EngineAction::Redraw
+            }
             AppEvent::Delegation(progress) => {
                 self.session.note_delegation(&progress);
                 let call = self.session.delegation_call();
@@ -1487,6 +1508,10 @@ impl ChatEngine {
         let Some(approval) = self.pending_approval.take() else {
             return;
         };
+        if let Some(answer) = self.answer_cloud_approval(&approval.id, approved) {
+            tokio::spawn(answer);
+            return;
+        }
         tokio::spawn(turn_transport::resolve_approval(
             &self.session,
             self.hosted.as_ref(),
@@ -1584,6 +1609,11 @@ impl ChatEngine {
             return;
         }
         if let Some(pending) = self.pending_clarification.take() {
+            if let Some(answer) = self.answer_cloud_questions(&pending.id, pending.answers.clone())
+            {
+                tokio::spawn(answer);
+                return;
+            }
             tokio::spawn(turn_transport::resolve_clarification(
                 &self.session,
                 self.hosted.as_ref(),
@@ -1637,8 +1667,16 @@ impl ChatEngine {
     fn finalize_stream(&mut self) {
         self.transcript.finish_streaming();
 
+        // A followed cloud turn is the server's to finalize: its copy of the
+        // conversation replaces this one when the turn ends (HX-19).
+        if self.is_following_cloud() {
+            self.reset_stream_state();
+            return;
+        }
+
         self.finalize_partial_response();
         self.reset_stream_state();
+        self.persist_synced();
 
         // Generate title after the first exchange. Counted on the persisted
         // history, not on display rows: a turn with tool calls persists its
@@ -1671,6 +1709,9 @@ impl ChatEngine {
     /// its text is queued in `pending_restore_text` so the caller can put it
     /// back into the input.
     fn finalize_partial_response(&mut self) {
+        if self.is_following_cloud() {
+            return;
+        }
         // The TUI has no trace of its own and no artifact queue: the session
         // commits the streamed text as-is. A second call for the same turn
         // (cancelled, then completed) is a no-op inside the session.
@@ -1810,7 +1851,7 @@ mod tests {
 
     /// A `ChatEngine` wrapping a real (network-free) `Conversation`, for tests
     /// that exercise conversation-history side effects of engine methods.
-    async fn test_engine() -> (ChatEngine, mpsc::UnboundedReceiver<AppEvent>) {
+    pub(super) async fn test_engine() -> (ChatEngine, mpsc::UnboundedReceiver<AppEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let mut engine = ChatEngine::new(
             ChatEngineConfig {

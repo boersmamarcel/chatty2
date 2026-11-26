@@ -2,6 +2,7 @@ mod approval;
 mod at_menu;
 mod chat_view;
 mod clarification;
+pub(crate) mod conversations;
 mod hint_bar;
 mod input;
 mod model_picker;
