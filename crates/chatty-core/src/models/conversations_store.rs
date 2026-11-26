@@ -387,6 +387,13 @@ impl ConversationsStore {
                     self.hosted.remove(local_id);
                     self.access_order.retain(|id| id != local_id);
                 }
+                SyncAction::DetachDeleted { local_id } => {
+                    self.device_names.remove(local_id);
+                    self.follow_placement(local_id, None);
+                    if let Some(conversation) = self.get_conversation_mut(local_id) {
+                        conversation.set_sync(ConversationSync::LocalOnly);
+                    }
+                }
                 SyncAction::FullResync => {}
             }
         }

@@ -60,6 +60,7 @@ fn render_action(action: &SyncAction) -> String {
             row.turn_status
         ),
         SyncAction::ApplyTombstone { local_id } => format!("tombstone {local_id}"),
+        SyncAction::DetachDeleted { local_id } => format!("detach {local_id}"),
         SyncAction::MarkDetailStale { local_id } => format!("stale {local_id}"),
         SyncAction::FullResync => "full-resync".to_string(),
     }
@@ -296,6 +297,89 @@ async fn a_start_full_sync_applies_tombstones_but_deletes_nothing_unseen() {
         vec![SyncAction::ApplyTombstone {
             local_id: "gone".into()
         }]
+    );
+}
+
+/// AGE-2121: a conversation placed on a device and deleted on the account
+/// keeps its local copy (detached, local-only); a cloud one's cached copy is
+/// deleted. Persisting the actions keeps the device's row and its history.
+#[tokio::test]
+async fn a_deleted_device_conversation_is_kept_here_and_a_cloud_one_goes() {
+    let api = FakeHiveConversations::new();
+    api.save("r-device", "Ran on this desktop", 1);
+    api.save("r-cloud", "Ran in the cloud", 1);
+    api.delete("r-device");
+    api.delete("r-cloud");
+    let device = ConversationSync::Synced(SyncedConversation {
+        server_url: SERVER.into(),
+        remote_id: "r-device".into(),
+        version: 1,
+        placement: Placement::Device {
+            device_id: "desk-1".into(),
+        },
+        last_synced_at: Some(1),
+    });
+    let mut rows = vec![
+        ConversationMetadata {
+            sync: device,
+            ..local_only("mine", "Ran on this desktop", 1)
+        },
+        ConversationMetadata {
+            sync: ConversationSync::cloud(SERVER, "r-cloud", None),
+            ..local_only("cached", "Ran in the cloud", 2)
+        },
+    ];
+    let mut engine = SyncEngine::new(SERVER);
+    let actions = pull(&api, &mut engine, &rows).await.unwrap();
+    assert_eq!(
+        actions,
+        vec![
+            SyncAction::DetachDeleted {
+                local_id: "mine".into()
+            },
+            SyncAction::ApplyTombstone {
+                local_id: "cached".into()
+            },
+        ]
+    );
+    apply_to_rows(&mut rows, &actions);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].id, "mine");
+    assert_eq!(rows[0].sync, ConversationSync::LocalOnly);
+
+    // Persisted: the device's row is kept with its history, local-only.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = ConversationSqliteRepository::deferred_with_path(dir.path().join("c.db"));
+    let mut data = crate::repositories::store_conformance::sample_conversation(
+        "mine",
+        "Ran on this desktop",
+        1,
+    );
+    data.message_history =
+        r#"[{"role":"user","content":[{"type":"text","text":"keep me"}]}]"#.into();
+    super::set_sync_columns(
+        &mut data,
+        &ConversationSync::Synced(SyncedConversation {
+            server_url: SERVER.into(),
+            remote_id: "r-device".into(),
+            version: 1,
+            placement: Placement::Device {
+                device_id: "desk-1".into(),
+            },
+            last_synced_at: Some(1),
+        }),
+    );
+    repo.save("mine", data).await.unwrap();
+    apply_to_repository(&repo, &actions[..1]).await.unwrap();
+    let kept = repo
+        .load_one("mine")
+        .await
+        .unwrap()
+        .expect("the row is kept");
+    assert!(kept.message_history.contains("keep me"));
+    assert!(
+        kept.sync.is_none() && kept.placement.is_none(),
+        "local-only now"
     );
 }
 
