@@ -92,7 +92,6 @@ pub fn memory_settings_page() -> SettingPage {
                         "Embedding Provider",
                         SettingField::render(|_options, _window, cx| {
                             let settings = cx.global::<ExecutionSettingsModel>();
-                            let enabled = settings.memory_enabled && settings.embedding_enabled;
                             let current_provider = settings.embedding_provider.clone();
 
                             let current_label = current_provider
@@ -122,7 +121,9 @@ pub fn memory_settings_page() -> SettingPage {
                                 .dropdown_caret(true)
                                 .outline()
                                 .w_full()
-                                .disabled(!enabled)
+                                // Editable like the model below it (AGE-2129: one was
+                                // greyed out, the other not); both apply only while
+                                // semantic search is on, as their texts say.
                                 .dropdown_menu_with_anchor(
                                     gpui::Corner::BottomLeft,
                                     move |mut menu, _, _| {
@@ -148,7 +149,7 @@ pub fn memory_settings_page() -> SettingPage {
                         }),
                     )
                     .description(
-                        "Provider for computing embeddings (can differ from your chat model).",
+                        "Which provider turns memories into searchable vectors. Used only while semantic search is on; it can differ from your chat model's provider.",
                     ),
                     SettingItem::new(
                         "Embedding Model",
@@ -178,7 +179,7 @@ pub fn memory_settings_page() -> SettingPage {
                         ),
                     )
                     .description(
-                        "Model identifier for embeddings. Leave empty to use the provider's default.",
+                        "Which of that provider's models to use. Used only while semantic search is on. Leave empty for the provider's default.",
                     ),
                 ]),
         ])
@@ -241,22 +242,30 @@ fn memory_browser_group() -> SettingGroup {
                                 }),
                         ),
                 )
-                // Load button when memory service exists but entries not yet loaded
+                // Nothing loaded yet: load once, at once, so the page shows what
+                // is stored without a "Load Memories" click (AGE-2129).
+                .when(has_memory && !state.auto_loaded && !state.loading, |this| {
+                        cx.global_mut::<MemoryBrowserState>().auto_loaded = true;
+                        cx.defer(|cx| {
+                            memory_browser_controller::load_stats(cx);
+                            memory_browser_controller::load_memories(String::new(), cx);
+                        });
+                        this
+                    },
+                )
                 .when(
                     has_memory
+                        && state.auto_loaded
                         && state.entries.is_empty()
                         && !state.loading
-                        && state.error.is_none(),
+                        && state.error.is_none()
+                        && state.query.is_empty(),
                     |this| {
                         this.child(
-                            h_flex().w_full().justify_center().py_4().child(
-                                Button::new("memory-browser-load-btn")
-                                    .label("Load Memories")
-                                    .on_click(|_, _window, cx| {
-                                        memory_browser_controller::load_stats(cx);
-                                        memory_browser_controller::load_memories(String::new(), cx);
-                                    }),
-                            ),
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("No memories yet. The AI saves facts and preferences here as you chat."),
                         )
                     },
                 )
