@@ -198,6 +198,7 @@ async fn run_loop(
                                 );
                                 let _ = disable_raw_mode();
                                 let outcome = crate::hive_auth::login().await;
+                                engine.forget_cloud_sign_in();
                                 let _ = enable_raw_mode();
                                 let _ = execute!(
                                     io::stdout(),
@@ -212,7 +213,9 @@ async fn run_loop(
                                 });
                             }
                             KeyAction::Logout => {
-                                engine.add_system_message(crate::hive_auth::logout().await);
+                                let outcome = crate::hive_auth::logout().await;
+                                engine.forget_cloud_sign_in();
+                                engine.add_system_message(outcome);
                             }
                             KeyAction::CopyLastResponse => {
                                 if let Err(e) = engine.copy_last_response_to_clipboard() {

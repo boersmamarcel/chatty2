@@ -34,8 +34,8 @@ use crate::models::conversation::{ConversationSync, Placement, SyncedConversatio
 use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::services::hive_sync::wire::{
-    CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder, PlacementChange,
-    PlacementReply, PlacementTarget, PushHistory, VersionReply,
+    AuthSessions, CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder,
+    PlacementChange, PlacementReply, PlacementTarget,
 };
 
 // ── What the user is told ────────────────────────────────────────────────────
@@ -100,9 +100,13 @@ pub enum HandoffError {
     #[error("A reply is still being written. Wait for it to finish, or stop it, then try again.")]
     TurnRunning,
     /// Another device, or the cloud, holds the conversation: only it may
-    /// change it. [`continue_here`] takes it over.
-    #[error("{}", held_elsewhere(holder))]
-    HeldElsewhere { holder: Holder },
+    /// change it. [`continue_here`] takes it over. `message` is the
+    /// server's own user-facing text, shown as-is when it sent one.
+    #[error("{}", message.clone().unwrap_or_else(|| held_elsewhere(holder)))]
+    HeldElsewhere {
+        holder: Holder,
+        message: Option<String>,
+    },
     /// The server's copy changed since this device last saw it (412).
     #[error(
         "This conversation changed on another device. Continue it on this device to get the \
@@ -209,8 +213,11 @@ impl HandoffServer {
             StatusCode::CONFLICT => {
                 let body: ConflictBody = response.json().await.unwrap_or_default();
                 Err(match body.holder() {
-                    Some(holder) if !body.turn_running() => HandoffError::HeldElsewhere { holder },
-                    _ => HandoffError::TurnRunning,
+                    Some(holder) => HandoffError::HeldElsewhere {
+                        holder,
+                        message: body.message,
+                    },
+                    None => HandoffError::TurnRunning,
                 })
             }
             status if !status.is_success() => {
@@ -239,6 +246,20 @@ pub async fn cloud_models(server: &HandoffServer) -> Result<CloudModels, Handoff
     let url = format!("{}/api/settings/models", server.url);
     let response = server.send(&url, |http| http.get(&url)).await?;
     HandoffServer::json(response).await
+}
+
+/// This device's id as the server knows it: the caller's login session, the
+/// row of `GET /api/auth/sessions` marked `current`. A device placement names
+/// it. Cache it per sign-in; it never goes in a request body.
+pub async fn this_device_id(server: &HandoffServer) -> Result<String, HandoffError> {
+    let url = format!("{}/api/auth/sessions", server.url);
+    let response = server.send(&url, |http| http.get(&url)).await?;
+    let sessions: AuthSessions = HandoffServer::json(response).await?;
+    sessions.current.ok_or_else(|| {
+        HandoffError::Server(anyhow::anyhow!(
+            "the server did not say which sign-in is this device's"
+        ))
+    })
 }
 
 /// The server's copy of a synced conversation.
@@ -342,15 +363,8 @@ pub async fn send_to_cloud(
         version = push_history(server, &remote_id, version, &uploaded).await?;
     }
 
-    // PHASE 4: the placement.
-    let reply = change_placement(
-        server,
-        &remote_id,
-        PlacementTarget::Cloud,
-        version,
-        Some(&model_id),
-    )
-    .await?;
+    // PHASE 4: the placement. The model went up with the history.
+    let reply = change_placement(server, &remote_id, PlacementTarget::Cloud, version).await?;
 
     Ok(ConversationSync::Synced(SyncedConversation {
         server_url: server.url.clone(),
@@ -386,9 +400,8 @@ async fn create(
         client_id: &row.id,
         title: &row.title,
         model_id: &row.model_id,
-        messages: serde_json::from_str(&row.message_history)
-            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
         conversation: row,
+        placement: PlacementTarget::Device,
     };
     let response = server
         .send(&url, |http| http.post(&url).json(&body))
@@ -404,21 +417,15 @@ async fn push_history(
     row: &ConversationData,
 ) -> Result<u64, HandoffError> {
     let url = format!("{}/api/conversations/{remote_id}/history", server.url);
-    let body = PushHistory { conversation: row };
     let response = server
         .send(&url, |http| {
             http.put(&url)
                 .header(reqwest::header::IF_MATCH, version.to_string())
-                .json(&body)
+                .json(row)
         })
         .await?;
-    let etag = response
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim_matches('"').parse::<u64>().ok());
-    let reply: VersionReply = response.json().await.unwrap_or_default();
-    Ok(reply.version.or(etag).unwrap_or(version + 1))
+    let reply: PlacementReply = response.json().await.unwrap_or_default();
+    Ok(reply.version.unwrap_or(version + 1))
 }
 
 async fn change_placement(
@@ -426,13 +433,11 @@ async fn change_placement(
     remote_id: &str,
     to: PlacementTarget,
     expected_version: u64,
-    model_id: Option<&str>,
 ) -> Result<PlacementReply, HandoffError> {
     let url = format!("{}/api/conversations/{remote_id}/placement", server.url);
     let body = PlacementChange {
         to,
         expected_version,
-        model_id,
     };
     let response = server
         .send(&url, |http| http.post(&url).json(&body))
@@ -455,32 +460,43 @@ pub struct ContinuedHere {
 /// Pull a synced conversation's latest copy and take its placement for this
 /// device. Nothing local changes here; the caller adopts the copy and records
 /// the state. Also how a conversation held by another device is taken over.
+///
+/// `device_id` is this device's, from [`this_device_id`] (cached per
+/// sign-in by the caller); the placement records it.
 pub async fn continue_here(
     server: &HandoffServer,
     sync: &ConversationSync,
+    device_id: &str,
 ) -> Result<ContinuedHere, HandoffError> {
+    if device_id.is_empty() {
+        return Err(HandoffError::Server(anyhow::anyhow!(
+            "this device's sign-in id is unknown"
+        )));
+    }
     let Some(synced) = sync.synced() else {
         return Err(HandoffError::NotSynced);
     };
-    let remote = fetch_conversation(server, &synced.remote_id).await?;
-    if remote.turn_running() {
-        return Err(HandoffError::TurnRunning);
-    }
-    let version = remote.version.unwrap_or(synced.version);
-    let reply = change_placement(
-        server,
-        &synced.remote_id,
-        PlacementTarget::Device,
-        version,
-        None,
-    )
-    .await?;
+    // A save between the pull and the move (a rename, the cloud's last
+    // write) raises the version: pull again and retry once.
+    let mut retried = false;
+    let (remote, version, reply) = loop {
+        let remote = fetch_conversation(server, &synced.remote_id).await?;
+        if remote.turn_running() {
+            return Err(HandoffError::TurnRunning);
+        }
+        let version = remote.version.unwrap_or(synced.version);
+        match change_placement(server, &synced.remote_id, PlacementTarget::Device, version).await {
+            Ok(reply) => break (remote, version, reply),
+            Err(HandoffError::ChangedElsewhere) if !retried => retried = true,
+            Err(error) => return Err(error),
+        }
+    };
     let sync = ConversationSync::Synced(SyncedConversation {
         server_url: server.url.clone(),
         remote_id: synced.remote_id.clone(),
         version: reply.version.unwrap_or(version),
         placement: Placement::Device {
-            device_id: reply.device_id().unwrap_or_default(),
+            device_id: device_id.to_string(),
         },
         last_synced_at: Some(now_ms()),
     });

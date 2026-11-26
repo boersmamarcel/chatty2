@@ -10,7 +10,7 @@ use anyhow::Context as _;
 use chatty_core::session::{
     CONTINUE_HERE_SUMMARY, HandoffError, HandoffServer, HandoffSummary, LOCAL_MODEL_NOTE,
     NoAttachmentUpload, SEND_TO_CLOUD_SUMMARY, SendToCloud, continue_here, refuse_reason,
-    send_to_cloud,
+    send_to_cloud, this_device_id,
 };
 
 use super::ChatEngine;
@@ -124,7 +124,11 @@ impl ChatEngine {
             return Ok(refusal.to_string());
         }
         let server = self.handoff_server().await?;
-        let here = match continue_here(&server, &sync).await {
+        let device_id = match self.this_device(&server).await {
+            Ok(id) => id,
+            Err(error) => return Ok(error.to_string()),
+        };
+        let here = match continue_here(&server, &sync, &device_id).await {
             Ok(here) => here,
             Err(error) => return Ok(error.to_string()),
         };
@@ -147,6 +151,16 @@ impl ChatEngine {
         let mut out = String::from("This conversation now runs on this computer.\n");
         push_summary(&mut out, &CONTINUE_HERE_SUMMARY);
         Ok(out.trim_end().to_string())
+    }
+
+    /// This device's id, asked once per sign-in and kept.
+    async fn this_device(&mut self, server: &HandoffServer) -> Result<String, HandoffError> {
+        if let Some(id) = self.cloud.this_device.clone() {
+            return Ok(id);
+        }
+        let id = this_device_id(server).await?;
+        self.cloud.this_device = Some(id.clone());
+        Ok(id)
     }
 
     /// The Hive server hand-offs talk to, signed in as the user.

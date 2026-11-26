@@ -110,6 +110,15 @@ async fn continue_here_brings_a_cloud_conversation_back_to_this_device() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&cloud.server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api/auth/sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": "other", "current": false},
+            {"id": "this-dev", "current": true}
+        ])))
+        .expect(1)
+        .mount(&cloud.server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/api/conversations/r-1/placement"))
         .and(body_partial_json(json!({"to": "device"})))
@@ -132,7 +141,7 @@ async fn continue_here_brings_a_cloud_conversation_back_to_this_device() {
     assert_eq!(
         sync.placement(),
         Some(&Placement::Device {
-            device_id: "d-9".into()
+            device_id: "this-dev".into()
         })
     );
 }

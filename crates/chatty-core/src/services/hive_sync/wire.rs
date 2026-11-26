@@ -117,6 +117,9 @@ pub struct ConversationDetail {
     pub version: Option<u64>,
     #[serde(default, deserialize_with = "placement_opt")]
     pub placement: Option<Placement>,
+    /// Which device holds it, when `placement` is `"device"` (HX-13).
+    #[serde(default)]
+    pub placement_device: Option<PlacementDevice>,
     #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
@@ -140,6 +143,14 @@ pub struct ConversationDetail {
 }
 
 impl ConversationDetail {
+    /// Where the conversation is placed, with the holding device's id filled
+    /// in from `placement_device`.
+    pub fn current_placement(&self) -> Option<Placement> {
+        self.placement
+            .clone()
+            .map(|placement| with_device(placement, self.placement_device.as_ref()))
+    }
+
     /// Is a turn running on the server, by either the HX-8 status or the
     /// older flag?
     pub fn turn_running(&self) -> bool {
@@ -188,19 +199,21 @@ impl ConversationDetail {
 
 // ── Hand-off (HX-13 / HX-14) ─────────────────────────────────────────────────
 //
-// The writes "Send to the cloud" and "Continue on this device" make, written
-// against HX-13's (AGE-2092) spec before its exact JSON was fixed. Every
-// field the client reads is optional, so adjusting to the final shape is a
-// change here and nowhere else.
+// The writes "Send to the cloud" and "Continue on this device" make, as
+// HX-13 (AGE-2092) fixed them. Every reply field the client reads is
+// optional, so a server a release apart still decodes.
 //
-// * `POST /api/conversations` with [`CreateConversation`] → a
-//   [`ConversationDetail`]. `client_id` makes the create idempotent: a retry
-//   returns the conversation the first attempt made.
-// * `PUT /api/conversations/{id}/history` with `If-Match: <version>` and
-//   [`PushHistory`] → [`VersionReply`]. 412 for a stale version, 409 (with a
-//   [`ConflictBody`]) when another device or the cloud holds it.
+// * `POST /api/conversations` with [`CreateConversation`] → the summary
+//   ([`ConversationDetail`] decodes it). `client_id` makes the create
+//   idempotent: an existing one answers 200 with its summary, unchanged.
+// * `PUT /api/conversations/{id}/history`, body the [`ConversationData`]
+//   itself, header `If-Match: <version>` → [`PlacementReply`]. 409
+//   `held_elsewhere` ([`ConflictBody`]) when another device or the cloud
+//   holds it (checked before the version), 412 `version_mismatch`, 428 when
+//   `If-Match` is missing.
 // * `POST /api/conversations/{id}/placement` with [`PlacementChange`] →
-//   [`PlacementReply`]. 409 while a turn runs.
+//   [`PlacementReply`]. 409 `turn_active` while a turn runs, 412
+//   `version_mismatch`. Already there is a 200, so a retry is safe.
 // * `GET /api/settings/models` → [`CloudModels`]: what the cloud can run.
 
 /// The body of the idempotent create.
@@ -209,17 +222,13 @@ pub struct CreateConversation<'a> {
     /// This device's id for the conversation, unique per user on the server.
     pub client_id: &'a str,
     pub title: &'a str,
+    /// The model the cloud runs it on.
     pub model_id: &'a str,
-    /// The history as messages too, for a server that reads only these.
-    pub messages: serde_json::Value,
-    /// The full row: traces, usage, timestamps, attachment refs.
+    /// The full row, in stored form; its `id` is ignored.
     pub conversation: &'a ConversationData,
-}
-
-/// The body of a history push.
-#[derive(Debug, serde::Serialize)]
-pub struct PushHistory<'a> {
-    pub conversation: &'a ConversationData,
+    /// Created held by this device, so the history and attachments are in
+    /// place before the placement moves.
+    pub placement: PlacementTarget,
 }
 
 /// Where a placement change moves the conversation.
@@ -232,56 +241,36 @@ pub enum PlacementTarget {
     Device,
 }
 
-/// The body of a placement change.
+/// The body of a placement change. Unknown fields are a 422.
 #[derive(Debug, serde::Serialize)]
-pub struct PlacementChange<'a> {
+pub struct PlacementChange {
     pub to: PlacementTarget,
     pub expected_version: u64,
-    /// The model the cloud runs it on; sent only for `to: cloud`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<&'a str>,
 }
 
-/// A reply that names the conversation's new version.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct VersionReply {
-    #[serde(default)]
-    pub version: Option<u64>,
-}
-
-/// The reply to a placement change.
+/// The reply to a history push or a placement change.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct PlacementReply {
     #[serde(default)]
     pub version: Option<u64>,
-    /// As sent; read with [`PlacementReply::device_id`].
     #[serde(default)]
-    pub placement: Option<serde_json::Value>,
-    #[serde(default)]
-    pub device_id: Option<String>,
+    pub placement_device: Option<PlacementDevice>,
 }
 
-impl PlacementReply {
-    /// The device the conversation is now placed on, when the server says.
-    pub fn device_id(&self) -> Option<String> {
-        self.placement
-            .as_ref()
-            .and_then(|placement| placement.get("device_id"))
-            .and_then(|id| id.as_str())
-            .map(str::to_string)
-            .or_else(|| self.device_id.clone())
-    }
-}
-
-/// A 409's body: why the write was refused and, when another device or the
-/// cloud holds the conversation, which one.
+/// A refusal's body (409, 412): why, in words the server wrote for the user,
+/// and, for `held_elsewhere`, who holds the conversation.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ConflictBody {
-    /// A machine-readable reason, e.g. `turn_active` or `not_holder`.
-    #[serde(default, alias = "code")]
+    /// `held_elsewhere`, `turn_active` or `version_mismatch`.
+    #[serde(default)]
     pub error: Option<String>,
-    #[serde(default, alias = "held_by", alias = "placement")]
-    pub holder: Option<serde_json::Value>,
+    /// User-facing; shown as-is.
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub placement: Option<String>,
+    #[serde(default)]
+    pub placement_device: Option<PlacementDevice>,
     #[serde(default)]
     pub turn_status: Option<TurnStatus>,
 }
@@ -289,31 +278,24 @@ pub struct ConflictBody {
 impl ConflictBody {
     /// Is the refusal because a turn is running?
     pub fn turn_running(&self) -> bool {
-        let reason = self.error.as_deref().unwrap_or_default();
-        reason.contains("turn")
+        self.error.as_deref() == Some("turn_active")
             || self
                 .turn_status
                 .is_some_and(|status| status != TurnStatus::Idle && status != TurnStatus::Unknown)
     }
 
-    /// Who holds the conversation, when the body says.
+    /// Who holds the conversation, when the refusal is `held_elsewhere`.
     pub fn holder(&self) -> Option<Holder> {
-        let value = self.holder.as_ref()?;
-        let field = |name: &str| {
-            value
-                .get(name)
-                .and_then(|field| field.as_str())
-                .filter(|field| !field.is_empty())
-                .map(str::to_string)
-        };
-        let kind = value.as_str().map(str::to_string).or_else(|| field("kind"));
-        match kind.as_deref() {
-            Some("cloud") => Some(Holder::Cloud),
-            _ => Some(Holder::Device {
-                device_id: field("device_id"),
-                name: field("device_name").or_else(|| field("name")),
-            }),
+        if self.error.as_deref() != Some("held_elsewhere") {
+            return None;
         }
+        Some(match (self.placement.as_deref(), &self.placement_device) {
+            (Some("cloud"), _) => Holder::Cloud,
+            (_, device) => Holder::Device {
+                device_id: device.as_ref().map(|device| device.id.clone()),
+                name: device.as_ref().and_then(|device| device.name.clone()),
+            },
+        })
     }
 }
 
@@ -326,6 +308,45 @@ pub enum Holder {
         /// The name the device signed in with, when the server keeps one.
         name: Option<String>,
     },
+}
+
+/// `GET /api/auth/sessions`: the user's login sessions. The one marked
+/// `current` is this device, whose id is what a device placement names.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuthSessions {
+    /// This device's login session id, when the server marked one current.
+    pub current: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AuthSessionsWire {
+    Wrapped {
+        #[serde(alias = "items")]
+        sessions: Vec<AuthSessionWire>,
+    },
+    Bare(Vec<AuthSessionWire>),
+}
+
+#[derive(Deserialize)]
+struct AuthSessionWire {
+    id: String,
+    #[serde(default)]
+    current: bool,
+}
+
+impl<'de> Deserialize<'de> for AuthSessions {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let sessions = match AuthSessionsWire::deserialize(deserializer)? {
+            AuthSessionsWire::Wrapped { sessions } | AuthSessionsWire::Bare(sessions) => sessions,
+        };
+        Ok(AuthSessions {
+            current: sessions
+                .into_iter()
+                .find(|session| session.current && !session.id.is_empty())
+                .map(|session| session.id),
+        })
+    }
 }
 
 /// One model the cloud can run a conversation on.
@@ -459,14 +480,7 @@ struct ChangeWire {
     #[serde(default, deserialize_with = "placement_opt")]
     placement: Option<Placement>,
     #[serde(default)]
-    placement_device: Option<PlacementDeviceWire>,
-}
-
-/// `placement_device`: the device that holds a device-placed conversation.
-#[derive(Deserialize)]
-struct PlacementDeviceWire {
-    #[serde(default)]
-    name: Option<String>,
+    placement_device: Option<PlacementDevice>,
 }
 
 impl<'de> Deserialize<'de> for ChangesPage {
@@ -506,9 +520,11 @@ impl From<ChangeWire> for RemoteChange {
                 .or(wire.updated_at)
                 .unwrap_or(0),
             turn_status,
-            placement: wire
-                .placement
-                .unwrap_or(Placement::Cloud { model_id: None }),
+            placement: with_device(
+                wire.placement
+                    .unwrap_or(Placement::Cloud { model_id: None }),
+                wire.placement_device.as_ref(),
+            ),
             device_name: wire
                 .placement_device
                 .and_then(|device| device.name)
@@ -517,9 +533,32 @@ impl From<ChangeWire> for RemoteChange {
     }
 }
 
-/// A placement as the server sends it: `"cloud"`, or an object
+/// The device that holds a conversation (HX-13): its login session's id and
+/// the name it signed in with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct PlacementDevice {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// A device placement takes its id from `placement_device` when the
+/// placement itself did not carry one (HX-13 sends them side by side).
+fn with_device(placement: Placement, device: Option<&PlacementDevice>) -> Placement {
+    match (placement, device) {
+        (Placement::Device { device_id }, Some(device)) if device_id.is_empty() => {
+            Placement::Device {
+                device_id: device.id.clone(),
+            }
+        }
+        (placement, _) => placement,
+    }
+}
+
+/// A placement as the server sends it: `"cloud"` or `"device"` (HX-13, the
+/// device named beside it in `placement_device`), or an object
 /// `{"kind": "cloud" | "device", "device_id": …}`. Anything else is the
-/// cloud, the only placement the server has until HX-13.
+/// cloud.
 fn placement_opt<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<Placement>, D::Error> {
@@ -533,7 +572,9 @@ fn placement_opt<'de, D: Deserializer<'de>>(
             .as_str()
             .or_else(|| value.get("kind").and_then(|kind| kind.as_str()));
         match (kind, device_id) {
-            (Some("device"), Some(device_id)) => Placement::Device { device_id },
+            (Some("device"), device_id) => Placement::Device {
+                device_id: device_id.unwrap_or_default(),
+            },
             _ => Placement::Cloud {
                 model_id: value
                     .get("model_id")
@@ -669,24 +710,75 @@ mod tests {
     #[test]
     fn a_conflict_names_its_holder_or_the_running_turn() {
         let body: ConflictBody = serde_json::from_value(serde_json::json!({
-            "error": "not_holder",
-            "holder": {"kind": "device", "device_id": "d-2", "device_name": "Laptop"}
+            "error": "held_elsewhere",
+            "message": "This conversation is running on Work laptop. Continue it here first.",
+            "placement": "device",
+            "placement_device": {"id": "s-2", "name": "Work laptop"},
+            "version": 4
         }))
         .unwrap();
         assert!(!body.turn_running());
         assert_eq!(
             body.holder(),
             Some(Holder::Device {
-                device_id: Some("d-2".into()),
-                name: Some("Laptop".into())
+                device_id: Some("s-2".into()),
+                name: Some("Work laptop".into())
             })
         );
-        let body: ConflictBody =
-            serde_json::from_value(serde_json::json!({"error": "turn_active"})).unwrap();
+        let body: ConflictBody = serde_json::from_value(serde_json::json!({
+            "error": "turn_active", "message": "A turn is running.", "turn_status": "running"
+        }))
+        .unwrap();
         assert!(body.turn_running());
         assert_eq!(body.holder(), None);
-        let body: ConflictBody =
-            serde_json::from_value(serde_json::json!({"held_by": "cloud"})).unwrap();
+        let body: ConflictBody = serde_json::from_value(serde_json::json!({
+            "error": "held_elsewhere", "placement": "cloud", "placement_device": null
+        }))
+        .unwrap();
         assert_eq!(body.holder(), Some(Holder::Cloud));
+    }
+
+    #[test]
+    fn the_current_login_session_is_this_device() {
+        let sessions: AuthSessions = serde_json::from_value(serde_json::json!([
+            {"id": "s-1", "current": false, "name": "Laptop"},
+            {"id": "s-2", "current": true}
+        ]))
+        .unwrap();
+        assert_eq!(sessions.current.as_deref(), Some("s-2"));
+        let none: AuthSessions =
+            serde_json::from_value(serde_json::json!({"sessions": [{"id": "s-1"}]})).unwrap();
+        assert_eq!(none.current, None);
+    }
+
+    /// HX-13 sends the placement as a bare word with the holding device
+    /// beside it; a device placement must not read as the cloud.
+    #[test]
+    fn a_device_placement_takes_its_id_from_placement_device() {
+        let page: ChangesPage = serde_json::from_value(serde_json::json!({
+            "conversations": [{"id": "a", "version": 2, "placement": "device",
+                               "placement_device": {"id": "s-1", "name": "Mac"}}],
+            "next_cursor": "c"
+        }))
+        .unwrap();
+        let RemoteChange::Upsert(a) = &page.changes[0] else {
+            panic!("a is an upsert")
+        };
+        assert_eq!(
+            a.placement,
+            Placement::Device {
+                device_id: "s-1".into()
+            }
+        );
+        let detail: ConversationDetail = serde_json::from_value(serde_json::json!({
+            "id": "a", "placement": "device", "placement_device": {"id": "s-1", "name": null}
+        }))
+        .unwrap();
+        assert_eq!(
+            detail.current_placement(),
+            Some(Placement::Device {
+                device_id: "s-1".into()
+            })
+        );
     }
 }

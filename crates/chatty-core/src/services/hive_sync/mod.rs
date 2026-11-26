@@ -27,14 +27,14 @@ pub mod wire;
 
 use std::time::Duration;
 
-pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi, current_device_id};
+pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi};
 pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeHiveConversations;
 pub use notify::{CloudNotice, TransitionDetector};
 pub use wire::{
-    ChangesPage, CloudModel, CloudModels, ConversationDetail, FULL_SYNC_CURSOR, Holder, PAGE_LIMIT,
-    RemoteChange, RemoteSummary, TurnStatus,
+    AuthSessions, ChangesPage, CloudModel, CloudModels, ConversationDetail, FULL_SYNC_CURSOR,
+    Holder, PAGE_LIMIT, RemoteChange, RemoteSummary, TurnStatus,
 };
 
 use crate::models::conversation::ConversationSync;

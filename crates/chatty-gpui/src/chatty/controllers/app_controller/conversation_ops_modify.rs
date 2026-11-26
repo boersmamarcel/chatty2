@@ -20,7 +20,7 @@ use super::*;
 use chatty_core::models::conversation::ConversationSync;
 use chatty_core::session::{
     HandoffError, HandoffServer, NoAttachmentUpload, SendToCloud, continue_here, pick_local_model,
-    refuse_reason, send_to_cloud,
+    refuse_reason, send_to_cloud, this_device_id,
 };
 
 use crate::chatty::views::{HandoffDialog, HandoffKind};
@@ -494,8 +494,8 @@ impl ChattyApp {
                         cx,
                     );
                 }
-                Err(HandoffError::HeldElsewhere { holder }) => {
-                    let message = HandoffError::HeldElsewhere { holder }.to_string();
+                Err(error @ HandoffError::HeldElsewhere { .. }) => {
+                    let message = error.to_string();
                     open_handoff_dialog(conv_id.clone(), HandoffKind::TakeOver { message }, local_model.clone(), cx);
                 }
                 Err(error) => {
@@ -528,12 +528,26 @@ impl ChattyApp {
             return;
         };
         let server = Self::handoff_server(cx);
+        let cached_device = cx.global::<ConversationsStore>().this_device();
 
         cx.spawn(async move |weak, cx| {
-            let result = continue_here(&server, &sync).await;
+            let result = async {
+                let device_id = match cached_device {
+                    Some(device_id) => device_id,
+                    None => this_device_id(&server).await?,
+                };
+                let here = continue_here(&server, &sync, &device_id).await?;
+                Ok::<_, HandoffError>((here, device_id))
+            }
+            .await;
             weak.update(cx, |app, cx| {
                 let here = match result {
-                    Ok(here) => here,
+                    Ok((here, device_id)) => {
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            store.set_this_device(device_id);
+                        });
+                        here
+                    }
                     Err(error) => {
                         warn!(conv_id = %conv_id, error = ?error, "Continuing the conversation here failed");
                         app.notice(&format!("Could not continue this conversation here. {error}"), cx);

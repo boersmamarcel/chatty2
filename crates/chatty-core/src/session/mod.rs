@@ -96,7 +96,7 @@ pub use handoff::{
     AttachmentUploader, CONTINUE_HERE_SUMMARY, ContinuedHere, HandoffError, HandoffServer,
     HandoffSummary, LOCAL_MODEL_NOTE, NoAttachmentUpload, SEND_TO_CLOUD_SUMMARY, SendToCloud,
     cloud_models, continue_here, fetch_conversation, pick_local_model, refuse_reason,
-    send_to_cloud,
+    send_to_cloud, this_device_id,
 };
 pub use hosted::{
     AnswerOutcome, AttachOutcome, BrokerRequest, FrameSink, HostedFrame, HostedSession,

@@ -122,29 +122,6 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
     }
 }
 
-/// This device's id on the server: the caller's own login session in
-/// `GET /api/auth/sessions` (`current: true`). A device-placed conversation
-/// whose `device_id` is not this one is held elsewhere. `None` when the
-/// server cannot say; the caller then shows nothing rather than guess.
-pub async fn current_device_id(server_url: &str, auth: Option<Arc<HiveSession>>) -> Option<String> {
-    let url = format!("{}/api/auth/sessions", server_url.trim_end_matches('/'));
-    let http = reqwest::Client::new();
-    let response = send_to_server(auth.as_deref(), &url, || http.get(&url))
-        .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let body: serde_json::Value = response.json().await.ok()?;
-    let sessions = body.get("sessions").unwrap_or(&body).as_array()?;
-    sessions
-        .iter()
-        .find(|session| session.get("current").and_then(|c| c.as_bool()) == Some(true))
-        .and_then(|session| session.get("id"))
-        .and_then(|id| id.as_str())
-        .map(str::to_string)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,24 +196,5 @@ mod tests {
         ));
         let signed_out = api.conversation("locked").await.unwrap_err();
         assert_eq!(signed_out.to_string(), SIGN_IN_TO_HIVE);
-    }
-
-    #[tokio::test]
-    async fn this_device_is_the_current_login_session() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/auth/sessions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"id": "s-1", "current": false},
-                {"id": "s-2", "current": true}
-            ])))
-            .mount(&server)
-            .await;
-        assert_eq!(
-            current_device_id(&server.uri(), None).await.as_deref(),
-            Some("s-2")
-        );
-        let none = MockServer::start().await;
-        assert_eq!(current_device_id(&none.uri(), None).await, None);
     }
 }

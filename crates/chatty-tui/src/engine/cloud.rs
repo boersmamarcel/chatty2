@@ -23,7 +23,7 @@ use chatty_core::repositories::{ConversationRepository, ConversationSqliteReposi
 use chatty_core::services::hive_sync::{
     ALREADY_ANSWERED, ApiError, COULD_NOT_UPDATE, ConversationDetail, HiveConversationsApi,
     HttpHiveConversationsApi, NO_LONGER_EXISTS, SyncAction, SyncEngine, TurnStatus, adopt_detail,
-    apply_to_repository, current_device_id, pull,
+    apply_to_repository, pull,
 };
 use chatty_core::session::{
     AnswerOutcome, AttachOutcome, BrokerRequest, HostedFrame, HostedSession, InputAnswer,
@@ -47,7 +47,7 @@ pub(super) struct CloudState {
     /// the last pull.
     held_by: HashMap<String, String>,
     /// This device's id on the server, once known.
-    this_device: Option<String>,
+    pub(super) this_device: Option<String>,
     /// Each conversation's turn as of the last pull or fetch, by local id.
     status: HashMap<String, TurnStatus>,
     /// The ids of the last `/conversations` list, which `/open <n>` counts in.
@@ -109,6 +109,18 @@ impl ChatEngine {
             self.cloud.auth = Some(auth);
             self.cloud.hive_url = Some(url);
         }
+    }
+
+    /// A sign-in or sign-out happened: what was learned under the old one
+    /// (the account's server and sign-in, this device's id, the sync cursor)
+    /// is dropped and learned again on next use.
+    pub(crate) fn forget_cloud_sign_in(&mut self) {
+        self.cloud.api = None;
+        self.cloud.auth = None;
+        self.cloud.hive_url = None;
+        self.cloud.sync = None;
+        self.cloud.this_device = None;
+        self.cloud.held_by.clear();
     }
 
     /// `/conversations`: pull the account's list, then show every saved
@@ -176,7 +188,8 @@ impl ChatEngine {
             })
             && let Some(url) = self.cloud.hive_url.clone()
         {
-            self.cloud.this_device = current_device_id(&url, self.cloud.auth.clone()).await;
+            let server = chatty_core::session::HandoffServer::new(&url, self.cloud.auth.clone());
+            self.cloud.this_device = chatty_core::session::this_device_id(&server).await.ok();
         }
         let entries = conversations::entries(
             &metadata,
