@@ -393,6 +393,9 @@ pub fn is_protocol_follow_up_text(text: &str) -> bool {
         || t.starts_with("LOOP DETECTED:")
         || t.starts_with("DEADLINE:")
         || t.starts_with("Agent protocol follow-up:")
+        // The loop guard's nudge after a long text-only answer (AGE-2129):
+        // without the prefix, it showed as the person's own message.
+        || t.starts_with(crate::session::BREVITY_FOLLOW_UP)
 }
 
 /// A todo title is cut at this many characters in [`plan_listing`].

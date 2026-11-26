@@ -74,7 +74,10 @@ pub fn is_persisted_tool_round_trip(history: &[Message], index: usize) -> bool {
 /// assistant text message, whatever tool round-trips sit between them.
 ///
 /// The "first exchange" checks that used to count messages read this instead,
-/// since a turn with tool calls persists more than two messages.
+/// since a turn with tool calls persists more than two messages. An injected
+/// protocol follow-up (the loop guard's nudge, say) and its answer are part of
+/// the exchange before it, not one of their own (AGE-2124): a first turn the
+/// guard nudged is still the first, for the title and the account's create.
 pub fn exchange_count<'a>(messages: impl IntoIterator<Item = &'a Message>) -> usize {
     let mut awaiting_answer = false;
     let mut exchanges = 0;
@@ -83,6 +86,11 @@ pub fn exchange_count<'a>(messages: impl IntoIterator<Item = &'a Message>) -> us
             continue;
         }
         match message {
+            Message::User { content }
+                if content.iter().any(|part| {
+                    matches!(part, UserContent::Text(text)
+                        if super::agent_task_controller::is_protocol_follow_up_text(&text.text))
+                }) => {}
             Message::User { .. } => awaiting_answer = true,
             Message::Assistant(_) if awaiting_answer => {
                 exchanges += 1;
@@ -367,6 +375,17 @@ mod tests {
         assert!(!is_persisted_tool_round_trip(&history, 3));
         assert!(!is_persisted_tool_round_trip(&history, 4));
         assert!(!is_persisted_tool_round_trip(&history, 5));
+    }
+
+    #[test]
+    fn a_protocol_follow_up_is_not_an_exchange_of_its_own() {
+        let nudged = [
+            Message::user("count to 300 in words"),
+            Message::assistant("one, two, three, …"),
+            Message::user(crate::session::BREVITY_FOLLOW_UP),
+            Message::assistant("That is the full count."),
+        ];
+        assert_eq!(exchange_count(&nudged), 1);
     }
 
     #[test]
