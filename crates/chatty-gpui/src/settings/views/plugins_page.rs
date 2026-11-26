@@ -23,10 +23,10 @@ use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 pub fn plugins_page() -> SettingPage {
     SettingPage::new("Plugins")
         .description(
-            "WASM plugins are tools inside an agent: a spec lists a plugin under [[plugins]] \
-             and grants it capabilities (Settings → Agents). A plugin is never an agent of its \
-             own. Install plugins from the Hive marketplace under Extensions, or copy one into \
-             the module directory.",
+            "Plugins add tools that an agent can use, such as reading a file format or \
+             calling a service. An agent uses a plugin only when its settings list it \
+             (Settings → Agents). Install plugins from the Hive marketplace under \
+             Extensions.",
         )
         .resettable(false)
         .groups(vec![module_runtime_group(), plugins_group()])

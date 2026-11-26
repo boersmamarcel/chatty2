@@ -92,6 +92,27 @@ fn default_supports_temperature() -> bool {
 }
 
 impl ModelConfig {
+    /// Older versions stored OpenRouter's per-token price in the per-million
+    /// fields (Claude Opus 4 as 0.000015 rather than 15): it showed as
+    /// \"$0.00\", and every conversation on it cost nothing (AGE-2129). No
+    /// model costs less than $0.001 per million tokens, so a smaller positive
+    /// price is a per-token one, and is converted.
+    pub fn with_prices_per_million(mut self) -> Self {
+        const PER_TOKEN_BELOW: f64 = 0.001;
+        for price in [
+            &mut self.cost_per_million_input_tokens,
+            &mut self.cost_per_million_output_tokens,
+        ] {
+            if let Some(value) = price
+                && *value > 0.0
+                && *value < PER_TOKEN_BELOW
+            {
+                *value *= 1_000_000.0;
+            }
+        }
+        self
+    }
+
     pub fn new(
         id: String,
         name: String,
@@ -214,9 +235,13 @@ impl ModelsModel {
             .collect()
     }
 
-    /// Replace all models (used when loading from disk)
+    /// Replace all models (used when loading from disk). A price saved per
+    /// token by an older version is read as per million (AGE-2129).
     pub fn replace_all(&mut self, models: Vec<ModelConfig>) {
-        self.models = models;
+        self.models = models
+            .into_iter()
+            .map(ModelConfig::with_prices_per_million)
+            .collect();
     }
 
     /// IDs a provider sync should drop: its own [`ModelSource::Sync`] entries
@@ -456,6 +481,36 @@ mod tests {
                 cache_read_per_million: Some(0.3),
                 cache_write_per_million: Some(3.75),
             })
+        );
+    }
+
+    /// AGE-2129: a per-token price an older version saved is read per
+    /// million; a real per-million price, a zero and an unknown one are kept.
+    #[test]
+    fn a_per_token_price_on_disk_is_read_per_million() {
+        let mut model = ModelConfig::new(
+            "opus".into(),
+            "Claude Opus 4".into(),
+            ProviderType::OpenRouter,
+            "anthropic/claude-opus-4".into(),
+        );
+        model.cost_per_million_input_tokens = Some(0.000015);
+        model.cost_per_million_output_tokens = Some(0.000075);
+        let fixed = model.clone().with_prices_per_million();
+        assert!((fixed.cost_per_million_input_tokens.unwrap() - 15.0).abs() < 1e-9);
+        assert!((fixed.cost_per_million_output_tokens.unwrap() - 75.0).abs() < 1e-9);
+
+        model.cost_per_million_input_tokens = Some(3.0);
+        model.cost_per_million_output_tokens = Some(0.0);
+        let kept = model.clone().with_prices_per_million();
+        assert_eq!(kept.cost_per_million_input_tokens, Some(3.0));
+        assert_eq!(kept.cost_per_million_output_tokens, Some(0.0));
+        model.cost_per_million_input_tokens = None;
+        assert_eq!(
+            model
+                .with_prices_per_million()
+                .cost_per_million_input_tokens,
+            None
         );
     }
 }
