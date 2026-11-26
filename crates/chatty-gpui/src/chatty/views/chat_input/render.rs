@@ -213,7 +213,11 @@ impl RenderOnce for ChatInput {
         let model_tooltip = model_display_full;
 
         // Model popover
+        // The composer sits at the bottom of the window: its menus open
+        // upward, or they ran off the window and their trigger's tooltip
+        // covered them (AGE-2129).
         let model_popover = Popover::new("model-menu")
+            .anchor(Corner::BottomRight)
             .trigger(model_button)
             .appearance(false)
             .content(move |_popover, _window, cx| {
@@ -320,6 +324,7 @@ impl RenderOnce for ChatInput {
 
             Some(
                 Popover::new("attachment-menu")
+                    .anchor(Corner::BottomLeft)
                     .trigger(attach_button)
                     .appearance(false)
                     .content(move |_, _window, cx| {
