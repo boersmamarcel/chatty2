@@ -365,6 +365,24 @@ impl ChattyApp {
                                     .map_err(|e| debug!(error = ?e, "Failed to promote pending stream"))
                                     .ok();
                                 }
+                                // Showing the new conversation set the composer
+                                // from its streams, before the pending one was
+                                // promoted to it: no stream, so no Stop for the
+                                // whole first turn of a new chat (AGE-2129). It is
+                                // streaming; say so again.
+                                let shown = id.clone();
+                                chat_view
+                                    .update(cx, |view, cx| {
+                                        if view.conversation_id().map(String::as_str)
+                                            == Some(shown.as_str())
+                                        {
+                                            view.chat_input_state().update(cx, |input, cx| {
+                                                input.set_streaming(true, cx);
+                                            });
+                                        }
+                                    })
+                                    .map_err(|e| debug!(error = ?e, "Failed to mark the first turn as streaming"))
+                                    .ok();
                                 id
                             }
                             Err(e) => {
