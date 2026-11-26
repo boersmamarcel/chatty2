@@ -692,6 +692,56 @@ impl ChattyApp {
 
     /// Persist a conversation to disk asynchronously.
     /// Also updates the metadata store so the sidebar reflects the latest title and cost.
+    /// Give a conversation a new title from the sidebar (AGE-2129). A loaded
+    /// conversation is saved and, when it syncs, pushed, so the account has
+    /// the title too; one that is not loaded has its stored row renamed.
+    /// The sidebar keeps its place: its time is left as it was.
+    pub(super) fn rename_conversation(
+        &mut self,
+        conv_id: &str,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (loaded, synced) = cx.update_global::<ConversationsStore, _>(|store, _| {
+            let kept = store
+                .metadata()
+                .iter()
+                .find(|m| m.id == conv_id)
+                .map(|m| (m.total_cost, m.updated_at));
+            let loaded = store.get_conversation_mut(conv_id).map(|conversation| {
+                conversation.set_title(title.clone());
+                conversation.sync().synced().is_some()
+            });
+            if let Some((cost, updated_at)) = kept {
+                store.upsert_metadata(conv_id, &title, cost, updated_at);
+            }
+            (loaded.is_some(), loaded.unwrap_or(false))
+        });
+        if loaded {
+            self.persist_conversation(conv_id, cx);
+            if synced {
+                self.push_after_turn(conv_id, cx);
+            }
+        } else {
+            let repo = self.conversation_repo.clone();
+            let id = conv_id.to_string();
+            cx.spawn(async move |_, _| match repo.load_one(&id).await {
+                Ok(Some(mut row)) => {
+                    row.title = title;
+                    if let Err(error) = repo.save(&id, row).await {
+                        warn!(conv_id = %id, ?error, "Could not save the new title");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(conv_id = %id, ?error, "Could not load a conversation to rename")
+                }
+            })
+            .detach();
+        }
+        self.refresh_sidebar(cx);
+    }
+
     pub(super) fn persist_conversation(&self, conv_id: &str, cx: &mut Context<Self>) {
         self.persist_and_export_conversation(conv_id, false, false, cx);
     }

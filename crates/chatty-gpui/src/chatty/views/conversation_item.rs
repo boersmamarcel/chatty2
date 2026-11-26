@@ -14,6 +14,9 @@ use std::sync::Arc;
 /// Callback type for conversation actions
 pub type ConversationActionCallback = Arc<dyn Fn(&str, &mut App) + Send + Sync>;
 
+/// Callback for a rename: the conversation's id and its new title.
+pub type ConversationRenameCallback = Arc<dyn Fn(&str, String, &mut App) + Send + Sync>;
+
 /// A single conversation item in the sidebar
 #[derive(IntoElement, Clone)]
 pub struct ConversationItem {
@@ -27,6 +30,7 @@ pub struct ConversationItem {
     /// "Keep on this device only", offered for a conversation synced to the
     /// account (AGE-2096).
     on_keep_local: Option<ConversationActionCallback>,
+    on_rename: Option<ConversationRenameCallback>,
     is_collapsed: bool,
     cost_usd: Option<f64>,
     /// Runs on a `chatty-server` rather than in this process (AGE-298).
@@ -46,6 +50,7 @@ impl ConversationItem {
             on_export: None,
             on_move: None,
             on_keep_local: None,
+            on_rename: None,
             is_collapsed: false,
             cost_usd: None,
             is_hosted: false,
@@ -106,6 +111,16 @@ impl ConversationItem {
         self
     }
 
+    /// Rename the conversation (AGE-2129). The menu's "Rename…" asks for
+    /// the new title and hands it to `callback`.
+    pub fn on_rename<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&str, String, &mut App) + Send + Sync + 'static,
+    {
+        self.on_rename = Some(Arc::new(callback));
+        self
+    }
+
     pub fn hosted(mut self, is_hosted: bool) -> Self {
         self.is_hosted = is_hosted;
         self
@@ -142,6 +157,9 @@ impl RenderOnce for ConversationItem {
         let on_export = self.on_export.clone();
         let on_move = self.on_move.clone();
         let on_keep_local = self.on_keep_local.clone();
+        let on_rename = self.on_rename.clone();
+        let id_for_rename = self.id.clone();
+        let title_for_rename = self.title.clone();
         let is_hosted = self.is_hosted;
 
         let bg_color = if self.is_active {
@@ -245,6 +263,7 @@ impl RenderOnce for ConversationItem {
             .when(
                 !self.is_collapsed
                     && (on_delete.is_some()
+                        || on_rename.is_some()
                         || on_export.is_some()
                         || on_move.is_some()
                         || on_keep_local.is_some()),
@@ -259,6 +278,7 @@ impl RenderOnce for ConversationItem {
                     let delete_btn_id = SharedString::from(format!("delete-{}", self.id));
                     let move_btn_id = SharedString::from(format!("move-{}", self.id));
                     let keep_btn_id = SharedString::from(format!("keep-{}", self.id));
+                    let rename_btn_id = SharedString::from(format!("rename-{}", self.id));
 
                     this.child(
                         Popover::new(SharedString::from(format!("conv-menu-{}", self.id)))
@@ -269,6 +289,21 @@ impl RenderOnce for ConversationItem {
                                 let on_export = on_export.clone();
                                 let on_move = on_move.clone();
                                 let on_keep_local = on_keep_local.clone();
+                                let on_rename = on_rename.clone();
+                                let id_ren = id_for_rename.clone();
+                                let title_ren = title_for_rename.clone();
+                                let rename_btn_id = rename_btn_id.clone();
+                                // Every action closes the menu (AGE-2129): it
+                                // stayed open, and floated loose once the list
+                                // scrolled.
+                                let popover = cx.entity();
+                                let (pop_exp, pop_mov, pop_keep, pop_del, pop_ren) = (
+                                    popover.clone(),
+                                    popover.clone(),
+                                    popover.clone(),
+                                    popover.clone(),
+                                    popover,
+                                );
                                 let id_keep = id_for_keep.clone();
                                 let keep_btn_id = keep_btn_id.clone();
                                 let id_del = id_for_delete.clone();
@@ -315,8 +350,9 @@ impl RenderOnce for ConversationItem {
                                                                 ),
                                                         ),
                                                 )
-                                                .on_click(move |_event, _window, cx| {
+                                                .on_click(move |_event, window, cx| {
                                                     cx.stop_propagation();
+                                                    pop_exp.update(cx, |state, cx| state.dismiss(window, cx));
                                                     cb(&id_exp, cx);
                                                 }),
                                         )
@@ -347,8 +383,9 @@ impl RenderOnce for ConversationItem {
                                                         )
                                                         .child(div().text_xs().child(label)),
                                                 )
-                                                .on_click(move |_event, _window, cx| {
+                                                .on_click(move |_event, window, cx| {
                                                     cx.stop_propagation();
+                                                    pop_mov.update(cx, |state, cx| state.dismiss(window, cx));
                                                     cb(&id_mov, cx);
                                                 }),
                                         )
@@ -375,9 +412,43 @@ impl RenderOnce for ConversationItem {
                                                                 .child("Keep on this device only"),
                                                         ),
                                                 )
-                                                .on_click(move |_event, _window, cx| {
+                                                .on_click(move |_event, window, cx| {
                                                     cx.stop_propagation();
+                                                    pop_keep.update(cx, |state, cx| state.dismiss(window, cx));
                                                     cb(&id_keep, cx);
+                                                }),
+                                        )
+                                    })
+                                    .when_some(on_rename, |this, cb| {
+                                        this.child(
+                                            Button::new(rename_btn_id)
+                                                .ghost()
+                                                .xsmall()
+                                                .w_full()
+                                                .justify_start()
+                                                .child(
+                                                    h_flex()
+                                                        .w_full()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(
+                                                            Icon::new(IconName::Replace)
+                                                                .size(px(12.0)),
+                                                        )
+                                                        .child(div().text_xs().child("Rename…")),
+                                                )
+                                                .on_click(move |_event, window, cx| {
+                                                    cx.stop_propagation();
+                                                    pop_ren.update(cx, |state, cx| {
+                                                        state.dismiss(window, cx)
+                                                    });
+                                                    show_rename_dialog(
+                                                        id_ren.clone(),
+                                                        title_ren.clone(),
+                                                        cb.clone(),
+                                                        window,
+                                                        cx,
+                                                    );
                                                 }),
                                         )
                                     })
@@ -415,8 +486,9 @@ impl RenderOnce for ConversationItem {
                                                                 ),
                                                         )),
                                                 )
-                                                .on_click(move |_event, _window, cx| {
+                                                .on_click(move |_event, window, cx| {
                                                     cx.stop_propagation();
+                                                    pop_del.update(cx, |state, cx| state.dismiss(window, cx));
                                                     cb(&id_del, cx);
                                                 }),
                                         )
@@ -437,4 +509,43 @@ pub fn cloud_mark_look(mark: CloudMark, cx: &App) -> (&'static str, Hsla) {
         CloudMark::Done => (mark.label(), cx.theme().success),
         CloudMark::Failed => (mark.label(), cx.theme().danger),
     }
+}
+
+/// Ask for a conversation's new title. Saving an empty title keeps the old
+/// one.
+fn show_rename_dialog(
+    id: String,
+    title: String,
+    on_rename: ConversationRenameCallback,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_component::WindowExt;
+    use gpui_component::input::{Input, InputState};
+
+    let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
+    input.update(cx, |state, cx| state.focus(window, cx));
+    window.open_dialog(cx, move |dialog, _window, _cx| {
+        dialog
+            .title("Rename conversation")
+            .w(px(420.))
+            .child(Input::new(&input))
+            .child(
+                Button::new("rename-conversation-save")
+                    .primary()
+                    .label("Save")
+                    .on_click({
+                        let input = input.clone();
+                        let id = id.clone();
+                        let on_rename = on_rename.clone();
+                        move |_, window, cx| {
+                            let title = input.read(cx).value().trim().to_string();
+                            if !title.is_empty() {
+                                on_rename(&id, title, cx);
+                            }
+                            window.close_dialog(cx);
+                        }
+                    }),
+            )
+    });
 }
