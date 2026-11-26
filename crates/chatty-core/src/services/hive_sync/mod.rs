@@ -32,7 +32,7 @@ pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi};
 pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeHiveConversations;
-pub use notify::{CloudNotice, TransitionDetector};
+pub use notify::{CloudNotice, NotifyMemory, TransitionDetector};
 pub use push::{
     HiveHistoryApi, HttpHiveHistoryApi, PushError, PushEvent, PushJob, PushQueue, PushTarget,
     drain, sync_after_stale, sync_after_turn,
