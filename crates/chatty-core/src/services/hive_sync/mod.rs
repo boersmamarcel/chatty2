@@ -35,11 +35,12 @@ pub use fake::FakeHiveConversations;
 pub use notify::{CloudNotice, TransitionDetector};
 pub use push::{
     HiveHistoryApi, HttpHiveHistoryApi, PushError, PushEvent, PushJob, PushQueue, PushTarget,
-    drain, fetch_device_id,
+    drain, fetch_device_id, sync_after_turn,
 };
 pub use wire::{
-    ChangesPage, ConversationDetail, FULL_SYNC_CURSOR, HeldBy, HistoryAccepted, PAGE_LIMIT,
-    PlacementDevice, RemoteChange, RemoteSummary, TurnStatus, push_body,
+    ChangesPage, ConversationDetail, CreatedConversation, FULL_SYNC_CURSOR, HeldBy,
+    HistoryAccepted, PAGE_LIMIT, PlacementDevice, RemoteChange, RemoteSummary, TurnStatus,
+    push_body,
 };
 
 use crate::models::conversation::ConversationSync;

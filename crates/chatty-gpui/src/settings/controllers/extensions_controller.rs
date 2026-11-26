@@ -278,6 +278,15 @@ pub fn register(username: String, email: String, password: String, cx: &mut App)
     .detach();
 }
 
+/// Turn "Sync new conversations" on or off. Only the off state is written to
+/// the settings file (AGE-2096).
+pub fn set_sync_new_conversations(on: bool, cx: &mut App) {
+    let settings = cx.global_mut::<HiveSettingsModel>();
+    settings.sync_new_conversations = on;
+    save_hive_settings_async(settings.clone(), cx);
+    cx.refresh_windows();
+}
+
 /// Log out: clear persisted credentials and revoke the refresh token.
 pub fn logout(cx: &mut App) {
     if let Some(session) = hive_session(cx) {
@@ -751,7 +760,7 @@ fn save_extensions_async(model: ExtensionsModel, cx: &mut App) {
     .detach();
 }
 
-fn save_hive_settings_async(model: HiveSettingsModel, cx: &mut App) {
+pub(crate) fn save_hive_settings_async(model: HiveSettingsModel, cx: &mut App) {
     // Unit tests have no repository registry; they only observe the sync.
     if cfg!(test) {
         return;
