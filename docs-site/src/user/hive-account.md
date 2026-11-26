@@ -37,7 +37,7 @@ Sign in on the other device. The conversation is in the sidebar; open it to see 
 
 To run it on that device instead, open the **⋯** menu and choose **Continue on this device…**. Chatty fetches the latest messages, tool activity and usage, and the next reply runs on that device, with its own models and files. If the cloud's model isn't set up there, the conversation uses one that is. The cloud copy, and any files the cloud run saved, stay in your Hive account.
 
-A conversation is changed in one place at a time. If you send it from a device while another device has it open, chatty tells you where it is and offers **Continue on this device** to take it over.
+A conversation is changed in one place at a time. If you send it from a device while another device has it open, the desktop app doesn't run the turn: it shows where the conversation is, puts your message back in the composer, and waits until you choose **Continue on this device** to take it over. If the conversation is renamed on the web, the next turn from the device that has it keeps the new title.
 
 ## Notifications
 
