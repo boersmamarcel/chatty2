@@ -149,8 +149,9 @@ impl ConversationSync {
     }
 
     /// What the composer's model chip says while turns run in the cloud: the
-    /// server's model, or "Hosted model" when it reported none. `None` when
-    /// turns run here, whose chip is the local picker (AGE-849).
+    /// server's model as a person reads it ("Claude Sonnet 5.5"), or
+    /// "Default cloud model" when it reported none. `None` when turns run
+    /// here, whose chip is the local picker (AGE-849).
     pub fn cloud_model_label(&self) -> Option<String> {
         match self.placement() {
             Some(Placement::Cloud { model_id }) => Some(
@@ -158,8 +159,8 @@ impl ConversationSync {
                     .as_deref()
                     .map(str::trim)
                     .filter(|model| !model.is_empty())
-                    .unwrap_or("Hosted model")
-                    .to_string(),
+                    .map(readable_model_name)
+                    .unwrap_or_else(|| "Default cloud model".to_string()),
             ),
             _ => None,
         }
@@ -1599,6 +1600,55 @@ fn user_message_text(message: &Message) -> String {
     }
 }
 
+/// A model identifier as a person reads it, as the Hive server names its
+/// models (hive#822): "claude-sonnet-5-5" is "Claude Sonnet 5.5",
+/// "anthropic/claude-opus-5-5" is "Claude Opus 5.5", "qwen3-27b" is
+/// "Qwen3 27B". A name that is not an identifier (it has a space) is kept.
+pub fn readable_model_name(identifier: &str) -> String {
+    if identifier.contains(' ') {
+        return identifier.to_string();
+    }
+    let base = identifier.rsplit('/').next().unwrap_or(identifier);
+    let parts: Vec<&str> = base
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let numeric = |part: &&str| part.chars().all(|c| c.is_ascii_digit());
+    let version_at = parts
+        .iter()
+        .rposition(|part| !numeric(part))
+        .map_or(0, |last_word| last_word + 1);
+    let mut words: Vec<String> = parts[..version_at]
+        .iter()
+        .map(|part| {
+            let lower = part.to_ascii_lowercase();
+            let acronym = ["gpt", "glm", "llm"].contains(&lower.as_str());
+            let size = lower.len() > 1
+                && lower.ends_with(['b', 'k', 'm'])
+                && lower[..lower.len() - 1]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.');
+            if acronym || size {
+                lower.to_ascii_uppercase()
+            } else {
+                let mut chars = lower.chars();
+                chars
+                    .next()
+                    .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                    .unwrap_or_default()
+            }
+        })
+        .collect();
+    if version_at < parts.len() {
+        words.push(parts[version_at..].join("."));
+    }
+    if words.is_empty() {
+        identifier.to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2433,5 +2483,18 @@ mod tests {
 
         // Nothing to remove when the last message is not an answer.
         assert_eq!(remove_last_turn_state(&mut entries), None);
+    }
+
+    #[test]
+    fn a_cloud_model_reads_as_a_name() {
+        for (identifier, name) in [
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("anthropic/claude-opus-5-5", "Claude Opus 5.5"),
+            ("qwen3-27b", "Qwen3 27B"),
+            ("moonshotai/kimi-k2.6", "Kimi K2.6"),
+            ("Claude Sonnet 5.5", "Claude Sonnet 5.5"),
+        ] {
+            assert_eq!(super::readable_model_name(identifier), name, "{identifier}");
+        }
     }
 }
