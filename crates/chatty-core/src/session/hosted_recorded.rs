@@ -23,8 +23,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::TurnInput;
 use super::event::SessionEvent;
+use super::handoff::{HandoffServer, fetch_conversation};
 use super::hosted::{BrokerRequest, HostedFrame, HostedSession, InputOutcome};
-use super::move_conversation::fetch_hosted;
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
 use crate::settings::models::providers_store::ProviderType;
 
@@ -305,7 +305,9 @@ async fn the_conversation_detail_decodes_with_its_tool_call_messages() {
         )
         .mount(&server)
         .await;
-    let detail = fetch_hosted(&server.uri(), "c-1", None).await.unwrap();
+    let detail = fetch_conversation(&HandoffServer::new(&server.uri(), None), "c-1")
+        .await
+        .unwrap();
     assert_eq!(detail.id, "c-1");
     assert_eq!(detail.model_id, "anthropic/claude-sonnet");
     assert!(!detail.turn_active);

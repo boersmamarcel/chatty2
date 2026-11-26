@@ -23,11 +23,15 @@ use std::sync::Arc;
 
 use hive_client::HiveSession;
 
-use super::wire::{CreatedConversation, HeldBy, HistoryAccepted};
+use super::wire::{ConflictBody, CreatedConversation, HistoryAccepted};
 use crate::models::conversation::{ConversationSync, Placement};
 use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::session::hosted::{SIGN_IN_TO_HIVE, send_to_server};
+
+/// What a deleted conversation's 410 says when the server sends no message.
+pub const DELETED_ON_ACCOUNT: &str =
+    "This conversation was deleted from your Hive account. It stays on this computer.";
 
 /// Why a push did not land.
 #[derive(Debug, thiserror::Error)]
@@ -38,7 +42,12 @@ pub enum PushError {
     Stale,
     /// 409: another device holds the conversation now.
     #[error("another device holds the conversation")]
-    HeldElsewhere(HeldBy),
+    HeldElsewhere(Box<ConflictBody>),
+    /// 410 on a create: the conversation was deleted on the account and its
+    /// id stays retired. It becomes local-only, the local copy kept; the
+    /// string is the server's message, shown once.
+    #[error("{0}")]
+    Deleted(String),
     /// 401 after the session's one refresh.
     #[error("{SIGN_IN_TO_HIVE}")]
     SignedOut,
@@ -131,9 +140,9 @@ impl HiveHistoryApi for HttpHiveHistoryApi {
                     .await
                     .map_err(|error| PushError::Rejected(format!("unexpected reply: {error}"))),
                 reqwest::StatusCode::PRECONDITION_FAILED => Err(PushError::Stale),
-                reqwest::StatusCode::CONFLICT => Err(PushError::HeldElsewhere(
-                    response.json::<HeldBy>().await.unwrap_or_default(),
-                )),
+                reqwest::StatusCode::CONFLICT => Err(PushError::HeldElsewhere(Box::new(
+                    response.json::<ConflictBody>().await.unwrap_or_default(),
+                ))),
                 reqwest::StatusCode::UNAUTHORIZED => Err(PushError::SignedOut),
                 status if status.is_server_error() => {
                     Err(PushError::Offline(format!("the server answered {status}")))
@@ -175,6 +184,14 @@ impl HttpHiveHistoryApi {
         let response = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body))
             .await
             .map_err(|error| PushError::Offline(format!("{error:#}")))?;
+        if response.status() == reqwest::StatusCode::GONE {
+            let body: ConflictBody = response.json().await.unwrap_or_default();
+            return Err(PushError::Deleted(
+                body.message
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| DELETED_ON_ACCOUNT.to_string()),
+            ));
+        }
         if let Some(error) = classify(response.status()) {
             return Err(error);
         }
@@ -183,45 +200,6 @@ impl HttpHiveHistoryApi {
             .await
             .map_err(|error| PushError::Rejected(format!("unexpected reply: {error}")))
     }
-}
-
-/// This device's id on the server: the login session the bearer belongs to
-/// (HX-7), found as the `current` row of `GET /api/auth/sessions`. A
-/// conversation is held by this device when its `placement_device.id` is this
-/// id. Fetch it once per sign-in; it is never sent in a body.
-pub async fn fetch_device_id(
-    server_url: &str,
-    auth: Option<&HiveSession>,
-) -> Result<String, PushError> {
-    let url = format!("{}/api/auth/sessions", server_url.trim_end_matches('/'));
-    hive_client::ensure_secure_url(&url).map_err(PushError::Rejected)?;
-    let http = reqwest::Client::new();
-    let response = send_to_server(auth, &url, || http.get(&url))
-        .await
-        .map_err(|error| PushError::Offline(format!("{error:#}")))?;
-    match response.status() {
-        status if status.is_success() => {}
-        reqwest::StatusCode::UNAUTHORIZED => return Err(PushError::SignedOut),
-        status if status.is_server_error() => {
-            return Err(PushError::Offline(format!("the server answered {status}")));
-        }
-        status => return Err(PushError::Rejected(format!("the server answered {status}"))),
-    }
-    let sessions: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| PushError::Rejected(format!("unexpected reply: {error}")))?;
-    // A bare array, or the array under `sessions`.
-    sessions
-        .get("sessions")
-        .unwrap_or(&sessions)
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|row| row.get("current").and_then(|current| current.as_bool()) == Some(true))
-        .and_then(|row| row.get("id").and_then(|id| id.as_str()))
-        .map(str::to_string)
-        .ok_or_else(|| PushError::Rejected("this sign-in has no current session".to_string()))
 }
 
 /// Where one push goes: the conversation's address on the server and the
@@ -288,7 +266,10 @@ pub enum PushEvent {
     NeedsPull { local_id: String },
     /// 409: another device holds it; this conversation is no longer pushed
     /// until [`release`](PushQueue::release).
-    HeldElsewhere { local_id: String, held_by: HeldBy },
+    HeldElsewhere {
+        local_id: String,
+        held_by: ConflictBody,
+    },
     /// 401: nothing more is pushed until the user signs in. The push stays
     /// queued.
     SignedOut,
@@ -297,6 +278,9 @@ pub enum PushEvent {
     /// The server refused it for good; it is dropped, and the next turn
     /// queues a fresh one.
     Dropped { local_id: String, reason: String },
+    /// 410: deleted on the account. Make it local-only, keep the local copy,
+    /// and show `message` once.
+    Deleted { local_id: String, message: String },
 }
 
 /// What a frontend with no queue does after a finished turn (chatty-tui):
@@ -421,7 +405,10 @@ impl PushQueue {
             Err(PushError::Stale) => PushEvent::NeedsPull { local_id },
             Err(PushError::HeldElsewhere(held_by)) => {
                 self.held.insert(local_id.clone());
-                PushEvent::HeldElsewhere { local_id, held_by }
+                PushEvent::HeldElsewhere {
+                    local_id,
+                    held_by: *held_by,
+                }
             }
             Err(PushError::SignedOut) => {
                 self.pending.push_front(local_id);
@@ -432,6 +419,7 @@ impl PushQueue {
                 PushEvent::Offline
             }
             Err(PushError::Rejected(reason)) => PushEvent::Dropped { local_id, reason },
+            Err(PushError::Deleted(message)) => PushEvent::Deleted { local_id, message },
         }
     }
 }
@@ -693,14 +681,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_conflict_stops_pushing_that_conversation_and_names_the_holder() {
-        let held = HeldBy {
+        let held = ConflictBody {
             placement_device: Some(crate::services::hive_sync::PlacementDevice {
                 id: Some("s-2".into()),
                 name: Some("Laptop".into()),
             }),
-            ..HeldBy::default()
+            ..ConflictBody::default()
         };
-        let api = Scripted::new(vec![Err(PushError::HeldElsewhere(held.clone()))]);
+        let api = Scripted::new(vec![Err(PushError::HeldElsewhere(Box::new(held.clone())))]);
         let mut queue = PushQueue::default();
         queue.enqueue("c1");
         let mut events = Vec::new();
@@ -764,41 +752,33 @@ mod tests {
         assert!(queue.is_empty());
     }
 
+    /// HX-13: a create whose `client_id` was deleted on the account is a 410;
+    /// it settles as `Deleted` with the server's message, and is not queued
+    /// again.
     #[tokio::test]
-    async fn this_device_is_the_current_login_session() {
+    async fn a_create_for_a_conversation_deleted_on_the_account_is_deleted() {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/auth/sessions"))
-            .and(header("authorization", "Bearer tok"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"id": "s-1", "current": false, "device_name": "Work laptop"},
-                {"id": "s-2", "current": true, "device_name": "This one"}
-            ])))
+        Mock::given(method("POST"))
+            .and(path("/api/conversations"))
+            .respond_with(ResponseTemplate::new(410).set_body_json(serde_json::json!({
+                "error": "deleted", "message": "This conversation was deleted."
+            })))
             .mount(&server)
             .await;
-        let auth = signed_in(&server);
+        let api = HttpHiveHistoryApi::new(&server.uri(), None);
+        let error = api.create("local-1", &body("t")).await.unwrap_err();
+        assert!(matches!(&error, PushError::Deleted(m) if m == "This conversation was deleted."));
 
+        let mut queue = PushQueue::default();
+        let event = queue.settle("local-1", Err(error));
         assert_eq!(
-            fetch_device_id(&server.uri(), Some(&auth)).await.unwrap(),
-            "s-2"
+            event,
+            PushEvent::Deleted {
+                local_id: "local-1".into(),
+                message: "This conversation was deleted.".into()
+            }
         );
-    }
-
-    #[tokio::test]
-    async fn a_sign_in_with_no_current_session_has_no_device() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/auth/sessions"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"sessions": [{"id": "s-1"}]})),
-            )
-            .mount(&server)
-            .await;
-        assert!(matches!(
-            fetch_device_id(&server.uri(), None).await,
-            Err(PushError::Rejected(_))
-        ));
+        assert!(queue.is_empty());
     }
 
     #[tokio::test]
@@ -828,17 +808,20 @@ mod tests {
 
     #[test]
     fn the_servers_own_message_is_the_notice() {
-        let held = HeldBy {
+        let held = ConflictBody {
             message: Some(
                 "This conversation is running on Work laptop. Continue it here first.".into(),
             ),
-            ..HeldBy::default()
+            ..ConflictBody::default()
         };
         assert_eq!(
             held.notice(),
             "This conversation is running on Work laptop. Continue it here first."
         );
-        assert_eq!(HeldBy::default().notice(), "Continued on another device");
+        assert_eq!(
+            ConflictBody::default().notice(),
+            "Continued on another device"
+        );
     }
 
     /// A frontend with no queue: a local conversation is created on its first

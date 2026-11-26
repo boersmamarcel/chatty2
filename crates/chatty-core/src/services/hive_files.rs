@@ -472,8 +472,8 @@ fn mime_for(path: &Path) -> &'static str {
 /// (HX-14's seam): every file its messages name that still exists on this
 /// machine, bound to the conversation `remote_id` on the server.
 ///
-/// Batch E's `AttachmentUploader` trait is implemented over
-/// [`upload_attachments`](Self::upload_attachments) when that trait lands.
+/// It is the [`AttachmentUploader`](crate::session::AttachmentUploader) that
+/// "Send to the cloud" uses.
 pub struct HiveAttachmentUploader {
     files: Arc<dyn HiveFilesApi>,
 }
@@ -516,6 +516,24 @@ impl HiveAttachmentUploader {
             .ok_or_else(|| anyhow::anyhow!("this platform has no data directory for files"))?;
         upload_attachments(&*self.files, remote_id, &paths, &dir).await?;
         Ok(conversation)
+    }
+}
+
+impl crate::session::AttachmentUploader for HiveAttachmentUploader {
+    fn upload_attachments<'a>(
+        &'a self,
+        _server: &'a crate::session::HandoffServer,
+        remote_id: &'a str,
+        conversation: crate::repositories::ConversationData,
+    ) -> crate::repositories::conversation_repository::BoxFuture<
+        'a,
+        anyhow::Result<crate::repositories::ConversationData>,
+    > {
+        Box::pin(HiveAttachmentUploader::upload_attachments(
+            self,
+            remote_id,
+            conversation,
+        ))
     }
 }
 

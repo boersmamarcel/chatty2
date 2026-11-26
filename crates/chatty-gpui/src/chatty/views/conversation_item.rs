@@ -326,9 +326,9 @@ impl RenderOnce for ConversationItem {
                                         // menu never asks the user to remember
                                         // where this conversation runs.
                                         let label = if is_hosted {
-                                            "Bring back here"
+                                            "Continue on this device…"
                                         } else {
-                                            "Take online…"
+                                            "Send to the cloud…"
                                         };
                                         this.child(
                                             Button::new(move_btn_id)

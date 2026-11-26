@@ -39,11 +39,11 @@
 mod delegation;
 mod event;
 mod handler;
+pub mod handoff;
 pub(crate) mod hosted;
 #[cfg(test)]
 mod hosted_recorded;
 pub mod mailbox;
-mod move_conversation;
 pub mod schema;
 /// Dispatching a turn to wherever its conversation runs (AGE-298).
 pub mod transport;
@@ -92,15 +92,17 @@ pub use handler::{
     BREVITY_FOLLOW_UP, CUT_OFF_FOLLOW_UP, MALFORMED_TOOL_CALL_FOLLOW_UP, SessionStreamHandler,
     TurnPolicy, UNKNOWN_TOOL_CALL_FOLLOW_UP_PREFIX,
 };
+pub use handoff::{
+    AttachmentUploader, CONTINUE_HERE_SUMMARY, ContinuedHere, HandoffError, HandoffServer,
+    HandoffSummary, LOCAL_MODEL_NOTE, NoAttachmentUpload, SEND_TO_CLOUD_SUMMARY, SendToCloud,
+    cloud_models, continue_here, fetch_conversation, pick_local_model, refuse_reason,
+    send_to_cloud, this_device_id,
+};
 pub use hosted::{
     AnswerOutcome, AttachOutcome, BrokerRequest, FrameSink, HostedFrame, HostedSession,
     InputAnswer, InputOutcome, PendingInput, connector_settings_url,
 };
 pub use mailbox::{Arrival, Decision, Mailbox, Queued, QueuedId, Refusal, TurnEnd};
-pub use move_conversation::{
-    BRING_BACK_SUMMARY, HOSTED_DISABLED, MoveSummary, RemoteConversation, TAKE_ONLINE_SUMMARY,
-    fetch_hosted, refuse_reason, take_online,
-};
 pub use transport as turn_transport;
 
 /// Everything a session needs from settings, by value. Loading is the

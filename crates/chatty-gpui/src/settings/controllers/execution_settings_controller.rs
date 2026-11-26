@@ -203,25 +203,6 @@ pub fn toggle_allow_private_network_access(cx: &mut App) {
     save_async(settings, cx);
 }
 
-/// Toggle the per-conversation move between local and hosted, and persist to
-/// disk (AGE-308).
-///
-/// Developer-only: with it off — the default — the sidebar offers no move and
-/// the TUI's `/online` refuses. It changes no tool, so the tool set is not
-/// notified.
-pub fn toggle_hosted_conversations(cx: &mut App) {
-    let new_enabled = !cx
-        .global::<ExecutionSettingsModel>()
-        .hosted_conversations_enabled;
-    cx.global_mut::<ExecutionSettingsModel>()
-        .hosted_conversations_enabled = new_enabled;
-
-    let settings = cx.global::<ExecutionSettingsModel>().clone();
-    cx.refresh_windows();
-
-    save_async(settings, cx);
-}
-
 /// Toggle Docker code execution enabled/disabled and persist to disk.
 pub fn toggle_execute_code(cx: &mut App) {
     let new_enabled = !cx.global::<ExecutionSettingsModel>().execute_code_enabled;

@@ -503,9 +503,10 @@ impl Render for SidebarView {
                     .collect()
             })
             .unwrap_or_default();
-        // AGE-308: the move between local and hosted is developer-only until
-        // online mode is account-scoped, so the menu simply does not offer it.
-        let move_enabled = crate::chatty::controllers::app_controller::move_ui_enabled(cx);
+        // HX-14: the hand-off needs a Hive account, so the menu offers it
+        // only when signed in; a conversation already in the cloud can
+        // always be continued here.
+        let signed_in = crate::chatty::controllers::app_controller::handoff_offered(cx);
 
         let files_mode = self.is_files_mode();
 
@@ -644,7 +645,7 @@ impl Render for SidebarView {
                                                         })
                                                     })
                                                     .cloud_mark(cloud_marks.get(id).copied())
-                                                    .when(move_enabled, |item| {
+                                                    .when(signed_in || hosted_ids.contains(id), |item| {
                                                         item.on_move({
                                                             let entity = sidebar_entity.clone();
                                                             let id = id.clone();
