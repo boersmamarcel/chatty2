@@ -33,8 +33,8 @@ pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 pub use fake::FakeHiveConversations;
 pub use notify::{CloudNotice, TransitionDetector};
 pub use wire::{
-    ChangesPage, ConversationDetail, FULL_SYNC_CURSOR, PAGE_LIMIT, RemoteChange, RemoteSummary,
-    TurnStatus,
+    ChangesPage, CloudModel, CloudModels, ConversationDetail, FULL_SYNC_CURSOR, Holder, PAGE_LIMIT,
+    RemoteChange, RemoteSummary, TurnStatus,
 };
 
 use crate::models::conversation::ConversationSync;

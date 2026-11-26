@@ -46,6 +46,8 @@ git diff main | chatty-tui --pipe                       # stdin in, answer on st
 ```
 
 `chatty-tui` ships with the desktop app (**Install CLI…**) or builds with `cargo build --release -p chatty-tui`.
+**With a Hive account:** [send a conversation to the cloud](https://boersmamarcel.github.io/chatty2/user/hive-account.html), close the laptop, and pick it up on another device.
+
 **In your editor:** `chatty-tui acp` speaks the [Agent Client Protocol](https://boersmamarcel.github.io/chatty2/user/terminal.html#use-chatty-as-an-agent-in-zed-or-vs-code), so Zed can use Chatty as its agent.
 
 ## What it does

@@ -441,7 +441,6 @@ mod tests {
                 embedding_enabled: true,
                 embedding_provider: Some(ProviderType::OpenRouter),
                 embedding_model: Some("text-embedding-3-small".to_string()),
-                hosted_conversations_enabled: true,
                 tool_loading: crate::settings::models::ToolLoading::Dynamic,
                 ask_user_enabled: false,
                 terminal_access: true,

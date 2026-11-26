@@ -190,7 +190,7 @@ Typing `/` in the input opens an inline slash-command menu. Use `↑/↓` to sel
 | `/copy` | Copy the latest assistant response to system clipboard |
 | `/update` | Trigger CLI auto-update when an installed CLI target exists |
 | `/cwd`, `/cd [directory]` | Show or change the working directory |
-| `/online [url\|off]` | Show where this conversation runs; move it to a `chatty-server` or back. Developer-only until `hosted_conversations_enabled` is on (AGE-298/308) |
+| `/online [url\|off]` | Show where this conversation runs; send it to the cloud in your Hive account, or continue it here (HX-14) |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads |
 | `/paste [n]` | Print the full text of an elided long paste |
 | `/quit`, `/exit` | Quit |

@@ -13,8 +13,9 @@ use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationSync;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
 use chatty_core::session::{
-    BRING_BACK_SUMMARY, Delegation, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted, refuse_reason,
-    take_online,
+    CONTINUE_HERE_SUMMARY, Delegation, HandoffServer, HandoffSummary, HostedSession,
+    NoAttachmentUpload, SEND_TO_CLOUD_SUMMARY, SendToCloud, continue_here, refuse_reason,
+    send_to_cloud,
 };
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::tools::LOCAL_AGENT_NAME;
@@ -26,14 +27,15 @@ use crate::events::AppEvent;
 ///
 /// The strings come from chatty-core, so the TUI prompt and the desktop
 /// dialog say the same thing and neither can drift from what the code does.
-fn push_move_summary(out: &mut String, summary: &MoveSummary) {
-    out.push_str("Moves:\n");
-    for item in summary.moves {
+fn push_move_summary(out: &mut String, summary: &HandoffSummary) {
+    out.push_str(summary.lead);
+    out.push_str(&format!("\n{}:\n", summary.goes_title));
+    for item in summary.goes {
         out.push_str(&format!("  + {item}\n"));
     }
-    out.push_str("Does not move:\n");
-    for (what, why) in summary.does_not_move {
-        out.push_str(&format!("  - {what} ({why})\n"));
+    out.push_str(&format!("{}:\n", summary.stays_title));
+    for item in summary.stays {
+        out.push_str(&format!("  - {item}\n"));
     }
 }
 
@@ -459,14 +461,14 @@ impl ChatEngine {
             None => {
                 out.push_str("This conversation runs locally.\n");
                 out.push_str("  /online <server-url>  take it online\n\n");
-                push_move_summary(&mut out, &TAKE_ONLINE_SUMMARY);
+                push_move_summary(&mut out, &SEND_TO_CLOUD_SUMMARY);
             }
             Some((server_url, remote_id)) => {
                 out.push_str(&format!(
                     "This conversation runs on {server_url} (as {remote_id}).\n"
                 ));
                 out.push_str("  /online off  bring it back to this machine\n\n");
-                push_move_summary(&mut out, &BRING_BACK_SUMMARY);
+                push_move_summary(&mut out, &CONTINUE_HERE_SUMMARY);
             }
         }
         out
@@ -507,14 +509,20 @@ impl ChatEngine {
         let auth = Some(auth);
         match target {
             Some(server_url) => {
-                let new_mode = take_online(
-                    &server_url,
-                    conversation.title(),
-                    &conversation.messages(),
-                    auth.as_deref(),
+                // HX-19 replaces this command; until then it keeps the
+                // conversation's own model and uploads no attachments.
+                let data = conversation.snapshot().to_data()?;
+                let new_mode = send_to_cloud(
+                    &HandoffServer::new(&server_url, auth.clone()),
+                    SendToCloud {
+                        conversation: &data,
+                        sync: &mode,
+                        cloud_model: None,
+                    },
+                    &NoAttachmentUpload,
                 )
                 .await
-                .context("Failed to take the conversation online")?;
+                .context("Failed to send the conversation to the cloud")?;
                 let (url, remote_id) = new_mode
                     .cloud_on()
                     .map(|(url, id)| (url.to_string(), id.to_string()))
@@ -529,13 +537,13 @@ impl ChatEngine {
                 ));
             }
             None => {
-                let (server_url, remote_id) = mode
+                let (server_url, _) = mode
                     .cloud_on()
-                    .map(|(url, id)| (url.to_string(), id.to_string()))
                     .expect("refuse_reason rejected a local conversation already");
-                let remote = fetch_hosted(&server_url, &remote_id, auth.as_deref())
+                let here = continue_here(&HandoffServer::new(server_url, auth.clone()), &mode)
                     .await
-                    .context("Failed to read the hosted conversation back")?;
+                    .context("Failed to continue the conversation here")?;
+                let remote = here.remote;
 
                 // This client applied every event of every hosted turn it was
                 // present for, so its local history is usually already
@@ -560,7 +568,7 @@ impl ChatEngine {
                     }
                 }
                 if let Some(conv) = self.session.conversation_mut() {
-                    conv.set_sync(ConversationSync::LocalOnly);
+                    conv.set_sync(here.sync.clone());
                 }
                 self.hosted = None;
                 self.add_system_message(match missed {

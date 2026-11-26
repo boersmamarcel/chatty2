@@ -9,6 +9,7 @@
 - [Getting started](./user/getting-started.md)
 - [Providers & models](./user/providers-and-models.md)
 - [Chatting](./user/chatting.md)
+  - [Use chatty with your Hive account](./user/hive-account.md)
 - [Terminal dock](./user/terminal-dock.md)
 - [Agents & tools](./user/agents-and-tools.md)
 - [Extensions & MCP](./user/extensions.md)

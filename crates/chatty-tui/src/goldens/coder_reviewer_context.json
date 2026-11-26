@@ -36,8 +36,7 @@
       "embedding_enabled": false,
       "warn_on_external_agent": false,
       "embedding_provider": null,
-      "embedding_model": null,
-      "hosted_conversations_enabled": false
+      "embedding_model": null
     },
     "ask_user_enabled": true,
     "instructions_dir": "/golden/workspace",
@@ -89,8 +88,7 @@
       "embedding_enabled": false,
       "warn_on_external_agent": false,
       "embedding_provider": null,
-      "embedding_model": null,
-      "hosted_conversations_enabled": false
+      "embedding_model": null
     },
     "ask_user_enabled": true,
     "instructions_dir": "/golden/workspace",
@@ -138,8 +136,7 @@
       "embedding_enabled": false,
       "warn_on_external_agent": false,
       "embedding_provider": null,
-      "embedding_model": null,
-      "hosted_conversations_enabled": false
+      "embedding_model": null
     },
     "ask_user_enabled": true,
     "instructions_dir": "/golden/workspace",
