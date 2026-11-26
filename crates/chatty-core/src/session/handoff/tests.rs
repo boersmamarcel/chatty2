@@ -406,7 +406,7 @@ async fn a_409_names_the_device_that_holds_it_and_continue_here_takes_it_over() 
         .expect(1)
         .mount(&server)
         .await;
-    let here = continue_here(&handoff(&server), &on_device(3))
+    let here = continue_here(&handoff(&server), &on_device(3), "d-1")
         .await
         .unwrap();
     assert_eq!(here.remote.version, Some(7));
@@ -434,14 +434,16 @@ async fn continue_here_pulls_the_cloud_copy_then_takes_the_placement() {
     placement_ok(&server, "device", 6).await;
 
     let cloud = ConversationSync::cloud(server.uri(), "r-1", Some("cloud-a".into()));
-    let here = continue_here(&handoff(&server), &cloud).await.unwrap();
+    let here = continue_here(&handoff(&server), &cloud, "d-1")
+        .await
+        .unwrap();
     assert_eq!(here.remote.messages.len(), 1);
     assert!(!here.sync.runs_in_cloud());
     assert_eq!(here.sync.synced().unwrap().version, 6);
     assert_eq!(
         here.sync.placement(),
         Some(&Placement::Device {
-            device_id: "d-9".into()
+            device_id: "d-1".into()
         })
     );
 }
@@ -492,9 +494,41 @@ async fn continue_here_pulls_again_and_retries_once_after_a_412() {
         .await;
 
     let cloud = ConversationSync::cloud(server.uri(), "r-1", None);
-    let here = continue_here(&handoff(&server), &cloud).await.unwrap();
+    let here = continue_here(&handoff(&server), &cloud, "d-1")
+        .await
+        .unwrap();
     assert_eq!(here.remote.version, Some(6));
     assert_eq!(here.sync.synced().unwrap().version, 7);
+}
+
+/// This device's id is the login session the server marks `current`, never
+/// whatever a placement reply names.
+#[tokio::test]
+async fn this_device_is_the_current_login_session() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/auth/sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {"id": "s-other", "current": false},
+            {"id": "s-me", "current": true}
+        ])))
+        .mount(&server)
+        .await;
+    assert_eq!(this_device_id(&handoff(&server)).await.unwrap(), "s-me");
+
+    let unknown = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/auth/sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&unknown)
+        .await;
+    assert!(this_device_id(&handoff(&unknown)).await.is_err());
+    assert!(
+        continue_here(&handoff(&unknown), &on_device(1), "")
+            .await
+            .is_err(),
+        "no device id, no placement: never an empty one"
+    );
 }
 
 #[tokio::test]
@@ -514,7 +548,7 @@ async fn continue_here_is_refused_while_the_cloud_turn_runs() {
         .await;
     let cloud = ConversationSync::cloud(server.uri(), "r-1", None);
     assert!(matches!(
-        continue_here(&handoff(&server), &cloud).await,
+        continue_here(&handoff(&server), &cloud, "d-1").await,
         Err(HandoffError::TurnRunning)
     ));
 }

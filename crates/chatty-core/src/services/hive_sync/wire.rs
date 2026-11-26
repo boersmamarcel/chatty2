@@ -254,15 +254,6 @@ pub struct PlacementReply {
     pub placement_device: Option<PlacementDevice>,
 }
 
-impl PlacementReply {
-    /// The device the conversation is now placed on, when the server says.
-    pub fn device_id(&self) -> Option<String> {
-        self.placement_device
-            .as_ref()
-            .map(|device| device.id.clone())
-    }
-}
-
 /// A refusal's body (409, 412): why, in words the server wrote for the user,
 /// and, for `held_elsewhere`, who holds the conversation.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -314,6 +305,45 @@ pub enum Holder {
         /// The name the device signed in with, when the server keeps one.
         name: Option<String>,
     },
+}
+
+/// `GET /api/auth/sessions`: the user's login sessions. The one marked
+/// `current` is this device, whose id is what a device placement names.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuthSessions {
+    /// This device's login session id, when the server marked one current.
+    pub current: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AuthSessionsWire {
+    Wrapped {
+        #[serde(alias = "items")]
+        sessions: Vec<AuthSessionWire>,
+    },
+    Bare(Vec<AuthSessionWire>),
+}
+
+#[derive(Deserialize)]
+struct AuthSessionWire {
+    id: String,
+    #[serde(default)]
+    current: bool,
+}
+
+impl<'de> Deserialize<'de> for AuthSessions {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let sessions = match AuthSessionsWire::deserialize(deserializer)? {
+            AuthSessionsWire::Wrapped { sessions } | AuthSessionsWire::Bare(sessions) => sessions,
+        };
+        Ok(AuthSessions {
+            current: sessions
+                .into_iter()
+                .find(|session| session.current && !session.id.is_empty())
+                .map(|session| session.id),
+        })
+    }
 }
 
 /// One model the cloud can run a conversation on.
@@ -689,6 +719,19 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(body.holder(), Some(Holder::Cloud));
+    }
+
+    #[test]
+    fn the_current_login_session_is_this_device() {
+        let sessions: AuthSessions = serde_json::from_value(serde_json::json!([
+            {"id": "s-1", "current": false, "name": "Laptop"},
+            {"id": "s-2", "current": true}
+        ]))
+        .unwrap();
+        assert_eq!(sessions.current.as_deref(), Some("s-2"));
+        let none: AuthSessions =
+            serde_json::from_value(serde_json::json!({"sessions": [{"id": "s-1"}]})).unwrap();
+        assert_eq!(none.current, None);
     }
 
     /// HX-13 sends the placement as a bare word with the holding device

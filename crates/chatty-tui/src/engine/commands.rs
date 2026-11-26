@@ -15,7 +15,7 @@ use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_com
 use chatty_core::session::{
     CONTINUE_HERE_SUMMARY, Delegation, HandoffServer, HandoffSummary, HostedSession,
     NoAttachmentUpload, SEND_TO_CLOUD_SUMMARY, SendToCloud, continue_here, refuse_reason,
-    send_to_cloud,
+    send_to_cloud, this_device_id,
 };
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::tools::LOCAL_AGENT_NAME;
@@ -534,7 +534,11 @@ impl ChatEngine {
                 let (server_url, _) = mode
                     .cloud_on()
                     .expect("refuse_reason rejected a local conversation already");
-                let here = continue_here(&HandoffServer::new(server_url, auth.clone()), &mode)
+                let server = HandoffServer::new(server_url, auth.clone());
+                let device_id = this_device_id(&server)
+                    .await
+                    .context("Failed to tell which device this is")?;
+                let here = continue_here(&server, &mode, &device_id)
                     .await
                     .context("Failed to continue the conversation here")?;
                 let remote = here.remote;

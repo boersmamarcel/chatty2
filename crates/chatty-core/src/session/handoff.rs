@@ -34,8 +34,8 @@ use crate::models::conversation::{ConversationSync, Placement, SyncedConversatio
 use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::services::hive_sync::wire::{
-    CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder, PlacementChange,
-    PlacementReply, PlacementTarget,
+    AuthSessions, CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder,
+    PlacementChange, PlacementReply, PlacementTarget,
 };
 
 // ── What the user is told ────────────────────────────────────────────────────
@@ -248,6 +248,20 @@ pub async fn cloud_models(server: &HandoffServer) -> Result<CloudModels, Handoff
     HandoffServer::json(response).await
 }
 
+/// This device's id as the server knows it: the caller's login session, the
+/// row of `GET /api/auth/sessions` marked `current`. A device placement names
+/// it. Cache it per sign-in; it never goes in a request body.
+pub async fn this_device_id(server: &HandoffServer) -> Result<String, HandoffError> {
+    let url = format!("{}/api/auth/sessions", server.url);
+    let response = server.send(&url, |http| http.get(&url)).await?;
+    let sessions: AuthSessions = HandoffServer::json(response).await?;
+    sessions.current.ok_or_else(|| {
+        HandoffError::Server(anyhow::anyhow!(
+            "the server did not say which sign-in is this device's"
+        ))
+    })
+}
+
 /// The server's copy of a synced conversation.
 pub async fn fetch_conversation(
     server: &HandoffServer,
@@ -446,10 +460,19 @@ pub struct ContinuedHere {
 /// Pull a synced conversation's latest copy and take its placement for this
 /// device. Nothing local changes here; the caller adopts the copy and records
 /// the state. Also how a conversation held by another device is taken over.
+///
+/// `device_id` is this device's, from [`this_device_id`] (cached per
+/// sign-in by the caller); the placement records it.
 pub async fn continue_here(
     server: &HandoffServer,
     sync: &ConversationSync,
+    device_id: &str,
 ) -> Result<ContinuedHere, HandoffError> {
+    if device_id.is_empty() {
+        return Err(HandoffError::Server(anyhow::anyhow!(
+            "this device's sign-in id is unknown"
+        )));
+    }
     let Some(synced) = sync.synced() else {
         return Err(HandoffError::NotSynced);
     };
@@ -473,7 +496,7 @@ pub async fn continue_here(
         remote_id: synced.remote_id.clone(),
         version: reply.version.unwrap_or(version),
         placement: Placement::Device {
-            device_id: reply.device_id().unwrap_or_default(),
+            device_id: device_id.to_string(),
         },
         last_synced_at: Some(now_ms()),
     });
