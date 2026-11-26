@@ -33,6 +33,18 @@ pub enum CloudMark {
     Failed,
 }
 
+impl CloudMark {
+    /// The words both frontends show for the mark.
+    pub fn label(self) -> &'static str {
+        match self {
+            CloudMark::Running => "Running in the cloud",
+            CloudMark::WaitingForYou => "Waiting for you",
+            CloudMark::Done => "Done",
+            CloudMark::Failed => "Something went wrong",
+        }
+    }
+}
+
 /// A frame from a hosted conversation that is not a session event, with the
 /// local conversation it came from.
 pub type HostedUiFrame = (String, HostedFrame);

@@ -13,8 +13,8 @@ use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationSync;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
 use chatty_core::session::{
-    BRING_BACK_SUMMARY, Delegation, HostedSession, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted,
-    refuse_reason, take_online,
+    BRING_BACK_SUMMARY, Delegation, MoveSummary, TAKE_ONLINE_SUMMARY, fetch_hosted, refuse_reason,
+    take_online,
 };
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::tools::LOCAL_AGENT_NAME;
@@ -173,6 +173,10 @@ pub enum Command {
     Unqueue,
     /// /export [path] — export the conversation as ATIF (AGE-860)
     Export(Option<String>),
+    /// /conversations — list saved and cloud conversations (HX-19)
+    Conversations,
+    /// /open <n|id> — open one of them (HX-19)
+    Open(Option<String>),
     /// /login — sign in to Hive as this TUI (AGE-2084)
     Login,
     /// /logout — sign the TUI out of Hive (AGE-2084)
@@ -229,6 +233,8 @@ impl ChatEngine {
             "/now" => Some(Command::Now(arg)),
             "/unqueue" => Some(Command::Unqueue),
             "/export" => Some(Command::Export(arg)),
+            "/conversations" => Some(Command::Conversations),
+            "/open" => Some(Command::Open(arg)),
             "/login" => Some(Command::Login),
             "/logout" => Some(Command::Logout),
             "/quit" | "/exit" => Some(Command::Quit),
@@ -514,7 +520,7 @@ impl ChatEngine {
                     .map(|(url, id)| (url.to_string(), id.to_string()))
                     .expect("take_online returns a cloud placement");
 
-                self.hosted = Some(HostedSession::new(&url, &remote_id).with_auth(auth));
+                self.hosted = Some(self.new_hosted(&url, &remote_id, auth));
                 if let Some(conv) = self.session.conversation_mut() {
                     conv.set_sync(new_mode);
                 }
@@ -576,7 +582,7 @@ impl ChatEngine {
     ///
     /// Tool round-trips are skipped for the same reason every other reader
     /// skips them: they are history for the model, not lines for a person.
-    fn append_missed_message(&mut self, message: &Message) {
+    pub(super) fn append_missed_message(&mut self, message: &Message) {
         if chatty_core::services::is_tool_message(message) {
             return;
         }
