@@ -2,7 +2,7 @@
 
 **When to read this:** You want to connect an LLM provider, add models to the roster, pick a default, or work out why a model is missing.
 
-Everything lives on one page: **Settings → Models & Providers**. The roster lists every model as a row — favourite star, provider, context window, input price per million tokens and temperature — with a status chip per provider across the top. Changes save automatically.
+Everything lives on one page: **Settings → Models & Providers**. The roster lists every model as a row — favourite star, provider, context window, input price per million tokens and temperature — with a status chip per provider across the top. The price shows **free** for local models and OpenRouter `:free` models, and **—** when the price is not known (it is never shown as $0.00 for a paid model). The header counts how many providers are set up, for example "3 of 3 providers set up". Changes save automatically.
 
 ## Connect a provider
 
