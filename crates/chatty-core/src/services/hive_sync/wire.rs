@@ -92,9 +92,9 @@ pub struct RemoteSummary {
     pub updated_at: i64,
     pub turn_status: TurnStatus,
     pub placement: Placement,
-    /// What the user called the device holding it, when the server named one
-    /// (HX-22): live, shown in the take-it-back banner, never persisted.
-    pub holder_name: Option<String>,
+    /// The name of the device that holds the conversation, when the server
+    /// says (`placement_device.name`). Live, like `turn_status`: never persisted.
+    pub device_name: Option<String>,
 }
 
 /// `GET /api/conversations/{id}`: the conversation, and as much of the
@@ -567,11 +567,6 @@ impl From<ChangeWire> for RemoteChange {
         } else {
             TurnStatus::Idle
         });
-        let holder_name = wire
-            .placement_device
-            .as_ref()
-            .and_then(|device| device.name.clone())
-            .filter(|name| !name.is_empty());
         RemoteChange::Upsert(RemoteSummary {
             id: wire.id,
             title: wire.title,
@@ -588,7 +583,10 @@ impl From<ChangeWire> for RemoteChange {
                     .unwrap_or(Placement::Cloud { model_id: None }),
                 wire.placement_device.as_ref(),
             ),
-            holder_name,
+            device_name: wire
+                .placement_device
+                .and_then(|device| device.name)
+                .filter(|name| !name.is_empty()),
         })
     }
 }
@@ -689,7 +687,7 @@ mod tests {
                 updated_at: 5,
                 turn_status: TurnStatus::WaitingForYou,
                 placement: Placement::Cloud { model_id: None },
-                holder_name: None,
+                device_name: None,
             })
         );
         assert_eq!(page.changes[1], RemoteChange::Deleted { id: "b".into() });
@@ -826,6 +824,7 @@ mod tests {
                 device_id: "s-1".into()
             }
         );
+        assert_eq!(a.device_name.as_deref(), Some("Mac"));
         let detail: ConversationDetail = serde_json::from_value(serde_json::json!({
             "id": "a", "placement": "device", "placement_device": {"id": "s-1", "name": null}
         }))

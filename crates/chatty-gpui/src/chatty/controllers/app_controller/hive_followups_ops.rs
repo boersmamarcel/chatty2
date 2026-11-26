@@ -63,7 +63,7 @@ impl ChattyApp {
             .get_conversation(&conv_id)
             .and_then(|c| c.sync().synced().map(|s| s.placement.clone()));
         let this_device = store.this_device();
-        let holder = store.holder_name(&conv_id).map(str::to_string);
+        let holder = store.device_name(&conv_id).map(str::to_string);
         if matches!(placement, Some(Placement::Device { .. })) {
             self.look_up_device_id(cx);
         }

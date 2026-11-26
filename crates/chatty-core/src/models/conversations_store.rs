@@ -98,7 +98,7 @@ pub struct ConversationsStore {
     /// the last pull. Live state: never persisted (HX-10).
     turn_status: HashMap<String, TurnStatus>,
     /// The name of the device holding each conversation, from the last pull.
-    holder_names: HashMap<String, String>,
+    device_names: HashMap<String, String>,
     /// Conversations whose turn finished / failed since they were last
     /// opened, for the sidebar's mark.
     finished: HashSet<String>,
@@ -125,7 +125,7 @@ impl ConversationsStore {
             this_device: None,
             frame_tx: None,
             turn_status: HashMap::new(),
-            holder_names: HashMap::new(),
+            device_names: HashMap::new(),
             finished: HashSet::new(),
             failed: HashSet::new(),
             inputs: std::sync::Mutex::new(HashMap::new()),
@@ -358,13 +358,13 @@ impl ConversationsStore {
             match action {
                 SyncAction::UpsertMetadata(remote) => {
                     self.set_turn_status(&remote.local_id, remote.turn_status);
-                    match &remote.holder_name {
+                    match &remote.device_name {
                         Some(name) => {
-                            self.holder_names
+                            self.device_names
                                 .insert(remote.local_id.clone(), name.clone());
                         }
                         None => {
-                            self.holder_names.remove(&remote.local_id);
+                            self.device_names.remove(&remote.local_id);
                         }
                     }
                     self.follow_placement(&remote.local_id, Some(&remote.sync));
@@ -472,8 +472,8 @@ impl ConversationsStore {
     }
 
     /// The name of the device holding the conversation, as of the last pull.
-    pub fn holder_name(&self, id: &str) -> Option<&str> {
-        self.holder_names.get(id).map(String::as_str)
+    pub fn device_name(&self, id: &str) -> Option<&str> {
+        self.device_names.get(id).map(String::as_str)
     }
 
     /// Whether the conversation's turn runs on the server right now, as of
@@ -1017,7 +1017,7 @@ mod tests {
                 updated_at: 100,
                 sync: cloud.clone(),
                 turn_status: TurnStatus::Running,
-                holder_name: None,
+                device_name: None,
             }),
             SyncAction::ApplyTombstone {
                 local_id: "conv-0".into(),

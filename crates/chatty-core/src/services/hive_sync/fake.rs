@@ -73,7 +73,7 @@ impl FakeHiveConversations {
                     updated_at,
                     turn_status: TurnStatus::Idle,
                     placement: Placement::Cloud { model_id: None },
-                    holder_name: None,
+                    device_name: None,
                 },
                 seq,
             ),
