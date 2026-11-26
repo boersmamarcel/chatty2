@@ -656,6 +656,9 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
         };
         let message = if status == reqwest::StatusCode::UNAUTHORIZED {
             SIGN_IN_TO_HIVE.to_string()
+        } else if let Some(held) = held_elsewhere_message(status, &detail) {
+            // The server's own words, with the next step already in them.
+            held
         } else {
             format!("the server refused the turn ({status}): {}", detail.trim())
         };
@@ -957,6 +960,19 @@ pub enum HostedFrame {
     StreamError(String),
     /// A frame name this build does not know. Skipped, never an error.
     Unknown(String),
+}
+
+/// `409 {"error":"held_elsewhere","message":…}`: another device holds the
+/// conversation. The message is written for the user and is shown as is.
+fn held_elsewhere_message(status: reqwest::StatusCode, body: &str) -> Option<String> {
+    if status != reqwest::StatusCode::CONFLICT {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_str(body).ok()?;
+    if body.get("error")?.as_str()? != "held_elsewhere" {
+        return None;
+    }
+    body.get("message")?.as_str().map(str::to_string)
 }
 
 /// What a [`HostedFrame::BrokerInput`] asks. The live frames carry the request
@@ -1693,6 +1709,40 @@ mod tests {
             id: id.into(),
             name: "read_file".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_turn_for_a_conversation_another_device_holds_shows_the_servers_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/c-1/turns"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "held_elsewhere",
+                "message": "This conversation is running on Work laptop. Continue it here first."
+            })))
+            .mount(&server)
+            .await;
+        let mut session = HostedSession::new(server.uri(), "c-1");
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        session
+            .begin_turn(&TurnInput::text("hello"), move |e| {
+                sink.borrow_mut().push(e)
+            })
+            .expect("the turn starts")
+            .await;
+        let errors: Vec<String> = seen
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::Error(error) => Some(error.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            errors,
+            ["This conversation is running on Work laptop. Continue it here first."]
+        );
     }
 
     #[tokio::test]
