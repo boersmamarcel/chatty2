@@ -845,7 +845,13 @@ impl McpService {
                     Ok(()) => (name, true, None),
                     Err(e) => {
                         let err_msg = format!("{e:#}");
-                        error!(server = %name, error = ?e, "Failed to connect to MCP server");
+                        // A sign-in the person has not done yet is a state
+                        // Settings shows, not an error for the error count.
+                        if err_msg.contains(SIGN_IN_NEEDED) {
+                            info!(server = %name, "MCP server waits for a sign-in");
+                        } else {
+                            error!(server = %name, error = ?e, "Failed to connect to MCP server");
+                        }
                         (name, false, Some(err_msg))
                     }
                 }
