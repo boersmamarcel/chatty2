@@ -299,8 +299,10 @@ impl ChatEngine {
             // Stale: never read, or invalidated by a newer version. Unknown
             // status: nothing here has said whether a turn is running.
             let stale = synced.last_synced_at.is_none();
-            let unknown_status = sync.runs_in_cloud() && !self.cloud.status.contains_key(&id);
-            if stale || unknown_status {
+            // A cloud conversation is always read again: the status the last
+            // `/conversations` saw may be old, and a turn started since was
+            // neither shown nor followed (AGE-2127).
+            if stale || sync.runs_in_cloud() {
                 notice = self.fetch_and_adopt(&synced.remote_id.clone()).await;
             }
         }

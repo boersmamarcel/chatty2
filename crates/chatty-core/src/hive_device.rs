@@ -15,6 +15,18 @@ pub fn device_name() -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// What the terminal app calls this device (AGE-2127): the host name with
+/// "(terminal)", so the desktop and the TUI on one machine are told apart
+/// ("running on marcel-beast" named both). Within the server's 80.
+pub fn terminal_device_name() -> Option<String> {
+    const SUFFIX: &str = " (terminal)";
+    let host: String = device_name()?
+        .chars()
+        .take(80 - SUFFIX.chars().count())
+        .collect();
+    Some(format!("{}{SUFFIX}", host.trim_end()))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -23,6 +35,10 @@ mod tests {
             assert!(name.chars().count() <= 80);
             assert!(!name.chars().any(char::is_control));
             assert_eq!(name, name.trim());
+        }
+        if let Some(name) = super::terminal_device_name() {
+            assert!(name.ends_with(" (terminal)"), "{name}");
+            assert!(name.chars().count() <= 80);
         }
     }
 }
