@@ -16,6 +16,11 @@ const MAX_OAUTH_METADATA_BYTES: usize = 1024 * 1024;
 
 /// A JSON body of at most [`MAX_OAUTH_METADATA_BYTES`]; `None` when it is
 /// larger, cannot be read, or does not parse.
+/// The error of a connect that needed an OAuth sign-in and was not allowed to
+/// open a browser. Contains "Auth required", which the app reads as
+/// [`McpAuthStatus::NeedsAuth`](crate::settings::models::mcp_store::McpAuthStatus::NeedsAuth).
+pub const SIGN_IN_NEEDED: &str = "Auth required: sign in from Settings → Extensions";
+
 async fn read_json_capped<T: serde::de::DeserializeOwned>(
     mut resp: reqwest::Response,
 ) -> Option<T> {
@@ -84,6 +89,15 @@ impl McpConnection {
     /// If the server requires OAuth authentication, an interactive browser-based
     /// flow is initiated automatically.
     pub async fn connect(config: McpServerConfig) -> Result<Self> {
+        Self::connect_with(config, true).await
+    }
+
+    /// [`connect`](Self::connect), but with `browser` false a server that needs
+    /// an OAuth sign-in this device has no tokens for fails with
+    /// [`SIGN_IN_NEEDED`] instead of opening a browser tab. The app's start
+    /// connects this way: a sign-in nobody finished opened a tab on every
+    /// start (AGE-2129).
+    pub async fn connect_with(config: McpServerConfig, browser: bool) -> Result<Self> {
         hive_client::ensure_secure_url(&config.url).map_err(anyhow::Error::msg)?;
 
         let name = config.name.clone();
@@ -108,7 +122,7 @@ impl McpConnection {
                 server = %name,
                 "Server advertises OAuth via resource metadata, using OAuth flow"
             );
-            return Self::connect_with_oauth(&name, &url, Some(auth_servers)).await;
+            return Self::connect_with_oauth(&name, &url, Some(auth_servers), browser).await;
         }
 
         // Try connecting with retries for transient transport errors (e.g.
@@ -189,7 +203,7 @@ impl McpConnection {
         }
 
         // Second attempt: OAuth 2.0 browser-based authorization
-        Self::connect_with_oauth(&name, &url, None).await
+        Self::connect_with_oauth(&name, &url, None, browser).await
     }
 
     /// Probe whether the MCP server advertises OAuth-protected resource metadata.
@@ -336,6 +350,7 @@ impl McpConnection {
         name: &str,
         url: &str,
         probed_auth_servers: Option<Vec<String>>,
+        browser: bool,
     ) -> Result<Self> {
         use rmcp::transport::auth::{AuthClient, CredentialStore};
 
@@ -365,6 +380,11 @@ impl McpConnection {
                     credential_store.clear().await.ok();
                 }
             }
+        }
+
+        if !browser {
+            info!(server = %name, "OAuth sign-in needed; not opening a browser without a request");
+            anyhow::bail!("{SIGN_IN_NEEDED}");
         }
 
         // Full browser-based OAuth flow
@@ -749,6 +769,12 @@ impl McpService {
 
     /// Connect to a single MCP server by URL.
     pub async fn connect_server(&self, config: McpServerConfig) -> Result<()> {
+        self.connect_server_with(config, true).await
+    }
+
+    /// [`connect_server`](Self::connect_server); `browser` as in
+    /// [`McpConnection::connect_with`].
+    pub async fn connect_server_with(&self, config: McpServerConfig, browser: bool) -> Result<()> {
         let name = config.name.clone();
 
         // Check if already connected
@@ -760,7 +786,7 @@ impl McpService {
             }
         }
 
-        let connection = McpConnection::connect(config).await?;
+        let connection = McpConnection::connect_with(config, browser).await?;
 
         {
             let mut connections = self.connections.write().await;
@@ -796,6 +822,8 @@ impl McpService {
 
     /// Connect to all enabled servers, returning per-server results.
     /// Returns a list of (server_name, success: bool, error_message: Option).
+    /// Never opens a browser: a server that needs a sign-in reports
+    /// [`SIGN_IN_NEEDED`], and the person signs in from Settings.
     pub async fn connect_all_with_status(
         &self,
         configs: Vec<McpServerConfig>,
@@ -813,7 +841,7 @@ impl McpService {
             let svc = self.clone();
             join_set.spawn(async move {
                 let name = config.name.clone();
-                match svc.connect_server(config).await {
+                match svc.connect_server_with(config, false).await {
                     Ok(()) => (name, true, None),
                     Err(e) => {
                         let err_msg = format!("{e:#}");
@@ -1014,6 +1042,20 @@ mod tests {
     }
 
     // --- disconnect_server on unknown name ---
+
+    #[tokio::test]
+    async fn a_sign_in_without_a_request_never_opens_a_browser() {
+        // No tokens are stored for this name: a quiet connect stops before
+        // discovery and the browser, with the error the app reads as
+        // "needs sign-in" (AGE-2129).
+        let name = format!("age-2129-{}", uuid::Uuid::new_v4());
+        let error =
+            McpConnection::connect_with_oauth(&name, "https://mcp.invalid/mcp", None, false)
+                .await
+                .err()
+                .expect("no tokens and no browser");
+        assert!(format!("{error:#}").contains("Auth required"), "{error:#}");
+    }
 
     #[tokio::test]
     async fn test_disconnect_server_unknown_is_ok() {

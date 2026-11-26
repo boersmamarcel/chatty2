@@ -3,6 +3,7 @@ use crate::settings::controllers::{extensions_controller, teams_controller};
 use crate::settings::models::extensions_store::{ExtensionKind, ExtensionsModel};
 use crate::settings::models::hive_settings::HiveSettingsModel;
 use crate::settings::models::marketplace_state::{MarketplaceState, MarketplaceTab};
+use crate::settings::models::mcp_store::McpAuthStatus;
 use crate::settings::models::{DiscoveredModulesModel, ModuleLoadStatus};
 use crate::settings::views::plugins_page::add_to_agent_button;
 use chatty_core::hive::models::AgentSpecListing;
@@ -207,6 +208,16 @@ fn installed_extensions_group() -> SettingGroup {
                             ExtensionKind::WasmModule => "Plugin",
                             ExtensionKind::A2aAgent(_) => "A2A",
                         };
+                        // An enabled MCP server whose sign-in the start skipped
+                        // (AGE-2129): say so, and offer the sign-in.
+                        let needs_sign_in = ext.enabled
+                            && match &ext.kind {
+                                ExtensionKind::McpServer(cfg) => matches!(
+                                    model.mcp_auth_status(&cfg.name),
+                                    Some(McpAuthStatus::NeedsAuth)
+                                ),
+                                _ => false,
+                            };
                         let status_icon = if ext.enabled { "🟢" } else { "⏸" };
 
                         // For WASM modules: look up discovered module metadata for
@@ -333,6 +344,17 @@ fn installed_extensions_group() -> SettingGroup {
                                     })
                                     .when_some(trust_level, |el, trust| {
                                         el.child(trust_badge(&trust, cx))
+                                    })
+                                    .when(needs_sign_in, |el| {
+                                        el.child(
+                                            div()
+                                                .text_xs()
+                                                .px_1()
+                                                .rounded_sm()
+                                                .bg(cx.theme().warning)
+                                                .text_color(cx.theme().warning_foreground)
+                                                .child("Needs sign-in"),
+                                        )
                                     }),
                             )
                             .child(
@@ -408,6 +430,23 @@ fn installed_extensions_group() -> SettingGroup {
                                             )
                                         },
                                     )
+                                    .when(needs_sign_in, |el| {
+                                        let sign_in_id = id.clone();
+                                        el.child(
+                                            Button::new(SharedString::from(format!(
+                                                "mcp-sign-in-{sign_in_id}"
+                                            )))
+                                            .small()
+                                            .primary()
+                                            .label("Sign in")
+                                            .on_click(move |_, _window, cx| {
+                                                extensions_controller::sign_in_mcp(
+                                                    sign_in_id.clone(),
+                                                    cx,
+                                                );
+                                            }),
+                                        )
+                                    })
                                     .child(
                                         Button::new(SharedString::from(format!("toggle-{id}")))
                                             .small()
