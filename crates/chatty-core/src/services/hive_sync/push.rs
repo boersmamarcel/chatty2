@@ -27,7 +27,7 @@ use super::wire::{ConflictBody, CreatedConversation, HistoryAccepted};
 use crate::models::conversation::{ConversationSync, Placement};
 use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
-use crate::session::hosted::{SIGN_IN_TO_HIVE, send_to_server};
+use crate::session::hosted::{LOG_TARGET, SIGN_IN_TO_HIVE, error_code, send_to_server};
 
 /// What a deleted conversation's 410 says when the server sends no message.
 pub const DELETED_ON_ACCOUNT: &str =
@@ -92,6 +92,19 @@ fn classify(status: reqwest::StatusCode) -> Option<PushError> {
     }
 }
 
+/// One line per refused push or create: the conversation, the status and the
+/// server's error code (never its message, which can quote the user). A 409
+/// or 412 is the protocol working, so it is `info`; anything else `warn`.
+fn log_refusal(what: &str, id: &str, if_match: u64, status: reqwest::StatusCode, body: &str) {
+    let code = error_code(body);
+    let status = status.as_u16();
+    if matches!(status, 409 | 412) {
+        tracing::info!(target: LOG_TARGET, remote_id = id, if_match, status, error_code = code.as_deref(), "The server refused {what}");
+    } else {
+        tracing::warn!(target: LOG_TARGET, remote_id = id, if_match, status, error_code = code.as_deref(), "The server refused {what}");
+    }
+}
+
 /// [`HiveHistoryApi`] over HTTP, authenticated as the Hive sign-in through
 /// [`send_to_server`] (which refuses an insecure URL).
 #[derive(Clone)]
@@ -119,6 +132,7 @@ impl HiveHistoryApi for HttpHiveHistoryApi {
         body: &ConversationData,
     ) -> BoxFuture<'static, Result<HistoryAccepted, PushError>> {
         let url = format!("{}/api/conversations/{remote_id}/history", self.server_url);
+        let remote_id = remote_id.to_string();
         let http = self.http.clone();
         let auth = self.auth.clone();
         let body = serde_json::to_value(body);
@@ -133,15 +147,23 @@ impl HiveHistoryApi for HttpHiveHistoryApi {
                     .json(&body)
             })
             .await
-            .map_err(|error| PushError::Offline(format!("{error:#}")))?;
-            match response.status() {
-                status if status.is_success() => response
+            .map_err(|error| {
+                tracing::warn!(target: LOG_TARGET, remote_id, if_match, error = format!("{error:#}"), "Could not send a history push");
+                PushError::Offline(format!("{error:#}"))
+            })?;
+            let status = response.status();
+            if status.is_success() {
+                return response
                     .json::<HistoryAccepted>()
                     .await
-                    .map_err(|error| PushError::Rejected(format!("unexpected reply: {error}"))),
+                    .map_err(|error| PushError::Rejected(format!("unexpected reply: {error}")));
+            }
+            let text = response.text().await.unwrap_or_default();
+            log_refusal("a history push", &remote_id, if_match, status, &text);
+            match status {
                 reqwest::StatusCode::PRECONDITION_FAILED => Err(PushError::Stale),
                 reqwest::StatusCode::CONFLICT => Err(PushError::HeldElsewhere(Box::new(
-                    response.json::<ConflictBody>().await.unwrap_or_default(),
+                    serde_json::from_str::<ConflictBody>(&text).unwrap_or_default(),
                 ))),
                 reqwest::StatusCode::UNAUTHORIZED => Err(PushError::SignedOut),
                 status if status.is_server_error() => {
@@ -181,25 +203,47 @@ impl HttpHiveHistoryApi {
         body: serde_json::Value,
     ) -> Result<CreatedConversation, PushError> {
         hive_client::ensure_secure_url(&url).map_err(PushError::Rejected)?;
+        let conv_id = body
+            .get("client_id")
+            .and_then(|id| id.as_str())
+            .unwrap_or_default()
+            .to_string();
         let response = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body))
             .await
-            .map_err(|error| PushError::Offline(format!("{error:#}")))?;
-        if response.status() == reqwest::StatusCode::GONE {
-            let body: ConflictBody = response.json().await.unwrap_or_default();
-            return Err(PushError::Deleted(
-                body.message
-                    .filter(|message| !message.trim().is_empty())
-                    .unwrap_or_else(|| DELETED_ON_ACCOUNT.to_string()),
-            ));
-        }
-        if let Some(error) = classify(response.status()) {
-            return Err(error);
+            .map_err(|error| {
+                tracing::warn!(target: LOG_TARGET, conv_id, error = format!("{error:#}"), "Could not send a conversation create");
+                PushError::Offline(format!("{error:#}"))
+            })?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                target: LOG_TARGET,
+                conv_id,
+                status = status.as_u16(),
+                error_code = error_code(&text).as_deref(),
+                "The server refused a conversation create"
+            );
+            return Err(create_refusal(status, &text));
         }
         response
             .json::<CreatedConversation>()
             .await
             .map_err(|error| PushError::Rejected(format!("unexpected reply: {error}")))
     }
+}
+
+/// A refused create as a [`PushError`].
+fn create_refusal(status: reqwest::StatusCode, body: &str) -> PushError {
+    if status == reqwest::StatusCode::GONE {
+        let body: ConflictBody = serde_json::from_str(body).unwrap_or_default();
+        return PushError::Deleted(
+            body.message
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or_else(|| DELETED_ON_ACCOUNT.to_string()),
+        );
+    }
+    classify(status).unwrap_or_else(|| PushError::Rejected(format!("the server answered {status}")))
 }
 
 /// Where one push goes: the conversation's address on the server and the
