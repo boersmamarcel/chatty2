@@ -114,6 +114,9 @@ pub struct ConversationDetail {
     pub version: Option<u64>,
     #[serde(default, deserialize_with = "placement_opt")]
     pub placement: Option<Placement>,
+    /// The holding device (HX-13), when the conversation runs on one.
+    #[serde(default)]
+    pub placement_device: Option<PlacementDevice>,
     #[serde(default)]
     pub messages: Vec<Message>,
     #[serde(default)]
@@ -137,6 +140,12 @@ pub struct ConversationDetail {
 }
 
 impl ConversationDetail {
+    /// Where this conversation runs: the holding device when the server
+    /// names one, else its `placement`.
+    pub fn effective_placement(&self) -> Option<Placement> {
+        placement_of(self.placement.clone(), self.placement_device.as_ref())
+    }
+
     /// Is a turn running on the server, by either the HX-8 status or the
     /// older flag?
     pub fn turn_running(&self) -> bool {
@@ -183,6 +192,97 @@ impl ConversationDetail {
     }
 }
 
+// ── Writes (HX-13, AGE-2092; AGE-2096) ───────────────────────────────────────
+
+/// The device that holds a conversation, as the server names it: the id is
+/// the holder's login session (HX-7), and the name is what the user called
+/// that device. `null` on the wire when the conversation runs in the cloud.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct PlacementDevice {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// The placement a row has: the holding device when the server names one,
+/// else what `placement` says.
+fn placement_of(
+    placement: Option<Placement>,
+    device: Option<&PlacementDevice>,
+) -> Option<Placement> {
+    match device.and_then(|device| device.id.clone()) {
+        Some(device_id) => Some(Placement::Device { device_id }),
+        None => placement,
+    }
+}
+
+/// The reply to an accepted `PUT /api/conversations/{id}/history`: the
+/// version the server now holds. The body of the push is the conversation's
+/// stored form ([`ConversationData`]); [`push_body`] takes out what is
+/// meaningless off this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct HistoryAccepted {
+    pub version: u64,
+}
+
+/// The summary a `POST /api/conversations` answers with (HX-13): the id the
+/// server gave the conversation and the version it starts at.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CreatedConversation {
+    pub id: String,
+    #[serde(default)]
+    pub version: u64,
+}
+
+/// `row` as the server stores it: without the working directory and the sync
+/// columns, which describe this device and mean nothing on the server.
+pub fn push_body(mut row: ConversationData) -> ConversationData {
+    row.working_dir = None;
+    row.sync = None;
+    row.placement = None;
+    row.remote_version = None;
+    row.last_synced_at = None;
+    row
+}
+
+/// The body of a 409 `held_elsewhere`: who holds the conversation now.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct HeldBy {
+    #[serde(default)]
+    pub placement_device: Option<PlacementDevice>,
+    #[serde(default)]
+    pub message: Option<String>,
+    /// The version the server holds.
+    #[serde(default)]
+    pub version: Option<u64>,
+}
+
+impl HeldBy {
+    /// What to tell the user: the server's own message as it is, else
+    /// [`continued_on`](Self::continued_on).
+    pub fn notice(&self) -> String {
+        match self.message.as_deref().map(str::trim) {
+            Some(message) if !message.is_empty() => message.to_string(),
+            _ => self.continued_on(),
+        }
+    }
+
+    /// "Continued on <device>", or the generic form when the server named
+    /// none.
+    pub fn continued_on(&self) -> String {
+        match self
+            .placement_device
+            .as_ref()
+            .and_then(|device| device.name.as_deref())
+            .filter(|name| !name.is_empty())
+        {
+            Some(name) => format!("Continued on {name}"),
+            None => "Continued on another device".to_string(),
+        }
+    }
+}
+
 // ── Decoding ─────────────────────────────────────────────────────────────────
 
 /// The page as it arrives: an object with the changes under `conversations`
@@ -220,6 +320,8 @@ struct ChangeWire {
     turn_active: bool,
     #[serde(default, deserialize_with = "placement_opt")]
     placement: Option<Placement>,
+    #[serde(default)]
+    placement_device: Option<PlacementDevice>,
 }
 
 impl<'de> Deserialize<'de> for ChangesPage {
@@ -259,8 +361,7 @@ impl From<ChangeWire> for RemoteChange {
                 .or(wire.updated_at)
                 .unwrap_or(0),
             turn_status,
-            placement: wire
-                .placement
+            placement: placement_of(wire.placement, wire.placement_device.as_ref())
                 .unwrap_or(Placement::Cloud { model_id: None }),
         })
     }
@@ -381,5 +482,62 @@ mod tests {
             })
         );
         assert!(detail.turn_running());
+    }
+
+    /// HX-13: a device placement arrives as `"placement": "device"` plus the
+    /// holder in `placement_device`, on a list row and on the detail alike.
+    #[test]
+    fn a_device_placement_is_read_from_placement_device() {
+        let page: ChangesPage = serde_json::from_value(serde_json::json!({
+            "conversations": [
+                {"id": "r-1", "version": 5, "placement": "device",
+                 "placement_device": {"id": "s-2", "name": "Work laptop"}},
+                {"id": "r-2", "version": 1, "placement": "cloud", "placement_device": null}
+            ],
+            "next_cursor": "c"
+        }))
+        .unwrap();
+        let placements: Vec<_> = page
+            .changes
+            .iter()
+            .map(|change| match change {
+                RemoteChange::Upsert(summary) => summary.placement.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            placements,
+            vec![
+                Placement::Device {
+                    device_id: "s-2".into()
+                },
+                Placement::Cloud { model_id: None }
+            ]
+        );
+
+        let detail: ConversationDetail = serde_json::from_value(serde_json::json!({
+            "id": "r-1", "placement": "device",
+            "placement_device": {"id": "s-2", "name": null}
+        }))
+        .unwrap();
+        assert_eq!(
+            detail.effective_placement(),
+            Some(Placement::Device {
+                device_id: "s-2".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_push_leaves_this_devices_paths_and_sync_state_behind() {
+        let mut row = ConversationDetail::default().to_conversation_data("local");
+        row.working_dir = Some("/home/me/project".into());
+        row.sync = Some("{}".into());
+        row.placement = Some("{}".into());
+        row.remote_version = Some(3);
+        row.last_synced_at = Some(9);
+        let body = push_body(row);
+        assert!(body.working_dir.is_none() && body.sync.is_none() && body.placement.is_none());
+        assert!(body.remote_version.is_none() && body.last_synced_at.is_none());
     }
 }

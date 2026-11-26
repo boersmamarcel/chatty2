@@ -523,6 +523,71 @@ pub struct ChatEngine {
     cloud: cloud::CloudState,
 }
 
+/// Does a finished turn have anything to send to the account? A conversation
+/// that runs in the cloud is the server's; a local one is sent only on its
+/// first turn; one already synced is pushed.
+fn should_sync_to_account(
+    sync: &chatty_core::models::conversation::ConversationSync,
+    first_turn: bool,
+) -> bool {
+    use chatty_core::models::conversation::ConversationSync;
+    match sync {
+        ConversationSync::LocalOnly => first_turn,
+        ConversationSync::Synced(_) => !sync.runs_in_cloud(),
+    }
+}
+
+/// This process's device id on the server, found once.
+static DEVICE_ID: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+
+/// Send a finished turn to the account (see [`ChatEngine::sync_to_account`]).
+/// `None` when the user is not signed in, has new-conversation sync off for a
+/// new conversation, or the server could not be reached.
+async fn push_turn_to_account(
+    snapshot: chatty_core::models::conversation::ConversationSnapshot,
+    sync: chatty_core::models::conversation::ConversationSync,
+    first_turn: bool,
+) -> Option<chatty_core::models::conversation::ConversationSync> {
+    use chatty_core::models::conversation::ConversationSync;
+    use chatty_core::services::hive_sync::{HttpHiveHistoryApi, fetch_device_id, sync_after_turn};
+
+    // Unit tests never reach for the real sign-in.
+    if cfg!(test) {
+        return None;
+    }
+    let session = crate::hive_auth::signed_in_session().await?;
+    let desktop = chatty_core::hive_settings_repository().load().await.ok()?;
+    if matches!(sync, ConversationSync::LocalOnly) && !desktop.sync_new_conversations {
+        return None;
+    }
+    let server_url = chatty_core::tui_hive::hive_url(&desktop)
+        .trim_end_matches('/')
+        .to_string();
+    let device = DEVICE_ID
+        .get_or_try_init(|| fetch_device_id(&server_url, Some(&session)))
+        .await
+        .map_err(|error| tracing::debug!(%error, "No Hive device id; not syncing"))
+        .ok()?;
+    let body = snapshot
+        .to_data()
+        .map_err(|error| tracing::warn!(?error, "Could not build the conversation for Hive"))
+        .ok()?;
+    let api = HttpHiveHistoryApi::new(&server_url, Some(session));
+    sync_after_turn(
+        &api,
+        &server_url,
+        device,
+        &snapshot.id,
+        &sync,
+        first_turn,
+        body,
+    )
+    .await
+    .map_err(|error| tracing::debug!(%error, "Could not sync the conversation to Hive"))
+    .ok()
+    .flatten()
+}
+
 /// This process's plugin meter, installed once at start-up.
 static PLUGIN_METER: OnceLock<Arc<ModuleMeter>> = OnceLock::new();
 
@@ -1370,6 +1435,14 @@ impl ChatEngine {
                 self.ended_as = Some(TurnEnd::Cancelled);
                 EngineAction::Redraw
             }
+            AppEvent::SyncUpdated(sync) => {
+                if let Some(conv) = self.session.conversation_mut() {
+                    conv.set_sync(sync);
+                }
+                // The new state (created, or a newer version) is saved too.
+                self.persist_synced();
+                EngineAction::None
+            }
             AppEvent::TitleGenerated(title) => {
                 if let Some(conv) = self.session.conversation_mut() {
                     conv.set_title(title.clone());
@@ -1677,6 +1750,7 @@ impl ChatEngine {
         self.finalize_partial_response();
         self.reset_stream_state();
         self.persist_synced();
+        self.sync_to_account();
 
         // Generate title after the first exchange. Counted on the persisted
         // history, not on display rows: a turn with tool calls persists its
@@ -1698,6 +1772,29 @@ impl ChatEngine {
                 }
             });
         }
+    }
+
+    /// After a turn: save the conversation to the Hive account, when the user
+    /// is signed in. A conversation this device holds is pushed; a new one is
+    /// created on its first turn while "Sync new conversations" is on; any
+    /// other local one sends nothing. Best-effort and off the turn: a failure
+    /// is logged and the next turn tries again.
+    fn sync_to_account(&self) {
+        let Some(conversation) = self.session.conversation() else {
+            return;
+        };
+        let sync = conversation.sync().clone();
+        let first_turn = chatty_core::services::exchange_count(conversation.messages().iter()) == 1;
+        if !should_sync_to_account(&sync, first_turn) {
+            return;
+        }
+        let snapshot = conversation.snapshot();
+        let tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            if let Some(updated) = push_turn_to_account(snapshot, sync, first_turn).await {
+                let _ = tx.send(AppEvent::SyncUpdated(updated));
+            }
+        });
     }
 
     /// Commit the streamed response to conversation history using the one
@@ -1775,6 +1872,28 @@ pub fn detect_git_branch(workspace_dir: Option<&str>) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// AGE-2096: what a finished turn sends to the account. A local
+    /// conversation is created on its first turn only, a synced one is
+    /// pushed, and a cloud one is the server's.
+    #[test]
+    fn a_turn_syncs_only_what_this_device_may_send() {
+        use chatty_core::models::conversation::{ConversationSync, Placement, SyncedConversation};
+        let device = ConversationSync::Synced(SyncedConversation {
+            server_url: "http://localhost".into(),
+            remote_id: "r-1".into(),
+            version: 1,
+            placement: Placement::Device {
+                device_id: "s-1".into(),
+            },
+            last_synced_at: None,
+        });
+        assert!(should_sync_to_account(&ConversationSync::LocalOnly, true));
+        assert!(!should_sync_to_account(&ConversationSync::LocalOnly, false));
+        assert!(should_sync_to_account(&device, false));
+        let cloud = ConversationSync::cloud("http://localhost", "r-1", None);
+        assert!(!should_sync_to_account(&cloud, false));
+    }
+
     /// AGE-1277: a fresh approval prompt is not armed; one shown longer
     /// than the delay is.
     #[test]

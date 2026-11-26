@@ -15,14 +15,15 @@
 //!
 //! A frontend pulls while signed in: at start, on window focus and wake, and
 //! every [`PULL_INTERVAL`] while the app is open. There is no background
-//! process. Pushing this device's turns is HX-17; nothing here writes to the
-//! server.
+//! process. Pushing this device's turns is [`push`](PushQueue) (HX-17); a pull
+//! never writes to the server.
 
 mod api;
 mod engine;
 #[cfg(any(test, feature = "test-support"))]
 mod fake;
 mod notify;
+mod push;
 pub mod wire;
 
 use std::time::Duration;
@@ -32,9 +33,14 @@ pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeHiveConversations;
 pub use notify::{CloudNotice, TransitionDetector};
+pub use push::{
+    HiveHistoryApi, HttpHiveHistoryApi, PushError, PushEvent, PushJob, PushQueue, PushTarget,
+    drain, fetch_device_id, sync_after_turn,
+};
 pub use wire::{
-    ChangesPage, ConversationDetail, FULL_SYNC_CURSOR, PAGE_LIMIT, RemoteChange, RemoteSummary,
-    TurnStatus,
+    ChangesPage, ConversationDetail, CreatedConversation, FULL_SYNC_CURSOR, HeldBy,
+    HistoryAccepted, PAGE_LIMIT, PlacementDevice, RemoteChange, RemoteSummary, TurnStatus,
+    push_body,
 };
 
 use crate::models::conversation::ConversationSync;

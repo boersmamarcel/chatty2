@@ -373,6 +373,7 @@ impl ConversationsStore {
                 if !unchanged {
                     let mut client = HostedSession::new(server_url, remote_id)
                         .with_auth(self.hosted_auth.clone());
+                    client.set_files_dir(crate::services::hive_files::cache_dir(remote_id));
                     if let Some(sink) = self.frame_sink(id) {
                         client.set_frame_sink(sink);
                     }
