@@ -24,7 +24,7 @@ The **Teams** tab next to the plugin listing finds published agent teams and ins
 
 If an older `hive_settings.json` still contains a `runner_url` entry, Chatty shows an error on this page and leaves the file (and your Hive sign-in) untouched; delete the `runner_url` line from the file to continue.
 
-Each row has **Enable** / **Disable** (🟢 enabled, ⏸ disabled).
+Each row has **Enable** / **Disable** (a green dot means enabled, a faded grey dot means disabled; hover it for "On" or "Off").
 
 ## Built-in catalog
 
