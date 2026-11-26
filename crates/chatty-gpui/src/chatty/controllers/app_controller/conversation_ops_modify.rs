@@ -90,6 +90,17 @@ impl ChattyApp {
             debug!("Already creating a conversation, ignoring duplicate request");
             return;
         }
+        // The chat on screen is still empty: it is the new chat. Another one
+        // would only add an empty "New Chat" row to the list (AGE-2129).
+        if active_chat_is_empty(cx.global::<ConversationsStore>()) {
+            debug!("The active conversation is empty; staying in it");
+            self.chat_view.update(cx, |view, cx| {
+                view.chat_input_state()
+                    .update(cx, |state, _| state.mark_for_clear());
+                cx.notify();
+            });
+            return;
+        }
         // Cancel any pending stream before creating a new conversation
         if let Some(manager) = cx.try_global::<GlobalStreamManager>().and_then(|g| g.get()) {
             manager.update(cx, |mgr, cx| {
@@ -844,6 +855,17 @@ fn open_handoff_dialog(conv_id: String, kind: HandoffKind, local_model: String, 
             .map_err(|e| warn!(error = ?e, "Failed to open the hand-off dialog"))
             .ok();
     });
+}
+
+/// Is the conversation on screen one nobody has written in yet: no
+/// messages, no turn running, and kept on this device only?
+fn active_chat_is_empty(store: &ConversationsStore) -> bool {
+    store.active_id().is_some_and(|id| {
+        !store.is_streaming(id)
+            && store.get_conversation(id).is_some_and(|conversation| {
+                conversation.messages().is_empty() && conversation.sync().synced().is_none()
+            })
+    })
 }
 
 #[cfg(test)]
