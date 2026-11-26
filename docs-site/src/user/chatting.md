@@ -98,7 +98,7 @@ The bar follows **Enable Git Integration** in Settings → Code Execution. Priva
 
 - Conversations are stored in a local database on your machine by default.
 - Titles are generated automatically. The search icon in the title bar opens **Search conversations…**, which filters the sidebar as you type.
-- Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, **Take online…**, and **Delete**.
+- Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, **Send to the cloud…** (or **Continue on this device…**) when you are signed in to Hive, and **Delete**.
 
 **Cloud conversations.** Once you are signed in to Hive (**Settings → Extensions → Hive**), conversations that run on a `chatty-server` are listed in the sidebar and kept in step with it every 30 seconds and when the window is activated. A mark on each one shows its state: running, waiting for you, done or failed (done and failed clear when you open it). Opening one fetches a stale copy first and follows a run in progress live, so you can watch it, stop it, or queue a message as with a local turn. If the server's model is not on this device, the conversation opens on any local model as a stand-in; its turns never use it. When a run waits for approval or an answer, the usual approval and question cards appear, titled with the agent that asks; answering one that was already answered elsewhere shows "Already answered elsewhere." and removes it. If a connector needs you to sign in, the card says "Sign in to <connector> to continue" and its button opens the connectors page of your Hive site in the browser.
 
@@ -109,9 +109,9 @@ The bar follows **Enable Git Integration** in Settings → Code Execution. Priva
 
 ![Token and cost tracking](../assets/animations/advanced_token_tracking.gif)
 
-## Taking a conversation online
+## Sending a conversation to the cloud
 
-**Take online…** is a developer preview: it appears in a conversation's **⋯** menu only once you turn it on under **Settings → Execution → Developer**, and it does not yet let you watch a run after closing the laptop. It uploads its history to the Hive server of your account (the address shown in **Settings → Extensions → Hive account**; the dialog has no address field) and continues it there to carry on there. A globe icon badges the conversation in the sidebar while it runs remotely, and while it does the composer's model chip shows the model the server reported (or "Hosted model" if it reported none) instead of your local pick, with no model picker, since the server decides the model. The same menu offers **Bring back here** to return it. The confirmation dialog lists exactly what moves (the title and message history; the server picks its own model) and what never does (workspace files, attachments, MCP servers, memory, skills, and provider API keys — those stay on this machine). The local copy stays on this machine; bringing the conversation back adopts the server's history only when it is longer than yours, replacing the local messages (and their traces) in that case. A move mid-turn is refused until the turn finishes. The server only accepts requests from a signed-in Hive session, so sign in first (**Settings → Extensions → Hive account**); while you are signed out the move dialog is disabled and says why, and a hosted turn fails with a message telling you to sign in.
+With a Hive account, **Send to the cloud…** keeps a conversation running after you close the laptop, and **Continue on this device…** brings it back. The dialog says what goes with it and what stays on this computer before anything leaves. While a conversation runs in the cloud, a globe icon marks it in the sidebar and the composer's model chip shows the cloud model. See [Use chatty with your Hive account](./hive-account.md).
 
 ## Themes and text
 

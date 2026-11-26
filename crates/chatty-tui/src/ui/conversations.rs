@@ -44,6 +44,7 @@ pub fn mark_of(status: TurnStatus) -> Option<CloudMark> {
     match status {
         TurnStatus::Running => Some(CloudMark::Running),
         TurnStatus::WaitingForYou => Some(CloudMark::WaitingForYou),
+        TurnStatus::Interrupted => Some(CloudMark::Interrupted),
         TurnStatus::Idle | TurnStatus::Unknown => None,
     }
 }

@@ -87,6 +87,9 @@ pub struct ConversationsStore {
     /// `chatty-server` validates the same login session the registry issued.
     /// `None` until the frontend installs its session.
     hosted_auth: Option<Arc<HiveSession>>,
+    /// This device's login session id on the Hive server (HX-14), fetched
+    /// once per sign-in and dropped when the sign-in changes.
+    this_device: Option<String>,
     /// Where a hosted conversation's non-event frames go: the owner reads the
     /// other end (HX-11). Installed once; every hosted client's sink writes
     /// to it, tagged with its conversation.
@@ -94,6 +97,8 @@ pub struct ConversationsStore {
     /// Whether each synced conversation's turn is running on the server, from
     /// the last pull. Live state: never persisted (HX-10).
     turn_status: HashMap<String, TurnStatus>,
+    /// The name of the device holding each conversation, from the last pull.
+    holder_names: HashMap<String, String>,
     /// Conversations whose turn finished / failed since they were last
     /// opened, for the sidebar's mark.
     finished: HashSet<String>,
@@ -117,8 +122,10 @@ impl ConversationsStore {
             sessions: HashMap::new(),
             hosted: HashMap::new(),
             hosted_auth: None,
+            this_device: None,
             frame_tx: None,
             turn_status: HashMap::new(),
+            holder_names: HashMap::new(),
             finished: HashSet::new(),
             failed: HashSet::new(),
             inputs: std::sync::Mutex::new(HashMap::new()),
@@ -257,6 +264,18 @@ impl ConversationsStore {
             client.set_auth(auth.clone());
         }
         self.hosted_auth = auth;
+        self.this_device = None;
+    }
+
+    /// This device's login session id, when fetched for the current sign-in.
+    pub fn this_device(&self) -> Option<String> {
+        self.this_device.clone()
+    }
+
+    /// Remember this device's login session id for the current sign-in, or
+    /// forget it (`None`) when the sign-in ends.
+    pub fn set_this_device(&mut self, device_id: Option<String>) {
+        self.this_device = device_id;
     }
 
     /// The Hive sign-in hosted requests authenticate with, for a move that
@@ -339,6 +358,15 @@ impl ConversationsStore {
             match action {
                 SyncAction::UpsertMetadata(remote) => {
                     self.set_turn_status(&remote.local_id, remote.turn_status);
+                    match &remote.holder_name {
+                        Some(name) => {
+                            self.holder_names
+                                .insert(remote.local_id.clone(), name.clone());
+                        }
+                        None => {
+                            self.holder_names.remove(&remote.local_id);
+                        }
+                    }
                     self.follow_placement(&remote.local_id, Some(&remote.sync));
                     if let Some(conversation) = self.get_conversation_mut(&remote.local_id) {
                         conversation.set_title(remote.title.clone());
@@ -441,6 +469,11 @@ impl ConversationsStore {
             self.finished.remove(id);
             self.failed.remove(id);
         }
+    }
+
+    /// The name of the device holding the conversation, as of the last pull.
+    pub fn holder_name(&self, id: &str) -> Option<&str> {
+        self.holder_names.get(id).map(String::as_str)
     }
 
     /// Whether the conversation's turn runs on the server right now, as of
@@ -792,6 +825,20 @@ mod tests {
         store.access_order.iter().cloned().collect()
     }
 
+    /// HX-14: this device's id is cached per sign-in, so a new sign-in (or
+    /// signing out) forgets it.
+    #[test]
+    fn this_devices_id_is_forgotten_when_the_sign_in_changes() {
+        let mut store = ConversationsStore::new();
+        store.set_this_device(Some("s-1".into()));
+        assert_eq!(store.this_device().as_deref(), Some("s-1"));
+        store.set_hosted_auth(Some(Arc::new(HiveSession::new(
+            "https://hive.example".to_string(),
+            None,
+        ))));
+        assert_eq!(store.this_device(), None);
+    }
+
     #[test]
     fn list_recent_metadata_returns_correct_count() {
         let store = make_store_with_n_entries(100);
@@ -970,6 +1017,7 @@ mod tests {
                 updated_at: 100,
                 sync: cloud.clone(),
                 turn_status: TurnStatus::Running,
+                holder_name: None,
             }),
             SyncAction::ApplyTombstone {
                 local_id: "conv-0".into(),

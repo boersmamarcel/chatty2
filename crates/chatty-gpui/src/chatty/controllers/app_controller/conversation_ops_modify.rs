@@ -18,29 +18,21 @@ use super::export_ops::{write_atif_export, write_jsonl_export};
 use super::*;
 
 use chatty_core::models::conversation::ConversationSync;
-use chatty_core::session::{RemoteConversation, fetch_hosted, refuse_reason, take_online};
+use chatty_core::services::hive_files::HiveAttachmentUploader;
+use chatty_core::session::{
+    HandoffError, HandoffServer, SendToCloud, continue_here, pick_local_model, refuse_reason,
+    send_to_cloud, this_device_id,
+};
 
-use crate::chatty::views::MoveConversationDialog;
+use crate::chatty::views::{HandoffDialog, HandoffKind};
+use crate::settings::models::hive_settings::HiveSettingsModel;
 
-/// What a completed transfer produced, so the store update happens in one
-/// place with the conversation borrowed once (AGE-298).
-enum MoveOutcome {
-    /// The server accepted the history and named it; this is where it lives now.
-    WentOnline(ConversationSync),
-    /// The server's copy of the history, to reconcile against the local one.
-    CameBack(Box<RemoteConversation>),
-}
-
-/// Whether the per-conversation move between this machine and a server is
-/// offered at all (AGE-308).
-///
-/// Off by default: a move carries the transcript and nothing else today, so
-/// the sidebar does not offer it and the event it would emit is a no-op.
-/// Conversations already marked hosted are unaffected — the mode is data on
-/// the row, and this gates only the move.
-pub(crate) fn move_ui_enabled(cx: &App) -> bool {
-    cx.try_global::<ExecutionSettingsModel>()
-        .is_some_and(|settings| settings.hosted_conversations_enabled)
+/// Whether the sidebar offers "Send to the cloud" (HX-14): only with a Hive
+/// account. A conversation already in the cloud is always offered
+/// "Continue on this device", signed in or not.
+pub(crate) fn handoff_offered(cx: &App) -> bool {
+    cx.try_global::<HiveSettingsModel>()
+        .is_some_and(HiveSettingsModel::is_logged_in)
 }
 
 impl ChattyApp {
@@ -390,196 +382,256 @@ impl ChattyApp {
         self.refresh_chat_input_skills(dir.as_deref(), cx);
     }
 
-    /// Open the confirmation for moving a conversation between this machine
-    /// and a server (AGE-298).
+    /// Open the confirmation for "Send to the cloud" or "Continue on this
+    /// device" (HX-14). The direction is read from where the conversation's
+    /// turns run now, so the dialog and the menu entry cannot disagree.
     ///
     /// Refused mid-turn: a turn can be blocked on an approval or a
-    /// clarification that lives in the stores of the session that raised it,
-    /// and moving would leave it with no address any answer could name. The
-    /// direction is read from the conversation's current mode, so the dialog
-    /// and the menu entry cannot disagree about which way it goes.
-    pub(super) fn confirm_conversation_move(&mut self, id: &str, cx: &mut Context<Self>) {
+    /// clarification that lives in the stores of the session that raised it.
+    pub(super) fn confirm_handoff(&mut self, id: &str, cx: &mut Context<Self>) {
         let conv_id = id.to_string();
-        if !move_ui_enabled(cx) {
-            debug!(
-                conv_id = %conv_id,
-                "Ignoring a conversation move: hosted conversations are not enabled"
-            );
-            return;
-        }
         if !cx.global::<ConversationsStore>().is_loaded(&conv_id) {
-            // The move needs the history, and only a loaded conversation has
-            // it. Loading also opens the conversation, which is the one the
-            // user is acting on anyway; the dialog reads the direction from
-            // the row meanwhile.
+            // The hand-off needs the history, and only a loaded conversation
+            // has it. Loading also opens it, which is the one the user is
+            // acting on anyway; the dialog reads the direction from the row.
             self.load_conversation(&conv_id, cx);
         }
         let store = cx.global::<ConversationsStore>();
-        let mode = store
+        let (sync, local_model) = store
             .get_conversation(&conv_id)
-            .map(|conversation| conversation.sync().clone())
+            .map(|conversation| {
+                (
+                    conversation.sync().clone(),
+                    conversation.model_id().to_string(),
+                )
+            })
             .unwrap_or_else(|| {
-                if store.is_hosted(&conv_id) {
-                    // Not loaded, but the row says it runs in the cloud. The
-                    // dialog only needs the direction; the address is read
-                    // again when the move runs, off the loaded conversation.
+                let sync = if store.is_hosted(&conv_id) {
                     ConversationSync::cloud(String::new(), String::new(), None)
                 } else {
                     ConversationSync::LocalOnly
-                }
+                };
+                (sync, String::new())
             });
-        let going_online = !mode.runs_in_cloud();
+        let to_cloud = !sync.runs_in_cloud();
         let turn_active = store.is_streaming(&conv_id);
 
-        if let Some(reason) = refuse_reason(turn_active, &mode, going_online) {
+        if let Some(reason) = refuse_reason(turn_active, &sync, to_cloud) {
             self.chat_view.update(cx, |view, cx| {
                 view.add_info_message(reason.to_string(), cx);
             });
             return;
         }
-
-        cx.defer(move |cx| {
-            // The main window's root view is gpui-component's `Root`, not
-            // `ChattyApp`, so the handle is used untyped: a downcast to the
-            // app would return `None` and the click would do nothing.
-            let Some(window) = cx.windows().first().copied() else {
-                warn!(conv_id = %conv_id, "No window to open the move dialog in");
-                return;
-            };
-            window
-                .update(cx, |_, window, cx| {
-                    MoveConversationDialog::open(conv_id.clone(), going_online, window, cx);
-                })
-                .map_err(|e| warn!(error = ?e, "Failed to open the move dialog"))
-                .ok();
-        });
+        let kind = if to_cloud {
+            HandoffKind::SendToCloud
+        } else {
+            HandoffKind::ContinueHere
+        };
+        open_handoff_dialog(conv_id, kind, local_model, cx);
     }
 
-    /// Carry out a confirmed move.
+    /// The account's Hive server, signed in as the user.
+    fn handoff_server(cx: &App) -> HandoffServer {
+        HandoffServer::new(
+            &cx.global::<HiveSettingsModel>().hive_url,
+            cx.global::<ConversationsStore>().hosted_auth(),
+        )
+    }
+
+    /// Carry out a confirmed "Send to the cloud". `cloud_model` is the model
+    /// the user picked when the conversation's own does not run in the cloud.
     ///
-    /// `target` is the server URL when going online and `None` when bringing
-    /// the conversation home. The ordering is the safety property AGE-298
-    /// asks for: the history transfer happens first and *nothing* local
-    /// changes until it has succeeded, so a client killed part-way through
-    /// leaves the conversation exactly as it was and the hosted copy it never
-    /// learned the id of is unreachable rather than half-adopted.
-    pub fn move_conversation(&mut self, id: &str, target: Option<String>, cx: &mut Context<Self>) {
+    /// Nothing local changes until every step on the server succeeded
+    /// (AGE-298's rule, kept): a failure, or the app quitting part-way,
+    /// leaves the conversation exactly as it was.
+    pub fn send_conversation_to_cloud(
+        &mut self,
+        id: &str,
+        cloud_model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let conv_id = id.to_string();
-        let loaded = cx
+        let snapshot = cx
             .global::<ConversationsStore>()
             .get_conversation(&conv_id)
-            .map(|conversation| {
-                (
-                    conversation.title().to_string(),
-                    conversation.messages(),
-                    conversation.sync().clone(),
-                )
-            });
-        let auth = cx.global::<ConversationsStore>().hosted_auth();
-        let Some((title, messages, mode)) = loaded else {
-            // The confirm opened before the load that the dialog started had
-            // finished; nothing has moved, so saying so is the whole recovery.
-            warn!(conv_id = %conv_id, "Cannot move a conversation that is not loaded");
-            self.chat_view.update(cx, |view, cx| {
-                view.add_info_message(
-                    "This conversation is still loading. Try the move again in a moment."
-                        .to_string(),
-                    cx,
-                );
-            });
+            .map(|conversation| (conversation.snapshot(), conversation.model_id().to_string()));
+        let Some((snapshot, local_model)) = snapshot else {
+            warn!(conv_id = %conv_id, "Cannot send a conversation that is not loaded");
+            self.notice(
+                "This conversation is still loading. Try again in a moment.",
+                cx,
+            );
             return;
         };
+        let server = Self::handoff_server(cx);
+        let uploader = HiveAttachmentUploader::new(
+            server.url(),
+            cx.global::<ConversationsStore>().hosted_auth(),
+        );
 
         cx.spawn(async move |weak, cx| {
-            let outcome = match &target {
-                Some(server_url) => take_online(server_url, &title, &messages, auth.as_deref())
-                    .await
-                    .map(MoveOutcome::WentOnline),
-                None => {
-                    let Some((server_url, remote_id)) = mode.cloud_on() else {
-                        return Ok(());
-                    };
-                    fetch_hosted(server_url, remote_id, auth.as_deref())
-                        .await
-                        .map(|remote| MoveOutcome::CameBack(Box::new(remote)))
-                }
-            };
+            let result = async {
+                let data = snapshot.to_data().map_err(HandoffError::Server)?;
+                send_to_cloud(
+                    &server,
+                    SendToCloud {
+                        conversation: &data,
+                        sync: &snapshot.sync,
+                        cloud_model: cloud_model.as_deref(),
+                    },
+                    &uploader,
+                )
+                .await
+            }
+            .await;
 
-            let outcome = match outcome {
-                Ok(outcome) => outcome,
+            weak.update(cx, |app, cx| match result {
+                Ok(sync) => {
+                    cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                        store.set_conversation_sync(&conv_id, sync);
+                    });
+                    app.persist_conversation(&conv_id, cx);
+                    app.refresh_sidebar(cx);
+                    app.load_conversation(&conv_id, cx);
+                    app.notice(
+                        "This conversation now runs in the cloud. You can close this computer \
+                         and open it from any device signed in to your Hive account.",
+                        cx,
+                    );
+                }
+                Err(HandoffError::DeletedOnAccount { message }) => {
+                    let message = HandoffError::DeletedOnAccount { message }.to_string();
+                    app.deleted_on_account(&conv_id, message, cx);
+                }
+                Err(error @ HandoffError::HeldElsewhere { .. }) => {
+                    let message = error.to_string();
+                    open_handoff_dialog(conv_id.clone(), HandoffKind::TakeOver { message }, local_model.clone(), cx);
+                }
                 Err(error) => {
-                    // Nothing local was touched, so there is nothing to undo.
-                    warn!(conv_id = %conv_id, error = ?error, "The conversation move failed");
-                    weak.update(cx, |app, cx| {
-                        app.chat_view.update(cx, |view, cx| {
-                            view.add_info_message(
-                                format!("Could not move this conversation: {error:#}"),
-                                cx,
-                            );
-                        });
-                    })
-                    .map_err(|e| warn!(error = ?e, "The conversation move failed and its notice could not be shown"))
-                    .ok();
-                    return Ok(());
+                    warn!(conv_id = %conv_id, error = ?error, "Sending the conversation to the cloud failed");
+                    app.notice(&format!("Could not send this conversation to the cloud. {error}"), cx);
                 }
-            };
-
-            weak.update(cx, |app, cx| {
-                let notice = cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                    match outcome {
-                        MoveOutcome::WentOnline(new_mode) => {
-                            let where_to = new_mode
-                                .cloud_on()
-                                .map(|(url, _)| url.to_string())
-                                .unwrap_or_default();
-                            store.set_conversation_sync(&conv_id, new_mode);
-                            format!("This conversation now runs on {where_to}.")
-                        }
-                        MoveOutcome::CameBack(remote) => {
-                            // The local side applied every event of every
-                            // hosted turn it was present for, so its history is
-                            // usually already complete. The server's copy is
-                            // adopted only when it is longer, which is the case
-                            // it exists for: turns this client missed.
-                            // `replace_from_remote` keeps the traces and other
-                            // per-message metadata either side has (AGE-2088).
-                            let local_len = store
-                                .get_conversation(&conv_id)
-                                .map(|conversation| conversation.messages().len())
-                                .unwrap_or(0);
-                            let missed = remote.messages.len().saturating_sub(local_len);
-                            if missed > 0 && let Some(conversation) =
-                                store.get_conversation_mut(&conv_id)
-                                && let Err(error) = conversation
-                                    .replace_from_remote(remote.to_conversation_data(&conv_id))
-                            {
-                                warn!(conv_id = %conv_id, error = ?error, "Could not adopt the server's history");
-                            }
-                            store.set_conversation_sync(&conv_id, ConversationSync::LocalOnly);
-                            match missed {
-                                0 => "This conversation runs on this machine again.".to_string(),
-                                n => format!(
-                                    "This conversation runs on this machine again, with {n} message(s) it ran without you."
-                                ),
-                            }
-                        }
-                    }
-                });
-
-                app.persist_conversation(&conv_id, cx);
-                app.refresh_sidebar(cx);
-                // Reload so the transcript reflects a bring-back that adopted
-                // turns this client missed, and the sidebar re-badges the row.
-                app.load_conversation(&conv_id, cx);
-                app.chat_view.update(cx, |view, cx| {
-                    view.add_info_message(notice, cx);
-                });
             })
-            .map_err(|e| warn!(error = ?e, "The conversation moved but the view could not be refreshed"))
+            .map_err(|e| warn!(error = ?e, "The hand-off finished but the view could not be updated"))
             .ok();
             Ok::<_, anyhow::Error>(())
         })
         .detach();
+    }
+
+    /// Carry out a confirmed "Continue on this device": pull the latest
+    /// copy, take the conversation for this device, and run its next turn
+    /// here on a local model. Also how a conversation another device holds
+    /// is taken over. Nothing local changes unless both steps succeeded.
+    pub fn continue_conversation_here(&mut self, id: &str, cx: &mut Context<Self>) {
+        let conv_id = id.to_string();
+        let Some(sync) = cx
+            .global::<ConversationsStore>()
+            .get_conversation(&conv_id)
+            .map(|conversation| conversation.sync().clone())
+        else {
+            self.notice(
+                "This conversation is still loading. Try again in a moment.",
+                cx,
+            );
+            return;
+        };
+        let server = Self::handoff_server(cx);
+        let cached_device = cx.global::<ConversationsStore>().this_device();
+
+        cx.spawn(async move |weak, cx| {
+            let result = async {
+                let device_id = match cached_device {
+                    Some(device_id) => device_id,
+                    None => this_device_id(&server).await?,
+                };
+                let here = continue_here(&server, &sync, &device_id).await?;
+                Ok::<_, HandoffError>((here, device_id))
+            }
+            .await;
+            weak.update(cx, |app, cx| {
+                let here = match result {
+                    Ok((here, device_id)) => {
+                        cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                            store.set_this_device(Some(device_id));
+                        });
+                        here
+                    }
+                    Err(error) => {
+                        warn!(conv_id = %conv_id, error = ?error, "Continuing the conversation here failed");
+                        app.notice(&format!("Could not continue this conversation here. {error}"), cx);
+                        return;
+                    }
+                };
+                let (missed, current_model) = cx.update_global::<ConversationsStore, _>(|store, _cx| {
+                    // This device applied every event of every cloud turn it
+                    // watched, so its copy is usually complete. The cloud's
+                    // copy is adopted when it is longer: turns run while this
+                    // device was away. `replace_from_remote` keeps the traces
+                    // and per-message metadata either side has (AGE-2088).
+                    let local_len = store
+                        .get_conversation(&conv_id)
+                        .map(|conversation| conversation.messages().len())
+                        .unwrap_or(0);
+                    let missed = here.remote.messages.len().saturating_sub(local_len);
+                    if missed > 0
+                        && let Some(conversation) = store.get_conversation_mut(&conv_id)
+                        && let Err(error) = conversation
+                            .replace_from_remote(here.remote.to_conversation_data(&conv_id))
+                    {
+                        warn!(conv_id = %conv_id, error = ?error, "Could not adopt the cloud's copy");
+                    }
+                    store.set_conversation_sync(&conv_id, here.sync);
+                    let current = store
+                        .get_conversation(&conv_id)
+                        .map(|conversation| conversation.model_id().to_string())
+                        .unwrap_or_default();
+                    (missed, current)
+                });
+
+                app.persist_conversation(&conv_id, cx);
+                app.refresh_sidebar(cx);
+                app.load_conversation(&conv_id, cx);
+
+                // The next turn runs on a local model: the cloud's when this
+                // device has it, else the one the conversation had here.
+                let models = cx.global::<ModelsModel>();
+                let local = pick_local_model(
+                    &here.remote.model_id,
+                    &current_model,
+                    models.default_model().map(|model| model.id.as_str()),
+                    |id| models.get_model(id).is_some(),
+                );
+                match local {
+                    Some(model) if model != current_model => app.change_conversation_model(model, cx),
+                    Some(_) => {}
+                    None => app.notice(
+                        "Add a model in Settings → Models & Providers to continue this conversation here.",
+                        cx,
+                    ),
+                }
+                app.notice(
+                    &match missed {
+                        0 => "This conversation runs on this device again. The cloud copy stays in your Hive account.".to_string(),
+                        n => format!(
+                            "This conversation runs on this device again, with {n} message(s) from the cloud. The cloud copy stays in your Hive account."
+                        ),
+                    },
+                    cx,
+                );
+            })
+            .map_err(|e| warn!(error = ?e, "The hand-off finished but the view could not be updated"))
+            .ok();
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
+    }
+
+    /// One line in the transcript.
+    fn notice(&self, text: &str, cx: &mut Context<Self>) {
+        let text = text.to_string();
+        self.chat_view
+            .update(cx, |view, cx| view.add_info_message(text, cx));
     }
 
     /// Delete a conversation
@@ -726,33 +778,39 @@ impl ChattyApp {
     }
 }
 
+/// Open the hand-off dialog in the main window, after the current update.
+fn open_handoff_dialog(conv_id: String, kind: HandoffKind, local_model: String, cx: &mut App) {
+    cx.defer(move |cx| {
+        // The main window's root view is gpui-component's `Root`, not
+        // `ChattyApp`, so the handle is used untyped.
+        let Some(window) = cx.windows().first().copied() else {
+            warn!(conv_id = %conv_id, "No window to open the hand-off dialog in");
+            return;
+        };
+        window
+            .update(cx, |_, window, cx| {
+                HandoffDialog::open(conv_id.clone(), kind, local_model, window, cx);
+            })
+            .map_err(|e| warn!(error = ?e, "Failed to open the hand-off dialog"))
+            .ok();
+    });
+}
+
 #[cfg(test)]
 mod tests {
-    use super::move_ui_enabled;
-    use crate::settings::models::execution_settings::ExecutionSettingsModel;
+    use super::handoff_offered;
+    use crate::settings::models::hive_settings::HiveSettingsModel;
 
-    /// AGE-308: the default build offers no move, and it takes an explicit
-    /// opt-in to get one. Both halves matter — the first is what keeps users
-    /// away from a transport that carries only the transcript.
+    /// HX-14: the hand-off is offered with a Hive account and not without;
+    /// there is no developer switch any more.
     #[gpui::test]
-    fn the_move_is_offered_only_when_hosted_conversations_are_enabled(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn send_to_the_cloud_is_offered_only_when_signed_in(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
-            assert!(
-                !move_ui_enabled(cx),
-                "no settings loaded yet: the move must not be offered"
-            );
-
-            cx.set_global(ExecutionSettingsModel::default());
-            assert!(
-                !move_ui_enabled(cx),
-                "default settings must not offer the move"
-            );
-
-            cx.global_mut::<ExecutionSettingsModel>()
-                .hosted_conversations_enabled = true;
-            assert!(move_ui_enabled(cx), "the developer toggle turns it back on");
+            assert!(!handoff_offered(cx), "no settings loaded yet");
+            cx.set_global(HiveSettingsModel::default());
+            assert!(!handoff_offered(cx), "signed out");
+            cx.global_mut::<HiveSettingsModel>().token = Some("tok".into());
+            assert!(handoff_offered(cx), "signed in");
         });
     }
 }

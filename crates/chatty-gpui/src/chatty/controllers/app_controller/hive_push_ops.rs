@@ -22,9 +22,10 @@ use std::collections::HashMap;
 
 use chatty_core::models::conversation::{ConversationSync, Placement, SyncedConversation};
 use chatty_core::services::hive_sync::{
-    CreatedConversation, HeldBy, HistoryAccepted, HiveHistoryApi, HttpHiveHistoryApi, PushError,
-    PushEvent, PushQueue, PushTarget, fetch_device_id, push_body,
+    ConflictBody, CreatedConversation, HistoryAccepted, HiveHistoryApi, HttpHiveHistoryApi,
+    PushError, PushEvent, PushQueue, PushTarget, push_body,
 };
+use chatty_core::session::{HandoffServer, this_device_id};
 use gpui_component::WindowExt;
 
 use super::*;
@@ -44,14 +45,11 @@ pub(super) struct HivePushState {
     /// their version up to date, with how many times in a row.
     stale: HashMap<String, u8>,
     /// Conversations the server said another device holds, and who.
-    held_by: HashMap<String, HeldBy>,
+    held_by: HashMap<String, ConflictBody>,
     /// Local conversations whose next queue turn creates them on the account
     /// instead of pushing history.
     creates: std::collections::HashSet<String>,
-    /// This device's id on the server: the current login session, found once
-    /// per sign-in and dropped when the user signs out.
-    device: Option<String>,
-    /// A lookup of `device` is running (HX-22).
+    /// A lookup of this device's id is running (HX-22).
     device_lookup: bool,
 }
 
@@ -74,18 +72,9 @@ impl HivePushState {
         self.device_lookup = running;
     }
 
-    pub(super) fn set_device(&mut self, device: String) {
-        self.device = Some(device);
-    }
-
     /// Whether this device's id is being looked up now.
     pub(super) fn device_lookup_running(&self) -> bool {
         self.device_lookup
-    }
-
-    /// This device's id on the server, once known.
-    pub(super) fn device_id(&self) -> Option<&str> {
-        self.device.as_deref()
     }
 }
 
@@ -214,21 +203,25 @@ impl ChattyApp {
         }
         let settings = cx.global::<HiveSettingsModel>();
         if !settings.is_logged_in() {
-            self.hive_push.device = None;
+            // This device's id belongs to the sign-in that just ended.
+            cx.update_global::<ConversationsStore, _>(|store, _| store.set_this_device(None));
             return;
         }
         let server_url = settings.hive_url.trim_end_matches('/').to_string();
         let Some(session) = hive_session(cx) else {
             return;
         };
-        let cached_device = self.hive_push.device.clone();
+        // One cache per sign-in, shared with "Continue on this device".
+        let cached_device = cx.global::<ConversationsStore>().this_device();
         let repo = self.conversation_repo.clone();
         self.hive_push.in_flight = true;
 
         cx.spawn(async move |weak, cx| {
             let device = match cached_device {
                 Some(device) => Some(device),
-                None => match fetch_device_id(&server_url, Some(&session)).await {
+                None => match this_device_id(&HandoffServer::new(&server_url, Some(session.clone())))
+                    .await
+                {
                     Ok(device) => Some(device),
                     Err(error) => {
                         // Offline, or a sign-in that cannot hold a placement:
@@ -240,7 +233,11 @@ impl ChattyApp {
                 },
             };
             if let Some(device) = &device {
-                weak.update(cx, |app, _| app.hive_push.device = Some(device.clone()))
+                weak.update(cx, |_, cx| {
+                    cx.update_global::<ConversationsStore, _>(|store, _| {
+                        store.set_this_device(Some(device.clone()))
+                    })
+                })
                     .map_err(|e| debug!(error = ?e, "The app closed during a Hive push"))
                     .ok();
             }
@@ -438,6 +435,11 @@ impl ChattyApp {
                 self.hive_push.creates.remove(&local_id);
                 false
             }
+            PushEvent::Deleted { local_id, message } => {
+                self.hive_push.creates.remove(&local_id);
+                self.deleted_on_account(&local_id, message, cx);
+                false
+            }
             PushEvent::NeedsPull { local_id } | PushEvent::HeldElsewhere { local_id, .. } => {
                 // A create has no version to be stale and no holder to be
                 // held by; the server answering so is not understood.
@@ -500,14 +502,42 @@ impl ChattyApp {
                 warn!(conv_id = %local_id, %reason, "The server refused a history push");
                 false
             }
+            PushEvent::Deleted { local_id, message } => {
+                self.deleted_on_account(&local_id, message, cx);
+                false
+            }
         }
+    }
+
+    /// 410: the conversation was deleted on the account and its id stays
+    /// retired. It becomes local-only so nothing retries; the local copy is
+    /// kept, never deleted; the server's message is shown once.
+    pub(super) fn deleted_on_account(
+        &mut self,
+        local_id: &str,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        info!(conv_id = %local_id, "Deleted on the Hive account; keeping it on this device");
+        self.hive_push.queue.forget(local_id);
+        self.hive_push.stale.remove(local_id);
+        self.hive_push.held_by.remove(local_id);
+        let loaded = cx.update_global::<ConversationsStore, _>(|store, _| {
+            store.set_conversation_sync(local_id, ConversationSync::LocalOnly);
+            store.get_conversation(local_id).is_some()
+        });
+        if loaded {
+            self.persist_conversation(local_id, cx);
+        }
+        self.refresh_sidebar(cx);
+        self.notify_window(message, cx);
     }
 
     /// A pull finished: the version of a conversation that heard 412 is up to
     /// date, so push it again if this device still holds it; and one that was
     /// held by another device but is ours again (taken back) may be pushed.
     pub(super) fn requeue_after_pull(&mut self, cx: &mut Context<Self>) {
-        let Some(device) = self.hive_push.device.clone() else {
+        let Some(device) = cx.global::<ConversationsStore>().this_device() else {
             return;
         };
         let held_here = |id: &str, cx: &Context<Self>| {

@@ -537,19 +537,32 @@ fn should_sync_to_account(
     }
 }
 
-/// This process's device id on the server, found once.
+/// This process's device id on the server, found once: the one cache the
+/// turn push and `/online` share.
 static DEVICE_ID: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+
+/// This device's id on `server` (its current login session), cached for the
+/// process.
+pub(crate) async fn this_device(
+    server: &chatty_core::session::HandoffServer,
+) -> Result<String, chatty_core::session::HandoffError> {
+    DEVICE_ID
+        .get_or_try_init(|| chatty_core::session::this_device_id(server))
+        .await
+        .cloned()
+}
 
 /// Send a finished turn to the account (see [`ChatEngine::sync_to_account`]).
 /// `None` when the user is not signed in, has new-conversation sync off for a
-/// new conversation, or the server could not be reached.
+/// new conversation, or the server could not be reached; `Some(Err(message))`
+/// when the conversation was deleted on the account (410).
 async fn push_turn_to_account(
     snapshot: chatty_core::models::conversation::ConversationSnapshot,
     sync: chatty_core::models::conversation::ConversationSync,
     first_turn: bool,
-) -> Option<chatty_core::models::conversation::ConversationSync> {
+) -> Option<Result<chatty_core::models::conversation::ConversationSync, String>> {
     use chatty_core::models::conversation::ConversationSync;
-    use chatty_core::services::hive_sync::{HttpHiveHistoryApi, fetch_device_id, sync_after_turn};
+    use chatty_core::services::hive_sync::{HttpHiveHistoryApi, sync_after_turn};
 
     // Unit tests never reach for the real sign-in.
     if cfg!(test) {
@@ -563,29 +576,38 @@ async fn push_turn_to_account(
     let server_url = chatty_core::tui_hive::hive_url(&desktop)
         .trim_end_matches('/')
         .to_string();
-    let device = DEVICE_ID
-        .get_or_try_init(|| fetch_device_id(&server_url, Some(&session)))
-        .await
-        .map_err(|error| tracing::debug!(%error, "No Hive device id; not syncing"))
-        .ok()?;
+    let device = this_device(&chatty_core::session::HandoffServer::new(
+        &server_url,
+        Some(session.clone()),
+    ))
+    .await
+    .map_err(|error| tracing::debug!(%error, "No Hive device id; not syncing"))
+    .ok()?;
     let body = snapshot
         .to_data()
         .map_err(|error| tracing::warn!(?error, "Could not build the conversation for Hive"))
         .ok()?;
     let api = HttpHiveHistoryApi::new(&server_url, Some(session));
-    sync_after_turn(
+    match sync_after_turn(
         &api,
         &server_url,
-        device,
+        &device,
         &snapshot.id,
         &sync,
         first_turn,
         body,
     )
     .await
-    .map_err(|error| tracing::debug!(%error, "Could not sync the conversation to Hive"))
-    .ok()
-    .flatten()
+    {
+        Ok(updated) => updated.map(Ok),
+        // Deleted on the account: local-only from now on, the local copy
+        // kept, and the server's message shown once.
+        Err(chatty_core::services::hive_sync::PushError::Deleted(message)) => Some(Err(message)),
+        Err(error) => {
+            tracing::debug!(%error, "Could not sync the conversation to Hive");
+            None
+        }
+    }
 }
 
 /// This process's plugin meter, installed once at start-up.
@@ -1791,8 +1813,17 @@ impl ChatEngine {
         let snapshot = conversation.snapshot();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            if let Some(updated) = push_turn_to_account(snapshot, sync, first_turn).await {
-                let _ = tx.send(AppEvent::SyncUpdated(updated));
+            match push_turn_to_account(snapshot, sync, first_turn).await {
+                Some(Ok(updated)) => {
+                    let _ = tx.send(AppEvent::SyncUpdated(updated));
+                }
+                Some(Err(message)) => {
+                    let _ = tx.send(AppEvent::SyncUpdated(
+                        chatty_core::models::conversation::ConversationSync::LocalOnly,
+                    ));
+                    let _ = tx.send(AppEvent::Notice(message));
+                }
+                None => {}
             }
         });
     }

@@ -53,8 +53,7 @@ if [ ! -f "$DIR/config/chatty/execution_settings.json" ]; then
   "network_isolation": false,
   "max_agent_turns": 50,
   "memory_enabled": false,
-  "embedding_enabled": false,
-  "hosted_conversations_enabled": false
+  "embedding_enabled": false
 }
 JSON
 fi

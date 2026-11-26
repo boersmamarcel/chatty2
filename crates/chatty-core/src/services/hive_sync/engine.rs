@@ -42,6 +42,8 @@ pub struct RemoteRow {
     pub sync: ConversationSync,
     /// Live, not persisted.
     pub turn_status: TurnStatus,
+    /// Live, not persisted: the holding device's name, when named.
+    pub holder_name: Option<String>,
 }
 
 /// What [`SyncEngine::apply_page`] decided about one page.
@@ -226,6 +228,7 @@ impl SyncEngine {
             updated_at: summary.updated_at,
             sync,
             turn_status: summary.turn_status,
+            holder_name: summary.holder_name,
         })];
         if stale {
             actions.push(SyncAction::MarkDetailStale { local_id });
