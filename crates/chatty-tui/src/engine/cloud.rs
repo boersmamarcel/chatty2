@@ -173,6 +173,17 @@ impl ChatEngine {
                             }
                         }
                         apply_to_repository(repo.as_ref(), &actions).await?;
+                        // Deleted on the account while a device held it
+                        // (AGE-2121): the copy stays here, local-only.
+                        let detached = actions
+                            .iter()
+                            .filter(|action| matches!(action, SyncAction::DetachDeleted { .. }))
+                            .count();
+                        if detached > 0 {
+                            note = Some(format!(
+                                "{detached} conversation(s) were deleted on your Hive account. They stay on this device."
+                            ));
+                        }
                     }
                     Err(error) => note = Some(format!("Showing saved conversations only: {error}")),
                 }

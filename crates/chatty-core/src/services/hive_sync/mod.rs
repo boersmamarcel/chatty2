@@ -163,6 +163,12 @@ pub async fn apply_to_repository<R: ConversationRepository + ?Sized>(
                 repo.save(&remote.local_id, data).await?;
             }
             SyncAction::ApplyTombstone { local_id } => repo.delete(local_id).await?,
+            SyncAction::DetachDeleted { local_id } => {
+                if let Some(mut data) = repo.load_one(local_id).await? {
+                    set_sync_columns(&mut data, &ConversationSync::LocalOnly);
+                    repo.save(local_id, data).await?;
+                }
+            }
             SyncAction::MarkDetailStale { local_id } => {
                 if let Some(mut data) = repo.load_one(local_id).await? {
                     data.last_synced_at = None;
