@@ -27,7 +27,7 @@ pub mod wire;
 
 use std::time::Duration;
 
-pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi};
+pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi, current_device_id};
 pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeHiveConversations;

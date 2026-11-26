@@ -19,15 +19,15 @@ use super::tests::test_engine;
 use super::*;
 use chatty_core::services::hive_sync::{ALREADY_ANSWERED, NO_LONGER_EXISTS};
 
-struct Cloud {
-    server: MockServer,
-    repo: Arc<ConversationSqliteRepository>,
-    engine: ChatEngine,
-    events: mpsc::UnboundedReceiver<AppEvent>,
+pub(super) struct Cloud {
+    pub(super) server: MockServer,
+    pub(super) repo: Arc<ConversationSqliteRepository>,
+    pub(super) engine: ChatEngine,
+    pub(super) events: mpsc::UnboundedReceiver<AppEvent>,
     _dir: tempfile::TempDir,
 }
 
-async fn cloud() -> Cloud {
+pub(super) async fn cloud() -> Cloud {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
     let repo = Arc::new(ConversationSqliteRepository::deferred_with_path(
@@ -48,7 +48,7 @@ async fn cloud() -> Cloud {
     }
 }
 
-fn history(texts: &[(&str, &str)]) -> serde_json::Value {
+pub(super) fn history(texts: &[(&str, &str)]) -> serde_json::Value {
     let messages: Vec<Message> = texts
         .iter()
         .map(|(role, text)| match *role {
@@ -59,7 +59,7 @@ fn history(texts: &[(&str, &str)]) -> serde_json::Value {
     serde_json::to_value(messages).unwrap()
 }
 
-fn detail(status: &str, texts: &[(&str, &str)]) -> ResponseTemplate {
+pub(super) fn detail(status: &str, texts: &[(&str, &str)]) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(json!({
         "id": "r-1",
         "title": "Cloud research",
@@ -70,7 +70,7 @@ fn detail(status: &str, texts: &[(&str, &str)]) -> ResponseTemplate {
     }))
 }
 
-async fn serve_list(server: &MockServer, status: &str) {
+pub(super) async fn serve_list(server: &MockServer, status: &str) {
     Mock::given(method("GET"))
         .and(path("/api/conversations"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -86,19 +86,19 @@ async fn serve_list(server: &MockServer, status: &str) {
         .await;
 }
 
-fn sse_session(event: &SessionEvent) -> String {
+pub(super) fn sse_session(event: &SessionEvent) -> String {
     format!(
         "event: session\ndata: {}\n\n",
         serde_json::to_string(event).unwrap()
     )
 }
 
-fn sse(parts: &[String]) -> ResponseTemplate {
+pub(super) fn sse(parts: &[String]) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_raw(parts.concat(), "text/event-stream")
 }
 
 /// Feed events through `handle_event` until `done` holds, or fail.
-async fn pump(cloud: &mut Cloud, done: impl Fn(&ChatEngine) -> bool) {
+pub(super) async fn pump(cloud: &mut Cloud, done: impl Fn(&ChatEngine) -> bool) {
     for _ in 0..200 {
         if done(&cloud.engine) {
             return;
@@ -112,7 +112,7 @@ async fn pump(cloud: &mut Cloud, done: impl Fn(&ChatEngine) -> bool) {
     panic!("the engine never reached the expected state");
 }
 
-fn transcript_text(engine: &ChatEngine) -> String {
+pub(super) fn transcript_text(engine: &ChatEngine) -> String {
     engine
         .transcript
         .messages
@@ -122,7 +122,7 @@ fn transcript_text(engine: &ChatEngine) -> String {
         .join("\n")
 }
 
-fn system_lines(engine: &ChatEngine) -> String {
+pub(super) fn system_lines(engine: &ChatEngine) -> String {
     transcript_text(engine)
 }
 

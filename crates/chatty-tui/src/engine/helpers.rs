@@ -198,17 +198,26 @@ mod tests {
         );
         assert_eq!(ChatEngine::parse_command("/update"), Some(Command::Update));
         assert_eq!(ChatEngine::parse_command("/cwd"), Some(Command::Cwd(None)));
+        assert_eq!(ChatEngine::parse_command("/online"), None);
         assert_eq!(
-            ChatEngine::parse_command("/online"),
-            Some(Command::Online(None))
+            ChatEngine::parse_command("/send-to-cloud"),
+            Some(Command::SendToCloud(None))
         );
         assert_eq!(
-            ChatEngine::parse_command("/online http://localhost:8081"),
-            Some(Command::Online(Some("http://localhost:8081".to_string())))
+            ChatEngine::parse_command("/send-to-cloud confirm model-1"),
+            Some(Command::SendToCloud(Some("confirm model-1".to_string())))
         );
         assert_eq!(
-            ChatEngine::parse_command("/online off"),
-            Some(Command::Online(Some("off".to_string())))
+            ChatEngine::parse_command("/continue-here"),
+            Some(Command::ContinueHere)
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/conversations"),
+            Some(Command::Conversations)
+        );
+        assert_eq!(
+            ChatEngine::parse_command("/open 2"),
+            Some(Command::Open(Some("2".to_string())))
         );
         assert_eq!(
             ChatEngine::parse_command("/cd ../workspace"),

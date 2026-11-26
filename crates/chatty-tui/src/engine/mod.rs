@@ -42,6 +42,9 @@ mod cloud;
 #[cfg(test)]
 mod cloud_tests;
 mod commands;
+mod handoff;
+#[cfg(test)]
+mod handoff_tests;
 pub mod helpers;
 mod transcript;
 

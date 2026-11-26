@@ -51,7 +51,8 @@ chatty-tui provides four operating modes:
                           Keybindings: Enter=send, Ctrl+C=stop/quit, Ctrl+Q=quit,
                           y/n=approve/deny tool calls. Slash commands: /model,
                           /tools, /modules, /add-dir, /agent, /clear(/new), /compact,
-                           /context, /copy, /update, /cwd(/cd), /online,
+                           /context, /copy, /update, /cwd(/cd), /send-to-cloud,
+                           /continue-here,
                            /conversations, /open.
 
   HEADLESS (--headless):  Send a single message via --message, print the full

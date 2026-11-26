@@ -89,6 +89,9 @@ pub struct RemoteSummary {
     pub updated_at: i64,
     pub turn_status: TurnStatus,
     pub placement: Placement,
+    /// The name of the device that holds the conversation, when the server
+    /// says (`placement_device.name`). Live, like `turn_status`: never persisted.
+    pub device_name: Option<String>,
 }
 
 /// `GET /api/conversations/{id}`: the conversation, and as much of the
@@ -455,6 +458,15 @@ struct ChangeWire {
     turn_active: bool,
     #[serde(default, deserialize_with = "placement_opt")]
     placement: Option<Placement>,
+    #[serde(default)]
+    placement_device: Option<PlacementDeviceWire>,
+}
+
+/// `placement_device`: the device that holds a device-placed conversation.
+#[derive(Deserialize)]
+struct PlacementDeviceWire {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for ChangesPage {
@@ -497,6 +509,10 @@ impl From<ChangeWire> for RemoteChange {
             placement: wire
                 .placement
                 .unwrap_or(Placement::Cloud { model_id: None }),
+            device_name: wire
+                .placement_device
+                .and_then(|device| device.name)
+                .filter(|name| !name.is_empty()),
         })
     }
 }
@@ -551,7 +567,9 @@ mod tests {
                 {"id": "a", "title": "A", "version": 3, "updated_at_ms": 5_000,
                  "turn_status": "waiting_for_you", "placement": "cloud", "extra": 1},
                 {"id": "b", "deleted": true},
-                {"id": "c", "updated_at": "2026-11-25T10:00:00Z", "turn_status": "napping"}
+                {"id": "c", "updated_at": "2026-11-25T10:00:00Z", "turn_status": "napping",
+                 "placement": {"kind": "device", "device_id": "d-1"},
+                 "placement_device": {"id": "d-1", "name": "Work laptop"}}
             ],
             "next_cursor": "cur-2"
         }))
@@ -567,6 +585,7 @@ mod tests {
                 updated_at: 5,
                 turn_status: TurnStatus::WaitingForYou,
                 placement: Placement::Cloud { model_id: None },
+                device_name: None,
             })
         );
         assert_eq!(page.changes[1], RemoteChange::Deleted { id: "b".into() });
@@ -575,6 +594,13 @@ mod tests {
         };
         assert_eq!(c.updated_at, 1_795_600_800);
         assert_eq!(c.turn_status, TurnStatus::Unknown);
+        assert_eq!(
+            c.placement,
+            Placement::Device {
+                device_id: "d-1".into()
+            }
+        );
+        assert_eq!(c.device_name.as_deref(), Some("Work laptop"));
     }
 
     /// The list before HX-1 is a bare array; it still decodes, as one page

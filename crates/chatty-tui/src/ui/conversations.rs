@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use chatty_core::models::CloudMark;
+use chatty_core::models::conversation::Placement;
 use chatty_core::repositories::ConversationMetadata;
 use chatty_core::services::hive_sync::TurnStatus;
 
@@ -19,22 +20,27 @@ pub struct Entry {
 }
 
 /// Where a conversation's turns run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Place {
     /// Never leaves this machine.
     Local,
     /// Kept on the server, turns run on this device.
     Synced,
+    /// Kept on the server, held by another device (its name when known):
+    /// only that device changes it until it is continued here.
+    Elsewhere(Option<String>),
     /// Kept on the server, turns run there.
     Cloud,
 }
 
 impl Place {
-    fn label(self) -> &'static str {
+    fn label(&self) -> String {
         match self {
-            Place::Local => "local",
-            Place::Synced => "synced",
-            Place::Cloud => "cloud",
+            Place::Local => "local".to_string(),
+            Place::Synced => "synced".to_string(),
+            Place::Cloud => "cloud".to_string(),
+            Place::Elsewhere(Some(name)) => format!("on {name}"),
+            Place::Elsewhere(None) => "on another device".to_string(),
         }
     }
 }
@@ -48,16 +54,29 @@ pub fn mark_of(status: TurnStatus) -> Option<CloudMark> {
     }
 }
 
-/// The rows of `metadata`, in its order (newest first), marked from `status`.
+/// The rows of `metadata`, in its order (newest first), marked from
+/// `status`. `held_by` names the device holding each device-placed row the
+/// server said, and `this_device` is this device's id: a device-placed row
+/// with another id is held elsewhere.
 pub fn entries(
     metadata: &[ConversationMetadata],
     status: &HashMap<String, TurnStatus>,
+    held_by: &HashMap<String, String>,
+    this_device: Option<&str>,
 ) -> Vec<Entry> {
     metadata
         .iter()
         .map(|row| {
+            let other_device = match row.sync.synced().map(|synced| &synced.placement) {
+                Some(Placement::Device { device_id }) => {
+                    this_device.is_some_and(|this| this != device_id)
+                }
+                _ => false,
+            };
             let place = if row.sync.runs_in_cloud() {
                 Place::Cloud
+            } else if other_device {
+                Place::Elsewhere(held_by.get(&row.id).cloned())
             } else if row.sync.synced().is_some() {
                 Place::Synced
             } else {
@@ -172,7 +191,14 @@ mod tests {
                 "d",
                 "",
                 synced(Placement::Device {
-                    device_id: "x".into(),
+                    device_id: "this-device".into(),
+                }),
+            ),
+            row(
+                "e",
+                "Report",
+                synced(Placement::Device {
+                    device_id: "work".into(),
                 }),
             ),
         ];
@@ -180,14 +206,19 @@ mod tests {
             ("b".to_string(), TurnStatus::Running),
             ("c".to_string(), TurnStatus::WaitingForYou),
         ]);
-        let text = render(&entries(&metadata, &status), Some("a"));
+        let held = HashMap::from([("e".to_string(), "Work laptop".to_string())]);
+        let text = render(
+            &entries(&metadata, &status, &held, Some("this-device")),
+            Some("a"),
+        );
         assert_eq!(
             text,
             "Conversations (/open <number> opens one):\n\
              *  1. Local chat  [local]\n\
              \x20  2. Research  [cloud]  Running in the cloud\n\
              \x20  3. Waiting  [cloud]  Waiting for you\n\
-             \x20  4. Untitled  [synced]"
+             \x20  4. Untitled  [synced]\n\
+             \x20  5. Report  [on Work laptop]"
         );
     }
 
