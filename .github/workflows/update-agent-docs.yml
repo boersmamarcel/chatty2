@@ -55,6 +55,9 @@ jobs:
           PR_AUTHOR: ${{ steps.meta.outputs.author }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Merges are made by the hive-nurse App since #1451; the action refuses
+          # a run a bot started unless it is listed.
+          allowed_bots: hive-nurse-agent
           claude_args: '--allowed-tools "Read,Edit,Bash(git diff:*),Bash(git log:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr create:*),Bash(git checkout -b:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git config:*)"'
           prompt: |
             # Agent Docs Sync Agent
