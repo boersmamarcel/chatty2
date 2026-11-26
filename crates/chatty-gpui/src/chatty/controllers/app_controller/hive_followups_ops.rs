@@ -9,6 +9,9 @@ use chatty_core::services::hive_sync::{ApiError, HiveConversationsApi, HttpHiveC
 
 use super::*;
 use crate::chatty::views::FollowUp;
+use crate::settings::controllers::extensions_controller::hive_session;
+use crate::settings::models::hive_settings::HiveSettingsModel;
+use chatty_core::services::hive_sync::fetch_device_id;
 
 /// Shown when the server named neither a holder nor a message.
 const HELD_ELSEWHERE: &str =
@@ -52,6 +55,10 @@ impl ChattyApp {
         let placement = store
             .get_conversation(&conv_id)
             .and_then(|c| c.sync().synced().map(|s| s.placement.clone()));
+        let held_by_device = matches!(placement, Some(Placement::Device { .. }));
+        if held_by_device {
+            self.look_up_device_id(cx);
+        }
         let follow_up = follow_up_for(
             interrupted,
             self.hive_push.held_message(&conv_id),
@@ -60,6 +67,40 @@ impl ChattyApp {
         );
         self.chat_view
             .update(cx, |view, cx| view.set_follow_up(follow_up, cx));
+    }
+
+    /// This device's id is otherwise only learned when a push goes out, but a
+    /// pull that finds another device holding a conversation needs it to tell
+    /// "held elsewhere" from "held here". Ask once, then redraw the line.
+    fn look_up_device_id(&mut self, cx: &mut Context<Self>) {
+        if self.hive_push.device_id().is_some() || self.hive_push.device_lookup_running() {
+            return;
+        }
+        let settings = cx.global::<HiveSettingsModel>();
+        if !settings.is_logged_in() {
+            return;
+        }
+        let server_url = settings.hive_url.trim_end_matches('/').to_string();
+        let Some(session) = hive_session(cx) else {
+            return;
+        };
+        self.hive_push.set_device_lookup(true);
+        cx.spawn(async move |weak, cx| {
+            let device = fetch_device_id(&server_url, Some(&session)).await;
+            weak.update(cx, |app, cx| {
+                app.hive_push.set_device_lookup(false);
+                match device {
+                    Ok(device) => {
+                        app.hive_push.set_device(device);
+                        app.refresh_follow_up(cx);
+                    }
+                    Err(error) => debug!(error = %error, "No Hive device id yet"),
+                }
+            })
+            .map_err(|e| debug!(error = ?e, "The app closed during a device lookup"))
+            .ok();
+        })
+        .detach();
     }
 
     /// Hang the files a cloud run produced on the turns they belong to.

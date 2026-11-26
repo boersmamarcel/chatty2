@@ -51,6 +51,8 @@ pub(super) struct HivePushState {
     /// This device's id on the server: the current login session, found once
     /// per sign-in and dropped when the user signs out.
     device: Option<String>,
+    /// A lookup of `device` is running (HX-22).
+    device_lookup: bool,
 }
 
 /// Where a create gets the conversation from.
@@ -66,6 +68,19 @@ impl HivePushState {
     /// last push it refused (HX-22).
     pub(super) fn held_message(&self, id: &str) -> Option<Option<String>> {
         self.held_by.get(id).map(|held| held.message.clone())
+    }
+
+    pub(super) fn set_device_lookup(&mut self, running: bool) {
+        self.device_lookup = running;
+    }
+
+    pub(super) fn set_device(&mut self, device: String) {
+        self.device = Some(device);
+    }
+
+    /// Whether this device's id is being looked up now.
+    pub(super) fn device_lookup_running(&self) -> bool {
+        self.device_lookup
     }
 
     /// This device's id on the server, once known.
