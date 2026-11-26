@@ -437,7 +437,10 @@ impl HeadlessRunner {
             updated_at: now,
             working_dir: None,
             agent_task_snapshot: None,
-            mode: None,
+            sync: None,
+            placement: None,
+            remote_version: None,
+            last_synced_at: None,
             tool_call_count: 0,
             context_tokens: 0,
         };

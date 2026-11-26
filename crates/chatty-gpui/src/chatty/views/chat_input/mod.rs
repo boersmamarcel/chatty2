@@ -487,13 +487,14 @@ impl ChatInputState {
         }
     }
 
-    /// Follow the displayed conversation's mode: a hosted one shows the
-    /// server's model and offers no local picker (AGE-849).
-    pub fn set_conversation_mode(
+    /// Follow the displayed conversation's placement: one whose turns run in
+    /// the cloud shows the server's model and offers no local picker
+    /// (AGE-849).
+    pub fn set_conversation_sync(
         &mut self,
-        mode: &chatty_core::models::conversation::ConversationMode,
+        sync: &chatty_core::models::conversation::ConversationSync,
     ) {
-        self.hosted_model_label = mode.hosted_model_label();
+        self.hosted_model_label = sync.cloud_model_label();
     }
 
     /// Whether the composer offers the local model picker.

@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context, Result};
 use chatty_core::agent_spec::AgentSpec;
 use chatty_core::factories::agent_factory::{AgentBuildContext, AgentServices};
-use chatty_core::hive::ModuleMeter;
+use chatty_core::hive::{HiveSession, ModuleMeter};
 use chatty_core::models::Conversation;
 use chatty_core::models::TurnOutcome;
 use chatty_core::models::clarification_store::{ClarificationAnswer, ClarifyingQuestion};
@@ -29,7 +29,7 @@ use chatty_core::settings::models::models_store::ModelConfig;
 use chatty_core::settings::models::module_settings::ModuleSettingsModel;
 use chatty_core::settings::models::providers_store::ProviderConfig;
 use chatty_core::settings::models::{ExecutionSettingsModel, ModelsModel};
-use chatty_core::tools::plugin_tool::{PluginHost, borrowed_meter};
+use chatty_core::tools::plugin_tool::{PluginHost, session_meter};
 
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -525,7 +525,7 @@ static PLUGIN_METER: OnceLock<Arc<ModuleMeter>> = OnceLock::new();
 /// Hive sign-in (AGE-837): a spec's paid plugin is admitted and reported
 /// exactly like a call through the desktop's gateway. Later calls are
 /// no-ops.
-pub(crate) async fn install_plugin_meter() {
+pub(crate) async fn install_plugin_meter(own_session: bool) {
     if PLUGIN_METER.get().is_some() {
         return;
     }
@@ -533,8 +533,35 @@ pub(crate) async fn install_plugin_meter() {
         chatty_core::extensions_repository().load(),
         chatty_core::hive_settings_repository().load(),
     );
-    let meter = borrowed_meter(&extensions.unwrap_or_default(), &hive.unwrap_or_default()).await;
+    // The root process owns the sign-in and refreshes it. A participant
+    // worker borrows the root's pair and never refreshes: a second process
+    // spending the refresh token would be reuse (AGE-2084).
+    let registry_url = hive.unwrap_or_default().registry_url().to_string();
+    let session = if own_session {
+        Some(crate::hive_auth::session().await)
+    } else {
+        Some(Arc::new(HiveSession::borrowed(
+            registry_url.clone(),
+            owner_pair().await,
+        )))
+    };
+    let meter = session_meter(&extensions.unwrap_or_default(), &registry_url, session).await;
     let _ = PLUGIN_METER.set(Arc::new(meter));
+}
+
+/// The pair of the process that owns the login: the TUI's when one is
+/// stored, else the desktop's.
+async fn owner_pair() -> Option<chatty_core::hive::TokenPair> {
+    if let Ok(tui) = chatty_core::hive_tui_settings_repository().load().await
+        && let Some(pair) = tui.token_pair()
+    {
+        return Some(pair);
+    }
+    chatty_core::hive_settings_repository()
+        .load()
+        .await
+        .ok()
+        .and_then(|desktop| desktop.token_pair())
 }
 
 /// Where a spec's plugins are found (PL-U2, AGE-616): the module

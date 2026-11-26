@@ -486,14 +486,17 @@ mod tests {
                     dock_height: 420.0,
                     ..Default::default()
                 },
+                notify_cloud_conversations: true,
             },
             hive_settings: HiveSettingsModel {
-                registry_url: "https://hive.example.com".to_string(),
+                hive_url: "https://hive.example.com".to_string(),
+                registry_url_override: None,
                 token: Some("jwt-token".to_string()),
                 refresh_token: Some("refresh-token".to_string()),
                 expires_at: Some("2026-09-27T10:00:00Z".parse().unwrap()),
                 username: Some("marcel".to_string()),
                 email: Some("marcel@example.com".to_string()),
+                ..Default::default()
             },
             mcp_servers: vec![McpServerConfig {
                 name: "server-a".to_string(),

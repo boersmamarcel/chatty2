@@ -3,10 +3,9 @@
 //! **Install team** does — every spec and locked plugin verified — then exit.
 
 use anyhow::{Context, Result, bail};
-use chatty_core::hive::{HiveRegistryClient, HiveSession, SessionState};
+use chatty_core::hive::HiveRegistryClient;
 use chatty_core::team_install;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 pub async fn run(team_ref: &str) -> Result<()> {
     let (name, version) = team_install::parse_team_ref(team_ref);
@@ -25,25 +24,24 @@ pub async fn run(team_ref: &str) -> Result<()> {
     {
         eprintln!("chatty: {notice}");
     }
-    let mut hive = hive.unwrap_or_default();
+    let hive = hive.unwrap_or_default();
     let mut extensions = extensions.unwrap_or_default();
     let mut module_settings = module_settings.context("Failed to load module settings")?;
-    let Some(pair) = hive.token_pair() else {
+    // The TUI's own sign-in, never the desktop's pair (AGE-2084).
+    let Some(session) = crate::hive_auth::signed_in_session().await else {
         bail!(
-            "sign in to Hive first (Settings → Extensions in the desktop): \
-             fetching a team's specs needs your account"
+            "{} Fetching a team's specs needs your account.",
+            chatty_core::tui_hive::RUN_LOGIN
         );
     };
-
-    let session = Arc::new(HiveSession::new(&hive.registry_url, Some(pair.clone())));
-    let client = HiveRegistryClient::new(&hive.registry_url).with_session(session.clone());
+    let client = HiveRegistryClient::new(hive.registry_url()).with_session(session);
     let module_dir = PathBuf::from(&module_settings.module_dir);
 
-    let fetched = async {
+    let team = async {
         let listing = team_install::find_listing(&client, &name).await?;
         team_install::fetch_team(
             &client,
-            &hive.registry_url,
+            hive.registry_url(),
             &listing,
             version.as_deref(),
             &module_dir,
@@ -51,19 +49,10 @@ pub async fn run(team_ref: &str) -> Result<()> {
         .await
     }
     .await;
-    // A refresh during the fetch rotated the pair; the old refresh token is
-    // spent, so keep the new one whatever happened next.
-    let state = session.subscribe().borrow().clone();
-    if let SessionState::SignedIn(rotated) = state
-        && rotated != pair
-    {
-        hive.set_token_pair(Some(&rotated));
-        chatty_core::hive_settings_repository()
-            .save(hive.clone())
-            .await
-            .context("Failed to save the refreshed Hive sign-in")?;
-    }
-    let team = fetched?;
+    // A refresh during the fetch rotated the pair; wait for the saver to
+    // write it before the process exits.
+    crate::hive_auth::flush().await;
+    let team = team?;
 
     let record = team_install::apply_team(
         team,

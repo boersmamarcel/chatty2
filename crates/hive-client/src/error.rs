@@ -58,6 +58,11 @@ pub enum ClientError {
     #[error("the step-up request was not approved: {0}")]
     StepUpNotApproved(String),
 
+    /// The address answered, but not as a Hive server (`GET /api/version`
+    /// was refused, was not JSON, or did not name a server).
+    #[error("This address is not a Hive server")]
+    NotHive,
+
     /// The registry's base URL is plain `http://` to a non-local address
     /// (SEC-16, AGE-756): refused before any request is sent, so a bearer
     /// token or password never has a chance to leave in clear text.

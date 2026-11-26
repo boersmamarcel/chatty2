@@ -13,6 +13,8 @@ mod desktop_delegation_tests;
 /// `broker_runner`: the module gateway it starts lazily is not Unix-only,
 /// only the fleet-broker socket riding on it is.
 pub mod lazy_gateway_broker;
+/// OS notifications for cloud conversations (HX-12).
+pub mod os_notification;
 
 /// Whether a configured MCP or A2A `url` points at this machine, for the
 /// "External" badges. A plain substring test, as every caller had it.

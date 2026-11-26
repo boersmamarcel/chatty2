@@ -61,6 +61,7 @@ pub mod team_install;
 pub mod testing;
 pub mod token_budget;
 pub mod tools;
+pub mod tui_hive;
 
 // Re-export the settings snapshot/delta types (AGE-283).
 pub use settings_snapshot::{SettingsDelta, SettingsSnapshot};
@@ -101,6 +102,11 @@ pub struct RepositoryRegistry {
 
 static REPOSITORY_REGISTRY: OnceLock<RepositoryRegistry> = OnceLock::new();
 
+/// The TUI's own Hive sign-in (AGE-2084). Not a `RepositoryRegistry` field:
+/// it is no settings family a hosted guest snapshots.
+static HIVE_TUI_REPOSITORY: OnceLock<Arc<dyn settings::repositories::HiveTuiSettingsRepository>> =
+    OnceLock::new();
+
 /// Initialize all repository singletons. Must be called once at startup before
 /// any repository is accessed. Returns an error if the config directory cannot
 /// be determined (e.g., missing HOME), allowing the host to show a proper error
@@ -137,11 +143,14 @@ pub fn init_repositories_with(keychain_timeout: Option<std::time::Duration>) -> 
         training_settings: Arc::new(TrainingSettingsJsonRepository::new()?),
         user_secrets: Arc::new(UserSecretsJsonRepository::new()?),
         module_settings: Arc::new(ModuleSettingsJsonRepository::new()?),
-        hive_settings: Arc::new(HiveSettingsJsonRepository::new(secrets)?),
+        hive_settings: Arc::new(HiveSettingsJsonRepository::new(secrets.clone())?),
         extensions: Arc::new(ExtensionsJsonRepository::new()?),
         token_tracking: Arc::new(TokenTrackingJsonRepository::new()?),
     };
     REPOSITORY_REGISTRY.set(registry).ok();
+    HIVE_TUI_REPOSITORY
+        .set(Arc::new(HiveTuiSettingsJsonRepository::new(secrets)?))
+        .ok();
 
     Ok(())
 }
@@ -216,6 +225,15 @@ pub fn module_settings_repository() -> Arc<dyn settings::repositories::ModuleSet
 /// Returns a cloned Arc to the Hive settings repository.
 pub fn hive_settings_repository() -> Arc<dyn settings::repositories::HiveSettingsRepository> {
     registry().hive_settings.clone()
+}
+
+/// Returns a cloned Arc to the TUI's own Hive sign-in repository (AGE-2084).
+pub fn hive_tui_settings_repository() -> Arc<dyn settings::repositories::HiveTuiSettingsRepository>
+{
+    HIVE_TUI_REPOSITORY
+        .get()
+        .expect("BUG: init_repositories() was not called before accessing a repository.")
+        .clone()
 }
 
 /// Returns a cloned Arc to the extensions repository.

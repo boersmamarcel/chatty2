@@ -37,6 +37,7 @@ pub mod registry;
 pub mod screencast;
 mod select;
 pub mod session;
+pub mod site_check;
 pub mod sites;
 pub mod snapshot;
 mod targets;
@@ -178,18 +179,30 @@ impl BrowserManager {
         self
     }
 
-    /// Spend the approved action if it is this one: same origin, same page
-    /// address, and the same control (AGE-2043). Matching or not, a second
-    /// call finds nothing once it has matched.
-    pub fn take_approved_action(&self, origin: &str, url: &str, control: &str) -> bool {
-        let mut slot = self.approved_action.lock();
-        let hit = slot.as_ref().is_some_and(|a| {
+    /// Whether the approved action is this one: same origin, same page
+    /// address, and the same control (AGE-2043). It is not spent here: an
+    /// action that then fails (a covered button, a stale ref) keeps it for
+    /// the retry. [`Self::spend_approved_action`] spends it once the action
+    /// went through.
+    pub fn approved_action_matches(&self, origin: &str, url: &str, control: &str) -> bool {
+        self.approved_action.lock().as_ref().is_some_and(|a| {
             a.origin == origin
                 && a.url == url
                 && (a.action == control || a.action.starts_with(&format!("{control} on ")))
-        });
+        })
+    }
+
+    /// Spend the approved action: the action it allowed went through.
+    pub fn spend_approved_action(&self) {
+        *self.approved_action.lock() = None;
+    }
+
+    /// Spend the approved action if it is this one. Matching or not, a second
+    /// call finds nothing once it has matched.
+    pub fn take_approved_action(&self, origin: &str, url: &str, control: &str) -> bool {
+        let hit = self.approved_action_matches(origin, url, control);
         if hit {
-            *slot = None;
+            self.spend_approved_action();
         }
         hit
     }

@@ -1119,7 +1119,7 @@ fn main() {
                 if !missing_pricing_modules.is_empty() {
                     // Listing modules is public; no session exists yet, and
                     // a second holder of the token pair must not refresh it.
-                    let client = chatty_core::hive::HiveRegistryClient::new(&hive.registry_url);
+                    let client = chatty_core::hive::HiveRegistryClient::new(hive.registry_url());
 
                     match client
                         .list_modules(&chatty_core::hive::models::ListParams {
@@ -1163,7 +1163,7 @@ fn main() {
             if let Some(hive) = loaded_hive.take() {
                 cx.update(|cx| {
                     info!(
-                        registry = %hive.registry_url,
+                        hive = %hive.hive_url,
                         logged_in = hive.token.is_some(),
                         "Hive settings loaded"
                     );
@@ -1189,42 +1189,7 @@ fn main() {
                 .ok();
             }
 
-            // Sync hive_settings.registry_url from the Hive MCP extension URL.
-            // extensions.json may have been edited to point at a different host
-            // while hive_settings.json was absent (defaulting to localhost:8080).
-            cx.update(|cx| {
-                let ext_model = cx.global::<settings::models::ExtensionsModel>();
-                if let Some(ext) = ext_model.find(chatty_core::install::HIVE_MCP_EXT_ID)
-                    && let settings::models::extensions_store::ExtensionKind::McpServer(ref cfg) =
-                        ext.kind
-                {
-                        let derived = cfg.url.trim_end_matches("/mcp").to_string();
-                        let hive = cx.global::<settings::models::HiveSettingsModel>();
-                        if !derived.is_empty() && derived != hive.registry_url {
-                            info!(
-                                old = %hive.registry_url,
-                                new = %derived,
-                                "Syncing Hive registry URL from extension"
-                            );
-                            let mut updated = hive.clone();
-                            updated.registry_url = derived;
-                            cx.set_global(updated.clone());
-                            cx.spawn(|_cx: &mut AsyncApp| async move {
-                                if let Err(e) = chatty_core::hive_settings_repository()
-                                    .save(updated)
-                                    .await
-                                {
-                                    warn!(error = ?e, "Failed to persist synced Hive registry URL");
-                                }
-                            })
-                            .detach();
-                        }
-                }
-            })
-            .map_err(|e| warn!(error = ?e, "Failed to sync Hive registry URL from extension"))
-            .ok();
-
-            // The registry URL is final now: start the one Hive session that
+            // The Hive address is final now: start the one Hive session that
             // holds (and refreshes) the persisted token pair.
             cx.update(|cx| {
                 settings::controllers::extensions_controller::install_hive_session(cx);

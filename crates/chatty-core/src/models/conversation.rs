@@ -28,58 +28,132 @@ pub enum MessageFeedback {
     ThumbsDown,
 }
 
-/// Where a conversation's turns run (AGE-298).
+/// Is this conversation kept on the user's Hive account, and if so, where do
+/// its turns run (AGE-2088, plan D1)?
 ///
-/// The unit is the conversation, not the app: the conversation is already the
-/// unit of session ownership on both sides — one `AgentSession` per
-/// conversation locally, one per conversation in `chatty-server` — so a local
-/// Ollama chat and a hosted long-running task can sit in the sidebar at once.
+/// Two questions that `ConversationMode` used to answer with one enum:
 ///
-/// A conversation that moves keeps its local row and its history; the mode is
-/// what records that it now runs elsewhere. That is what "marked as moved,
-/// kept, not deleted" means here, and it is what makes the move idempotent:
-/// nothing local changes until the upload has returned a remote id, and then
-/// exactly one field flips.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ConversationMode {
-    /// Turns run in-process against this conversation's own `AgentSession`.
+/// * **sync** — [`LocalOnly`](Self::LocalOnly) never leaves the machine;
+///   [`Synced`](Self::Synced) means the server holds the canonical copy and
+///   this device keeps a cache of it (D3).
+/// * **placement** — only a synced conversation has one: where its turns run
+///   right now ([`Placement`]). Nesting it inside `Synced` is what makes "a
+///   local-only conversation running in the cloud" unrepresentable.
+///
+/// Syncing alone never runs anything remotely; "send to the cloud" changes
+/// the placement, not the sync.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ConversationSync {
+    /// Never leaves this machine. The default, and what every row written
+    /// before sync existed loads as.
     #[default]
-    Local,
-    /// Turns run on a `chatty-server`, addressed by `remote_id`.
-    Hosted {
-        /// Base URL of the server, without a trailing slash.
-        server_url: String,
-        /// The conversation's id *on that server*, which is not the local id.
-        remote_id: String,
-        /// The model the server reported for the conversation when it went
-        /// online (AGE-849), shown in the composer in place of the local
-        /// pick. `None` when the server named none, or the row predates this.
-        #[serde(default)]
+    LocalOnly,
+    /// Kept on the server; this device holds a cache.
+    Synced(SyncedConversation),
+}
+
+/// A synced conversation's address on the server and how current this
+/// device's copy of it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncedConversation {
+    /// Base URL of the server, without a trailing slash. One per account once
+    /// the Hive URL is unified (D5); carried per conversation until then,
+    /// because the move dialog still names a server per move.
+    pub server_url: String,
+    /// The conversation's id *on that server*, which need not be the local id.
+    pub remote_id: String,
+    /// The server version this device's copy of the *history* is at. A newer
+    /// version in the server's list marks the detail stale; it is replaced
+    /// when the detail is fetched again. `0` means none was fetched yet.
+    pub version: u64,
+    /// Where turns run.
+    pub placement: Placement,
+    /// When (unix ms) this device last brought its copy of the history in
+    /// line with the server; `None` while the cached detail is stale or was
+    /// never fetched.
+    pub last_synced_at: Option<i64>,
+}
+
+/// Where a synced conversation's turns run right now (D1).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Placement {
+    /// In-process on the named device, with its local models and workspace.
+    Device { device_id: String },
+    /// On chatty-server; every device is a viewer and composer.
+    Cloud {
+        /// The model the server reported for the conversation (AGE-849),
+        /// shown in the composer in place of the local pick. `None` when the
+        /// server named none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         model_id: Option<String>,
     },
 }
 
-impl ConversationMode {
-    /// The server this conversation runs on, if it is hosted.
-    pub fn hosted_on(&self) -> Option<(&str, &str)> {
+/// The `sync` column's JSON: the synced conversation's address. The version,
+/// placement and sync time have columns of their own.
+#[derive(Serialize, Deserialize)]
+struct SyncColumn {
+    server_url: String,
+    remote_id: String,
+}
+
+impl ConversationSync {
+    /// A conversation whose turns run on `server_url` as `remote_id`: what a
+    /// move online produces.
+    pub fn cloud(
+        server_url: impl Into<String>,
+        remote_id: impl Into<String>,
+        model_id: Option<String>,
+    ) -> Self {
+        ConversationSync::Synced(SyncedConversation {
+            server_url: server_url.into().trim_end_matches('/').to_string(),
+            remote_id: remote_id.into(),
+            version: 0,
+            placement: Placement::Cloud { model_id },
+            last_synced_at: None,
+        })
+    }
+
+    /// The synced half, if any.
+    pub fn synced(&self) -> Option<&SyncedConversation> {
         match self {
-            ConversationMode::Local => None,
-            ConversationMode::Hosted {
-                server_url,
-                remote_id,
-                ..
-            } => Some((server_url.as_str(), remote_id.as_str())),
+            ConversationSync::LocalOnly => None,
+            ConversationSync::Synced(synced) => Some(synced),
         }
     }
 
-    /// What the composer's model chip says while this conversation is hosted:
-    /// the server's model, or "Hosted model" when it reported none. `None`
-    /// for a local conversation, whose chip is the local picker (AGE-849).
-    pub fn hosted_model_label(&self) -> Option<String> {
-        match self {
-            ConversationMode::Local => None,
-            ConversationMode::Hosted { model_id, .. } => Some(
+    /// Where turns run; `None` for a local-only conversation, whose turns
+    /// always run here.
+    pub fn placement(&self) -> Option<&Placement> {
+        self.synced().map(|synced| &synced.placement)
+    }
+
+    /// The server this conversation's turns run on, when its placement is
+    /// [`Cloud`](Placement::Cloud): `(server_url, remote_id)`.
+    pub fn cloud_on(&self) -> Option<(&str, &str)> {
+        match self.synced() {
+            Some(SyncedConversation {
+                server_url,
+                remote_id,
+                placement: Placement::Cloud { .. },
+                ..
+            }) => Some((server_url.as_str(), remote_id.as_str())),
+            _ => None,
+        }
+    }
+
+    /// Do this conversation's turns run on a server?
+    pub fn runs_in_cloud(&self) -> bool {
+        self.cloud_on().is_some()
+    }
+
+    /// What the composer's model chip says while turns run in the cloud: the
+    /// server's model, or "Hosted model" when it reported none. `None` when
+    /// turns run here, whose chip is the local picker (AGE-849).
+    pub fn cloud_model_label(&self) -> Option<String> {
+        match self.placement() {
+            Some(Placement::Cloud { model_id }) => Some(
                 model_id
                     .as_deref()
                     .map(str::trim)
@@ -87,12 +161,74 @@ impl ConversationMode {
                     .unwrap_or("Hosted model")
                     .to_string(),
             ),
+            _ => None,
         }
     }
 
-    pub fn is_hosted(&self) -> bool {
-        matches!(self, ConversationMode::Hosted { .. })
+    /// Read the four sync columns of a row. All `NULL` is
+    /// [`LocalOnly`](Self::LocalOnly), which is what a row that never synced
+    /// holds, so it keeps exactly the bytes it had. A `sync` column that does
+    /// not parse is treated the same way: refusing to load a conversation
+    /// over it would lose its history. A synced row with no readable
+    /// placement is taken to run in the cloud, the only placement a row could
+    /// have before devices held one.
+    pub fn from_columns(
+        sync: Option<&str>,
+        placement: Option<&str>,
+        remote_version: Option<i64>,
+        last_synced_at: Option<i64>,
+    ) -> Self {
+        let Some(column) = sync.and_then(|json| serde_json::from_str::<SyncColumn>(json).ok())
+        else {
+            return ConversationSync::LocalOnly;
+        };
+        let placement = placement
+            .and_then(|json| serde_json::from_str::<Placement>(json).ok())
+            .unwrap_or(Placement::Cloud { model_id: None });
+        ConversationSync::Synced(SyncedConversation {
+            server_url: column.server_url,
+            remote_id: column.remote_id,
+            version: remote_version.unwrap_or(0).max(0) as u64,
+            placement,
+            last_synced_at,
+        })
     }
+
+    /// The four sync columns for a row: all `None` for a local-only one.
+    pub fn to_columns(&self) -> SyncColumns {
+        match self {
+            ConversationSync::LocalOnly => SyncColumns::default(),
+            ConversationSync::Synced(synced) => SyncColumns {
+                sync: serde_json::to_string(&SyncColumn {
+                    server_url: synced.server_url.clone(),
+                    remote_id: synced.remote_id.clone(),
+                })
+                .ok(),
+                placement: serde_json::to_string(&synced.placement).ok(),
+                remote_version: Some(synced.version.min(i64::MAX as u64) as i64),
+                last_synced_at: synced.last_synced_at,
+            },
+        }
+    }
+
+    /// Read the sync columns off a repository row.
+    pub fn of_data(data: &ConversationData) -> Self {
+        Self::from_columns(
+            data.sync.as_deref(),
+            data.placement.as_deref(),
+            data.remote_version,
+            data.last_synced_at,
+        )
+    }
+}
+
+/// The persisted form of a [`ConversationSync`], one field per column.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SyncColumns {
+    pub sync: Option<String>,
+    pub placement: Option<String>,
+    pub remote_version: Option<i64>,
+    pub last_synced_at: Option<i64>,
 }
 
 /// Outcome of `Conversation::finalize_turn` (AGE-243 / D4).
@@ -189,9 +325,10 @@ pub struct Conversation {
     working_dir: Option<PathBuf>,
     /// Latest persisted agent todo panel snapshot for this conversation.
     agent_task_snapshot: Option<AgentTaskSnapshot>,
-    /// Where this conversation's turns run (AGE-298). `Local` for every
-    /// conversation that predates the mode.
-    mode: ConversationMode,
+    /// Whether the conversation is kept on the Hive account, and where its
+    /// turns run (AGE-2088). `LocalOnly` for every conversation that never
+    /// synced.
+    sync: ConversationSync,
     /// Effective workspace directory the current agent was built with.
     agent_workspace_dir: Option<PathBuf>,
     /// Progress slot for the invoke_agent tool in this conversation's agent.
@@ -265,7 +402,7 @@ impl Conversation {
             agent_task_snapshot: None,
             agent_workspace_dir,
             invoke_agent_progress_slot: built.invoke_agent_progress_slot,
-            mode: ConversationMode::Local,
+            sync: ConversationSync::LocalOnly,
         })
     }
 
@@ -305,43 +442,7 @@ impl Conversation {
             .await
             .context("Failed to create agent from config")?;
 
-        // Deserialize message history
-        let history = Self::deserialize_history(&data.message_history)
-            .context("Failed to deserialize message history")?;
-
-        // Deserialize system traces
-        let system_traces = Self::deserialize_traces(&data.system_traces)
-            .context("Failed to deserialize system traces")?;
-
-        let non_null_traces = system_traces.iter().filter(|t| t.is_some()).count();
-        tracing::debug!(
-            conv_id = %data.id,
-            total_traces = system_traces.len(),
-            non_null_traces,
-            history_len = history.len(),
-            "Deserialized traces in from_data"
-        );
-
-        // Deserialize per-message metadata (with fallbacks for older data)
-        let attachment_paths =
-            Self::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
-        let message_timestamps =
-            Self::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
-        let message_feedback =
-            Self::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
-
-        // Zip the deserialized arrays into MessageEntry structs
-        let entries: Vec<MessageEntry> = history
-            .into_iter()
-            .enumerate()
-            .map(|(i, message)| MessageEntry {
-                message,
-                system_trace: system_traces.get(i).cloned().flatten(),
-                attachment_paths: attachment_paths.get(i).cloned().unwrap_or_default(),
-                timestamp: message_timestamps.get(i).copied().flatten(),
-                feedback: message_feedback.get(i).cloned().flatten(),
-            })
-            .collect();
+        let entries = entries_of(&data)?;
 
         // Deserialize regeneration records (with fallback to empty if not present)
         let regeneration_records =
@@ -354,14 +455,7 @@ impl Conversation {
             .agent_task_snapshot
             .as_deref()
             .and_then(|json| Self::deserialize_agent_task_snapshot(json).ok());
-        // A row written before AGE-298 has no mode, and a row whose mode does
-        // not parse is treated the same way: local. Refusing to load the
-        // conversation over an unreadable mode would lose its history.
-        let mode = data
-            .mode
-            .as_deref()
-            .and_then(|json| Self::deserialize_mode(json).ok())
-            .unwrap_or_default();
+        let sync = ConversationSync::of_data(&data);
 
         // Convert Unix timestamps to SystemTime
         let created_at = UNIX_EPOCH + Duration::from_secs(data.created_at as u64);
@@ -392,7 +486,7 @@ impl Conversation {
             agent_task_snapshot,
             agent_workspace_dir,
             invoke_agent_progress_slot: built.invoke_agent_progress_slot,
-            mode,
+            sync,
         })
     }
 
@@ -633,24 +727,20 @@ impl Conversation {
         serde_json::from_str(json).context("Failed to deserialize agent task snapshot")
     }
 
-    /// Where this conversation's turns run (AGE-298).
-    pub fn mode(&self) -> &ConversationMode {
-        &self.mode
+    /// Whether this conversation is synced, and where its turns run.
+    pub fn sync(&self) -> &ConversationSync {
+        &self.sync
     }
 
-    /// Move this conversation between local and hosted.
+    /// Record a new sync state: a move between this device and the cloud, or
+    /// a pull that brought this copy in line with the server.
     ///
-    /// The caller owns the transfer of history; this only records where turns
-    /// go from here, and is the last step of a move so a failed transfer
-    /// leaves the conversation exactly as it was.
-    pub fn set_mode(&mut self, mode: ConversationMode) {
-        self.mode = mode;
+    /// The caller owns the transfer of history; this only records the
+    /// outcome, and is the last step of a move so a failed transfer leaves
+    /// the conversation exactly as it was.
+    pub fn set_sync(&mut self, sync: ConversationSync) {
+        self.sync = sync;
         self.updated_at = SystemTime::now();
-    }
-
-    /// Deserialize the persisted mode from JSON.
-    pub fn deserialize_mode(json: &str) -> Result<ConversationMode> {
-        serde_json::from_str(json).context("Failed to deserialize conversation mode")
     }
 
     /// Get regeneration records for this conversation
@@ -703,7 +793,7 @@ impl Conversation {
             created_at: self.created_at,
             working_dir: self.working_dir.clone(),
             agent_task_snapshot: self.agent_task_snapshot.clone(),
-            mode: self.mode.clone(),
+            sync: self.sync.clone(),
         }
     }
 
@@ -794,6 +884,88 @@ impl Conversation {
             })
             .collect();
         self.updated_at = SystemTime::now();
+    }
+
+    /// Adopt the server's copy of a synced conversation (AGE-2088).
+    ///
+    /// The server is canonical for a synced conversation (plan D3), so its
+    /// history, traces, attachment refs, timestamps, feedback, usage and
+    /// totals replace this device's. Unlike
+    /// [`import_history`](Self::import_history), which starts every message's
+    /// metadata empty, nothing the server sent is dropped.
+    ///
+    /// Per-message metadata the server did *not* send for a message — a
+    /// server that keeps fewer columns than this device does — is kept from
+    /// this device's copy, but only where the message at that index is the
+    /// same one, so metadata never lands on the wrong row. Usage the server
+    /// did not send is kept the same way.
+    ///
+    /// What stays this device's own: the local id, the bound model and agent,
+    /// the working directory, and the sync state, which the caller sets once
+    /// it knows what version it adopted.
+    pub fn replace_from_remote(&mut self, data: ConversationData) -> Result<()> {
+        let mut entries = entries_of(&data)?;
+        let traces = Self::deserialize_traces(&data.system_traces).unwrap_or_default();
+        let attachments =
+            Self::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
+        let timestamps =
+            Self::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
+        let feedback =
+            Self::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
+        for (index, (entry, local)) in entries.iter_mut().zip(&self.entries).enumerate() {
+            if !same_message(&entry.message, &local.message) {
+                continue;
+            }
+            if traces.get(index).is_none_or(Option::is_none) {
+                entry.system_trace = local.system_trace.clone();
+            }
+            if attachments.get(index).is_none() {
+                entry.attachment_paths = local.attachment_paths.clone();
+            }
+            if timestamps.get(index).is_none_or(Option::is_none) {
+                entry.timestamp = local.timestamp;
+            }
+            if feedback.get(index).is_none_or(Option::is_none) {
+                entry.feedback = local.feedback.clone();
+            }
+        }
+
+        self.entries = entries;
+        if !data.title.is_empty() {
+            self.title = data.title;
+        }
+        if let Ok(usage) = Self::deserialize_token_usage(&data.token_usage)
+            && !usage.message_usages.is_empty()
+        {
+            self.token_usage = usage;
+        }
+        if let Ok(records) = Self::deserialize_regeneration_records(&data.regeneration_records)
+            && !records.is_empty()
+        {
+            self.regeneration_records = records;
+        }
+        if let Some(snapshot) = data
+            .agent_task_snapshot
+            .as_deref()
+            .and_then(|json| Self::deserialize_agent_task_snapshot(json).ok())
+        {
+            self.agent_task_snapshot = Some(snapshot);
+        }
+        if data.tool_call_count > 0 {
+            self.tool_call_count = data.tool_call_count;
+        }
+        if data.context_tokens > 0 {
+            self.context_tokens = data.context_tokens;
+        }
+        if data.created_at > 0 {
+            self.created_at = UNIX_EPOCH + Duration::from_secs(data.created_at as u64);
+        }
+        self.updated_at = if data.updated_at > 0 {
+            UNIX_EPOCH + Duration::from_secs(data.updated_at as u64)
+        } else {
+            SystemTime::now()
+        };
+        Ok(())
     }
 
     /// Get the agent. Returns a cheap `Arc` clone rather than a deep copy of
@@ -1050,7 +1222,7 @@ pub struct ConversationSnapshot {
     pub created_at: SystemTime,
     pub working_dir: Option<PathBuf>,
     pub agent_task_snapshot: Option<AgentTaskSnapshot>,
-    pub mode: ConversationMode,
+    pub sync: ConversationSync,
 }
 
 impl ConversationSnapshot {
@@ -1059,6 +1231,7 @@ impl ConversationSnapshot {
     /// Pure CPU over owned data: safe to call from a background task.
     /// `updated_at` is stamped here, at the moment the row is built.
     pub fn to_data(&self) -> Result<ConversationData> {
+        let columns = self.sync.to_columns();
         Ok(ConversationData {
             id: self.id.clone(),
             title: self.title.clone(),
@@ -1084,19 +1257,61 @@ impl ConversationSnapshot {
                 .map(serde_json::to_string)
                 .transpose()
                 .context("Failed to serialize agent task snapshot")?,
-            // Local is the absent case, so a local conversation's row stays
-            // byte-identical to what it was before the mode existed.
-            mode: match &self.mode {
-                ConversationMode::Local => None,
-                hosted => Some(
-                    serde_json::to_string(hosted)
-                        .context("Failed to serialize conversation mode")?,
-                ),
-            },
+            // Local-only is all `NULL`, so a conversation that never syncs
+            // keeps the bytes it had before sync existed.
+            sync: columns.sync,
+            placement: columns.placement,
+            remote_version: columns.remote_version,
+            last_synced_at: columns.last_synced_at,
             tool_call_count: self.tool_call_count,
             context_tokens: self.context_tokens,
         })
     }
+}
+
+/// The per-message entries a repository row describes: the history zipped
+/// with its traces, attachments, timestamps and feedback. The metadata arrays
+/// fall back to empty when they do not parse, as rows from before they
+/// existed carry none.
+fn entries_of(data: &ConversationData) -> Result<Vec<MessageEntry>> {
+    // Deserialize message history
+    let history = Conversation::deserialize_history(&data.message_history)
+        .context("Failed to deserialize message history")?;
+
+    // Deserialize system traces
+    let system_traces = Conversation::deserialize_traces(&data.system_traces)
+        .context("Failed to deserialize system traces")?;
+
+    let non_null_traces = system_traces.iter().filter(|t| t.is_some()).count();
+    tracing::debug!(
+        conv_id = %data.id,
+        total_traces = system_traces.len(),
+        non_null_traces,
+        history_len = history.len(),
+        "Deserialized traces in from_data"
+    );
+
+    // Deserialize per-message metadata (with fallbacks for older data)
+    let attachment_paths =
+        Conversation::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
+    let message_timestamps =
+        Conversation::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
+    let message_feedback =
+        Conversation::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
+
+    // Zip the deserialized arrays into MessageEntry structs
+    let entries: Vec<MessageEntry> = history
+        .into_iter()
+        .enumerate()
+        .map(|(i, message)| MessageEntry {
+            message,
+            system_trace: system_traces.get(i).cloned().flatten(),
+            attachment_paths: attachment_paths.get(i).cloned().unwrap_or_default(),
+            timestamp: message_timestamps.get(i).copied().flatten(),
+            feedback: message_feedback.get(i).cloned().flatten(),
+        })
+        .collect();
+    Ok(entries)
 }
 
 fn unix_seconds(at: SystemTime) -> i64 {
@@ -1131,6 +1346,12 @@ fn serialize_message_feedback_of(entries: &[MessageEntry]) -> Result<String> {
     let feedback: Vec<Option<&MessageFeedback>> =
         entries.iter().map(|e| e.feedback.as_ref()).collect();
     serde_json::to_string(&feedback).context("Failed to serialize message feedback")
+}
+
+/// Are two messages the same one? Compared through serde, which is how they
+/// are persisted, so a message is "the same" exactly when its row would be.
+fn same_message(a: &Message, b: &Message) -> bool {
+    serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
 }
 
 /// A user message that a human (or a summary) wrote, as opposed to tool results.
@@ -1422,11 +1643,7 @@ mod tests {
             created_at: UNIX_EPOCH + Duration::from_secs(1_699_999_000),
             working_dir: Some(PathBuf::from("/tmp/workspace")),
             agent_task_snapshot: None,
-            mode: ConversationMode::Hosted {
-                server_url: "http://localhost:8081".to_string(),
-                remote_id: "remote-1".to_string(),
-                model_id: None,
-            },
+            sync: ConversationSync::cloud("http://localhost:8081", "remote-1", None),
         }
     }
 
@@ -1464,41 +1681,72 @@ mod tests {
         assert!(data.updated_at >= data.created_at);
     }
 
-    /// A hosted conversation's mode has to survive the row, or "bring this
-    /// back" would have no server to ask after a restart (AGE-298).
+    /// A synced conversation's address and placement have to survive the
+    /// row, or "bring this back" would have no server to ask after a restart.
     #[test]
-    fn the_mode_round_trips_through_the_row() {
-        let data = populated_snapshot().to_data().unwrap();
-        let mode = Conversation::deserialize_mode(data.mode.as_deref().expect("a hosted row"))
-            .expect("the mode parses");
+    fn the_sync_state_round_trips_through_the_row() {
+        let mut synced = ConversationSync::cloud("http://localhost:8081/", "remote-1", None);
+        if let ConversationSync::Synced(s) = &mut synced {
+            s.version = 7;
+            s.last_synced_at = Some(1_700_000_000_000);
+        }
+        let data = ConversationSnapshot {
+            sync: synced.clone(),
+            ..populated_snapshot()
+        }
+        .to_data()
+        .unwrap();
+        assert_eq!(data.remote_version, Some(7));
+        assert_eq!(ConversationSync::of_data(&data), synced);
         assert_eq!(
-            mode,
-            ConversationMode::Hosted {
-                server_url: "http://localhost:8081".to_string(),
-                remote_id: "remote-1".to_string(),
-                model_id: None,
-            }
+            synced.cloud_on(),
+            Some(("http://localhost:8081", "remote-1")),
+            "the trailing slash is trimmed once, at construction"
+        );
+
+        let on_device = ConversationSync::Synced(SyncedConversation {
+            server_url: "https://hive.example".into(),
+            remote_id: "r-2".into(),
+            version: 3,
+            placement: Placement::Device {
+                device_id: "dev-1".into(),
+            },
+            last_synced_at: None,
+        });
+        let data = ConversationSnapshot {
+            sync: on_device.clone(),
+            ..populated_snapshot()
+        }
+        .to_data()
+        .unwrap();
+        assert_eq!(ConversationSync::of_data(&data), on_device);
+        assert!(
+            !on_device.runs_in_cloud(),
+            "a device placement runs its turns on that device"
         );
     }
 
-    /// Local is the absent case, so nothing changes on disk for the
-    /// conversations that never move — which is every conversation that
-    /// predates the mode.
+    /// Local-only is the absent case, so nothing changes on disk for the
+    /// conversations that never sync.
     #[test]
-    fn a_local_conversation_writes_no_mode_at_all() {
-        let snapshot = ConversationSnapshot {
-            mode: ConversationMode::Local,
+    fn a_local_only_conversation_writes_no_sync_columns() {
+        let data = ConversationSnapshot {
+            sync: ConversationSync::LocalOnly,
             ..populated_snapshot()
-        };
-        assert!(snapshot.to_data().unwrap().mode.is_none());
+        }
+        .to_data()
+        .unwrap();
+        assert!(data.sync.is_none());
+        assert!(data.placement.is_none());
+        assert!(data.remote_version.is_none());
+        assert!(data.last_synced_at.is_none());
     }
 
-    /// A row written before the mode existed still loads, as Local. This is
-    /// the compatibility guarantee AGE-298 asks for, and it is a property of
-    /// the *deserializer*, so it is tested through serde and not through a
-    /// hand-built struct.
+    /// A row written before sync existed still loads, as local-only. This is
+    /// a property of the *deserializer*, so it is tested through serde and
+    /// not through a hand-built struct.
     #[test]
-    fn a_row_from_before_the_mode_loads_as_local() {
+    fn a_row_from_before_sync_loads_as_local_only() {
         let row = serde_json::json!({
             "id": "old-1",
             "title": "Old",
@@ -1509,16 +1757,24 @@ mod tests {
             "updated_at": 2,
         });
         let data: ConversationData = serde_json::from_value(row).expect("an old row still loads");
-        assert!(data.mode.is_none());
+        assert!(data.sync.is_none());
         // AGE-351: the totals default to 0 on a row from before they existed.
         assert_eq!(data.tool_call_count, 0);
         assert_eq!(data.context_tokens, 0);
-        let mode = data
-            .mode
-            .as_deref()
-            .and_then(|json| Conversation::deserialize_mode(json).ok())
-            .unwrap_or_default();
-        assert_eq!(mode, ConversationMode::Local);
+        assert_eq!(
+            ConversationSync::of_data(&data),
+            ConversationSync::LocalOnly
+        );
+    }
+
+    /// An unreadable `sync` column loads as local-only rather than refusing
+    /// the conversation, which would lose its history.
+    #[test]
+    fn an_unreadable_sync_column_loads_as_local_only() {
+        assert_eq!(
+            ConversationSync::from_columns(Some("not json"), None, Some(3), None),
+            ConversationSync::LocalOnly
+        );
     }
 
     /// `Conversation`'s long-standing per-field `serialize_*` methods and the

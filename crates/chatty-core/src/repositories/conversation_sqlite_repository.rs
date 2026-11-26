@@ -10,6 +10,7 @@ use super::conversation_repository::{
     BoxFuture, ConversationData, ConversationMetadata, ConversationRepository,
 };
 use super::error::{RepositoryError, RepositoryResult};
+use crate::models::conversation::ConversationSync;
 
 /// Migrations applied in order. Each entry is (version, sql).
 /// To add a new migration: append a tuple with the next version number and its SQL.
@@ -50,6 +51,36 @@ const MIGRATIONS: &[(i64, &str)] = &[
         5,
         "ALTER TABLE conversations ADD COLUMN tool_call_count INTEGER NOT NULL DEFAULT 0;
          ALTER TABLE conversations ADD COLUMN context_tokens INTEGER NOT NULL DEFAULT 0;",
+    ),
+    // AGE-2088: `mode` (AGE-298) answered two questions at once; it becomes
+    // the sync columns. A `Hosted` row becomes synced with a cloud placement
+    // at version 0 (none fetched yet); every other row — `NULL`, or a mode
+    // that does not parse — stays all `NULL`, which is local-only, so a row
+    // that never synced keeps exactly the bytes it had. `json_valid` guards
+    // `json_extract`, which raises on malformed JSON and would otherwise fail
+    // the migration and lock the user out of every conversation.
+    (
+        6,
+        "ALTER TABLE conversations ADD COLUMN sync TEXT;
+         ALTER TABLE conversations ADD COLUMN placement TEXT;
+         ALTER TABLE conversations ADD COLUMN remote_version INTEGER;
+         ALTER TABLE conversations ADD COLUMN last_synced_at INTEGER;
+         UPDATE conversations
+            SET sync = json_object(
+                    'server_url', rtrim(json_extract(mode, '$.server_url'), '/'),
+                    'remote_id', json_extract(mode, '$.remote_id')),
+                placement = CASE
+                    WHEN json_extract(mode, '$.model_id') IS NULL
+                        THEN json_object('kind', 'cloud')
+                    ELSE json_object('kind', 'cloud', 'model_id', json_extract(mode, '$.model_id'))
+                END,
+                remote_version = 0
+          WHERE CASE WHEN json_valid(mode)
+                     THEN json_extract(mode, '$.kind') = 'hosted'
+                          AND json_extract(mode, '$.server_url') IS NOT NULL
+                          AND json_extract(mode, '$.remote_id') IS NOT NULL
+                     ELSE 0 END;
+         ALTER TABLE conversations DROP COLUMN mode;",
     ),
 ];
 
@@ -222,7 +253,8 @@ impl ConversationRepository for ConversationSqliteRepository {
         Box::pin(async move {
             let pool = pool.get().await?;
             let rows = sqlx::query(
-                "SELECT id, title, total_cost, updated_at, mode, tool_call_count, context_tokens
+                "SELECT id, title, total_cost, updated_at, sync, placement, remote_version,
+                        last_synced_at, tool_call_count, context_tokens
                  FROM conversations
                  ORDER BY updated_at DESC",
             )
@@ -236,7 +268,12 @@ impl ConversationRepository for ConversationSqliteRepository {
                     title: row.get("title"),
                     total_cost: row.get("total_cost"),
                     updated_at: row.get("updated_at"),
-                    mode: row.get("mode"),
+                    sync: ConversationSync::from_columns(
+                        row.get("sync"),
+                        row.get("placement"),
+                        row.get("remote_version"),
+                        row.get("last_synced_at"),
+                    ),
                     tool_call_count: row.get("tool_call_count"),
                     context_tokens: row.get("context_tokens"),
                 })
@@ -255,7 +292,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
                         regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot,
-                        mode, tool_call_count, context_tokens
+                        sync, placement, remote_version, last_synced_at, tool_call_count,
+                        context_tokens
                  FROM conversations
                  WHERE id = ?",
             )
@@ -278,7 +316,10 @@ impl ConversationRepository for ConversationSqliteRepository {
                 updated_at: r.get("updated_at"),
                 working_dir: r.get("working_dir"),
                 agent_task_snapshot: r.get("agent_task_snapshot"),
-                mode: r.get("mode"),
+                sync: r.get("sync"),
+                placement: r.get("placement"),
+                remote_version: r.get("remote_version"),
+                last_synced_at: r.get("last_synced_at"),
                 tool_call_count: r.get("tool_call_count"),
                 context_tokens: r.get("context_tokens"),
             }))
@@ -293,7 +334,8 @@ impl ConversationRepository for ConversationSqliteRepository {
                 "SELECT id, title, model_id, message_history, system_traces, token_usage,
                         attachment_paths, message_timestamps, message_feedback,
                         regeneration_records, created_at, updated_at, working_dir, agent_task_snapshot,
-                        mode, tool_call_count, context_tokens
+                        sync, placement, remote_version, last_synced_at, tool_call_count,
+                        context_tokens
                  FROM conversations
                  ORDER BY updated_at DESC",
             )
@@ -317,7 +359,10 @@ impl ConversationRepository for ConversationSqliteRepository {
                     updated_at: r.get("updated_at"),
                     working_dir: r.get("working_dir"),
                     agent_task_snapshot: r.get("agent_task_snapshot"),
-                    mode: r.get("mode"),
+                    sync: r.get("sync"),
+                    placement: r.get("placement"),
+                    remote_version: r.get("remote_version"),
+                    last_synced_at: r.get("last_synced_at"),
                     tool_call_count: r.get("tool_call_count"),
                     context_tokens: r.get("context_tokens"),
                 })
@@ -335,8 +380,10 @@ impl ConversationRepository for ConversationSqliteRepository {
                     (id, title, model_id, message_history, system_traces, token_usage,
                      attachment_paths, message_timestamps, message_feedback,
                      regeneration_records, total_cost, created_at, updated_at, working_dir, agent_task_snapshot,
-                     mode, tool_call_count, context_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                     sync, placement, remote_version, last_synced_at, tool_call_count,
+                     context_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                         ?18, ?19, ?20, ?21)
                  ON CONFLICT(id) DO UPDATE SET
                     title                = excluded.title,
                     model_id             = excluded.model_id,
@@ -351,7 +398,10 @@ impl ConversationRepository for ConversationSqliteRepository {
                     updated_at           = excluded.updated_at,
                     working_dir          = excluded.working_dir,
                     agent_task_snapshot  = excluded.agent_task_snapshot,
-                    mode                 = excluded.mode,
+                    sync                 = excluded.sync,
+                    placement            = excluded.placement,
+                    remote_version       = excluded.remote_version,
+                    last_synced_at       = excluded.last_synced_at,
                     tool_call_count      = excluded.tool_call_count,
                     context_tokens       = excluded.context_tokens",
             )
@@ -370,7 +420,10 @@ impl ConversationRepository for ConversationSqliteRepository {
             .bind(data.updated_at)
             .bind(&data.working_dir)
             .bind(&data.agent_task_snapshot)
-            .bind(&data.mode)
+            .bind(&data.sync)
+            .bind(&data.placement)
+            .bind(data.remote_version)
+            .bind(data.last_synced_at)
             .bind(data.tool_call_count)
             .bind(data.context_tokens)
             .execute(&pool)
@@ -518,7 +571,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .expect("read version");
-        assert_eq!(version, 5);
+        assert_eq!(version, MIGRATIONS.last().unwrap().0);
         pool.close().await;
     }
 
@@ -589,5 +642,117 @@ mod tests {
         let metadata = repo.load_metadata().await.expect("reload metadata");
         assert_eq!(metadata[0].tool_call_count, 4);
         assert_eq!(metadata[0].context_tokens, 9_000);
+    }
+
+    /// AGE-2088: a database from before the sync columns, holding a Local
+    /// row, two Hosted rows and one whose mode does not parse, opens cleanly:
+    /// Hosted becomes synced with a cloud placement, everything else is
+    /// local-only with every sync column `NULL`, and `mode` is gone.
+    #[tokio::test]
+    async fn a_pre_sync_database_migrates_hosted_to_cloud_and_local_to_local_only() {
+        use crate::models::conversation::{Placement, SyncedConversation};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("conversations.db");
+        {
+            let options = SqliteConnectOptions::new()
+                .filename(&db_path)
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Wal);
+            let pool = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .expect("open v5 pool");
+            ConversationSqliteRepository::run_migrations(&pool, &MIGRATIONS[..5])
+                .await
+                .expect("apply migrations 1-5");
+            for (id, mode, updated_at) in [
+                ("local", None, 400),
+                (
+                    "hosted",
+                    Some(
+                        r#"{"kind":"hosted","server_url":"http://localhost:8081/","remote_id":"r-1","model_id":"platform-qwen3"}"#,
+                    ),
+                    300,
+                ),
+                (
+                    "hosted-old",
+                    Some(
+                        r#"{"kind":"hosted","server_url":"https://hive.example","remote_id":"r-2"}"#,
+                    ),
+                    200,
+                ),
+                ("garbled", Some("{not json"), 100),
+            ] {
+                sqlx::query(
+                    "INSERT INTO conversations (id, title, model_id, total_cost, created_at, updated_at, mode)
+                     VALUES (?, ?, 'model-1', 0.0, 1, ?, ?)",
+                )
+                .bind(id)
+                .bind(id)
+                .bind(updated_at)
+                .bind(mode)
+                .execute(&pool)
+                .await
+                .expect("insert a v5 row");
+            }
+            pool.close().await;
+        }
+
+        let repo = ConversationSqliteRepository::deferred_with_path(db_path.clone());
+        let metadata = repo
+            .load_metadata()
+            .await
+            .expect("opening a v5 database applies migration 6 cleanly");
+        let sync_of = |id: &str| {
+            metadata
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| m.sync.clone())
+                .expect("the row survived")
+        };
+        assert_eq!(sync_of("local"), ConversationSync::LocalOnly);
+        assert_eq!(sync_of("garbled"), ConversationSync::LocalOnly);
+        assert_eq!(
+            sync_of("hosted"),
+            ConversationSync::Synced(SyncedConversation {
+                server_url: "http://localhost:8081".into(),
+                remote_id: "r-1".into(),
+                version: 0,
+                placement: Placement::Cloud {
+                    model_id: Some("platform-qwen3".into()),
+                },
+                last_synced_at: None,
+            })
+        );
+        assert_eq!(
+            sync_of("hosted-old"),
+            ConversationSync::cloud("https://hive.example", "r-2", None)
+        );
+
+        // The local row's sync columns are all NULL: the bytes it had.
+        let local = repo.load_one("local").await.unwrap().unwrap();
+        assert_eq!(
+            (
+                local.sync,
+                local.placement,
+                local.remote_version,
+                local.last_synced_at
+            ),
+            (None, None, None, None)
+        );
+        // A full row loads to the same state the metadata layer reports.
+        let hosted = repo.load_one("hosted").await.unwrap().unwrap();
+        assert_eq!(ConversationSync::of_data(&hosted), sync_of("hosted"));
+
+        let pool = repo.pool.get().await.expect("pool");
+        let mode_columns: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'mode'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count column");
+        assert_eq!(mode_columns, 0, "the mode column is dropped");
     }
 }

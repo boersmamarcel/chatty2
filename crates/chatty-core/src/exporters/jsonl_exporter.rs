@@ -413,7 +413,10 @@ mod tests {
             updated_at: 1700000100,
             working_dir: None,
             agent_task_snapshot: None,
-            mode: None,
+            sync: None,
+            placement: None,
+            remote_version: None,
+            last_synced_at: None,
             tool_call_count: 0,
             context_tokens: 0,
         }
@@ -889,7 +892,10 @@ mod tests {
             updated_at: 0,
             working_dir: None,
             agent_task_snapshot: None,
-            mode: None,
+            sync: None,
+            placement: None,
+            remote_version: None,
+            last_synced_at: None,
             tool_call_count: 0,
             context_tokens: 0,
         };

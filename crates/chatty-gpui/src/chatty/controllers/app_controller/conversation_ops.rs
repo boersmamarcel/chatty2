@@ -43,13 +43,31 @@ impl ChattyApp {
             exec.workspace_dir = Some(normalize_workspace_string(working_dir));
         }
 
-        // Look up model config by ID
-        let model_config = models.get_model(&data.model_id).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Model '{}' not found (may have been deleted)",
-                data.model_id
-            )
-        })?;
+        // Look up model config by ID. A conversation that runs in the cloud
+        // names the server's model, which this device usually has no entry
+        // for, and its turns never use the local agent built here: any local
+        // model stands in for it, so the conversation can be opened at all.
+        let mut data = data;
+        let runs_in_cloud =
+            chatty_core::models::conversation::ConversationSync::of_data(&data).runs_in_cloud();
+        let model_config = match models.get_model(&data.model_id) {
+            Some(model_config) => model_config,
+            None if runs_in_cloud => {
+                let stand_in = models.models().first().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Add a model in Settings to open this cloud conversation on this device"
+                    )
+                })?;
+                data.model_id = stand_in.id.clone();
+                stand_in
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Model '{}' not found (may have been deleted)",
+                    data.model_id
+                ));
+            }
+        };
 
         // Find matching provider
         let provider_config = providers
@@ -98,6 +116,11 @@ impl ChattyApp {
                     })
                     .map_err(|e| debug!(error = ?e, "Failed to store metadata"))
                     .ok();
+                    // The rows are what a Hive pull matches against, so the
+                    // first one waits for them (AGE-2088).
+                    weak.update(cx, |app, cx| app.hive_rows_loaded(cx))
+                        .map_err(|e| debug!(error = ?e, "Failed to start Hive sync"))
+                        .ok();
 
                     // Update sidebar immediately from metadata — no full conversation load needed
                     sidebar
@@ -269,8 +292,8 @@ impl ChattyApp {
                         // explicitly or a new chat inherits the last one.
                         state.set_selected_model_id(model_config.id.clone());
                         // A new chat is local, whatever was on screen before.
-                        state.set_conversation_mode(
-                            &chatty_core::models::conversation::ConversationMode::Local,
+                        state.set_conversation_sync(
+                            &chatty_core::models::conversation::ConversationSync::LocalOnly,
                         );
                         state.set_capabilities(
                             model_config.supports_images,
@@ -466,9 +489,13 @@ impl ChattyApp {
                             .as_ref()
                             .map(|path| path.to_string_lossy().to_string()),
                         agent_task_snapshot: None,
-                        // A new conversation is local; taking it online is an
+                        // A new conversation is local-only until pushing its
+                        // turns exists (HX-17); taking it online is an
                         // explicit action on an existing one (AGE-298).
-                        mode: None,
+                        sync: None,
+                        placement: None,
+                        remote_version: None,
+                        last_synced_at: None,
                         tool_call_count: 0,
                         context_tokens: 0,
                     };
@@ -646,7 +673,7 @@ impl ChattyApp {
     }
 
     /// Display a conversation that is already loaded in the ConversationsStore.
-    fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn display_loaded_conversation(&mut self, id: &str, cx: &mut Context<Self>) {
         // Clear stale invoke_agent IDs from the previous conversation to
         // prevent suppressing ToolCallBlocks that happen to share an ID.
         self.active_invoke_agent_ids.clear();
@@ -665,7 +692,7 @@ impl ChattyApp {
                     conv.streaming_delegation_traces().to_vec(),
                     conv.working_dir().cloned(),
                     conv.agent_task_snapshot().cloned(),
-                    conv.mode().clone(),
+                    conv.sync().clone(),
                 )
             });
 
@@ -676,7 +703,7 @@ impl ChattyApp {
             streaming_delegation_traces,
             conversation_working_dir,
             agent_task_snapshot,
-            conversation_mode,
+            conversation_sync,
         )) = minimal_data
         {
             // Check if this conversation has an active stream via StreamManager
@@ -719,7 +746,7 @@ impl ChattyApp {
                 // Update the selected model and capabilities in the chat input
                 view.chat_input_state().update(cx, |state, cx| {
                     state.set_selected_model_id(model_id);
-                    state.set_conversation_mode(&conversation_mode);
+                    state.set_conversation_sync(&conversation_sync);
                     state.set_capabilities(model_capabilities.0, model_capabilities.1);
 
                     // Restore streaming state if conversation has active stream
@@ -776,6 +803,10 @@ impl ChattyApp {
             self.sidebar_view.update(cx, |sidebar, cx| {
                 sidebar.reroot_for_conversation(skills_dir, cx);
             });
+
+            // A conversation that runs in the cloud: bring it up to date,
+            // load what its run waits on, follow its turn (HX-10, HX-11).
+            self.on_cloud_conversation_shown(&conv_id, cx);
         }
     }
 }

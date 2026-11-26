@@ -208,6 +208,7 @@ AppData folder. On Linux they differ (`~/.config` vs `~/.local/share`).
 | `training_settings.json` | object | `TrainingSettingsModel` | `TrainingSettingsJsonRepository` |
 | `user_secrets.json` | object | `UserSecretsModel` | `UserSecretsJsonRepository` |
 | `hive_settings.json` | object | `HiveSettingsModel` | `HiveSettingsJsonRepository` |
+| `hive_tui_settings.json` | object | `HiveSettingsModel` | `HiveTuiSettingsJsonRepository` |
 | `extensions.json` | object | `ExtensionsModel` | `ExtensionsJsonRepository` |
 | `token_tracking.json` | object | `TokenTrackingSettings` | `TokenTrackingJsonRepository` |
 | `module_settings.json` | object | `ModuleSettingsModel` | `ModuleSettingsJsonRepository` |
@@ -367,6 +368,15 @@ Source: `settings/models/hive_settings.rs`.
 | `expires_at` | `Option<DateTime>` | `null` | When `token` expires |
 | `username` | `Option<String>` | `null` | Cached for UI |
 | `email` | `Option<String>` | `null` | Cached for re-login |
+
+---
+
+## `hive_tui_settings.json` — `HiveSettingsModel`
+
+Source: `tui_hive.rs`. The terminal app's own Hive sign-in, the same shape as
+`hive_settings.json` but a separate pair (secret refs `hive-tui/token` and
+`hive-tui/refresh_token`), so the TUI never spends the desktop's single-use
+refresh token.
 
 ---
 

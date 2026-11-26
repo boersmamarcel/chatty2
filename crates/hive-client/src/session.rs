@@ -59,7 +59,7 @@ impl HiveSession {
 
     /// A session that uses `pair`'s access token as it is and never
     /// refreshes it: for a process that reads the pair another process owns
-    /// (a desktop worker reads the desktop's). Refresh tokens rotate on use
+    /// (a delegated worker reads its root's). Refresh tokens rotate on use
     /// and a reused one revokes the whole family, so only the owner may
     /// spend it; once the borrowed access token expires, calls answer 401.
     pub fn borrowed(base_url: impl Into<String>, pair: Option<TokenPair>) -> Self {

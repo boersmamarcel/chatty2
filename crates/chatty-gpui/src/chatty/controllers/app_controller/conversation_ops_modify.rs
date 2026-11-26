@@ -17,9 +17,8 @@
 use super::export_ops::{write_atif_export, write_jsonl_export};
 use super::*;
 
-use chatty_core::models::conversation::ConversationMode;
-use chatty_core::session::{fetch_hosted, refuse_reason, take_online};
-use rig_core::completion::Message;
+use chatty_core::models::conversation::ConversationSync;
+use chatty_core::session::{RemoteConversation, fetch_hosted, refuse_reason, take_online};
 
 use crate::chatty::views::MoveConversationDialog;
 
@@ -27,9 +26,9 @@ use crate::chatty::views::MoveConversationDialog;
 /// place with the conversation borrowed once (AGE-298).
 enum MoveOutcome {
     /// The server accepted the history and named it; this is where it lives now.
-    WentOnline(ConversationMode),
+    WentOnline(ConversationSync),
     /// The server's copy of the history, to reconcile against the local one.
-    CameBack(Vec<Message>),
+    CameBack(Box<RemoteConversation>),
 }
 
 /// Whether the per-conversation move between this machine and a server is
@@ -418,22 +417,18 @@ impl ChattyApp {
         let store = cx.global::<ConversationsStore>();
         let mode = store
             .get_conversation(&conv_id)
-            .map(|conversation| conversation.mode().clone())
+            .map(|conversation| conversation.sync().clone())
             .unwrap_or_else(|| {
                 if store.is_hosted(&conv_id) {
-                    // Not loaded, but the row says it is hosted. The dialog
-                    // only needs the direction; the address is read again when
-                    // the move runs, off the loaded conversation.
-                    ConversationMode::Hosted {
-                        server_url: String::new(),
-                        remote_id: String::new(),
-                        model_id: None,
-                    }
+                    // Not loaded, but the row says it runs in the cloud. The
+                    // dialog only needs the direction; the address is read
+                    // again when the move runs, off the loaded conversation.
+                    ConversationSync::cloud(String::new(), String::new(), None)
                 } else {
-                    ConversationMode::Local
+                    ConversationSync::LocalOnly
                 }
             });
-        let going_online = !mode.is_hosted();
+        let going_online = !mode.runs_in_cloud();
         let turn_active = store.is_streaming(&conv_id);
 
         if let Some(reason) = refuse_reason(turn_active, &mode, going_online) {
@@ -477,7 +472,7 @@ impl ChattyApp {
                 (
                     conversation.title().to_string(),
                     conversation.messages(),
-                    conversation.mode().clone(),
+                    conversation.sync().clone(),
                 )
             });
         let auth = cx.global::<ConversationsStore>().hosted_auth();
@@ -501,12 +496,12 @@ impl ChattyApp {
                     .await
                     .map(MoveOutcome::WentOnline),
                 None => {
-                    let Some((server_url, remote_id)) = mode.hosted_on() else {
+                    let Some((server_url, remote_id)) = mode.cloud_on() else {
                         return Ok(());
                     };
                     fetch_hosted(server_url, remote_id, auth.as_deref())
                         .await
-                        .map(|remote| MoveOutcome::CameBack(remote.messages))
+                        .map(|remote| MoveOutcome::CameBack(Box::new(remote)))
                 }
             };
 
@@ -534,30 +529,33 @@ impl ChattyApp {
                     match outcome {
                         MoveOutcome::WentOnline(new_mode) => {
                             let where_to = new_mode
-                                .hosted_on()
+                                .cloud_on()
                                 .map(|(url, _)| url.to_string())
                                 .unwrap_or_default();
-                            store.set_conversation_mode(&conv_id, new_mode);
+                            store.set_conversation_sync(&conv_id, new_mode);
                             format!("This conversation now runs on {where_to}.")
                         }
-                        MoveOutcome::CameBack(messages) => {
+                        MoveOutcome::CameBack(remote) => {
                             // The local side applied every event of every
                             // hosted turn it was present for, so its history is
-                            // usually already complete *and* richer — it has
-                            // the traces the wire does not carry. The server's
-                            // copy is taken only when it is longer, which is
-                            // the case it exists for: turns this client missed.
+                            // usually already complete. The server's copy is
+                            // adopted only when it is longer, which is the case
+                            // it exists for: turns this client missed.
+                            // `replace_from_remote` keeps the traces and other
+                            // per-message metadata either side has (AGE-2088).
                             let local_len = store
                                 .get_conversation(&conv_id)
                                 .map(|conversation| conversation.messages().len())
                                 .unwrap_or(0);
-                            let missed = messages.len().saturating_sub(local_len);
+                            let missed = remote.messages.len().saturating_sub(local_len);
                             if missed > 0 && let Some(conversation) =
                                 store.get_conversation_mut(&conv_id)
+                                && let Err(error) = conversation
+                                    .replace_from_remote(remote.to_conversation_data(&conv_id))
                             {
-                                conversation.import_history(messages);
+                                warn!(conv_id = %conv_id, error = ?error, "Could not adopt the server's history");
                             }
-                            store.set_conversation_mode(&conv_id, ConversationMode::Local);
+                            store.set_conversation_sync(&conv_id, ConversationSync::LocalOnly);
                             match missed {
                                 0 => "This conversation runs on this machine again.".to_string(),
                                 n => format!(

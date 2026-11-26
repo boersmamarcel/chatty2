@@ -40,6 +40,14 @@ pub fn update_sidebar_mode(cx: &mut App, mode: SidebarMode) {
     .detach();
 }
 
+/// Turn the cloud-conversation notifications on or off and persist it
+/// (HX-12).
+pub fn update_cloud_notifications(cx: &mut App, enabled: bool) {
+    cx.global_mut::<GeneralSettingsModel>()
+        .notify_cloud_conversations = enabled;
+    save_general_settings(cx);
+}
+
 /// Write the current general settings to disk (for changes already applied
 /// to the global, e.g. the terminal dock's height after a drag).
 pub fn save_general_settings(cx: &mut App) {

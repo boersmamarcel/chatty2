@@ -9,47 +9,34 @@
 //! telling the user different things about what leaves their machine.
 //!
 //! The dialog does not perform the move; it collects the decision and hands
-//! the server URL back to the controller, which owns the ordering that makes a
+//! the account's Hive address (AGE-2085: one address, no field to type)
+//! back to the controller, which owns the ordering that makes a
 //! failed move harmless.
 
 use chatty_core::session::{BRING_BACK_SUMMARY, MoveSummary, TAKE_ONLINE_SUMMARY};
+use chatty_core::settings::models::hive_settings::HiveSettingsModel;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::{
-    ActiveTheme, Sizable, WindowExt,
+    ActiveTheme, Disableable, Sizable, WindowExt,
     button::{Button, ButtonVariants},
-    h_flex,
-    input::{Input, InputState},
-    v_flex,
+    h_flex, v_flex,
 };
 
 use crate::chatty::controllers::GlobalChattyApp;
 
-/// The dialog's body: the table, and — when going online — where to.
+/// The dialog's body: what moves and what does not.
 pub struct MoveConversationView {
     conv_id: String,
     /// `true` when the conversation is local and this is the trip out.
     going_online: bool,
-    /// Where to send it. Unused when bringing one back.
-    server_input: Entity<InputState>,
 }
 
 impl MoveConversationView {
-    pub fn new(
-        conv_id: String,
-        going_online: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let server_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("http://localhost:8081")
-                .default_value("http://localhost:8081")
-        });
+    pub fn new(conv_id: String, going_online: bool) -> Self {
         Self {
             conv_id,
             going_online,
-            server_input,
         }
     }
 
@@ -67,7 +54,12 @@ impl Render for MoveConversationView {
         let summary = self.summary();
         let going_online = self.going_online;
         let conv_id = self.conv_id.clone();
-        let server_input = self.server_input.clone();
+        let hive = cx.global::<HiveSettingsModel>();
+        let hive_url = hive.hive_url.clone();
+        let signed_in = hive.is_logged_in();
+        // Going online needs the account; bringing one back needs it too, but
+        // that path already says so itself when the server answers 401.
+        let blocked = going_online && !signed_in;
 
         v_flex()
             .gap_4()
@@ -77,9 +69,9 @@ impl Render for MoveConversationView {
                     .text_sm()
                     .text_color(cx.theme().muted_foreground)
                     .child(if going_online {
-                        "This conversation's history will be uploaded to the server you name and will run there until you bring it back. It stays on this machine too."
+                        format!("This conversation's history will be uploaded to your Hive account at {hive_url} and will run there until you bring it back. It stays on this machine too.")
                     } else {
-                        "This conversation will run on this machine again. Anything it did online that was not part of the conversation stays there."
+                        "This conversation will run on this machine again. Anything it did online that was not part of the conversation stays there.".to_string()
                     }),
             )
             .child(
@@ -132,12 +124,12 @@ impl Render for MoveConversationView {
                             )
                     })),
             )
-            .when(going_online, |this| {
+            .when(blocked, |this| {
                 this.child(
-                    v_flex()
-                        .gap_1()
-                        .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).child("Server"))
-                        .child(Input::new(&server_input)),
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().danger)
+                        .child("You are not signed in to Hive. Sign in under Settings → Extensions → Hive account, then try again."),
                 )
             })
             .child(
@@ -162,15 +154,9 @@ impl Render for MoveConversationView {
                             })
                             .small()
                             .primary()
+                            .disabled(blocked)
                             .on_click(move |_event, window, cx| {
-                                let target = going_online
-                                    .then(|| server_input.read(cx).value().trim().to_string())
-                                    .filter(|url| !url.is_empty());
-                                if going_online && target.is_none() {
-                                    // Nothing leaves this machine without a
-                                    // destination: refuse rather than guess one.
-                                    return;
-                                }
+                                let target = going_online.then(|| hive_url.clone());
                                 window.close_dialog(cx);
                                 if let Some(app) = cx
                                     .try_global::<GlobalChattyApp>()
@@ -191,7 +177,7 @@ pub struct MoveConversationDialog;
 
 impl MoveConversationDialog {
     pub fn open(conv_id: String, going_online: bool, window: &mut Window, cx: &mut App) {
-        let view = cx.new(|cx| MoveConversationView::new(conv_id, going_online, window, cx));
+        let view = cx.new(|_cx| MoveConversationView::new(conv_id, going_online));
         window.open_dialog(cx, move |dialog, _window, _cx| {
             dialog
                 .title(if going_online {

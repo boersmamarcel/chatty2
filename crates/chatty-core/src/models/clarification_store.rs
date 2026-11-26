@@ -52,7 +52,7 @@ fn notify_clarification(
 ///
 /// The free-text escape hatch is not part of this struct: every question
 /// implicitly accepts a custom answer, and the UI always renders that entry.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct ClarifyingQuestion {
     /// Stable key the model uses to match answers back to questions.
     pub id: String,

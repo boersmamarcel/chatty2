@@ -7,23 +7,43 @@ use crate::models::clarification_store::ClarificationAnswer;
 use crate::models::execution_approval_store::ApprovalDecision;
 use crate::models::write_approval_store::WriteApprovalDecision;
 use crate::repositories::ConversationMetadata;
-use crate::session::{AgentSession, HostedSession};
+use crate::services::hive_sync::TurnStatus;
+use crate::session::{
+    AgentSession, AnswerOutcome, HostedFrame, HostedSession, InputAnswer, hosted::FrameSink,
+};
 
-use super::conversation::{Conversation, ConversationMode};
-
-/// The mode as the row and the metadata layer carry it: `None` for Local, so
-/// a conversation that never moves is stored exactly as it was before AGE-298.
-fn serialize_mode(mode: &ConversationMode) -> Option<String> {
-    match mode {
-        ConversationMode::Local => None,
-        hosted => serde_json::to_string(hosted).ok(),
-    }
-}
+use super::conversation::{Conversation, ConversationSync};
 
 /// Maximum number of full conversation objects kept in memory.
 /// When the cache exceeds this limit, the least recently used conversations are evicted.
 /// They will be re-loaded from SQLite on demand if the user navigates back.
 const MAX_CACHED_CONVERSATIONS: usize = 10;
+
+/// What the sidebar shows beside a conversation that runs in the cloud
+/// (HX-10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudMark {
+    /// A turn is running on the server.
+    Running,
+    /// A turn is waiting for an answer from the user.
+    WaitingForYou,
+    /// A turn finished since this conversation was last opened.
+    Done,
+    /// A turn failed since this conversation was last opened.
+    Failed,
+}
+
+/// A frame from a hosted conversation that is not a session event, with the
+/// local conversation it came from.
+pub type HostedUiFrame = (String, HostedFrame);
+
+/// An approval or question a cloud run is waiting on: the address the
+/// answer needs (HX-11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingInputRef {
+    conversation_id: String,
+    nonce: String,
+}
 
 /// Global store for all conversations.
 ///
@@ -42,16 +62,31 @@ pub struct ConversationsStore {
     /// Full conversation data, populated on demand when the user selects a conversation.
     /// Bounded to `MAX_CACHED_CONVERSATIONS` entries via LRU eviction.
     sessions: HashMap<String, AgentSession>,
-    /// The hosted client for each loaded conversation whose mode is
-    /// `Hosted` (AGE-298). Keyed like `sessions` and derived from the
-    /// conversation's own mode when it is loaded, so the two cannot disagree
-    /// about where a conversation runs. A conversation always has a session;
+    /// The hosted client for each loaded conversation whose turns run in the
+    /// cloud (AGE-298, AGE-2088). Keyed like `sessions` and derived from the
+    /// conversation's own sync state when it is loaded, so the two cannot
+    /// disagree about where a conversation runs. A conversation always has a session;
     /// it has an entry here as well only while it runs elsewhere.
     hosted: HashMap<String, HostedSession>,
     /// The Hive sign-in every hosted client authenticates with (AGE-835): a
     /// `chatty-server` validates the same login session the registry issued.
     /// `None` until the frontend installs its session.
     hosted_auth: Option<Arc<HiveSession>>,
+    /// Where a hosted conversation's non-event frames go: the owner reads the
+    /// other end (HX-11). Installed once; every hosted client's sink writes
+    /// to it, tagged with its conversation.
+    frame_tx: Option<futures::channel::mpsc::UnboundedSender<HostedUiFrame>>,
+    /// Whether each synced conversation's turn is running on the server, from
+    /// the last pull. Live state: never persisted (HX-10).
+    turn_status: HashMap<String, TurnStatus>,
+    /// Conversations whose turn finished / failed since they were last
+    /// opened, for the sidebar's mark.
+    finished: HashSet<String>,
+    failed: HashSet<String>,
+    /// Approvals and questions cloud runs wait on, by input id.
+    /// Behind a lock because the answer routes (`resolve_*_remotely`) only
+    /// borrow the store shared.
+    inputs: std::sync::Mutex<HashMap<String, PendingInputRef>>,
     /// Tracks access order for LRU eviction. Most recently used at the back.
     access_order: VecDeque<String>,
     active_conversation_id: Option<String>,
@@ -67,6 +102,11 @@ impl ConversationsStore {
             sessions: HashMap::new(),
             hosted: HashMap::new(),
             hosted_auth: None,
+            frame_tx: None,
+            turn_status: HashMap::new(),
+            finished: HashSet::new(),
+            failed: HashSet::new(),
+            inputs: std::sync::Mutex::new(HashMap::new()),
             access_order: VecDeque::new(),
             active_conversation_id: None,
             streaming_ids: HashSet::new(),
@@ -99,36 +139,40 @@ impl ConversationsStore {
         self.metadata.iter().map(|m| m.id.clone()).collect()
     }
 
-    /// Does this conversation run on a server (AGE-298)?
+    /// Do this conversation's turns run on a server (AGE-298)?
     ///
-    /// Answered from the metadata layer, so the sidebar can badge a hosted
+    /// Answered from the metadata layer, so the sidebar can badge a cloud
     /// conversation without loading it — which is the point of that layer.
     /// A loaded conversation is asked directly, because it is the fresher of
     /// the two right after a move.
     pub fn is_hosted(&self, id: &str) -> bool {
         if let Some(conversation) = self.get_conversation(id) {
-            return conversation.mode().is_hosted();
+            return conversation.sync().runs_in_cloud();
         }
         self.metadata
             .iter()
             .find(|m| m.id == id)
-            .and_then(|m| m.mode.as_deref())
-            .and_then(|json| serde_json::from_str::<ConversationMode>(json).ok())
-            .is_some_and(|mode| mode.is_hosted())
+            .is_some_and(|m| m.sync.runs_in_cloud())
+    }
+
+    /// Every conversation's metadata row, newest first: the local side of a
+    /// sync pull (AGE-2088).
+    pub fn metadata(&self) -> &[ConversationMetadata] {
+        &self.metadata
     }
 
     /// Insert or update a single metadata entry and re-sort by updated_at descending.
     pub fn upsert_metadata(&mut self, id: &str, title: &str, total_cost: f64, updated_at: i64) {
-        // The mode is not a parameter: every caller of this is reporting a
-        // title/cost change after a turn, and none of them knows where the
-        // conversation runs. It is set by a move, through
-        // [`set_conversation_mode`](Self::set_conversation_mode), and read
+        // The sync state is not a parameter: every caller of this is
+        // reporting a title/cost change after a turn, and none of them knows
+        // where the conversation runs. It is set by a move or a pull, through
+        // [`set_conversation_sync`](Self::set_conversation_sync), and read
         // back from the row on the next load. The turn totals (AGE-351) are
         // taken from the loaded conversation the same way: the session
         // accumulates them at the turn barrier, and the row carries them.
         let loaded = self.get_conversation(id).map(|conversation| {
             (
-                conversation.mode().clone(),
+                conversation.sync().clone(),
                 conversation.tool_call_count(),
                 conversation.context_tokens(),
             )
@@ -137,19 +181,19 @@ impl ConversationsStore {
             entry.title = title.to_string();
             entry.total_cost = total_cost;
             entry.updated_at = updated_at;
-            if let Some((mode, tool_call_count, context_tokens)) = loaded {
-                entry.mode = serialize_mode(&mode);
+            if let Some((sync, tool_call_count, context_tokens)) = loaded {
+                entry.sync = sync;
                 entry.tool_call_count = tool_call_count;
                 entry.context_tokens = context_tokens;
             }
         } else {
-            let (mode, tool_call_count, context_tokens) = loaded.unwrap_or_default();
+            let (sync, tool_call_count, context_tokens) = loaded.unwrap_or_default();
             self.metadata.push(ConversationMetadata {
                 id: id.to_string(),
                 title: title.to_string(),
                 total_cost,
                 updated_at,
-                mode: serialize_mode(&mode),
+                sync,
                 tool_call_count,
                 context_tokens,
             });
@@ -181,23 +225,11 @@ impl ConversationsStore {
             tracing::warn!("Ignoring a session with no conversation");
             return;
         };
-        // The hosted client is derived from the conversation's own mode, here
-        // and nowhere else, so "where the row says it runs" and "where turns
-        // actually go" cannot drift apart (AGE-298).
-        match session.conversation().map(|c| c.mode().clone()) {
-            Some(ConversationMode::Hosted {
-                server_url,
-                remote_id,
-                ..
-            }) => {
-                let client =
-                    HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
-                self.hosted.insert(id.clone(), client);
-            }
-            _ => {
-                self.hosted.remove(&id);
-            }
-        }
+        // The hosted client is derived from the conversation's own sync
+        // state, here and nowhere else, so "where the row says it runs" and
+        // "where turns actually go" cannot drift apart (AGE-298).
+        let sync = session.conversation().map(|c| c.sync().clone());
+        self.follow_placement(&id, sync.as_ref());
         self.sessions.insert(id.clone(), session);
         self.touch_access_order(&id);
         self.evict_if_needed();
@@ -238,29 +270,244 @@ impl ConversationsStore {
         Some((session, self.hosted.get_mut(id)))
     }
 
-    /// Record where a conversation runs after a move completed.
+    /// Record a conversation's new sync state after a move or a pull
+    /// completed.
     ///
-    /// Called with the conversation's new mode *after* the history transfer
-    /// succeeded — never before, so a failed move leaves both the row and this
-    /// map describing the place the conversation is still running.
-    pub fn set_conversation_mode(&mut self, id: &str, mode: ConversationMode) {
-        match &mode {
-            ConversationMode::Hosted {
-                server_url,
-                remote_id,
-                ..
-            } => {
-                let client =
-                    HostedSession::new(server_url, remote_id).with_auth(self.hosted_auth.clone());
-                self.hosted.insert(id.to_string(), client);
+    /// Called *after* the history transfer succeeded — never before, so a
+    /// failed move leaves the row, the metadata and the hosted client all
+    /// describing the place the conversation is still running.
+    pub fn set_conversation_sync(&mut self, id: &str, sync: ConversationSync) {
+        self.follow_placement(id, Some(&sync));
+        if let Some(entry) = self.metadata.iter_mut().find(|m| m.id == id) {
+            entry.sync = sync.clone();
+        }
+        if let Some(conversation) = self.get_conversation_mut(id) {
+            conversation.set_sync(sync);
+        }
+    }
+
+    /// Apply a sync pull's actions to the in-memory layer (AGE-2088): the
+    /// sidebar's metadata, every loaded conversation's title and sync state,
+    /// and the hosted clients that follow the placement.
+    ///
+    /// Returns the actions to carry out on the persisted rows: every one,
+    /// less the tombstones of a conversation that is open or streaming,
+    /// which are left for a later pull rather than pulled out from under the
+    /// user (a full pull at the next start deletes them).
+    pub fn apply_sync_actions(
+        &mut self,
+        actions: &[crate::services::hive_sync::SyncAction],
+    ) -> Vec<crate::services::hive_sync::SyncAction> {
+        use crate::services::hive_sync::{SyncAction, apply_to_rows};
+
+        let kept: Vec<SyncAction> = actions
+            .iter()
+            .filter(|action| match action {
+                SyncAction::ApplyTombstone { local_id } => {
+                    let busy = self.active_conversation_id.as_deref() == Some(local_id.as_str())
+                        || self.streaming_ids.contains(local_id);
+                    if busy {
+                        tracing::info!(
+                            conv_id = %local_id,
+                            "Not deleting an open conversation the server deleted; a later pull will"
+                        );
+                    }
+                    !busy
+                }
+                _ => true,
+            })
+            .cloned()
+            .collect();
+
+        apply_to_rows(&mut self.metadata, &kept);
+        for action in &kept {
+            match action {
+                SyncAction::UpsertMetadata(remote) => {
+                    self.set_turn_status(&remote.local_id, remote.turn_status);
+                    self.follow_placement(&remote.local_id, Some(&remote.sync));
+                    if let Some(conversation) = self.get_conversation_mut(&remote.local_id) {
+                        conversation.set_title(remote.title.clone());
+                        conversation.set_sync(remote.sync.clone());
+                    }
+                }
+                SyncAction::MarkDetailStale { local_id } => {
+                    if let Some(conversation) = self.get_conversation_mut(local_id)
+                        && let ConversationSync::Synced(synced) = conversation.sync()
+                    {
+                        let mut synced = synced.clone();
+                        synced.last_synced_at = None;
+                        conversation.set_sync(ConversationSync::Synced(synced));
+                    }
+                }
+                SyncAction::ApplyTombstone { local_id } => {
+                    self.sessions.remove(local_id);
+                    self.hosted.remove(local_id);
+                    self.access_order.retain(|id| id != local_id);
+                }
+                SyncAction::FullResync => {}
             }
-            ConversationMode::Local => {
+        }
+        kept
+    }
+
+    /// Keep the hosted client in step with where `id`'s turns run: present
+    /// exactly while its placement is the cloud.
+    fn follow_placement(&mut self, id: &str, sync: Option<&ConversationSync>) {
+        match sync.and_then(ConversationSync::cloud_on) {
+            Some((server_url, remote_id)) => {
+                let unchanged = self.hosted.get(id).is_some_and(|client| {
+                    client.server_url() == server_url && client.remote_id() == remote_id
+                });
+                if !unchanged {
+                    let mut client = HostedSession::new(server_url, remote_id)
+                        .with_auth(self.hosted_auth.clone());
+                    if let Some(sink) = self.frame_sink(id) {
+                        client.set_frame_sink(sink);
+                    }
+                    self.hosted.insert(id.to_string(), client);
+                }
+            }
+            None => {
                 self.hosted.remove(id);
             }
         }
-        if let Some(conversation) = self.get_conversation_mut(id) {
-            conversation.set_mode(mode);
+    }
+
+    /// Where the frames hosted conversations send that are not session events
+    /// (broker inputs, connector sign-in, …) go. Present and future hosted
+    /// clients write to `tx`, each frame tagged with its conversation.
+    pub fn set_frame_channel(
+        &mut self,
+        tx: futures::channel::mpsc::UnboundedSender<HostedUiFrame>,
+    ) {
+        self.frame_tx = Some(tx);
+        let ids: Vec<String> = self.hosted.keys().cloned().collect();
+        for id in ids {
+            if let Some(sink) = self.frame_sink(&id)
+                && let Some(client) = self.hosted.get_mut(&id)
+            {
+                client.set_frame_sink(sink);
+            }
         }
+    }
+
+    fn frame_sink(&self, conversation_id: &str) -> Option<FrameSink> {
+        let tx = self.frame_tx.clone()?;
+        let conversation_id = conversation_id.to_string();
+        Some(Arc::new(move |frame| {
+            // The receiver is the app; gone means the app is closing.
+            let _ = tx.unbounded_send((conversation_id.clone(), frame));
+        }))
+    }
+
+    /// The hosted client of a conversation, to attach to its running turn.
+    pub fn hosted_mut(&mut self, id: &str) -> Option<&mut HostedSession> {
+        self.hosted.get_mut(id)
+    }
+
+    // ── Cloud status (HX-10) ──────────────────────────────────────────────────
+
+    /// Record what a pull saw of a conversation's turn on the server.
+    ///
+    /// A turn that stopped since the last pull leaves the conversation marked
+    /// done until it is opened.
+    pub fn set_turn_status(&mut self, id: &str, status: TurnStatus) {
+        let before = self.turn_status.insert(id.to_string(), status);
+        let was_busy = matches!(
+            before,
+            Some(TurnStatus::Running | TurnStatus::WaitingForYou)
+        );
+        let busy = matches!(status, TurnStatus::Running | TurnStatus::WaitingForYou);
+        if was_busy && !busy && self.active_conversation_id.as_deref() != Some(id) {
+            self.finished.insert(id.to_string());
+        }
+        if busy {
+            self.finished.remove(id);
+            self.failed.remove(id);
+        }
+    }
+
+    /// Whether the conversation's turn runs on the server right now, as of
+    /// the last pull.
+    pub fn turn_status(&self, id: &str) -> TurnStatus {
+        self.turn_status.get(id).copied().unwrap_or_default()
+    }
+
+    /// A turn of this cloud conversation failed; shown until it is opened.
+    pub fn mark_cloud_failed(&mut self, id: &str) {
+        if self.active_conversation_id.as_deref() != Some(id) {
+            self.failed.insert(id.to_string());
+        }
+    }
+
+    /// The sidebar's mark for a conversation, `None` when there is nothing to
+    /// say (not a cloud conversation, or idle with nothing new).
+    pub fn cloud_mark(&self, id: &str) -> Option<CloudMark> {
+        if !self.is_hosted(id) {
+            return None;
+        }
+        match self.turn_status(id) {
+            TurnStatus::Running => Some(CloudMark::Running),
+            TurnStatus::WaitingForYou => Some(CloudMark::WaitingForYou),
+            _ if self.failed.contains(id) => Some(CloudMark::Failed),
+            _ if self.finished.contains(id) => Some(CloudMark::Done),
+            _ => None,
+        }
+    }
+
+    // ── Inputs a cloud run waits on (HX-11) ───────────────────────────────────
+
+    /// Remember an input so an answer to its id can be addressed.
+    pub fn remember_input(&self, conversation_id: &str, input_id: &str, nonce: &str) {
+        if let Ok(mut inputs) = self.inputs.lock() {
+            inputs.insert(
+                input_id.to_string(),
+                PendingInputRef {
+                    conversation_id: conversation_id.to_string(),
+                    nonce: nonce.to_string(),
+                },
+            );
+        }
+    }
+
+    pub fn forget_input(&self, input_id: &str) {
+        if let Ok(mut inputs) = self.inputs.lock() {
+            inputs.remove(input_id);
+        }
+    }
+
+    /// Answer a broker input if `input_id` is one; `None` when it is not (the
+    /// caller then tries the conversation's own approvals). A refused-as-stale
+    /// answer reports itself on the frame channel as
+    /// [`HostedFrame::InputStale`], since the caller that spawns this future
+    /// has nowhere to read an outcome.
+    fn answer_broker_input(
+        &self,
+        input_id: &str,
+        answer: InputAnswer,
+    ) -> Option<futures::future::BoxFuture<'static, ()>> {
+        let input = self.inputs.lock().ok()?.get(input_id)?.clone();
+        let client = self.hosted.get(&input.conversation_id)?;
+        let send = client.answer_input(input_id, &input.nonce, answer);
+        let tx = self.frame_tx.clone();
+        let conversation_id = input.conversation_id;
+        let input_id = input_id.to_string();
+        Some(Box::pin(async move {
+            match send.await {
+                AnswerOutcome::Accepted => {}
+                AnswerOutcome::Stale => {
+                    if let Some(tx) = tx {
+                        let _ = tx.unbounded_send((
+                            conversation_id,
+                            HostedFrame::InputStale { id: input_id },
+                        ));
+                    }
+                }
+                AnswerOutcome::Failed(error) => {
+                    tracing::warn!(%error, "failed to answer a cloud run's input");
+                }
+            }
+        }))
     }
 
     /// Move an ID to the back of the access order (most recently used).
@@ -276,7 +523,7 @@ impl ConversationsStore {
             let evict_id = self.find_lru_evictable();
             if let Some(id) = evict_id {
                 self.sessions.remove(&id);
-                // The hosted client is rebuilt from the conversation's mode
+                // The hosted client is rebuilt from the conversation's sync state
                 // when it is loaded again, so it is cache, not state.
                 self.hosted.remove(&id);
                 self.access_order.retain(|s| s != &id);
@@ -401,6 +648,9 @@ impl ConversationsStore {
         id: &str,
         approved: bool,
     ) -> impl Future<Output = ()> + use<> {
+        // An approval a worker in the cloud run raised is answered on the
+        // input's own route, with its nonce (HX-11).
+        let broker = self.answer_broker_input(id, InputAnswer::Approval(approved));
         let sends: Vec<_> = self
             .hosted
             .values()
@@ -408,7 +658,12 @@ impl ConversationsStore {
             .map(|remote| remote.resolve_approval(id, approved))
             .collect();
         async move {
-            futures::future::join_all(sends).await;
+            match broker {
+                Some(broker) => broker.await,
+                None => {
+                    futures::future::join_all(sends).await;
+                }
+            }
         }
     }
 
@@ -419,6 +674,7 @@ impl ConversationsStore {
         id: &str,
         answers: Vec<ClarificationAnswer>,
     ) -> impl Future<Output = ()> + use<> {
+        let broker = self.answer_broker_input(id, InputAnswer::Answers(answers.clone()));
         let sends: Vec<_> = self
             .hosted
             .values()
@@ -426,7 +682,12 @@ impl ConversationsStore {
             .map(|remote| remote.resolve_clarification(id, answers.clone()))
             .collect();
         async move {
-            futures::future::join_all(sends).await;
+            match broker {
+                Some(broker) => broker.await,
+                None => {
+                    futures::future::join_all(sends).await;
+                }
+            }
         }
     }
 
@@ -455,6 +716,8 @@ impl ConversationsStore {
     /// or lazy-loading it, before the metadata list has been updated. Prefer `set_active`
     /// when you want existence validation.
     pub fn set_active_by_id(&mut self, id: String) {
+        self.finished.remove(&id);
+        self.failed.remove(&id);
         self.touch_access_order(&id);
         self.active_conversation_id = Some(id);
     }
@@ -636,32 +899,25 @@ mod tests {
             .iter_mut()
             .find(|m| m.id == "conv-1")
             .unwrap()
-            .mode = Some(
-            r#"{"kind":"hosted","server_url":"http://localhost:8081","remote_id":"r-1"}"#
-                .to_string(),
-        );
+            .sync = ConversationSync::cloud("http://localhost:8081", "r-1", None);
 
         assert!(store.is_hosted("conv-1"));
         assert!(!store.is_hosted("conv-0"));
         assert!(!store.is_hosted("never-seen"));
     }
 
-    /// The hosted client follows the mode: a move online creates it, a move
-    /// back removes it, and a delete never leaves one behind. Both maps are
-    /// written from the same call so they cannot disagree about where a
+    /// The hosted client follows the placement: a move online creates it, a
+    /// move back removes it, and a delete never leaves one behind. Both maps
+    /// are written from the same call so they cannot disagree about where a
     /// conversation runs.
     #[test]
-    fn the_hosted_client_follows_the_conversation_mode() {
+    fn the_hosted_client_follows_the_conversation_placement() {
         let mut store = ConversationsStore::new();
         insert_dummy(&mut store, "a");
 
-        store.set_conversation_mode(
+        store.set_conversation_sync(
             "a",
-            ConversationMode::Hosted {
-                server_url: "http://localhost:8081/".to_string(),
-                remote_id: "r-1".to_string(),
-                model_id: None,
-            },
+            ConversationSync::cloud("http://localhost:8081/", "r-1", None),
         );
         let hosted = store
             .get_hosted("a")
@@ -669,19 +925,51 @@ mod tests {
         assert_eq!(hosted.server_url(), "http://localhost:8081");
         assert_eq!(hosted.remote_id(), "r-1");
 
-        store.set_conversation_mode("a", ConversationMode::Local);
+        store.set_conversation_sync("a", ConversationSync::LocalOnly);
         assert!(store.get_hosted("a").is_none(), "back home, no client");
 
-        store.set_conversation_mode(
+        store.set_conversation_sync(
             "a",
-            ConversationMode::Hosted {
-                server_url: "http://localhost:8081".to_string(),
-                remote_id: "r-2".to_string(),
-                model_id: None,
-            },
+            ConversationSync::cloud("http://localhost:8081", "r-2", None),
         );
         store.delete_conversation("a");
         assert!(store.get_hosted("a").is_none(), "deleted, no client");
+    }
+
+    /// A pull reaches the sidebar rows and the hosted clients, but never
+    /// deletes the conversation the user has open.
+    #[test]
+    fn sync_actions_update_rows_and_spare_the_open_conversation() {
+        use crate::services::hive_sync::{RemoteRow, SyncAction, TurnStatus};
+
+        let mut store = make_store_with_n_entries(3);
+        store.set_active("conv-2".to_string());
+        let cloud = ConversationSync::cloud("https://hive.example", "r-9", None);
+        let kept = store.apply_sync_actions(&[
+            SyncAction::UpsertMetadata(RemoteRow {
+                local_id: "r-9".into(),
+                title: "From the web".into(),
+                model_id: None,
+                updated_at: 100,
+                sync: cloud.clone(),
+                turn_status: TurnStatus::Running,
+            }),
+            SyncAction::ApplyTombstone {
+                local_id: "conv-0".into(),
+            },
+            SyncAction::ApplyTombstone {
+                local_id: "conv-2".into(),
+            },
+        ]);
+
+        assert_eq!(
+            kept.len(),
+            2,
+            "the open conversation's tombstone is held back"
+        );
+        assert_eq!(store.all_metadata_ids(), vec!["r-9", "conv-2", "conv-1"]);
+        assert!(store.is_hosted("r-9"));
+        assert_eq!(store.metadata()[0].sync, cloud);
     }
 
     #[test]
@@ -697,5 +985,70 @@ mod tests {
                 "Cache limit too high — defeats the purpose of eviction"
             );
         }
+    }
+
+    /// HX-10: the sidebar's mark follows the pull's status, a finished turn
+    /// stays marked until the conversation is opened, and a local-only row
+    /// never has one.
+    #[test]
+    fn the_cloud_mark_follows_the_turn_and_clears_when_opened() {
+        let mut store = make_store_with_n_entries(2);
+        store.set_active("conv-0".to_string());
+        store.set_conversation_sync(
+            "conv-1",
+            ConversationSync::cloud("https://hive.example", "r-1", None),
+        );
+        assert_eq!(store.cloud_mark("conv-1"), None);
+
+        store.set_turn_status("conv-1", TurnStatus::Running);
+        assert_eq!(store.cloud_mark("conv-1"), Some(CloudMark::Running));
+        store.set_turn_status("conv-1", TurnStatus::WaitingForYou);
+        assert_eq!(store.cloud_mark("conv-1"), Some(CloudMark::WaitingForYou));
+        store.set_turn_status("conv-1", TurnStatus::Idle);
+        assert_eq!(store.cloud_mark("conv-1"), Some(CloudMark::Done));
+
+        store.set_active_by_id("conv-1".to_string());
+        assert_eq!(
+            store.cloud_mark("conv-1"),
+            None,
+            "opening it clears the mark"
+        );
+
+        store.set_turn_status("conv-0", TurnStatus::Running);
+        assert_eq!(
+            store.cloud_mark("conv-0"),
+            None,
+            "local-only rows have none"
+        );
+    }
+
+    /// HX-11: only an id remembered as a broker input is answered on the
+    /// input route; anything else falls through to the conversation's own.
+    #[test]
+    fn only_remembered_broker_inputs_take_the_input_route() {
+        let mut store = ConversationsStore::new();
+        insert_dummy(&mut store, "a");
+        store.set_conversation_sync(
+            "a",
+            ConversationSync::cloud("http://127.0.0.1:1", "r-1", None),
+        );
+        assert!(
+            store
+                .answer_broker_input("approval-1", InputAnswer::Approval(true))
+                .is_none()
+        );
+        let nonce = uuid::Uuid::new_v4().to_string();
+        store.remember_input("a", "approval-1", &nonce);
+        assert!(
+            store
+                .answer_broker_input("approval-1", InputAnswer::Approval(true))
+                .is_some()
+        );
+        store.forget_input("approval-1");
+        assert!(
+            store
+                .answer_broker_input("approval-1", InputAnswer::Approval(true))
+                .is_none()
+        );
     }
 }

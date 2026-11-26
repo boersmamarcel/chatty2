@@ -215,10 +215,10 @@ pub fn sample_conversation(id: &str, title: &str, updated_at: i64) -> Conversati
         updated_at,
         working_dir: Some("/tmp/workspace".to_string()),
         agent_task_snapshot: Some(r#"{"todos":[]}"#.to_string()),
-        mode: Some(
-            r#"{"kind":"hosted","server_url":"http://localhost:8081","remote_id":"remote-1"}"#
-                .to_string(),
-        ),
+        sync: Some(r#"{"server_url":"http://localhost:8081","remote_id":"remote-1"}"#.to_string()),
+        placement: Some(r#"{"kind":"cloud","model_id":"platform-qwen3"}"#.to_string()),
+        remote_version: Some(3 + updated_at / 1_000),
+        last_synced_at: Some(updated_at * 1_000),
         // Derived from `updated_at / 1_000` (the suite's samples differ only
         // in the thousands place) so two samples carry two different values,
         // and kept far apart from each other so a store that swaps
@@ -398,6 +398,7 @@ mod tests {
                     dock_height: 420.0,
                     ..Default::default()
                 },
+                notify_cloud_conversations: true,
             },
         )
         .await;
@@ -509,12 +510,15 @@ mod tests {
         conformance_hive_settings(
             || HiveSettingsJsonRepository::with_path(path.clone()),
             HiveSettingsModel {
-                registry_url: "https://hive.example.com".to_string(),
+                hive_url: "https://hive.example.com".to_string(),
+                registry_url_override: None,
                 token: Some("jwt-token".to_string()),
                 refresh_token: Some("refresh-token".to_string()),
                 expires_at: Some("2026-09-27T10:00:00Z".parse().unwrap()),
                 username: Some("marcel".to_string()),
                 email: Some("marcel@example.com".to_string()),
+                sync_new_conversations: false,
+                sync_existing_offered: true,
             },
         )
         .await;

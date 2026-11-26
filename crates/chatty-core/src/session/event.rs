@@ -38,7 +38,7 @@ use crate::tools::invoke_agent_tool::InvokeAgentProgress;
 /// Serializable so a turn can cross a process boundary: a delegated worker
 /// reports its events to the broker, which turns them into A2A status and
 /// artifact updates for the parent (AGE-196, ADR-0011).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub enum SessionEvent {
     /// The turn's stream loop is running.
     TurnStarted,
@@ -94,7 +94,12 @@ pub enum SessionEvent {
     PluginUsage(TokenUsage),
     /// rig's record of the turn's messages, for persisting the tool
     /// round-trips behind the final text (AGE-247).
-    TurnMessages(Vec<Message>),
+    TurnMessages(
+        /// rig's own `Message` JSON; rig carries no schema for it, so it is
+        /// opaque here, like the fabric wire's conversation payloads.
+        #[schemars(with = "Vec<serde_json::Value>")]
+        Vec<Message>,
+    ),
     /// Progress from a sub-agent the turn invoked — or, as
     /// [`InvokeAgentProgress::Heartbeat`] in a delegated worker's turn
     /// (`AgentSession::set_report_liveness`), the turn's own model still

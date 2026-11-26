@@ -30,7 +30,9 @@ use super::super::message_types::{
     detect_execution_engine, friendly_tool_name, is_denial_result, predict_execution_engine,
 };
 use super::super::trace_components::SystemTraceView;
-use super::{ChatView, ChatViewEvent, PendingApprovalInfo, PendingClarificationInfo};
+use super::{
+    ChatView, ChatViewEvent, ConnectorSignIn, PendingApprovalInfo, PendingClarificationInfo,
+};
 use crate::chatty::views::chart_renderer::extract_chart_spec;
 use crate::chatty::views::transcript::ChosenOption;
 use crate::chatty::views::transcript::{attachment_image_path, extract_table_preview};
@@ -656,6 +658,42 @@ impl ChatView {
 
         cx.notify();
         self.activate_sticky_scroll();
+    }
+
+    /// Is the approval or question `id` already on screen (HX-11)? A cloud
+    /// run's inputs reach the view from two places — the list fetched on open
+    /// and the live frames — and a replayed frame must not raise a second card.
+    pub fn knows_input(&self, id: &str) -> bool {
+        self.pending_approval.as_ref().is_some_and(|p| p.id == id)
+            || self
+                .pending_clarification
+                .as_ref()
+                .is_some_and(|p| p.id == id)
+    }
+
+    /// An input a cloud run waited on was settled — here or on another device
+    /// — or withdrawn: its card goes (HX-11). `approved` is only how an
+    /// approval's record reads afterwards; a question settled elsewhere is
+    /// shown as cancelled, since the answers are not ours.
+    pub fn settle_input(&mut self, id: &str, approved: bool, cx: &mut Context<Self>) {
+        if self.pending_approval.as_ref().is_some_and(|p| p.id == id) {
+            self.handle_approval_resolved(id, approved, cx);
+        }
+        if self
+            .pending_clarification
+            .as_ref()
+            .is_some_and(|p| p.id == id)
+        {
+            self.clear_pending_clarification(cx);
+        }
+    }
+
+    /// A cloud run needs the user to sign in to `connector` (HX-11).
+    pub fn show_connector_sign_in(&mut self, sign_in: ConnectorSignIn, cx: &mut Context<Self>) {
+        if !self.connector_sign_ins.contains(&sign_in) {
+            self.connector_sign_ins.push(sign_in);
+            cx.notify();
+        }
     }
 
     /// Drop the clarification popover, e.g. when the stream is cancelled.

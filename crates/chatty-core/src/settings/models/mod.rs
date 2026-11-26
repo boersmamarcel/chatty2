@@ -32,7 +32,7 @@ mod schema_docs {
     use super::execution_settings::{ApprovalMode, ExecutionSettingsModel};
     use super::extensions_store::{ExtensionKind, ExtensionSource, InstalledExtension};
     use super::general_model::GeneralSettingsModel;
-    use super::hive_settings::HiveSettingsModel;
+    use super::hive_settings::{DEFAULT_HIVE_URL, HiveSettingsModel};
     use super::mcp_store::{MASKED_API_KEY_SENTINEL, McpServerConfig};
     use super::models_store::ModelConfig;
     use super::module_settings::ModuleSettingsModel;
@@ -139,7 +139,8 @@ mod schema_docs {
         assert!(secrets.get("revealed_keys").is_none());
 
         let hive = serde_json::to_value(HiveSettingsModel::default()).unwrap();
-        assert_eq!(hive["registry_url"], "http://localhost:8080");
+        assert_eq!(hive["hive_url"], DEFAULT_HIVE_URL);
+        assert!(hive.get("registry_url").is_none());
         assert!(hive.get("runner_url").is_none());
         assert!(hive["token"].is_null());
         assert!(hive["username"].is_null());
