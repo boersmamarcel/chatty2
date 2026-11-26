@@ -215,7 +215,12 @@ async fn checked_hive_client(
     hive_url: &str,
     cx: &mut AsyncApp,
 ) -> Result<HiveRegistryClient, ClientError> {
-    let client = HiveRegistryClient::new(hive_url);
+    // The session is a desktop one, named for this machine (HX-7): a web
+    // session cannot hold a conversation on the device.
+    let client = HiveRegistryClient::new(hive_url).with_device(
+        chatty_core::hive::ClientKind::Desktop,
+        chatty_core::hive_device::device_name(),
+    );
     let version = client.server_version().await?;
     cx.update(|cx| {
         cx.global_mut::<MarketplaceState>().hive_server = Some(version.server);

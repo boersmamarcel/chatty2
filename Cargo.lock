@@ -1853,6 +1853,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "futures",
+ "gethostname",
  "glob",
  "gpui",
  "hex",
