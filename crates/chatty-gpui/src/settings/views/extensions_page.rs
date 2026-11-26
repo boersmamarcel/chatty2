@@ -218,7 +218,14 @@ fn installed_extensions_group() -> SettingGroup {
                                 ),
                                 _ => false,
                             };
-                        let status_icon = if ext.enabled { "🟢" } else { "⏸" };
+                        // A dot, not an emoji: 🟢 and ⏸ drew as a grey dot
+                        // and a box on Linux (AGE-2129).
+                        let status_color = if ext.enabled {
+                            cx.theme().success
+                        } else {
+                            cx.theme().muted_foreground.opacity(0.5)
+                        };
+                        let status_label = if ext.enabled { "On" } else { "Off" };
 
                         // For WASM modules: look up discovered module metadata for
                         // execution_mode, wasm_file presence, and the registry's
@@ -297,7 +304,17 @@ fn installed_extensions_group() -> SettingGroup {
                                 h_flex()
                                     .gap_2()
                                     .items_center()
-                                    .child(div().text_sm().child(status_icon.to_string()))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("status-{}", ext.id)))
+                                            .size(px(8.))
+                                            .rounded_full()
+                                            .bg(status_color)
+                                            .tooltip(move |window, cx| {
+                                                gpui_component::tooltip::Tooltip::new(status_label)
+                                                    .build(window, cx)
+                                            }),
+                                    )
                                     .child(
                                         div()
                                             .text_sm()
