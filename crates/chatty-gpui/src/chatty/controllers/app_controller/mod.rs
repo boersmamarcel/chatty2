@@ -54,7 +54,7 @@ mod message_ops;
 mod message_ops_internals;
 mod slash_commands;
 
-pub(crate) use conversation_ops_modify::move_ui_enabled;
+pub(crate) use conversation_ops_modify::handoff_offered;
 
 /// The local roster's names (PL-U5) for a
 /// conversation whose own effective workspace is `workspace` (its own
@@ -600,7 +600,7 @@ impl ChattyApp {
                     app.export_conversation_markdown(conv_id, cx);
                 }
                 SidebarEvent::MoveConversation(conv_id) => {
-                    app.confirm_conversation_move(conv_id, cx);
+                    app.confirm_handoff(conv_id, cx);
                 }
                 SidebarEvent::KeepConversationLocal(conv_id) => {
                     app.keep_conversation_local(conv_id, cx);

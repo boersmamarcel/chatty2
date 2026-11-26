@@ -76,8 +76,7 @@ cat > "$CFG/execution_settings.json" <<'EOF'
   "network_isolation": false,
   "max_agent_turns": 50,
   "memory_enabled": false,
-  "embedding_enabled": false,
-  "hosted_conversations_enabled": false
+  "embedding_enabled": false
 }
 EOF
 printf '[user]\n\temail = team-smoke@chatty.invalid\n\tname = team-smoke\n' > "$HOME_DIR/.gitconfig"

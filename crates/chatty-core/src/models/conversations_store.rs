@@ -84,6 +84,9 @@ pub struct ConversationsStore {
     /// `chatty-server` validates the same login session the registry issued.
     /// `None` until the frontend installs its session.
     hosted_auth: Option<Arc<HiveSession>>,
+    /// This device's login session id on the Hive server (HX-14), fetched
+    /// once per sign-in and dropped when the sign-in changes.
+    this_device: Option<String>,
     /// Where a hosted conversation's non-event frames go: the owner reads the
     /// other end (HX-11). Installed once; every hosted client's sink writes
     /// to it, tagged with its conversation.
@@ -114,6 +117,7 @@ impl ConversationsStore {
             sessions: HashMap::new(),
             hosted: HashMap::new(),
             hosted_auth: None,
+            this_device: None,
             frame_tx: None,
             turn_status: HashMap::new(),
             finished: HashSet::new(),
@@ -254,6 +258,18 @@ impl ConversationsStore {
             client.set_auth(auth.clone());
         }
         self.hosted_auth = auth;
+        self.this_device = None;
+    }
+
+    /// This device's login session id, when fetched for the current sign-in.
+    pub fn this_device(&self) -> Option<String> {
+        self.this_device.clone()
+    }
+
+    /// Remember this device's login session id for the current sign-in, or
+    /// forget it (`None`) when the sign-in ends.
+    pub fn set_this_device(&mut self, device_id: Option<String>) {
+        self.this_device = device_id;
     }
 
     /// The Hive sign-in hosted requests authenticate with, for a move that
@@ -786,6 +802,20 @@ mod tests {
 
     fn cached_ids(store: &ConversationsStore) -> Vec<String> {
         store.access_order.iter().cloned().collect()
+    }
+
+    /// HX-14: this device's id is cached per sign-in, so a new sign-in (or
+    /// signing out) forgets it.
+    #[test]
+    fn this_devices_id_is_forgotten_when_the_sign_in_changes() {
+        let mut store = ConversationsStore::new();
+        store.set_this_device(Some("s-1".into()));
+        assert_eq!(store.this_device().as_deref(), Some("s-1"));
+        store.set_hosted_auth(Some(Arc::new(HiveSession::new(
+            "https://hive.example".to_string(),
+            None,
+        ))));
+        assert_eq!(store.this_device(), None);
     }
 
     #[test]

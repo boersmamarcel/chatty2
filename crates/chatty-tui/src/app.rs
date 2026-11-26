@@ -2,7 +2,6 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::Result;
-use chatty_core::session::HOSTED_DISABLED;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     EventStream, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -809,13 +808,6 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Update => Some(KeyAction::UpdateCli),
         Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
         Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
-        // AGE-308: the move is developer-only until online mode is
-        // account-scoped. The command stays in the registry so it remains
-        // discoverable for developers; it refuses here.
-        Command::Online(_) if !engine.execution_settings().hosted_conversations_enabled => {
-            engine.add_system_message(HOSTED_DISABLED.to_string());
-            None
-        }
         // `/online` alone shows the table before anything leaves this machine;
         // naming a URL is the confirmation. `off` is the way back.
         Command::Online(None) => Some(KeyAction::ShowOnlineStatus),
@@ -946,33 +938,11 @@ mod tests {
             .text()
     }
 
-    /// AGE-308: `/online` still parses and still lists, but by default it
-    /// refuses instead of moving anything off this machine.
+    /// HX-14: `/online` has no developer switch any more; it needs a Hive
+    /// sign-in, which the move itself checks.
     #[test]
-    fn online_is_refused_while_hosted_conversations_are_disabled() {
+    fn online_maps_to_its_actions() {
         let mut engine = test_engine(ExecutionSettingsModel::default());
-
-        for command in [
-            Command::Online(None),
-            Command::Online(Some("http://localhost:8081".to_string())),
-            Command::Online(Some("off".to_string())),
-        ] {
-            assert!(
-                map_command_to_action(command, &mut engine).is_none(),
-                "the default build must not act on /online"
-            );
-            assert_eq!(last_system_message(&engine), HOSTED_DISABLED);
-        }
-    }
-
-    /// With the developer setting on, `/online` behaves exactly as it did.
-    #[test]
-    fn online_works_once_hosted_conversations_are_enabled() {
-        let settings = ExecutionSettingsModel {
-            hosted_conversations_enabled: true,
-            ..Default::default()
-        };
-        let mut engine = test_engine(settings);
 
         assert!(matches!(
             map_command_to_action(Command::Online(None), &mut engine),
