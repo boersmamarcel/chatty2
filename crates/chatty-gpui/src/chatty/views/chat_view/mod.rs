@@ -244,6 +244,11 @@ pub struct ChatView {
     queued_messages: Vec<(chatty_core::session::QueuedId, String)>,
     /// Why the last send was refused (the queue is full), shown under them.
     queue_notice: Option<String>,
+    /// Files a cloud run produced, by the history index of the turn they hang
+    /// on (HX-22).
+    cloud_outputs: std::collections::BTreeMap<usize, Vec<PathBuf>>,
+    /// The take-it-back or resume line, when one applies (HX-22).
+    follow_up: Option<FollowUp>,
     /// Session files-changed bar is unfolded to the per-file list.
     session_bar_expanded: bool,
     elapsed_tick_started: bool,
@@ -306,12 +311,64 @@ pub enum ChatViewEvent {
     SendQueuedNow(chatty_core::session::QueuedId),
     /// "Remove" on a queued message.
     WithdrawQueued(chatty_core::session::QueuedId),
+    /// "Continue here" on the take-it-back banner (HX-22).
+    ContinueHere,
+    /// "Resume" on an interrupted cloud turn (HX-22).
+    ResumeTurn,
+}
+
+/// The one line the chat offers under the transcript when the conversation
+/// needs the user's say before it can go on (HX-22).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FollowUp {
+    /// Another device or the cloud holds the conversation: the server's own
+    /// words, and a button to take it over.
+    TakeItBack { message: String },
+    /// The cloud turn was interrupted by a server restart.
+    Resume,
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
 
 /// The trace `adapt_message_with_trace` will read for this message.
 ///
+/// Hash of the files hung on a turn, so a new one changes its cache key.
+fn outputs_fingerprint(outputs: &[PathBuf]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    outputs.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hang a cloud run's files on the turn they belong to, as the same artifact
+/// cards a local run's files get (HX-22). A file the turn already shows a
+/// card for is not added again.
+fn append_cloud_outputs(
+    turn: &mut Turn,
+    msg: &DisplayMessage,
+    outputs: &std::collections::BTreeMap<usize, Vec<PathBuf>>,
+) {
+    let Some(files) = msg.history_index.and_then(|ix| outputs.get(&ix)) else {
+        return;
+    };
+    let namespace = (turn.message_index as u64).saturating_add(1);
+    for path in files {
+        let shown = turn.blocks.iter().any(|block| {
+            matches!(block, Block::Artifact { path: shown, .. } if shown == path)
+        });
+        if !shown {
+            turn.blocks.push(Block::Artifact {
+                id: super::transcript::BlockId::from_parts(
+                    namespace,
+                    &format!("cloud-output-{}", path.display()),
+                ),
+                path: path.clone(),
+                old_content: None,
+            });
+        }
+    }
+}
+
 /// The live trace while the turn streams, the persisted one once it is
 /// finalized — the same choice the adapter makes, made here so the render path
 /// can borrow it rather than clone it per frame.
@@ -686,6 +743,8 @@ impl ChatView {
             session_review_dismissed: false,
             queued_messages: Vec::new(),
             queue_notice: None,
+            cloud_outputs: Default::default(),
+            follow_up: None,
             session_bar_expanded: false,
             elapsed_tick_started: false,
             pr_status: cx.new(|_cx| PrStatusBarView::new()),
@@ -931,14 +990,19 @@ impl ChatView {
             .enumerate()
             .map(|(index, (msg, collapsed))| {
                 turn_cache::adapt_key(msg, index, *collapsed, message_trace(msg, cx))
+                    .wrapping_add(outputs_fingerprint(self.cloud_outputs_for(msg)))
             })
             .collect();
         let plan_active = self.plan_snapshot_active();
 
         let messages = &self.messages;
+        let outputs = &self.cloud_outputs;
         let adapted = self.turns.refresh(&keys, plan_active, |index| {
             let msg = &messages[index];
-            adapt_message_with_trace(msg, index, collapsed[index], message_trace(msg, cx))
+            let mut turn =
+                adapt_message_with_trace(msg, index, collapsed[index], message_trace(msg, cx));
+            append_cloud_outputs(&mut turn, msg, outputs);
+            turn
         });
 
         if let Some(started) = started {
@@ -2282,6 +2346,7 @@ impl ChatView {
         let session_entity = entity.clone();
         let session_bar_expanded = self.session_bar_expanded;
         let queued_strip = self.render_queued_strip(cx);
+        let follow_up_strip = self.render_follow_up(cx);
         let session_changes = if self.session_review_dismissed {
             Vec::new()
         } else {
@@ -2498,6 +2563,74 @@ impl ChatView {
             .when(thinking_visible, |this| this.child(thinking_indicator))
             // After the reply in progress: these are the turns that follow it.
             .children(queued_strip)
+            .children(follow_up_strip)
+    }
+
+    fn cloud_outputs_for(&self, msg: &DisplayMessage) -> &[PathBuf] {
+        msg.history_index
+            .and_then(|ix| self.cloud_outputs.get(&ix))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The files a cloud run produced, by the turn they hang on. Replaces
+    /// what was set before (HX-22).
+    pub fn set_cloud_outputs(
+        &mut self,
+        outputs: std::collections::BTreeMap<usize, Vec<PathBuf>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cloud_outputs != outputs {
+            self.cloud_outputs = outputs;
+            cx.notify();
+        }
+    }
+
+    /// Show, change or clear the take-it-back / resume line (HX-22).
+    pub fn set_follow_up(&mut self, follow_up: Option<FollowUp>, cx: &mut Context<Self>) {
+        if self.follow_up != follow_up {
+            self.follow_up = follow_up;
+            cx.notify();
+        }
+    }
+
+    /// The line under the transcript: what to do next, and one button.
+    fn render_follow_up(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use gpui_component::button::{Button, ButtonVariants};
+        let (text, label, event) = match self.follow_up.as_ref()? {
+            FollowUp::TakeItBack { message } => {
+                (message.clone(), "Continue here", ChatViewEvent::ContinueHere)
+            }
+            FollowUp::Resume => (
+                "This turn was interrupted. You can pick it up where it stopped.".to_string(),
+                "Resume",
+                ChatViewEvent::ResumeTurn,
+            ),
+        };
+        let entity = cx.entity();
+        Some(
+            div()
+                .w_full()
+                .px_4()
+                .pb(TURN_GAP)
+                .child(
+                    div()
+                        .w_full()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(cx.theme().secondary)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .child(div().flex_1().min_w_0().text_sm().child(text))
+                        .child(Button::new("follow-up-button").primary().label(label).on_click(
+                            move |_, _, cx| {
+                                entity.update(cx, |_, cx| cx.emit(event.clone()));
+                            },
+                        )),
+                )
+                .into_any_element(),
+        )
     }
 
     /// What the controller knows about this conversation's mailbox (AGE-482).

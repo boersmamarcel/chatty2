@@ -578,6 +578,73 @@ pub async fn download_files<A: HiveFilesApi + ?Sized>(
     }
 }
 
+/// An output of a cloud run that is on this device.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputFile {
+    pub name: String,
+    pub path: PathBuf,
+    /// When the server made it, unix seconds; `None` when it sent no
+    /// readable time.
+    pub created_at: Option<i64>,
+}
+
+/// The outputs (`role = "output"`) of conversation `remote_id` that are in
+/// `cache_dir`, oldest first. Call after [`download_files`]: an output that
+/// is not cached (a failed download, a file gone from disk) is left out.
+pub async fn cached_outputs<A: HiveFilesApi + ?Sized>(
+    api: &A,
+    remote_id: &str,
+    cache_dir: &Path,
+) -> Result<Vec<OutputFile>, FilesError> {
+    let listed = api.list(remote_id).await?;
+    let map = FileMap::load(cache_dir);
+    let mut outputs: Vec<OutputFile> = listed
+        .into_iter()
+        .filter(|entry| entry.role == FileRole::Output)
+        .filter_map(|entry| {
+            let path = map.downloaded.get(&entry.version).filter(|p| p.is_file())?;
+            Some(OutputFile {
+                name: entry.name,
+                path: path.clone(),
+                created_at: entry
+                    .created_at
+                    .as_deref()
+                    .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| at.timestamp()),
+            })
+        })
+        .collect();
+    outputs.sort_by_key(|output| output.created_at);
+    Ok(outputs)
+}
+
+/// Which turn each output hangs on: the first turn that ended at or after
+/// the output's `created_at`, else the last turn (the run is still going, or
+/// the clocks disagree). `turn_ends` is `(history index, end time in unix
+/// seconds)` for each assistant turn, in order; the result maps a history
+/// index to its outputs' paths.
+pub fn outputs_by_turn(
+    outputs: &[OutputFile],
+    turn_ends: &[(usize, Option<i64>)],
+) -> BTreeMap<usize, Vec<PathBuf>> {
+    let mut by_turn: BTreeMap<usize, Vec<PathBuf>> = BTreeMap::new();
+    let Some(&(last, _)) = turn_ends.last() else {
+        return by_turn;
+    };
+    for output in outputs {
+        let turn = output
+            .created_at
+            .and_then(|at| {
+                turn_ends
+                    .iter()
+                    .find(|(_, end)| end.is_some_and(|end| end >= at))
+            })
+            .map_or(last, |(index, _)| *index);
+        by_turn.entry(turn).or_default().push(output.path.clone());
+    }
+    by_turn
+}
+
 async fn download_one<A: HiveFilesApi + ?Sized>(
     api: &A,
     entry: &ConversationFile,
@@ -701,6 +768,54 @@ mod tests {
         // Opening again fetches nothing.
         let again = download_files(&api, "r-1", cache.path()).await.unwrap();
         assert!(again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn outputs_hang_on_the_turn_that_ended_at_or_after_their_creation() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/conversations/r-1/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"file": "f-1", "version": "v-1", "name": "in.csv", "role": "input",
+                 "created_at": "2026-11-26T10:00:00Z"},
+                {"file": "f-2", "version": "v-2", "name": "first.md", "role": "output",
+                 "created_at": "2026-11-26T10:05:00Z"},
+                {"file": "f-3", "version": "v-3", "name": "second.md", "role": "output",
+                 "created_at": "2026-11-26T11:30:00Z"}
+            ])))
+            .mount(&server)
+            .await;
+        for (file, version) in [("f-1", "v-1"), ("f-2", "v-2"), ("f-3", "v-3")] {
+            Mock::given(method("GET"))
+                .and(path(format!(
+                    "/api/files/{file}/versions/{version}/content"
+                )))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes("x"))
+                .mount(&server)
+                .await;
+        }
+        let api = HttpHiveFilesApi::new(&server.uri(), Some(signed_in(&server)));
+        let cache = tempfile::tempdir().unwrap();
+        download_files(&api, "r-1", cache.path()).await.unwrap();
+
+        let outputs = cached_outputs(&api, "r-1", cache.path()).await.unwrap();
+        assert_eq!(
+            outputs.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["first.md", "second.md"],
+            "inputs are not outputs"
+        );
+
+        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp();
+        // Turns at history indexes 1 and 3; the second ended before the
+        // last output, so that one lands on the last turn.
+        let ends = [
+            (1, Some(at("2026-11-26T10:10:00Z"))),
+            (3, Some(at("2026-11-26T11:00:00Z"))),
+        ];
+        let by_turn = outputs_by_turn(&outputs, &ends);
+        assert_eq!(by_turn[&1], vec![outputs[0].path.clone()]);
+        assert_eq!(by_turn[&3], vec![outputs[1].path.clone()]);
+        assert!(outputs_by_turn(&outputs, &[]).is_empty());
     }
 
     #[cfg(unix)]

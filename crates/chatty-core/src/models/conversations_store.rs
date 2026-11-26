@@ -27,6 +27,8 @@ pub enum CloudMark {
     Running,
     /// A turn is waiting for an answer from the user.
     WaitingForYou,
+    /// The server restarted mid-turn; the turn can be resumed (HX-22).
+    Interrupted,
     /// A turn finished since this conversation was last opened.
     Done,
     /// A turn failed since this conversation was last opened.
@@ -450,6 +452,7 @@ impl ConversationsStore {
         match self.turn_status(id) {
             TurnStatus::Running => Some(CloudMark::Running),
             TurnStatus::WaitingForYou => Some(CloudMark::WaitingForYou),
+            TurnStatus::Interrupted => Some(CloudMark::Interrupted),
             _ if self.failed.contains(id) => Some(CloudMark::Failed),
             _ if self.finished.contains(id) => Some(CloudMark::Done),
             _ => None,

@@ -25,6 +25,8 @@ struct State {
     /// skipped the pruned deletion; a full sync (`since=0`) never is, and
     /// neither is a cursor issued since, so a resync cannot loop.
     pruned_through: u64,
+    /// Remote ids whose turn was resumed, in order.
+    resumed: Vec<String>,
 }
 
 /// An in-memory chatty-server conversation list, with HX-8's `since` mode:
@@ -75,6 +77,19 @@ impl FakeHiveConversations {
                 seq,
             ),
         );
+    }
+
+    /// Mark a conversation's turn as `status`, as the server would after a
+    /// restart or a new turn.
+    pub fn set_turn_status(&self, id: &str, status: TurnStatus) {
+        if let Some((summary, _)) = self.state.lock().unwrap().conversations.get_mut(id) {
+            summary.turn_status = status;
+        }
+    }
+
+    /// The conversations resumed so far, in order.
+    pub fn resumed(&self) -> Vec<String> {
+        self.state.lock().unwrap().resumed.clone()
     }
 
     /// Delete a conversation, leaving a tombstone.
@@ -164,6 +179,22 @@ impl HiveConversationsApi for FakeHiveConversations {
                 ..ConversationDetail::default()
             })
             .ok_or(ApiError::NotFound);
+        Box::pin(async move { result })
+    }
+
+    fn resume(&self, remote_id: &str) -> BoxFuture<'static, Result<(), ApiError>> {
+        let mut state = self.state.lock().unwrap();
+        let result = match state.conversations.get_mut(remote_id) {
+            Some((summary, _)) if summary.turn_status == TurnStatus::Interrupted => {
+                summary.turn_status = TurnStatus::Running;
+                state.resumed.push(remote_id.to_string());
+                Ok(())
+            }
+            Some(_) => Err(ApiError::Refused(
+                "This turn can't be resumed any more.".to_string(),
+            )),
+            None => Err(ApiError::NotFound),
+        };
         Box::pin(async move { result })
     }
 }

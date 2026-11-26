@@ -44,6 +44,9 @@ pub enum TurnStatus {
     Idle,
     Running,
     WaitingForYou,
+    /// The server restarted mid-turn and kept the turn's state (HX-20); the
+    /// user can resume it.
+    Interrupted,
     /// A status this build does not know; shown as idle.
     #[serde(other)]
     Unknown,
@@ -150,7 +153,7 @@ impl ConversationDetail {
     /// older flag?
     pub fn turn_running(&self) -> bool {
         match self.turn_status {
-            Some(status) => status != TurnStatus::Idle && status != TurnStatus::Unknown,
+            Some(status) => matches!(status, TurnStatus::Running | TurnStatus::WaitingForYou),
             None => self.turn_active,
         }
     }

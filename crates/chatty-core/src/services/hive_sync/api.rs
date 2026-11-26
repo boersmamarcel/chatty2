@@ -22,6 +22,10 @@ pub enum ApiError {
     /// 404 on a detail: the conversation is gone.
     #[error("the conversation does not exist on the server")]
     NotFound,
+    /// A resume the server refused (404 or 409); the text is the server's
+    /// own `message`, written for the user.
+    #[error("{0}")]
+    Refused(String),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -42,6 +46,9 @@ pub trait HiveConversationsApi: Send + Sync {
         &self,
         remote_id: &str,
     ) -> BoxFuture<'static, Result<ConversationDetail, ApiError>>;
+
+    /// Resume the turn the server kept after a restart (HX-20).
+    fn resume(&self, remote_id: &str) -> BoxFuture<'static, Result<(), ApiError>>;
 }
 
 /// The API over HTTP, authenticated as the Hive sign-in through
@@ -119,6 +126,36 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
             format!("{}/api/conversations/{remote_id}", self.server_url),
             true,
         )
+    }
+
+    fn resume(&self, remote_id: &str) -> BoxFuture<'static, Result<(), ApiError>> {
+        let http = self.http.clone();
+        let auth = self.auth.clone();
+        let url = format!("{}/api/conversations/{remote_id}/turn/resume", self.server_url);
+        Box::pin(async move {
+            let response = send_to_server(auth.as_deref(), &url, || {
+                http.post(&url).json(&serde_json::json!({}))
+            })
+            .await?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(());
+            }
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(ApiError::SignedOut);
+            }
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT
+            {
+                let message = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body.get("message")?.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "This turn can't be resumed any more.".to_string());
+                return Err(ApiError::Refused(message));
+            }
+            Err(anyhow::anyhow!("the server answered {status} for {url}").into())
+        })
     }
 }
 

@@ -332,6 +332,13 @@ async fn a_failed_pull_keeps_the_cursor() {
         > {
             Box::pin(async { Err(ApiError::NotFound) })
         }
+        fn resume(
+            &self,
+            _: &str,
+        ) -> crate::repositories::conversation_repository::BoxFuture<'static, Result<(), ApiError>>
+        {
+            Box::pin(async { Err(ApiError::NotFound) })
+        }
     }
     assert!(matches!(
         pull(&AlwaysGone, &mut engine, &[]).await,
