@@ -606,6 +606,9 @@ impl ChattyApp {
                 SidebarEvent::KeepConversationLocal(conv_id) => {
                     app.keep_conversation_local(conv_id, cx);
                 }
+                SidebarEvent::RenameConversation(conv_id, title) => {
+                    app.rename_conversation(conv_id, title.clone(), cx);
+                }
                 SidebarEvent::ToggleCollapsed(collapsed) => {
                     // Optional: Could save collapsed state to settings here
                     debug!(collapsed = collapsed, "Sidebar toggled");

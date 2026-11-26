@@ -30,6 +30,8 @@ pub enum SidebarEvent {
     MoveConversation(String),
     /// Stop syncing this conversation to the account (AGE-2096).
     KeepConversationLocal(String),
+    /// Give this conversation a new title (AGE-2129).
+    RenameConversation(String, String),
     ToggleCollapsed(bool),
     LoadMore,
     /// A file was activated in Files mode (AGE-480): open it as an artifact
@@ -620,6 +622,15 @@ impl Render for SidebarView {
                                                         move |_conv_id, cx| {
                                                             entity.update(cx, |_, cx| {
                                                                 cx.emit(SidebarEvent::DeleteConversation(id.clone()));
+                                                            });
+                                                        }
+                                                    })
+                                                    .on_rename({
+                                                        let entity = sidebar_entity.clone();
+                                                        let id = id.clone();
+                                                        move |_conv_id, title, cx| {
+                                                            entity.update(cx, |_, cx| {
+                                                                cx.emit(SidebarEvent::RenameConversation(id.clone(), title.clone()));
                                                             });
                                                         }
                                                     })
