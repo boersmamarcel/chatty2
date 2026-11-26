@@ -120,6 +120,21 @@ impl ChattyApp {
             self.send_message_inner(send, true, cx);
             return;
         };
+        // One writer per conversation (HX-13, AGE-2122): while another
+        // device holds it, a turn here would fork the conversation from the
+        // account's copy. Refuse with the holder's words and give the text
+        // back; "Continue here" takes it over first.
+        if let Some(message) = self.held_elsewhere(&conv_id, cx) {
+            let text = send.message;
+            self.chat_view.update(cx, |view, cx| {
+                view.chat_input_state().update(cx, |input, _cx| {
+                    input.restore_draft_text(text);
+                });
+            });
+            self.notify_window(message, cx);
+            self.refresh_follow_up(cx);
+            return;
+        }
         self.route(&conv_id, Arrival::Message(send), cx);
     }
 

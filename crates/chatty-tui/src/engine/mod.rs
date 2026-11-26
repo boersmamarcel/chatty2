@@ -603,7 +603,8 @@ async fn push_turn_to_account(
         .to_data()
         .map_err(|error| tracing::warn!(?error, "Could not build the conversation for Hive"))
         .ok()?;
-    let api = HttpHiveHistoryApi::new(&server_url, Some(session));
+    let api = HttpHiveHistoryApi::new(&server_url, Some(session.clone()));
+    let retry_body = body.clone();
     match sync_after_turn(
         &api,
         &server_url,
@@ -619,8 +620,59 @@ async fn push_turn_to_account(
         // Deleted on the account: local-only from now on, the local copy
         // kept, and the server's message shown once.
         Err(chatty_core::services::hive_sync::PushError::Deleted(message)) => Some(Err(message)),
+        // 412: the account's copy moved on (a rename on the web). Only the
+        // holder writes the history, so what changed is metadata: take the
+        // server's version and title, and push once more (AGE-2122).
+        Err(chatty_core::services::hive_sync::PushError::Stale) => push_after_stale(
+            &api,
+            &server_url,
+            session,
+            &device,
+            &snapshot.id,
+            &sync,
+            retry_body,
+        )
+        .await
+        .map(Ok),
         Err(error) => {
             tracing::debug!(%error, "Could not sync the conversation to Hive");
+            None
+        }
+    }
+}
+
+/// [`push_turn_to_account`] after a 412 (AGE-2122): see
+/// [`chatty_core::services::hive_sync::sync_after_stale`].
+async fn push_after_stale(
+    api: &chatty_core::services::hive_sync::HttpHiveHistoryApi,
+    server_url: &str,
+    session: std::sync::Arc<chatty_core::hive::HiveSession>,
+    device: &str,
+    local_id: &str,
+    sync: &chatty_core::models::conversation::ConversationSync,
+    body: chatty_core::repositories::ConversationData,
+) -> Option<chatty_core::models::conversation::ConversationSync> {
+    use chatty_core::services::hive_sync::{HttpHiveConversationsApi, sync_after_stale};
+
+    let conversations = HttpHiveConversationsApi::new(server_url, Some(session));
+    match sync_after_stale(
+        api,
+        &conversations,
+        server_url,
+        device,
+        local_id,
+        sync,
+        body,
+    )
+    .await
+    {
+        Ok(Some(updated)) => Some(updated),
+        Ok(None) => {
+            tracing::info!(target: "chatty::hive", conv_id = %local_id, "Not pushing after a 412: another device holds it now");
+            None
+        }
+        Err(error) => {
+            tracing::info!(target: "chatty::hive", conv_id = %local_id, %error, attempt = 2, "Could not sync the conversation to Hive after a 412");
             None
         }
     }
