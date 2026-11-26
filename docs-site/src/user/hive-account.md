@@ -16,6 +16,7 @@ Once you are signed in, a new conversation is saved to your account after its fi
 
 - **Sync new conversations** (Settings → Extensions, under Hive Account) turns this off. New conversations then stay on this computer.
 - **Keep on this device only**, in a conversation's **⋯** menu, stops saving that one conversation. Its copy in your account is left as it is; delete it on the web if you no longer want it there.
+- If you delete a conversation on the web that runs on this computer, this computer keeps its copy as a local-only conversation and tells you once. A conversation that ran in the cloud is removed from this computer too.
 - **Sync my existing conversations**, offered once in the same place, saves the conversations you had before you signed in. Nothing older is saved without that.
 
 ## Send a conversation to the cloud
