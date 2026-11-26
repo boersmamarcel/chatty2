@@ -554,12 +554,13 @@ pub(crate) async fn this_device(
 
 /// Send a finished turn to the account (see [`ChatEngine::sync_to_account`]).
 /// `None` when the user is not signed in, has new-conversation sync off for a
-/// new conversation, or the server could not be reached.
+/// new conversation, or the server could not be reached; `Some(Err(message))`
+/// when the conversation was deleted on the account (410).
 async fn push_turn_to_account(
     snapshot: chatty_core::models::conversation::ConversationSnapshot,
     sync: chatty_core::models::conversation::ConversationSync,
     first_turn: bool,
-) -> Option<chatty_core::models::conversation::ConversationSync> {
+) -> Option<Result<chatty_core::models::conversation::ConversationSync, String>> {
     use chatty_core::models::conversation::ConversationSync;
     use chatty_core::services::hive_sync::{HttpHiveHistoryApi, sync_after_turn};
 
@@ -587,7 +588,7 @@ async fn push_turn_to_account(
         .map_err(|error| tracing::warn!(?error, "Could not build the conversation for Hive"))
         .ok()?;
     let api = HttpHiveHistoryApi::new(&server_url, Some(session));
-    sync_after_turn(
+    match sync_after_turn(
         &api,
         &server_url,
         &device,
@@ -597,9 +598,16 @@ async fn push_turn_to_account(
         body,
     )
     .await
-    .map_err(|error| tracing::debug!(%error, "Could not sync the conversation to Hive"))
-    .ok()
-    .flatten()
+    {
+        Ok(updated) => updated.map(Ok),
+        // Deleted on the account: local-only from now on, the local copy
+        // kept, and the server's message shown once.
+        Err(chatty_core::services::hive_sync::PushError::Deleted(message)) => Some(Err(message)),
+        Err(error) => {
+            tracing::debug!(%error, "Could not sync the conversation to Hive");
+            None
+        }
+    }
 }
 
 /// This process's plugin meter, installed once at start-up.
@@ -1805,8 +1813,17 @@ impl ChatEngine {
         let snapshot = conversation.snapshot();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            if let Some(updated) = push_turn_to_account(snapshot, sync, first_turn).await {
-                let _ = tx.send(AppEvent::SyncUpdated(updated));
+            match push_turn_to_account(snapshot, sync, first_turn).await {
+                Some(Ok(updated)) => {
+                    let _ = tx.send(AppEvent::SyncUpdated(updated));
+                }
+                Some(Err(message)) => {
+                    let _ = tx.send(AppEvent::SyncUpdated(
+                        chatty_core::models::conversation::ConversationSync::LocalOnly,
+                    ));
+                    let _ = tx.send(AppEvent::Notice(message));
+                }
+                None => {}
             }
         });
     }

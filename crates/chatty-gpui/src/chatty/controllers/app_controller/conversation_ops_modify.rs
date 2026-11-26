@@ -499,6 +499,10 @@ impl ChattyApp {
                         cx,
                     );
                 }
+                Err(HandoffError::DeletedOnAccount { message }) => {
+                    let message = HandoffError::DeletedOnAccount { message }.to_string();
+                    app.deleted_on_account(&conv_id, message, cx);
+                }
                 Err(error @ HandoffError::HeldElsewhere { .. }) => {
                     let message = error.to_string();
                     open_handoff_dialog(conv_id.clone(), HandoffKind::TakeOver { message }, local_model.clone(), cx);

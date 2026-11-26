@@ -416,6 +416,11 @@ impl ChattyApp {
                 self.hive_push.creates.remove(&local_id);
                 false
             }
+            PushEvent::Deleted { local_id, message } => {
+                self.hive_push.creates.remove(&local_id);
+                self.deleted_on_account(&local_id, message, cx);
+                false
+            }
             PushEvent::NeedsPull { local_id } | PushEvent::HeldElsewhere { local_id, .. } => {
                 // A create has no version to be stale and no holder to be
                 // held by; the server answering so is not understood.
@@ -477,7 +482,35 @@ impl ChattyApp {
                 warn!(conv_id = %local_id, %reason, "The server refused a history push");
                 false
             }
+            PushEvent::Deleted { local_id, message } => {
+                self.deleted_on_account(&local_id, message, cx);
+                false
+            }
         }
+    }
+
+    /// 410: the conversation was deleted on the account and its id stays
+    /// retired. It becomes local-only so nothing retries; the local copy is
+    /// kept, never deleted; the server's message is shown once.
+    pub(super) fn deleted_on_account(
+        &mut self,
+        local_id: &str,
+        message: String,
+        cx: &mut Context<Self>,
+    ) {
+        info!(conv_id = %local_id, "Deleted on the Hive account; keeping it on this device");
+        self.hive_push.queue.forget(local_id);
+        self.hive_push.stale.remove(local_id);
+        self.hive_push.held_by.remove(local_id);
+        let loaded = cx.update_global::<ConversationsStore, _>(|store, _| {
+            store.set_conversation_sync(local_id, ConversationSync::LocalOnly);
+            store.get_conversation(local_id).is_some()
+        });
+        if loaded {
+            self.persist_conversation(local_id, cx);
+        }
+        self.refresh_sidebar(cx);
+        self.notify_window(message, cx);
     }
 
     /// A pull finished: the version of a conversation that heard 412 is up to

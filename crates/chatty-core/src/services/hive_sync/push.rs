@@ -29,6 +29,10 @@ use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::session::hosted::{SIGN_IN_TO_HIVE, send_to_server};
 
+/// What a deleted conversation's 410 says when the server sends no message.
+pub const DELETED_ON_ACCOUNT: &str =
+    "This conversation was deleted from your Hive account. It stays on this computer.";
+
 /// Why a push did not land.
 #[derive(Debug, thiserror::Error)]
 pub enum PushError {
@@ -39,6 +43,11 @@ pub enum PushError {
     /// 409: another device holds the conversation now.
     #[error("another device holds the conversation")]
     HeldElsewhere(Box<ConflictBody>),
+    /// 410 on a create: the conversation was deleted on the account and its
+    /// id stays retired. It becomes local-only, the local copy kept; the
+    /// string is the server's message, shown once.
+    #[error("{0}")]
+    Deleted(String),
     /// 401 after the session's one refresh.
     #[error("{SIGN_IN_TO_HIVE}")]
     SignedOut,
@@ -175,6 +184,14 @@ impl HttpHiveHistoryApi {
         let response = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body))
             .await
             .map_err(|error| PushError::Offline(format!("{error:#}")))?;
+        if response.status() == reqwest::StatusCode::GONE {
+            let body: ConflictBody = response.json().await.unwrap_or_default();
+            return Err(PushError::Deleted(
+                body.message
+                    .filter(|message| !message.trim().is_empty())
+                    .unwrap_or_else(|| DELETED_ON_ACCOUNT.to_string()),
+            ));
+        }
         if let Some(error) = classify(response.status()) {
             return Err(error);
         }
@@ -261,6 +278,9 @@ pub enum PushEvent {
     /// The server refused it for good; it is dropped, and the next turn
     /// queues a fresh one.
     Dropped { local_id: String, reason: String },
+    /// 410: deleted on the account. Make it local-only, keep the local copy,
+    /// and show `message` once.
+    Deleted { local_id: String, message: String },
 }
 
 /// What a frontend with no queue does after a finished turn (chatty-tui):
@@ -399,6 +419,7 @@ impl PushQueue {
                 PushEvent::Offline
             }
             Err(PushError::Rejected(reason)) => PushEvent::Dropped { local_id, reason },
+            Err(PushError::Deleted(message)) => PushEvent::Deleted { local_id, message },
         }
     }
 }
@@ -728,6 +749,35 @@ mod tests {
         let mut queue = PushQueue::default();
         let event = queue.settle("c1", Err(PushError::Rejected("422".into())));
         assert!(matches!(event, PushEvent::Dropped { .. }));
+        assert!(queue.is_empty());
+    }
+
+    /// HX-13: a create whose `client_id` was deleted on the account is a 410;
+    /// it settles as `Deleted` with the server's message, and is not queued
+    /// again.
+    #[tokio::test]
+    async fn a_create_for_a_conversation_deleted_on_the_account_is_deleted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations"))
+            .respond_with(ResponseTemplate::new(410).set_body_json(serde_json::json!({
+                "error": "deleted", "message": "This conversation was deleted."
+            })))
+            .mount(&server)
+            .await;
+        let api = HttpHiveHistoryApi::new(&server.uri(), None);
+        let error = api.create("local-1", &body("t")).await.unwrap_err();
+        assert!(matches!(&error, PushError::Deleted(m) if m == "This conversation was deleted."));
+
+        let mut queue = PushQueue::default();
+        let event = queue.settle("local-1", Err(error));
+        assert_eq!(
+            event,
+            PushEvent::Deleted {
+                local_id: "local-1".into(),
+                message: "This conversation was deleted.".into()
+            }
+        );
         assert!(queue.is_empty());
     }
 
