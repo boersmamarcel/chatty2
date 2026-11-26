@@ -524,7 +524,7 @@ fn show_rename_dialog(
     use gpui_component::input::{Input, InputState};
 
     let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
-    input.update(cx, |state, cx| state.focus(window, cx));
+    let focus = input.clone();
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
             .title("Rename conversation")
@@ -547,5 +547,10 @@ fn show_rename_dialog(
                         }
                     }),
             )
+    });
+    // Opening the dialog focuses the dialog itself; the title field takes
+    // it after, so the person can type at once.
+    window.defer(cx, move |window, cx| {
+        focus.update(cx, |state, cx| state.focus(window, cx));
     });
 }
