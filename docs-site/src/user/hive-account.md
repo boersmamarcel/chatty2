@@ -12,7 +12,11 @@ Open **Settings → Extensions** and choose **Sign in** under **Hive Account** (
 
 Conversations in your Hive account appear in the sidebar of every device you are signed in on, including ones you started in the web app. A globe icon marks a conversation that runs in the cloud, and a dot shows when its reply is still being written or is waiting for you.
 
-A conversation you start on this computer stays on this computer until you send it to the cloud.
+Once you are signed in, a new conversation is saved to your account after its first reply, so you can open it on the web and your other devices. Its replies still run on this computer, and each new turn is saved to your account when it finishes. To change that:
+
+- **Sync new conversations** (Settings → Extensions, under Hive Account) turns this off. New conversations then stay on this computer.
+- **Keep on this device only**, in a conversation's **⋯** menu, stops saving that one conversation. Its copy in your account is left as it is; delete it on the web if you no longer want it there.
+- **Sync my existing conversations**, offered once in the same place, saves the conversations you had before you signed in. Nothing older is saved without that.
 
 ## Send a conversation to the cloud
 

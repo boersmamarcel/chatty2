@@ -7,10 +7,11 @@
 //! data *down* and asks for no confirmation.
 
 use anyhow::Context as _;
+use chatty_core::services::hive_files::HiveAttachmentUploader;
 use chatty_core::session::{
     CONTINUE_HERE_SUMMARY, HandoffError, HandoffServer, HandoffSummary, LOCAL_MODEL_NOTE,
-    NoAttachmentUpload, SEND_TO_CLOUD_SUMMARY, SendToCloud, continue_here, refuse_reason,
-    send_to_cloud, this_device_id,
+    SEND_TO_CLOUD_SUMMARY, SendToCloud, continue_here, refuse_reason, send_to_cloud,
+    this_device_id,
 };
 
 use super::ChatEngine;
@@ -70,7 +71,7 @@ impl ChatEngine {
                 sync: &sync,
                 cloud_model: cloud_model.as_deref(),
             },
-            &NoAttachmentUpload,
+            &HiveAttachmentUploader::new(server.url(), self.cloud.auth.clone()),
         )
         .await;
         let new_sync = match sent {

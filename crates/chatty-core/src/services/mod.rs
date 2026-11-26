@@ -48,6 +48,7 @@ pub mod filesystem_service;
 pub mod git_service;
 pub mod github_pr_service;
 pub mod handoff;
+pub mod hive_files;
 pub mod hive_sync;
 pub(crate) mod host_git;
 pub mod http_client;

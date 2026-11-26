@@ -589,6 +589,44 @@ async fn a_placement_409_mid_turn_says_a_reply_is_being_written() {
     assert!(matches!(error, HandoffError::TurnRunning));
 }
 
+/// HX-13: a `client_id` whose conversation was deleted on the account is
+/// answered 410; the hand-off stops there with the server's words, and
+/// nothing is placed.
+#[tokio::test]
+async fn a_conversation_deleted_on_the_account_is_not_sent_again() {
+    let server = MockServer::start().await;
+    roster(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/api/conversations"))
+        .respond_with(ResponseTemplate::new(410).set_body_json(serde_json::json!({
+            "error": "deleted", "message": "This conversation was deleted."
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/conversations/r-1/placement"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let local = row("cloud-a");
+    let error = send_to_cloud(
+        &handoff(&server),
+        SendToCloud {
+            conversation: &local,
+            sync: &ConversationSync::LocalOnly,
+            cloud_model: None,
+        },
+        &NoAttachmentUpload,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, HandoffError::DeletedOnAccount { .. }));
+    assert_eq!(error.to_string(), "This conversation was deleted.");
+}
+
 #[tokio::test]
 async fn a_stale_version_says_to_get_the_latest_copy() {
     let server = MockServer::start().await;

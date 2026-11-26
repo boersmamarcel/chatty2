@@ -29,6 +29,7 @@
 //! a refreshed one after a 401 (AGE-835). Signed out, the request goes out
 //! bare and the 401 is reported as "sign in to Hive", not as a dead server.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -79,6 +80,11 @@ pub struct HostedSession {
     /// Where the frames that are not a [`SessionEvent`] go (HX-2). Logging
     /// unless the owner installs its own with [`set_frame_sink`](Self::set_frame_sink).
     frame_sink: FrameSink,
+    /// Where this conversation's file map and downloaded files live
+    /// (HX-15). A turn's attachments are uploaded through the Hive files API
+    /// before the turn is sent; with no directory, a turn with attachments is
+    /// refused rather than sent without them.
+    files_dir: Option<PathBuf>,
 }
 
 /// The owner's side channel for [`HostedFrame`]s that are not session events.
@@ -106,7 +112,14 @@ impl HostedSession {
             turn_active: Arc::new(AtomicBool::new(false)),
             auth: None,
             frame_sink: Arc::new(log_frame),
+            files_dir: None,
         }
+    }
+
+    /// Upload each turn's attachments through the files API, keeping the
+    /// map of what was uploaded in `dir` (HX-15).
+    pub fn set_files_dir(&mut self, dir: Option<PathBuf>) {
+        self.files_dir = dir;
     }
 
     /// Hand the frames that are not session events (broker approvals and
@@ -167,14 +180,27 @@ impl HostedSession {
             bail!("a turn is already running");
         }
 
-        // Attachments and llm-only contents do not cross the wire: the server
-        // has no artifact sink (AGE-281, "not done"), so sending the paths
-        // would name files it cannot read. AGE-298's table says attachments do
-        // not move, and this is where that is true rather than merely stated.
+        // Attachments cross as files (HX-15), not as message content: each
+        // is uploaded to the conversation before the turn is sent, and the
+        // server renders it from the conversation's file list. llm-only
+        // contents do not cross. A turn is refused when it has neither text
+        // nor an attachment, or has attachments and nowhere to keep the map
+        // of what was uploaded.
         let text = extract_user_text(&input.contents);
-        if text.trim().is_empty() && input.kind != TurnKind::Regenerate {
-            bail!("a hosted turn needs text; attachments do not cross the wire yet");
+        if text.trim().is_empty()
+            && input.attachments.is_empty()
+            && input.kind != TurnKind::Regenerate
+        {
+            bail!("a hosted turn needs text or an attachment");
         }
+        let uploads = if input.attachments.is_empty() || input.kind == TurnKind::Regenerate {
+            None
+        } else {
+            let Some(dir) = self.files_dir.clone() else {
+                bail!("attachments in a hosted conversation need a file cache to upload from");
+            };
+            Some((dir, input.attachments.clone()))
+        };
 
         let body = serde_json::json!({
             "text": text,
@@ -193,6 +219,12 @@ impl HostedSession {
 
         Ok(async move {
             emit(SessionEvent::TurnStarted);
+            let uploaded = match uploads {
+                Some((dir, paths)) => {
+                    upload_for_turn(&http, auth.clone(), &url, &dir, &paths).await
+                }
+                None => Ok(()),
+            };
             // The server's stream carries its own `TurnStarted` and
             // `TurnEnded` (the wire is a serialization of `SessionEvent`), so
             // forwarding both and adding ours would hand the owner two of each
@@ -213,16 +245,21 @@ impl HostedSession {
                     }
                     other => emit(other),
                 };
-                drive_turn(
-                    &http,
-                    auth.as_deref(),
-                    &url,
-                    body,
-                    &cancel_flag,
-                    &mut forward,
-                    &frame_sink,
-                )
-                .await
+                match uploaded {
+                    Ok(()) => {
+                        drive_turn(
+                            &http,
+                            auth.as_deref(),
+                            &url,
+                            body,
+                            &cancel_flag,
+                            &mut forward,
+                            &frame_sink,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(error),
+                }
             };
             if let Err(error) = sent {
                 if ended {
@@ -554,6 +591,38 @@ impl From<PendingInputWire> for PendingInput {
 /// `Transport` and not `Other`: the two get different treatment on the
 /// headless surface, and a hosted turn is exactly the case where the network
 /// is the thing that failed.
+/// Upload a turn's attachments to the conversation the turn URL names, so
+/// the server has them when the turn starts (HX-15).
+async fn upload_for_turn(
+    http: &reqwest::Client,
+    auth: Option<Arc<HiveSession>>,
+    turn_url: &str,
+    dir: &Path,
+    paths: &[PathBuf],
+) -> std::result::Result<(), StreamError> {
+    // `<server>/api/conversations/<id>/turns`
+    let Some((base, remote_id)) = turn_url
+        .strip_suffix("/turns")
+        .and_then(|rest| rest.rsplit_once("/api/conversations/"))
+    else {
+        return Err(StreamError::new(
+            StreamErrorKind::Transport,
+            "the conversation's address is not one the files API can use",
+        ));
+    };
+    let api = crate::services::hive_files::HttpHiveFilesApi::with_client(http.clone(), base, auth);
+    crate::services::hive_files::upload_attachments(&api, remote_id, paths, dir)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            let kind = match error {
+                crate::services::hive_files::FilesError::SignedOut => StreamErrorKind::Auth,
+                _ => StreamErrorKind::Transport,
+            };
+            StreamError::new(kind, format!("could not upload the attachments: {error}"))
+        })
+}
+
 async fn drive_turn<F: FnMut(SessionEvent)>(
     http: &reqwest::Client,
     auth: Option<&HiveSession>,
@@ -1463,6 +1532,64 @@ mod tests {
             !events.iter().any(|e| matches!(e, SessionEvent::Error(_))),
             "no error after the refresh: {events:?}"
         );
+    }
+
+    /// HX-15: a turn that is only an image is no longer refused. The image is
+    /// uploaded to the conversation first, then the turn is sent.
+    #[tokio::test]
+    async fn a_hosted_turn_with_an_uploaded_image_is_accepted() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/files"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "f-1", "name": "pic.png", "media_type": "image/png",
+                "head": {"id": "v-1", "size": 3}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let text = serde_json::to_string(&SessionEvent::Text("I see it".into())).unwrap();
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/c-1/turns"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("event: text\ndata: {text}\n\n")),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let work = tempfile::tempdir().unwrap();
+        let png = work.path().join("pic.png");
+        std::fs::write(&png, [1u8, 2, 3]).unwrap();
+
+        let mut session = HostedSession::new(server.uri(), "c-1");
+        session.set_files_dir(Some(work.path().join("cache")));
+        let mut input = TurnInput::text("");
+        input.attachments = vec![png.clone()];
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        session
+            .begin_turn(&input, move |event| sink.borrow_mut().push(event))
+            .expect("an uploaded image is a turn")
+            .await;
+        let events = seen.take();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SessionEvent::Text(t) if t == "I see it")),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(e, SessionEvent::Error(_))));
+
+        // Neither text nor attachment is still refused, and attachments with
+        // nowhere to keep the upload map are refused rather than dropped.
+        assert!(session.begin_turn(&TurnInput::text(""), |_| {}).is_err());
+        let mut bare = HostedSession::new(server.uri(), "c-1");
+        assert!(bare.begin_turn(&input, |_| {}).is_err());
     }
 
     /// Signed out, the server's 401 is reported as "sign in to Hive" with

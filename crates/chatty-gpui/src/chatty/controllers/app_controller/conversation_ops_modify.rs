@@ -18,9 +18,10 @@ use super::export_ops::{write_atif_export, write_jsonl_export};
 use super::*;
 
 use chatty_core::models::conversation::ConversationSync;
+use chatty_core::services::hive_files::HiveAttachmentUploader;
 use chatty_core::session::{
-    HandoffError, HandoffServer, NoAttachmentUpload, SendToCloud, continue_here, pick_local_model,
-    refuse_reason, send_to_cloud, this_device_id,
+    HandoffError, HandoffServer, SendToCloud, continue_here, pick_local_model, refuse_reason,
+    send_to_cloud, this_device_id,
 };
 
 use crate::chatty::views::{HandoffDialog, HandoffKind};
@@ -463,6 +464,10 @@ impl ChattyApp {
             return;
         };
         let server = Self::handoff_server(cx);
+        let uploader = HiveAttachmentUploader::new(
+            server.url(),
+            cx.global::<ConversationsStore>().hosted_auth(),
+        );
 
         cx.spawn(async move |weak, cx| {
             let result = async {
@@ -474,7 +479,7 @@ impl ChattyApp {
                         sync: &snapshot.sync,
                         cloud_model: cloud_model.as_deref(),
                     },
-                    &NoAttachmentUpload,
+                    &uploader,
                 )
                 .await
             }
@@ -493,6 +498,10 @@ impl ChattyApp {
                          and open it from any device signed in to your Hive account.",
                         cx,
                     );
+                }
+                Err(HandoffError::DeletedOnAccount { message }) => {
+                    let message = HandoffError::DeletedOnAccount { message }.to_string();
+                    app.deleted_on_account(&conv_id, message, cx);
                 }
                 Err(error @ HandoffError::HeldElsewhere { .. }) => {
                     let message = error.to_string();
@@ -544,7 +553,7 @@ impl ChattyApp {
                 let here = match result {
                     Ok((here, device_id)) => {
                         cx.update_global::<ConversationsStore, _>(|store, _cx| {
-                            store.set_this_device(device_id);
+                            store.set_this_device(Some(device_id));
                         });
                         here
                     }

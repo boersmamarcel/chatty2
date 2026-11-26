@@ -35,7 +35,7 @@ use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::services::hive_sync::wire::{
     AuthSessions, CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder,
-    PlacementChange, PlacementReply, PlacementTarget,
+    PlacementChange, PlacementReply, PlacementTarget, push_body,
 };
 
 // ── What the user is told ────────────────────────────────────────────────────
@@ -134,6 +134,11 @@ pub enum HandoffError {
     /// The conversation is gone from the account.
     #[error("This conversation is no longer in your Hive account.")]
     NotFound,
+    /// 410 on the create: this conversation was deleted on the account, and
+    /// its id stays retired (the tombstone lasts 30 days). The caller makes
+    /// it local-only and keeps the local copy. `message` is the server's own.
+    #[error("{}", message.as_deref().unwrap_or("This conversation was deleted from your Hive account. It stays on this computer."))]
+    DeletedOnAccount { message: Option<String> },
     /// The attachment upload failed.
     #[error("Could not upload this conversation's attachments: {0:#}. Try again.")]
     Attachments(anyhow::Error),
@@ -210,6 +215,12 @@ impl HandoffServer {
             StatusCode::UNAUTHORIZED => Err(HandoffError::SignedOut),
             StatusCode::NOT_FOUND => Err(HandoffError::NotFound),
             StatusCode::PRECONDITION_FAILED => Err(HandoffError::ChangedElsewhere),
+            StatusCode::GONE => {
+                let body: ConflictBody = response.json().await.unwrap_or_default();
+                Err(HandoffError::DeletedOnAccount {
+                    message: body.message.filter(|message| !message.trim().is_empty()),
+                })
+            }
             StatusCode::CONFLICT => {
                 let body: ConflictBody = response.json().await.unwrap_or_default();
                 Err(match body.holder() {
@@ -382,12 +393,7 @@ pub async fn send_to_cloud(
 fn cloud_copy(conversation: &ConversationData, model_id: &str) -> ConversationData {
     ConversationData {
         model_id: model_id.to_string(),
-        working_dir: None,
-        sync: None,
-        placement: None,
-        remote_version: None,
-        last_synced_at: None,
-        ..conversation.clone()
+        ..push_body(conversation.clone())
     }
 }
 

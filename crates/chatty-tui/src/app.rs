@@ -187,13 +187,6 @@ async fn run_loop(
                             KeyAction::OpenConversation(arg) => {
                                 engine.open_command(&arg).await;
                             }
-                            KeyAction::ListConversations => {
-                                let list = engine.conversations_command().await;
-                                engine.add_system_message(list);
-                            }
-                            KeyAction::OpenConversation(arg) => {
-                                engine.open_command(&arg).await;
-                            }
                             KeyAction::Login => {
                                 // Leave the alternate screen so the prompts
                                 // are plain terminal lines, then come back.

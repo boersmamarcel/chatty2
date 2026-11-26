@@ -266,9 +266,10 @@ impl ConversationsStore {
         self.this_device.clone()
     }
 
-    /// Remember this device's login session id for the current sign-in.
-    pub fn set_this_device(&mut self, device_id: String) {
-        self.this_device = Some(device_id);
+    /// Remember this device's login session id for the current sign-in, or
+    /// forget it (`None`) when the sign-in ends.
+    pub fn set_this_device(&mut self, device_id: Option<String>) {
+        self.this_device = device_id;
     }
 
     /// The Hive sign-in hosted requests authenticate with, for a move that
@@ -388,6 +389,7 @@ impl ConversationsStore {
                 if !unchanged {
                     let mut client = HostedSession::new(server_url, remote_id)
                         .with_auth(self.hosted_auth.clone());
+                    client.set_files_dir(crate::services::hive_files::cache_dir(remote_id));
                     if let Some(sink) = self.frame_sink(id) {
                         client.set_frame_sink(sink);
                     }
@@ -807,7 +809,7 @@ mod tests {
     #[test]
     fn this_devices_id_is_forgotten_when_the_sign_in_changes() {
         let mut store = ConversationsStore::new();
-        store.set_this_device("s-1".into());
+        store.set_this_device(Some("s-1".into()));
         assert_eq!(store.this_device().as_deref(), Some("s-1"));
         store.set_hosted_auth(Some(Arc::new(HiveSession::new(
             "https://hive.example".to_string(),

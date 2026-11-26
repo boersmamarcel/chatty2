@@ -174,12 +174,50 @@ impl ChattyApp {
         };
         // Opened on this device: finishing or waiting is worth a notification.
         self.hive_sync.engaged.insert(conv_id.to_string());
+        self.download_cloud_files(conv_id, cx);
         if stale {
             self.sync_cloud_detail(conv_id, cx);
             return;
         }
         self.load_cloud_inputs(conv_id, cx);
         self.attach_if_running(conv_id, cx);
+    }
+
+    /// Bring the conversation's input and output files that this device does
+    /// not hold into the local cache (HX-15). The server deletes a run's
+    /// outputs after 30 days unless they are promoted, so this runs when the
+    /// conversation is opened, not when a file is first wanted.
+    fn download_cloud_files(&mut self, conv_id: &str, cx: &mut Context<Self>) {
+        let Some((server_url, remote_id, _)) = self.cloud_address(conv_id, cx) else {
+            return;
+        };
+        let Some(dir) = chatty_core::services::hive_files::cache_dir(&remote_id) else {
+            return;
+        };
+        if !self.hive_sync.files_in_flight.insert(conv_id.to_string()) {
+            return;
+        }
+        let auth = cx.global::<ConversationsStore>().hosted_auth();
+        let conv_id = conv_id.to_string();
+        cx.spawn(async move |weak, cx| {
+            let api = chatty_core::services::hive_files::HttpHiveFilesApi::new(&server_url, auth);
+            let result =
+                chatty_core::services::hive_files::download_files(&api, &remote_id, &dir).await;
+            weak.update(cx, |app, _| {
+                app.hive_sync.files_in_flight.remove(&conv_id);
+                match result {
+                    Ok(files) => {
+                        debug!(conv_id = %conv_id, count = files.len(), "Cached a cloud conversation's files");
+                    }
+                    Err(error) => {
+                        warn!(conv_id = %conv_id, error = %error, "Could not cache a cloud conversation's files");
+                    }
+                }
+            })
+            .map_err(|e| debug!(error = ?e, "The app closed while caching cloud files"))
+            .ok();
+        })
+        .detach();
     }
 
     /// Follow the conversation's turn when the server says one is running and
