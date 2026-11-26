@@ -98,16 +98,16 @@ The bar follows **Enable Git Integration** in Settings → Code Execution. Priva
 
 - Conversations are stored in a local database on your machine by default.
 - Titles are generated automatically. The search icon in the title bar opens **Search conversations…**, which filters the sidebar as you type.
-- Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, **Take online…**, and **Delete**.
+- Each conversation's **⋯** menu has **Download**, which saves the transcript as a Markdown file, **Send to the cloud…** (or **Continue on this device…**) when you are signed in to Hive, and **Delete**.
 - The sidebar shows the running cost per conversation; each reply shows its input and output tokens and cost. Pricing uses the per-million-token rates on the model, which the OpenRouter catalogue fills in for you.
 - Chatty only ever appends to the prompt it sends — the system instructions, tool list and prior turns already sent are never rewritten — so a provider's prompt cache keeps recognising them turn after turn. Providers that price cached input lower pass that saving straight through to the cost shown here.
 - **Regenerate** under a reply asks for a fresh answer. Chatty keeps both versions, which is what makes preference-pair export possible ([Advanced](./advanced.md)).
 
 ![Token and cost tracking](../assets/animations/advanced_token_tracking.gif)
 
-## Taking a conversation online
+## Sending a conversation to the cloud
 
-**Take online…** is a developer preview: it appears in a conversation's **⋯** menu only once you turn it on under **Settings → Execution → Developer**, and it does not yet let you watch a run after closing the laptop. It uploads its history to a `chatty-server` you name and continues it there to carry on there. A globe icon badges the conversation in the sidebar while it runs remotely, and while it does the composer's model chip shows the model the server reported (or "Hosted model" if it reported none) instead of your local pick, with no model picker, since the server decides the model. The same menu offers **Bring back here** to return it. The confirmation dialog lists exactly what moves (the title and message history; the server picks its own model) and what never does (workspace files, attachments, MCP servers, memory, skills, and provider API keys — those stay on this machine). The local copy stays on this machine; bringing the conversation back adopts the server's history only when it is longer than yours, replacing the local messages (and their traces) in that case. A move mid-turn is refused until the turn finishes. The server only accepts requests from a signed-in Hive session, so sign in first (**Settings → Extensions → Hive**); without it, the move or the hosted turn fails with a message telling you to sign in.
+With a Hive account, **Send to the cloud…** keeps a conversation running after you close the laptop, and **Continue on this device…** brings it back. The dialog says what goes with it and what stays on this computer before anything leaves. While a conversation runs in the cloud, a globe icon marks it in the sidebar and the composer's model chip shows the cloud model. See [Use chatty with your Hive account](./hive-account.md).
 
 ## Themes and text
 
