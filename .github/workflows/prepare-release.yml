@@ -308,13 +308,14 @@ jobs:
           private-key: ${{ secrets.NURSE_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
-          permission-statuses: write
-          permission-checks: write
 
       - name: Land version bump via pull request
         if: steps.mode.outputs.mode == 'bump-and-cut' && steps.tag_check.outputs.exists != 'true'
         env:
+          # The App opens, labels and merges the PR. The App may only read
+          # statuses and checks, so the built-in token stamps them.
           GH_TOKEN: ${{ steps.nurse_token.outputs.token }}
+          BUILTIN_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW: ${{ steps.version.outputs.new }}
           TAG: ${{ steps.version.outputs.tag }}
           REPO: ${{ github.repository }}
@@ -348,12 +349,12 @@ jobs:
 
           NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           for CONTEXT in test check-reserved guard; do
-            gh api "repos/${REPO}/statuses/${SHA}" \
+            GH_TOKEN="$BUILTIN_TOKEN" gh api "repos/${REPO}/statuses/${SHA}" \
               -f state=success \
               -f context="$CONTEXT" \
               -f description="cut-release version bump only" \
               >/dev/null
-            gh api "repos/${REPO}/check-runs" \
+            GH_TOKEN="$BUILTIN_TOKEN" gh api "repos/${REPO}/check-runs" \
               -f name="$CONTEXT" \
               -f head_sha="$SHA" \
               -f status=completed \
@@ -363,7 +364,7 @@ jobs:
               >/dev/null
           done
 
-          gh label create cut-release \
+          GH_TOKEN="$BUILTIN_TOKEN" gh label create cut-release \
             --repo "$REPO" \
             --description "Version bump PR; prepare-release tags after merge" \
             --color "1D76DB" 2>/dev/null || true
