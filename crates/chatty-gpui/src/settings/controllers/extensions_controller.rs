@@ -573,6 +573,23 @@ pub fn toggle_extension(id: String, cx: &mut App) {
     }
 }
 
+/// Sign in to an enabled MCP server whose OAuth sign-in the app's start
+/// skipped (AGE-2129): the browser opens only on this request, never by
+/// itself at start.
+pub fn sign_in_mcp(id: String, cx: &mut App) {
+    let Some(ext) = cx.global::<ExtensionsModel>().find(&id) else {
+        return;
+    };
+    let ExtensionKind::McpServer(config) = ext.kind.clone() else {
+        return;
+    };
+    if !ext.enabled {
+        return;
+    }
+    info!(id = %id, "Signing in to an MCP server");
+    handle_mcp_toggle(config, true, cx);
+}
+
 /// AGE-806: flip an A2A agent's per-agent `allow_private_network` opt-in.
 /// Only this agent is affected — the A2A edge's `GuardedResolver` reads the
 /// flag off the agent config it is given for every call, not a global
