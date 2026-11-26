@@ -143,6 +143,9 @@ pub struct ConversationDetail {
     pub created_at: Option<i64>,
     #[serde(default, deserialize_with = "unix_seconds_opt")]
     pub updated_at: Option<i64>,
+    /// chatty-server's name for it (AGE-2124): Unix seconds.
+    #[serde(default)]
+    pub last_active_at: Option<i64>,
 }
 
 impl ConversationDetail {
@@ -186,8 +189,8 @@ impl ConversationDetail {
             message_timestamps: json(&self.message_timestamps, "[]"),
             message_feedback: json(&self.message_feedback, "[]"),
             regeneration_records: "[]".to_string(),
-            created_at: self.created_at.unwrap_or(0),
-            updated_at: self.updated_at.unwrap_or(0),
+            created_at: self.created_at.or(self.last_active_at).unwrap_or(0),
+            updated_at: self.updated_at.or(self.last_active_at).unwrap_or(0),
             working_dir: None,
             agent_task_snapshot: None,
             sync: None,
@@ -531,6 +534,11 @@ struct ChangeWire {
     updated_at_ms: Option<i64>,
     #[serde(default, deserialize_with = "unix_seconds_opt")]
     updated_at: Option<i64>,
+    /// What chatty-server sends (AGE-2124): Unix seconds, in the
+    /// conversation's totals. Without it every pulled row got time 0 and
+    /// sorted below every local one.
+    #[serde(default)]
+    last_active_at: Option<i64>,
     #[serde(default)]
     turn_status: Option<TurnStatus>,
     #[serde(default)]
@@ -576,6 +584,7 @@ impl From<ChangeWire> for RemoteChange {
                 .updated_at_ms
                 .map(|ms| ms / 1_000)
                 .or(wire.updated_at)
+                .or(wire.last_active_at)
                 .unwrap_or(0),
             turn_status,
             placement: with_device(
@@ -663,6 +672,31 @@ fn unix_seconds_opt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AGE-2124: chatty-server sends a conversation's time as
+    /// `last_active_at` (Unix seconds), in the list and in the detail. Read
+    /// as 0, every pulled conversation sorted below every local one.
+    #[test]
+    fn the_servers_last_active_at_is_the_time() {
+        let page: ChangesPage = serde_json::from_value(serde_json::json!({
+            "conversations": [{"id": "a", "title": "A", "version": 1, "last_active_at": 1_795_708_470}],
+            "next_cursor": "c"
+        }))
+        .unwrap();
+        let RemoteChange::Upsert(a) = &page.changes[0] else {
+            panic!("an upsert")
+        };
+        assert_eq!(a.updated_at, 1_795_708_470);
+
+        let detail: ConversationDetail = serde_json::from_value(serde_json::json!({
+            "id": "a", "title": "A", "version": 1, "last_active_at": 1_795_708_470, "messages": []
+        }))
+        .unwrap();
+        assert_eq!(
+            detail.to_conversation_data("local").updated_at,
+            1_795_708_470
+        );
+    }
 
     #[test]
     fn a_page_decodes_upserts_tombstones_and_the_cursor() {
