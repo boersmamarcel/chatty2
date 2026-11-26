@@ -494,8 +494,8 @@ impl ChattyApp {
                         cx,
                     );
                 }
-                Err(HandoffError::HeldElsewhere { holder }) => {
-                    let message = HandoffError::HeldElsewhere { holder }.to_string();
+                Err(error @ HandoffError::HeldElsewhere { .. }) => {
+                    let message = error.to_string();
                     open_handoff_dialog(conv_id.clone(), HandoffKind::TakeOver { message }, local_model.clone(), cx);
                 }
                 Err(error) => {

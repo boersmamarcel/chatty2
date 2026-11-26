@@ -35,7 +35,7 @@ use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::services::hive_sync::wire::{
     CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder, PlacementChange,
-    PlacementReply, PlacementTarget, PushHistory, VersionReply,
+    PlacementReply, PlacementTarget,
 };
 
 // ── What the user is told ────────────────────────────────────────────────────
@@ -100,9 +100,13 @@ pub enum HandoffError {
     #[error("A reply is still being written. Wait for it to finish, or stop it, then try again.")]
     TurnRunning,
     /// Another device, or the cloud, holds the conversation: only it may
-    /// change it. [`continue_here`] takes it over.
-    #[error("{}", held_elsewhere(holder))]
-    HeldElsewhere { holder: Holder },
+    /// change it. [`continue_here`] takes it over. `message` is the
+    /// server's own user-facing text, shown as-is when it sent one.
+    #[error("{}", message.clone().unwrap_or_else(|| held_elsewhere(holder)))]
+    HeldElsewhere {
+        holder: Holder,
+        message: Option<String>,
+    },
     /// The server's copy changed since this device last saw it (412).
     #[error(
         "This conversation changed on another device. Continue it on this device to get the \
@@ -209,8 +213,11 @@ impl HandoffServer {
             StatusCode::CONFLICT => {
                 let body: ConflictBody = response.json().await.unwrap_or_default();
                 Err(match body.holder() {
-                    Some(holder) if !body.turn_running() => HandoffError::HeldElsewhere { holder },
-                    _ => HandoffError::TurnRunning,
+                    Some(holder) => HandoffError::HeldElsewhere {
+                        holder,
+                        message: body.message,
+                    },
+                    None => HandoffError::TurnRunning,
                 })
             }
             status if !status.is_success() => {
@@ -342,15 +349,8 @@ pub async fn send_to_cloud(
         version = push_history(server, &remote_id, version, &uploaded).await?;
     }
 
-    // PHASE 4: the placement.
-    let reply = change_placement(
-        server,
-        &remote_id,
-        PlacementTarget::Cloud,
-        version,
-        Some(&model_id),
-    )
-    .await?;
+    // PHASE 4: the placement. The model went up with the history.
+    let reply = change_placement(server, &remote_id, PlacementTarget::Cloud, version).await?;
 
     Ok(ConversationSync::Synced(SyncedConversation {
         server_url: server.url.clone(),
@@ -386,9 +386,8 @@ async fn create(
         client_id: &row.id,
         title: &row.title,
         model_id: &row.model_id,
-        messages: serde_json::from_str(&row.message_history)
-            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new())),
         conversation: row,
+        placement: PlacementTarget::Device,
     };
     let response = server
         .send(&url, |http| http.post(&url).json(&body))
@@ -404,21 +403,15 @@ async fn push_history(
     row: &ConversationData,
 ) -> Result<u64, HandoffError> {
     let url = format!("{}/api/conversations/{remote_id}/history", server.url);
-    let body = PushHistory { conversation: row };
     let response = server
         .send(&url, |http| {
             http.put(&url)
                 .header(reqwest::header::IF_MATCH, version.to_string())
-                .json(&body)
+                .json(row)
         })
         .await?;
-    let etag = response
-        .headers()
-        .get(reqwest::header::ETAG)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim_matches('"').parse::<u64>().ok());
-    let reply: VersionReply = response.json().await.unwrap_or_default();
-    Ok(reply.version.or(etag).unwrap_or(version + 1))
+    let reply: PlacementReply = response.json().await.unwrap_or_default();
+    Ok(reply.version.unwrap_or(version + 1))
 }
 
 async fn change_placement(
@@ -426,13 +419,11 @@ async fn change_placement(
     remote_id: &str,
     to: PlacementTarget,
     expected_version: u64,
-    model_id: Option<&str>,
 ) -> Result<PlacementReply, HandoffError> {
     let url = format!("{}/api/conversations/{remote_id}/placement", server.url);
     let body = PlacementChange {
         to,
         expected_version,
-        model_id,
     };
     let response = server
         .send(&url, |http| http.post(&url).json(&body))
@@ -462,19 +453,21 @@ pub async fn continue_here(
     let Some(synced) = sync.synced() else {
         return Err(HandoffError::NotSynced);
     };
-    let remote = fetch_conversation(server, &synced.remote_id).await?;
-    if remote.turn_running() {
-        return Err(HandoffError::TurnRunning);
-    }
-    let version = remote.version.unwrap_or(synced.version);
-    let reply = change_placement(
-        server,
-        &synced.remote_id,
-        PlacementTarget::Device,
-        version,
-        None,
-    )
-    .await?;
+    // A save between the pull and the move (a rename, the cloud's last
+    // write) raises the version: pull again and retry once.
+    let mut retried = false;
+    let (remote, version, reply) = loop {
+        let remote = fetch_conversation(server, &synced.remote_id).await?;
+        if remote.turn_running() {
+            return Err(HandoffError::TurnRunning);
+        }
+        let version = remote.version.unwrap_or(synced.version);
+        match change_placement(server, &synced.remote_id, PlacementTarget::Device, version).await {
+            Ok(reply) => break (remote, version, reply),
+            Err(HandoffError::ChangedElsewhere) if !retried => retried = true,
+            Err(error) => return Err(error),
+        }
+    };
     let sync = ConversationSync::Synced(SyncedConversation {
         server_url: server.url.clone(),
         remote_id: synced.remote_id.clone(),
