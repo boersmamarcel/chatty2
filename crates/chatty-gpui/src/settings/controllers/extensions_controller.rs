@@ -170,10 +170,9 @@ async fn sign_in(pair: TokenPair, username: String, email: String, cx: &mut Asyn
 /// the next step. The technical error goes to the log.
 fn sign_in_error(error: &ClientError, hive_url: &str) -> String {
     match error {
-        ClientError::NotHive => format!(
-            "{hive_url} is not a Hive server. Check the Hive address in your settings \
-             file (hive_settings.json), then try again."
-        ),
+        ClientError::NotHive => {
+            format!("{hive_url} is not a Hive server. Check the Hive address, then try again.")
+        }
         ClientError::Offline(_) => format!(
             "Could not reach {hive_url}. Check your connection and the Hive address, \
              then try again."
@@ -229,6 +228,24 @@ async fn checked_hive_client(
     .map_err(|e| warn!(error = ?e, "Failed to record the Hive server version"))
     .ok();
     Ok(client)
+}
+
+/// Use `url` as the Hive address (AGE-2129): it was only settable in
+/// `hive_settings.json`. A blank or unchanged address changes nothing; a new
+/// one is saved, and the panel asks the new server for its version.
+pub fn set_hive_url(url: &str, cx: &mut App) {
+    let url = url.trim().trim_end_matches('/').to_string();
+    if url.is_empty() || cx.global::<HiveSettingsModel>().hive_url == url {
+        return;
+    }
+    let model = {
+        let settings = cx.global_mut::<HiveSettingsModel>();
+        settings.hive_url = url;
+        settings.clone()
+    };
+    cx.global_mut::<MarketplaceState>().hive_server = None;
+    save_hive_settings_async(model, cx);
+    refresh_hive_server(cx);
 }
 
 /// Look up the Hive server's version for the account panel; a server that
@@ -721,6 +738,37 @@ pub fn add_custom_mcp(name: String, url: String, api_key: Option<String>, cx: &m
 
     cx.refresh_windows();
     info!(server = %name, "Created custom MCP server extension");
+}
+
+/// Add a remote A2A agent by hand (AGE-2129): the "Add Custom Extension"
+/// group promised one, and the Agents page sends people there for it, but
+/// only an MCP server could be added. Enabled at once, and its agent card
+/// fetched, as when an A2A extension is switched on.
+pub fn add_custom_a2a(name: String, url: String, api_key: Option<String>, cx: &mut App) {
+    let config = chatty_core::settings::models::a2a_store::A2aAgentConfig {
+        name: name.clone(),
+        url,
+        api_key,
+        enabled: true,
+        skills: Vec::new(),
+        allow_private_network: false,
+    };
+    let id = format!("a2a-{name}");
+    let extensions = cx.global_mut::<ExtensionsModel>();
+    extensions.add(InstalledExtension {
+        id: id.clone(),
+        display_name: name.clone(),
+        description: String::new(),
+        kind: ExtensionKind::A2aAgent(config.clone()),
+        source: ExtensionSource::Custom,
+        pricing_model: None,
+        enabled: true,
+    });
+    save_extensions_async(extensions.clone(), cx);
+    handle_a2a_probe(id, config, cx);
+    emit_rebuild_required(cx);
+    cx.refresh_windows();
+    info!(agent = %name, "Created custom A2A agent extension");
 }
 
 // ── Hive ↔ MCP token sync ──────────────────────────────────────────────────

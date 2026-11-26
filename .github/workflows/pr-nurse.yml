@@ -14,7 +14,7 @@ name: PR nurse
 # happens behind the workflow's back) edits the tree and never commits or
 # pushes. Two jobs keep PR code away from the write token: `work` runs the PR's
 # code and the session with a read-only token and emits a patch; `push` holds
-# AUTO_UPDATE_TOKEN, runs no PR code, applies the patch as data, validates it
+# a hive-nurse GitHub App token, runs no PR code, applies the patch as data, validates it
 # (no conflict markers, no forbidden paths) and pushes, because pushes made
 # with GITHUB_TOKEN do not trigger CI.
 
@@ -67,15 +67,39 @@ jobs:
             scripts/pr-nurse-decide.sh
           sparse-checkout-cone-mode: false
 
+      - name: Check that the nurse App secrets are set
+        env:
+          # Only whether each secret is set reaches the shell, never its value.
+          HAS_APP_ID: ${{ secrets.NURSE_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.NURSE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_APP_ID" != true ] || [ "$HAS_APP_KEY" != true ]; then
+            echo "::error::The repository secrets NURSE_APP_ID and NURSE_APP_PRIVATE_KEY must both be set (the hive-nurse GitHub App, installed on this repository)."
+            exit 1
+          fi
+
+      - name: Mint a short-lived token from the nurse App
+        id: nurse-token
+        # v3.3.0, pinned by commit. No owner/repositories: the token is
+        # scoped to this repository only.
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.NURSE_APP_ID }}
+          private-key: ${{ secrets.NURSE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-checks: read
+          permission-statuses: read
+
       - name: Pick the PR that needs care
         id: pick
         env:
-          GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
+          GH_TOKEN: ${{ steps.nurse-token.outputs.token }}
           REPO: ${{ github.repository }}
           ONLY: ${{ github.event.inputs.pr }}
         run: |
           set -euo pipefail
-          [ -n "$GH_TOKEN" ] || { echo "::error::AUTO_UPDATE_TOKEN is not set"; exit 1; }
+          [ -n "$GH_TOKEN" ] || { echo "::error::The nurse App returned no token; check NURSE_APP_ID and NURSE_APP_PRIVATE_KEY"; exit 1; }
           triage="$(bash scripts/pr-nurse-triage.sh "$REPO" ${ONLY:+"$ONLY"})"
           echo "triage: $triage"
 
@@ -93,7 +117,7 @@ jobs:
           if [ -n "$pr" ]; then echo "Nursing PR #$pr ($reason)."; else echo "Nothing needs care."; fi
 
   # Runs the PR's code (cargo build scripts, tests) and the headless session.
-  # It holds no write token: the workflow token is read-only, AUTO_UPDATE_TOKEN
+  # It holds no write token: the workflow token is read-only, the App token
   # is not available here, and the checkout does not persist credentials. Its
   # only output is a patch, handed to the push job below as data.
   work:
@@ -330,8 +354,31 @@ jobs:
       MAIN_SHA: ${{ needs.work.outputs.main_sha }}
       CONFLICTED: ${{ needs.work.outputs.conflicted }}
       BLOCKED: ${{ needs.work.outputs.blocked }}
-      GH_TOKEN: ${{ secrets.AUTO_UPDATE_TOKEN }}
     steps:
+      - name: Check that the nurse App secrets are set
+        env:
+          # Only whether each secret is set reaches the shell, never its value.
+          HAS_APP_ID: ${{ secrets.NURSE_APP_ID != '' }}
+          HAS_APP_KEY: ${{ secrets.NURSE_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_APP_ID" != true ] || [ "$HAS_APP_KEY" != true ]; then
+            echo "::error::The repository secrets NURSE_APP_ID and NURSE_APP_PRIVATE_KEY must both be set (the hive-nurse GitHub App, installed on this repository)."
+            exit 1
+          fi
+
+      - name: Mint a short-lived token from the nurse App
+        id: nurse-token
+        # v3.3.0, pinned by commit. No owner/repositories: the token is
+        # scoped to this repository only.
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.NURSE_APP_ID }}
+          private-key: ${{ secrets.NURSE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-checks: read
+          permission-statuses: read
+
       - name: Checkout the PR head commit
         uses: actions/checkout@v7
         with:
@@ -346,6 +393,8 @@ jobs:
           path: /tmp/nurse-out
 
       - name: Validate and push, or hand to a human
+        env:
+          GH_TOKEN: ${{ steps.nurse-token.outputs.token }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
