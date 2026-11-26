@@ -294,10 +294,27 @@ jobs:
             echo "Updated Cargo.lock for chatty-gpui=$NEW"
           fi
 
+      # The bump PR is opened and merged as the hive-nurse App (AGE-2131): the
+      # repository does not let GITHUB_TOKEN create pull requests ("GitHub
+      # Actions is not permitted to create or approve pull requests"), which
+      # failed every release since 2026-11-24. Needs NURSE_APP_ID and
+      # NURSE_APP_PRIVATE_KEY on this repository, and the App installed on it.
+      - name: Mint the hive-nurse App token
+        id: nurse_token
+        if: steps.mode.outputs.mode == 'bump-and-cut' && steps.tag_check.outputs.exists != 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.NURSE_APP_ID }}
+          private-key: ${{ secrets.NURSE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-statuses: write
+          permission-checks: write
+
       - name: Land version bump via pull request
         if: steps.mode.outputs.mode == 'bump-and-cut' && steps.tag_check.outputs.exists != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.nurse_token.outputs.token }}
           NEW: ${{ steps.version.outputs.new }}
           TAG: ${{ steps.version.outputs.tag }}
           REPO: ${{ github.repository }}
