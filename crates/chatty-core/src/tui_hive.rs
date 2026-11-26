@@ -88,7 +88,10 @@ pub async fn sign_in(
     email: &str,
     password: &str,
 ) -> Result<()> {
-    let client = HiveRegistryClient::new(hive_url);
+    let client = HiveRegistryClient::new(hive_url).with_device(
+        hive_client::ClientKind::Tui,
+        crate::hive_device::terminal_device_name(),
+    );
     client.server_version().await.with_context(|| {
         format!("Could not use {hive_url}; check the Hive address in hive_settings.json")
     })?;

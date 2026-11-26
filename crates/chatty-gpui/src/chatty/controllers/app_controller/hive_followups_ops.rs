@@ -50,6 +50,32 @@ pub(super) fn follow_up_for(
 }
 
 impl ChattyApp {
+    /// What to say instead of sending when another device holds `conv_id`
+    /// (AGE-2122): the same words as the line under the conversation, from
+    /// the same facts. `None` while this device may write to it.
+    pub(super) fn held_elsewhere(
+        &mut self,
+        conv_id: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let store = cx.global::<ConversationsStore>();
+        let placement = store
+            .get_conversation(conv_id)
+            .and_then(|c| c.sync().synced().map(|s| s.placement.clone()));
+        let this_device = store.this_device();
+        let holder = store.device_name(conv_id).map(str::to_string);
+        match follow_up_for(
+            false,
+            self.hive_push.held_message(conv_id),
+            placement.as_ref(),
+            this_device.as_deref(),
+            holder.as_deref(),
+        ) {
+            Some(FollowUp::TakeItBack { message }) => Some(message),
+            _ => None,
+        }
+    }
+
     /// Recompute the line under the shown conversation.
     pub(super) fn refresh_follow_up(&mut self, cx: &mut Context<Self>) {
         let Some(conv_id) = self.active_conversation_id(cx) else {

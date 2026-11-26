@@ -307,12 +307,16 @@ fn format_context(tokens: Option<i32>) -> String {
     }
 }
 
-/// Input-token price per million, or `free` for anything running locally.
+/// Input-token price per million: `free` for anything running locally or an
+/// OpenRouter `:free` model, `—` when the price is not known. A stored zero
+/// is unknown, not free: it read as "$0.00" for paid models (AGE-2129).
 fn format_price(model: &ModelConfig) -> String {
+    let free =
+        model.provider_type == ProviderType::Ollama || model.model_identifier.ends_with(":free");
     match model.cost_per_million_input_tokens {
-        Some(cost) => format!("${cost:.2}"),
-        None if model.provider_type == ProviderType::Ollama => "free".to_string(),
-        None => "—".to_string(),
+        _ if free => "free".to_string(),
+        Some(cost) if cost > 0.0 => format!("${cost:.2}"),
+        _ => "—".to_string(),
     }
 }
 
@@ -365,6 +369,7 @@ impl Render for ModelsListView {
             .filter(|m| m.is_favorite)
             .count();
         let configured_count = statuses.iter().filter(|s| s.configured).count();
+        let provider_count = statuses.len();
 
         let entity = cx.entity();
 
@@ -381,10 +386,9 @@ impl Render for ModelsListView {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(div().text_lg().child("Models & Providers"))
                             .child(
                                 div().text_xs().text_color(colors.muted_fg).child(format!(
-                                    "{total} models across {configured_count} providers · {favourites} favourites"
+                                    "{total} models · {configured_count} of {provider_count} providers set up · {favourites} favourites"
                                 )),
                             ),
                     )
@@ -710,3 +714,45 @@ impl ModelsListView {
 mod add_model_sheet;
 mod dialogs;
 mod provider_keys_sheet;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(provider: ProviderType, identifier: &str, cost: Option<f64>) -> ModelConfig {
+        let mut model = ModelConfig::new(
+            "m".to_string(),
+            "M".to_string(),
+            provider,
+            identifier.to_string(),
+        );
+        model.cost_per_million_input_tokens = cost;
+        model
+    }
+
+    /// AGE-2129: a stored zero is an unknown price, not a free model, except
+    /// for a local model or an OpenRouter `:free` one.
+    #[test]
+    fn a_price_is_shown_only_when_known() {
+        assert_eq!(
+            format_price(&model(ProviderType::OpenRouter, "a/b", Some(3.0))),
+            "$3.00"
+        );
+        assert_eq!(
+            format_price(&model(ProviderType::OpenRouter, "a/b", Some(0.0))),
+            "—"
+        );
+        assert_eq!(
+            format_price(&model(ProviderType::OpenRouter, "a/b", None)),
+            "—"
+        );
+        assert_eq!(
+            format_price(&model(ProviderType::OpenRouter, "a/b:free", Some(0.0))),
+            "free"
+        );
+        assert_eq!(
+            format_price(&model(ProviderType::Ollama, "llama3", None)),
+            "free"
+        );
+    }
+}

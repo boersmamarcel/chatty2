@@ -182,7 +182,7 @@ impl ChattyApp {
         );
     }
 
-    fn notify_window(&self, message: String, cx: &mut Context<Self>) {
+    pub(super) fn notify_window(&self, message: String, cx: &mut Context<Self>) {
         cx.defer(move |cx| {
             if let Some(window) = cx.active_window() {
                 window

@@ -5,7 +5,10 @@ use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPa
 
 pub fn training_settings_page() -> SettingPage {
     SettingPage::new("Training Data")
-        .description("Configure automatic conversation export for model training")
+        .description(
+            "For people who train their own models: save a copy of every conversation to the \
+             exports folder, in a standard training format. Off unless you turn it on.",
+        )
         .resettable(false)
         .groups(vec![
             SettingGroup::new()

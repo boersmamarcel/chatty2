@@ -43,6 +43,7 @@ pub mod exporters;
 pub mod factories;
 pub mod feature_card;
 pub use hive_client as hive;
+pub mod hive_device;
 pub mod install;
 pub mod models;
 pub mod paste;

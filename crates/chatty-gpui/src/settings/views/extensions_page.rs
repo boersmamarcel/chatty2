@@ -12,7 +12,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
-use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
+use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage};
 use gpui_component::{
     ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex,
     switch::Switch, v_flex,
@@ -36,9 +36,11 @@ pub fn extensions_page() -> SettingPage {
 // ── Hive Account ───────────────────────────────────────────────────────────
 
 fn hive_account_group() -> SettingGroup {
-    SettingGroup::new()
-        .title("Hive account")
-        .items(vec![SettingItem::render(|_options, _window, cx| {
+    // A titled item, not a bare element, so the settings search finds it
+    // ("hive", "account", "sign in", "sync") (AGE-2129).
+    SettingGroup::new().items(vec![SettingItem::new(
+        "Hive account",
+        SettingField::render(|_options, _window, cx| {
             let settings = cx.global::<HiveSettingsModel>();
             let is_logged_in = settings.token.is_some();
             let username = settings.username.clone().unwrap_or_default();
@@ -169,7 +171,10 @@ fn hive_account_group() -> SettingGroup {
                         .into_any_element()
                 })
                 .into_any_element()
-        })])
+        }),
+    )
+    .description("Sign in, set your Hive address, and sync your conversations.")
+    .layout(Axis::Vertical)])
 }
 
 // ── Installed Extensions ───────────────────────────────────────────────────
@@ -949,6 +954,15 @@ fn add_custom_group() -> SettingGroup {
                             show_add_mcp_dialog(window, cx);
                         }),
                 )
+                .child(
+                    Button::new("add-custom-a2a")
+                        .small()
+                        .icon(Icon::new(IconName::Plus))
+                        .label("Add A2A Agent")
+                        .on_click(|_, window, cx| {
+                            show_add_a2a_dialog(window, cx);
+                        }),
+                )
                 .into_any_element()
         })])
 }
@@ -956,8 +970,21 @@ fn add_custom_group() -> SettingGroup {
 // ── Dialogs ────────────────────────────────────────────────────────────────
 
 fn show_login_dialog(window: &mut Window, cx: &mut App) {
+    // The Hive address, changeable here (AGE-2129): it was only in the
+    // settings file.
+    let current_url = cx.global::<HiveSettingsModel>().hive_url.clone();
+    let address_input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("Hive address, e.g. https://hive.example.com")
+            .default_value(current_url)
+    });
     let email_input = cx.new(|cx| InputState::new(window, cx).placeholder("Email"));
-    let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
+    // Masked by default (AGE-2129); the eye shows it on request.
+    let password_input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("Password")
+            .masked(true)
+    });
 
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
@@ -966,6 +993,7 @@ fn show_login_dialog(window: &mut Window, cx: &mut App) {
             .child(
                 v_flex()
                     .gap_3()
+                    .child(Input::new(&address_input))
                     .child(Input::new(&email_input))
                     .child(Input::new(&password_input).mask_toggle()),
             )
@@ -974,12 +1002,15 @@ fn show_login_dialog(window: &mut Window, cx: &mut App) {
                     .primary()
                     .label("Sign In")
                     .on_click({
+                        let address_input = address_input.clone();
                         let email_input = email_input.clone();
                         let password_input = password_input.clone();
                         move |_, window, cx| {
                             let email = email_input.read(cx).value().trim().to_string();
                             let password = password_input.read(cx).value().to_string();
                             if !email.is_empty() && !password.is_empty() {
+                                let address = address_input.read(cx).value().to_string();
+                                extensions_controller::set_hive_url(&address, cx);
                                 extensions_controller::login(email, password, cx);
                                 window.close_dialog(cx);
                             }
@@ -990,11 +1021,20 @@ fn show_login_dialog(window: &mut Window, cx: &mut App) {
 }
 
 fn show_register_dialog(window: &mut Window, cx: &mut App) {
+    let current_url = cx.global::<HiveSettingsModel>().hive_url.clone();
+    let address_input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("Hive address, e.g. https://hive.example.com")
+            .default_value(current_url)
+    });
     let username_input =
         cx.new(|cx| InputState::new(window, cx).placeholder("Username (3-39 chars, lowercase)"));
     let email_input = cx.new(|cx| InputState::new(window, cx).placeholder("Email"));
-    let password_input =
-        cx.new(|cx| InputState::new(window, cx).placeholder("Password (12+ characters)"));
+    let password_input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("Password (12+ characters)")
+            .masked(true)
+    });
 
     window.open_dialog(cx, move |dialog, _window, _cx| {
         dialog
@@ -1003,6 +1043,7 @@ fn show_register_dialog(window: &mut Window, cx: &mut App) {
             .child(
                 v_flex()
                     .gap_3()
+                    .child(Input::new(&address_input))
                     .child(Input::new(&username_input))
                     .child(Input::new(&email_input))
                     .child(Input::new(&password_input).mask_toggle()),
@@ -1012,6 +1053,7 @@ fn show_register_dialog(window: &mut Window, cx: &mut App) {
                     .primary()
                     .label("Create account")
                     .on_click({
+                        let address_input = address_input.clone();
                         let username_input = username_input.clone();
                         let email_input = email_input.clone();
                         let password_input = password_input.clone();
@@ -1020,7 +1062,56 @@ fn show_register_dialog(window: &mut Window, cx: &mut App) {
                             let email = email_input.read(cx).value().trim().to_string();
                             let password = password_input.read(cx).value().to_string();
                             if !username.is_empty() && !email.is_empty() && password.len() >= 12 {
+                                let address = address_input.read(cx).value().to_string();
+                                extensions_controller::set_hive_url(&address, cx);
                                 extensions_controller::register(username, email, password, cx);
+                                window.close_dialog(cx);
+                            }
+                        }
+                    }),
+            )
+    });
+}
+
+fn show_add_a2a_dialog(window: &mut Window, cx: &mut App) {
+    let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("e.g. voucher-agent"));
+    let url_input = cx.new(|cx| {
+        InputState::new(window, cx).placeholder("https://agents.example.com/a2a/voucher-agent")
+    });
+    let key_input = cx.new(|cx| {
+        InputState::new(window, cx)
+            .placeholder("Optional API key")
+            .masked(true)
+    });
+
+    window.open_dialog(cx, move |dialog, _window, _cx| {
+        dialog
+            .title("Add A2A Agent")
+            .w(px(500.))
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(Input::new(&name_input))
+                    .child(Input::new(&url_input))
+                    .child(Input::new(&key_input).mask_toggle()),
+            )
+            .child(
+                Button::new("save-add-a2a")
+                    .primary()
+                    .label("Add")
+                    .on_click({
+                        let name_input = name_input.clone();
+                        let url_input = url_input.clone();
+                        let key_input = key_input.clone();
+                        move |_, window, cx| {
+                            let name = name_input.read(cx).value().trim().to_string();
+                            let url = url_input.read(cx).value().trim().to_string();
+                            let api_key = {
+                                let v = key_input.read(cx).value().trim().to_string();
+                                if v.is_empty() { None } else { Some(v) }
+                            };
+                            if !name.is_empty() && !url.is_empty() {
+                                extensions_controller::add_custom_a2a(name, url, api_key, cx);
                                 window.close_dialog(cx);
                             }
                         }

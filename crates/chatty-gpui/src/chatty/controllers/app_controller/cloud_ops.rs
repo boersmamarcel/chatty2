@@ -480,6 +480,7 @@ impl ChattyApp {
     ) {
         use chatty_core::services::hive_sync::SyncAction;
         let mut notices = Vec::new();
+        let mut detached = Vec::new();
         for action in actions {
             match action {
                 SyncAction::UpsertMetadata(row) => {
@@ -495,11 +496,35 @@ impl ChattyApp {
                     self.hive_sync.detector.forget(local_id);
                     self.hive_sync.engaged.remove(local_id);
                 }
+                SyncAction::DetachDeleted { local_id } => {
+                    self.hive_sync.detector.forget(local_id);
+                    self.hive_sync.engaged.remove(local_id);
+                    detached.push(local_id.clone());
+                }
                 SyncAction::MarkDetailStale { .. } | SyncAction::FullResync => {}
             }
         }
         for notice in notices {
             self.show_cloud_notice(notice, cx);
+        }
+        // Deleted on the account while this device held it (AGE-2121): the
+        // copy stays here, local-only, and the person hears it once, as when
+        // a push meets the deletion (410).
+        for local_id in detached {
+            let title = cx
+                .global::<ConversationsStore>()
+                .metadata()
+                .iter()
+                .find(|row| row.id == local_id)
+                .map(|row| row.title.clone())
+                .unwrap_or_default();
+            let message = if title.is_empty() {
+                "A conversation was deleted on your Hive account. It stays on this device."
+                    .to_string()
+            } else {
+                format!("\"{title}\" was deleted on your Hive account. It stays on this device.")
+            };
+            self.deleted_on_account(&local_id, message, cx);
         }
     }
 

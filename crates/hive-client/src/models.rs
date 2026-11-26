@@ -190,6 +190,17 @@ pub(crate) const MAX_VERSION_BYTES: usize = 16 * 1024;
 
 // ── Authentication ─────────────────────────────────────────────────────────
 
+/// Which client signs in (HX-7). The server keeps it on the login session:
+/// only a desktop or terminal session can hold a conversation on a device,
+/// and the person's list of sessions shows it with the device's name. A
+/// client that names none signs in as `web`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientKind {
+    Desktop,
+    Tui,
+}
+
 /// The token pair `login`, `register` and `refresh` return: a one-hour access
 /// JWT (`token`, sent as the Bearer) and the opaque 30-day `refresh_token`
 /// that `POST /api/auth/refresh` exchanges for the next pair. Every refresh

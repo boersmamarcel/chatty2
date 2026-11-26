@@ -154,6 +154,20 @@ impl ChatEngine {
                                 !matches!(action, SyncAction::ApplyTombstone { local_id }
                                     if open.as_deref() == Some(local_id.as_str()))
                             })
+                            // Held by this device but not here: kept on this
+                            // device only or deleted here; not brought back as a
+                            // duplicate (AGE-2124).
+                            .filter(|action| match action {
+                                SyncAction::UpsertMetadata(row) => {
+                                    local.iter().any(|known| known.id == row.local_id)
+                                        || !matches!(
+                                            (row.sync.placement(), self.cloud.this_device.as_deref()),
+                                            (Some(chatty_core::models::conversation::Placement::Device { device_id }), Some(this))
+                                                if device_id == this
+                                        )
+                                }
+                                _ => true,
+                            })
                             .collect();
                         for action in &actions {
                             if let SyncAction::UpsertMetadata(row) = action {
@@ -173,6 +187,17 @@ impl ChatEngine {
                             }
                         }
                         apply_to_repository(repo.as_ref(), &actions).await?;
+                        // Deleted on the account while a device held it
+                        // (AGE-2121): the copy stays here, local-only.
+                        let detached = actions
+                            .iter()
+                            .filter(|action| matches!(action, SyncAction::DetachDeleted { .. }))
+                            .count();
+                        if detached > 0 {
+                            note = Some(format!(
+                                "{detached} conversation(s) were deleted on your Hive account. They stay on this device."
+                            ));
+                        }
                     }
                     Err(error) => note = Some(format!("Showing saved conversations only: {error}")),
                 }
@@ -274,8 +299,10 @@ impl ChatEngine {
             // Stale: never read, or invalidated by a newer version. Unknown
             // status: nothing here has said whether a turn is running.
             let stale = synced.last_synced_at.is_none();
-            let unknown_status = sync.runs_in_cloud() && !self.cloud.status.contains_key(&id);
-            if stale || unknown_status {
+            // A cloud conversation is always read again: the status the last
+            // `/conversations` saw may be old, and a turn started since was
+            // neither shown nor followed (AGE-2127).
+            if stale || sync.runs_in_cloud() {
                 notice = self.fetch_and_adopt(&synced.remote_id.clone()).await;
             }
         }

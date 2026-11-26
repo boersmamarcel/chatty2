@@ -29,6 +29,10 @@ pub struct HiveRegistryClient {
     http: reqwest::Client,
     cache: Option<Cache>,
     session: Option<Arc<HiveSession>>,
+    /// The client and device a sign-in names (HX-7): sent with
+    /// [`login`](Self::login) and [`register`](Self::register). `None`
+    /// signs in as `web`.
+    device: Option<(crate::models::ClientKind, Option<String>)>,
     /// The registry root public keys downloads are verified against
     /// ([`trust::trusted_roots`]); a download verifies if any one of them
     /// signed it (SEC-3, AGE-816). Empty refuses every download.
@@ -64,6 +68,7 @@ impl HiveRegistryClient {
             http,
             cache: None,
             session: None,
+            device: None,
             session_key: tokio::sync::OnceCell::new(),
         }
     }
@@ -96,6 +101,23 @@ impl HiveRegistryClient {
     pub fn with_cache_dir(mut self, dir: impl Into<PathBuf>) -> std::io::Result<Self> {
         self.cache = Some(Cache::new(dir)?);
         Ok(self)
+    }
+
+    /// Name the client and device a sign-in opens its session for (HX-7):
+    /// [`login`](Self::login) and [`register`](Self::register) send them.
+    /// The desktop and the terminal app must, or the server treats their
+    /// session as a web one and refuses to hold a conversation on the device.
+    pub fn with_device(mut self, kind: crate::models::ClientKind, name: Option<String>) -> Self {
+        self.device = Some((kind, name));
+        self
+    }
+
+    /// The `client_kind` and `device_name` a sign-in sends, if any.
+    fn sign_in_device(&self) -> (Option<crate::models::ClientKind>, Option<&str>) {
+        match &self.device {
+            Some((kind, name)) => (Some(*kind), name.as_deref()),
+            None => (None, None),
+        }
     }
 
     /// Authenticate as the user signed in to `session` (e.g. for downloads).
@@ -160,7 +182,12 @@ impl HiveRegistryClient {
             username: &'a str,
             email: &'a str,
             password: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            client_kind: Option<crate::models::ClientKind>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            device_name: Option<&'a str>,
         }
+        let (client_kind, device_name) = self.sign_in_device();
 
         let url = format!("{}/api/auth/register", self.base_url);
         let resp = self
@@ -170,6 +197,8 @@ impl HiveRegistryClient {
                 username,
                 email,
                 password,
+                client_kind,
+                device_name,
             })
             .send()
             .await?;
@@ -188,13 +217,23 @@ impl HiveRegistryClient {
         struct LoginBody<'a> {
             email: &'a str,
             password: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            client_kind: Option<crate::models::ClientKind>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            device_name: Option<&'a str>,
         }
+        let (client_kind, device_name) = self.sign_in_device();
 
         let url = format!("{}/api/auth/login", self.base_url);
         let resp = self
             .http
             .post(&url)
-            .json(&LoginBody { email, password })
+            .json(&LoginBody {
+                email,
+                password,
+                client_kind,
+                device_name,
+            })
             .send()
             .await?;
 
@@ -963,5 +1002,73 @@ mod tests {
             assert!(matches!(err, ClientError::NotHive), "{err:?}");
             assert_eq!(err.to_string(), "This address is not a Hive server");
         }
+    }
+
+    /// HX-7: a sign-in names its client and device, or the server opens a
+    /// web session, which cannot hold a conversation on the device (422).
+    /// Without `with_device` the body is as before.
+    #[tokio::test]
+    async fn sign_in_names_the_client_and_device() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Not a literal: a fixed password string reads as a hard-coded
+        // credential to code scanning.
+        let password = uuid::Uuid::new_v4().to_string();
+        let pair = serde_json::json!({
+            "token": "t",
+            "refresh_token": "r",
+            "expires_at": "2030-01-01T00:00:00Z"
+        });
+        let hive = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/login"))
+            .and(body_json(serde_json::json!({
+                "email": "a@example.test",
+                "password": &password,
+                "client_kind": "desktop",
+                "device_name": "beast"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&pair))
+            .expect(1)
+            .mount(&hive)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/register"))
+            .and(body_json(serde_json::json!({
+                "username": "a",
+                "email": "a@example.test",
+                "password": &password,
+                "client_kind": "tui"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(&pair))
+            .expect(1)
+            .mount(&hive)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/auth/login"))
+            .and(body_json(serde_json::json!({
+                "email": "web@example.test",
+                "password": &password
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&pair))
+            .expect(1)
+            .mount(&hive)
+            .await;
+
+        HiveRegistryClient::new(hive.uri())
+            .with_device(crate::models::ClientKind::Desktop, Some("beast".into()))
+            .login("a@example.test", &password)
+            .await
+            .expect("the desktop signs in");
+        HiveRegistryClient::new(hive.uri())
+            .with_device(crate::models::ClientKind::Tui, None)
+            .register("a", "a@example.test", &password)
+            .await
+            .expect("the terminal app registers");
+        HiveRegistryClient::new(hive.uri())
+            .login("web@example.test", &password)
+            .await
+            .expect("no device: the body is as before");
     }
 }

@@ -10,6 +10,18 @@ use super::wire::{ChangesPage, FULL_SYNC_CURSOR, RemoteChange, RemoteSummary, Tu
 use crate::models::conversation::{ConversationSync, SyncedConversation};
 use crate::repositories::ConversationMetadata;
 
+/// What a server-side deletion does to the local row synced to it: a
+/// device-placed conversation keeps its copy (detached, local-only); a cloud
+/// one's cached copy goes.
+fn deletion(local_id: String, synced: &SyncedConversation) -> SyncAction {
+    match synced.placement {
+        crate::models::conversation::Placement::Device { .. } => {
+            SyncAction::DetachDeleted { local_id }
+        }
+        _ => SyncAction::ApplyTombstone { local_id },
+    }
+}
+
 /// What one page asks of the local rows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SyncAction {
@@ -18,7 +30,12 @@ pub enum SyncAction {
     /// [`MarkDetailStale`](Self::MarkDetailStale) as well.
     UpsertMetadata(RemoteRow),
     /// The conversation was deleted on the server: delete this device's copy.
+    /// Only for a conversation the cloud ran, whose local row is a cache.
     ApplyTombstone { local_id: String },
+    /// A conversation placed on a device was deleted on the server: keep this
+    /// device's copy, which may be the only one left, as a local-only
+    /// conversation, and tell the person once (AGE-2121, E2E plan 7b).
+    DetachDeleted { local_id: String },
     /// The server has a newer version of the history than this device holds:
     /// fetch the detail before showing it as current.
     MarkDetailStale { local_id: String },
@@ -142,8 +159,8 @@ impl SyncEngine {
                 .map(|(row, synced)| (row.id.clone(), synced.clone()));
             match change {
                 RemoteChange::Deleted { .. } => {
-                    if let Some((local_id, _)) = matched {
-                        actions.push(SyncAction::ApplyTombstone { local_id });
+                    if let Some((local_id, synced)) = matched {
+                        actions.push(deletion(local_id, &synced));
                     }
                 }
                 RemoteChange::Upsert(summary) => {
@@ -168,12 +185,12 @@ impl SyncEngine {
                     .filter(|(_, synced)| !seen.contains(&synced.remote_id))
                     .filter(|(row, _)| {
                         !actions.iter().any(|action| {
-                            matches!(action, SyncAction::ApplyTombstone { local_id } if *local_id == row.id)
+                            matches!(action,
+                                SyncAction::ApplyTombstone { local_id }
+                                | SyncAction::DetachDeleted { local_id } if *local_id == row.id)
                         })
                     })
-                    .map(|(row, _)| SyncAction::ApplyTombstone {
-                        local_id: row.id.clone(),
-                    })
+                    .map(|(row, synced)| deletion(row.id.clone(), synced))
                     .collect::<Vec<_>>(),
             );
         }
@@ -263,6 +280,11 @@ pub fn apply_to_rows(rows: &mut Vec<ConversationMetadata>, actions: &[SyncAction
                 }
             }
             SyncAction::ApplyTombstone { local_id } => rows.retain(|row| row.id != *local_id),
+            SyncAction::DetachDeleted { local_id } => {
+                if let Some(row) = rows.iter_mut().find(|row| row.id == *local_id) {
+                    row.sync = ConversationSync::LocalOnly;
+                }
+            }
             SyncAction::MarkDetailStale { local_id } => {
                 if let Some(ConversationSync::Synced(synced)) = rows
                     .iter_mut()

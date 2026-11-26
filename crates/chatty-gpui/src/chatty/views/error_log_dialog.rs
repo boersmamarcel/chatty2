@@ -80,10 +80,12 @@ impl ErrorEntryView {
 
 impl RenderOnce for ErrorEntryView {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Danger and warning colours, with white text: the accent badge was
+        // white on light grey and unreadable (AGE-2129).
         let level_color = if self.entry.level == ErrorLevel::Error {
-            cx.theme().accent
+            cx.theme().danger
         } else {
-            cx.theme().ring
+            cx.theme().warning
         };
 
         let level_text = if self.entry.level == ErrorLevel::Error {
@@ -138,16 +140,12 @@ impl RenderOnce for ErrorEntryView {
                                     div()
                                         .text_xs()
                                         .font_weight(FontWeight::BOLD)
-                                        .text_color(cx.theme().background)
+                                        .text_color(gpui::white())
                                         .child(level_text),
                                 ),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(self.entry.target.clone()),
-                            ),
+                            ), // The module path and source line are for a
+                               // developer: in the copied text, not on screen
+                               // (AGE-2129).
                     )
                     .child(
                         Button::new(ElementId::Name(format!("copy-error-{}", self.id).into()))
@@ -170,22 +168,6 @@ impl RenderOnce for ErrorEntryView {
                     .text_color(cx.theme().foreground)
                     .mb_2()
                     .child(self.entry.message.clone()),
-            )
-            .when(
-                self.entry.file.is_some() || self.entry.line.is_some(),
-                |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .mb_2()
-                            .child(format!(
-                                "{}:{}",
-                                self.entry.file.clone().unwrap_or_default(),
-                                self.entry.line.unwrap_or_default()
-                            )),
-                    )
-                },
             )
             .when(!self.entry.fields.is_empty(), |this| {
                 this.child(v_flex().gap_1().children(self.entry.fields.iter().map(
