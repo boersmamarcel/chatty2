@@ -87,6 +87,9 @@ pub enum AppEvent {
     /// GitHub pull request lookup for the workspace branch completed.
     PullRequestDetected(Option<Box<PullRequestSummary>>),
     TitleGenerated(String),
+    /// The conversation was created on, or pushed to, the Hive account after
+    /// a turn (AGE-2096): the sync state to record.
+    SyncUpdated(chatty_core::models::conversation::ConversationSync),
     DelegationProgress(String),
     /// A one-time notice for the transcript (the shell runs unsandboxed).
     Notice(String),
@@ -97,6 +100,15 @@ pub enum AppEvent {
     /// A batch of what a run nested under a delegation did, tagged by the
     /// broker (TB-1).
     SwarmEvent(chatty_fabric::SwarmEvent),
+    /// A frame from a cloud conversation's server that is not a session
+    /// event: an approval or question its run waits on, one settled
+    /// elsewhere, a connector to sign in to (HX-19).
+    CloudFrame(chatty_core::session::HostedFrame),
+    /// The cloud turn this client was following is over (HX-19).
+    CloudAttachEnded(chatty_core::session::AttachOutcome),
+    /// The server's copy of the open cloud conversation, or the notice to
+    /// show when it could not be read (HX-19).
+    CloudDetail(Box<Result<chatty_core::services::hive_sync::ConversationDetail, String>>),
 }
 
 impl std::fmt::Debug for AppEvent {
@@ -172,11 +184,20 @@ impl std::fmt::Debug for AppEvent {
                 f.debug_tuple("PullRequestDetected").field(pr).finish()
             }
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
+            Self::SyncUpdated(sync) => f.debug_tuple("SyncUpdated").field(sync).finish(),
             Self::Notice(s) => f.debug_tuple("Notice").field(s).finish(),
             Self::DelegationProgress(s) => f.debug_tuple("DelegationProgress").field(s).finish(),
             Self::DelegationFinished(s) => f.debug_tuple("DelegationFinished").field(s).finish(),
             Self::Delegation(p) => f.debug_tuple("Delegation").field(p).finish(),
             Self::SwarmEvent(e) => f.debug_tuple("SwarmEvent").field(e).finish(),
+            Self::CloudFrame(frame) => f.debug_tuple("CloudFrame").field(frame).finish(),
+            Self::CloudAttachEnded(outcome) => {
+                f.debug_tuple("CloudAttachEnded").field(outcome).finish()
+            }
+            Self::CloudDetail(result) => f
+                .debug_tuple("CloudDetail")
+                .field(&result.as_ref().as_ref().map(|detail| &detail.id))
+                .finish(),
         }
     }
 }

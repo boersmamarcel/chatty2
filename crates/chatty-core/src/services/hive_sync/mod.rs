@@ -35,16 +35,29 @@ pub use fake::FakeHiveConversations;
 pub use notify::{CloudNotice, TransitionDetector};
 pub use push::{
     HiveHistoryApi, HttpHiveHistoryApi, PushError, PushEvent, PushJob, PushQueue, PushTarget,
-    drain, fetch_device_id,
+    drain, fetch_device_id, sync_after_turn,
 };
 pub use wire::{
-    ChangesPage, ConversationDetail, FULL_SYNC_CURSOR, HeldBy, HistoryAccepted, PAGE_LIMIT,
-    PlacementDevice, RemoteChange, RemoteSummary, TurnStatus, push_body,
+    ChangesPage, ConversationDetail, CreatedConversation, FULL_SYNC_CURSOR, HeldBy,
+    HistoryAccepted, PAGE_LIMIT, PlacementDevice, RemoteChange, RemoteSummary, TurnStatus,
+    push_body,
 };
 
 use crate::models::conversation::ConversationSync;
 use crate::repositories::error::RepositoryResult;
 use crate::repositories::{ConversationData, ConversationMetadata, ConversationRepository};
+
+/// What a frontend tells the user when a cloud conversation could not be
+/// brought up to date (HX-10), the same words on every surface.
+pub const COULD_NOT_UPDATE: &str = "Couldn't reach the cloud to update this conversation. \
+     Check your connection; it updates again the next time you open it.";
+
+/// Shown when the server no longer has the conversation.
+pub const NO_LONGER_EXISTS: &str = "This conversation no longer exists in the \
+     cloud. It will disappear from your list shortly.";
+
+/// Shown when an answer was refused because the input was settled already.
+pub const ALREADY_ANSWERED: &str = "Already answered elsewhere.";
 
 /// How often an open, signed-in app pulls.
 pub const PULL_INTERVAL: Duration = Duration::from_secs(30);
@@ -160,6 +173,37 @@ pub async fn apply_to_repository<R: ConversationRepository + ?Sized>(
         }
     }
     Ok(())
+}
+
+/// Replace a loaded synced conversation's history with the server's `detail`
+/// and record the version it is at, so the copy is no longer stale. Returns
+/// the turn status the detail reports. Both frontends adopt a fetched detail
+/// through this; the caller persists the conversation afterwards.
+///
+/// Fails when the conversation is not synced, or the server's history cannot
+/// be adopted; the conversation is then unchanged.
+pub fn adopt_detail(
+    conversation: &mut crate::models::Conversation,
+    detail: ConversationDetail,
+    now_ms: i64,
+) -> anyhow::Result<TurnStatus> {
+    let mut synced = conversation
+        .sync()
+        .synced()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("the conversation is not synced"))?;
+    let status = detail.turn_status.unwrap_or(if detail.turn_active {
+        TurnStatus::Running
+    } else {
+        TurnStatus::Idle
+    });
+    let version = detail.version.unwrap_or(0);
+    let data = detail.to_conversation_data(conversation.id());
+    conversation.replace_from_remote(data)?;
+    synced.version = version;
+    synced.last_synced_at = Some(now_ms);
+    conversation.set_sync(ConversationSync::Synced(synced));
+    Ok(status)
 }
 
 fn set_sync_columns(data: &mut ConversationData, sync: &ConversationSync) {

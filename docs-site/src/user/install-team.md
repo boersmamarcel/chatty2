@@ -55,4 +55,4 @@ chatty-tui --install-team payments-lead          # the latest version
 chatty-tui --install-team payments-lead@1.0.0    # an exact version
 ```
 
-This does the same checks with the Hive sign-in the desktop saved, prints what it installed, and exits. Run the team in the TUI with `chatty-tui --broker`, then `/agent payments-lead <task>`.
+This does the same checks with the terminal app's own Hive sign-in (run `chatty-tui login` first), prints what it installed, and exits. Run the team in the TUI with `chatty-tui --broker`, then `/agent payments-lead <task>`.

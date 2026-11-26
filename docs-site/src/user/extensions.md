@@ -6,7 +6,7 @@
 
 ## Hive marketplace
 
-Hive is the registry Chatty installs extensions from; the address it is talking to is shown next to **Hive Account**. **Sign In** or **Register** (username, email, password) to install from it; the session lasts thirty days.
+Hive is the registry Chatty installs extensions from; the **Hive account** panel shows who is signed in, the Hive address, the server's version and a **Sign out** button. **Sign In** or **Register** (username, email, password) to install from it; the session lasts thirty days. Before it sends a password, Chatty checks that the address answers as a Hive server; if not, you get "This address is not a Hive server". The address is one setting, `hive_url` in `hive_settings.json` (an older `registry_url` there is carried over to it); the panel shows it read-only.
 
 **Browse Marketplace** searches the registry. Each result shows its type and pricing; **Install** downloads it into your module directory (the one set in the module settings) and adds it to your **Installed** list, **Uninstall** removes it. Chatty refuses a module whose name or version is malformed, whose download is over 64 MiB, or that is published as remote-only (running modules on the Hive runner is no longer supported), and remembers each installed module's checksum: if its file changes on disk afterwards, it no longer loads. Installed items carry two kinds of badge:
 
@@ -18,7 +18,7 @@ Hive is the registry Chatty installs extensions from; the address it is talking 
 | **Paid** | Not free — check the pricing before enabling |
 | **Trust: signed** / **Trust: local** | Where a loaded module's code comes from: signed by its publisher and installed from Hive, or copied in by hand |
 
-**Paid** plugins are metered wherever they run, including when an agent spec lists them and when a delegated worker calls them. Each module's free calls are used first (the count comes from Hive); after that a call needs a positive credit balance, and every call is reported to Hive. If Chatty cannot read your balance — you are signed out, your sign-in has expired, or Hive is unreachable — a paid call is refused with "Cannot verify credits … sign in to Hive" rather than run unbilled. Delegated workers reuse the sign-in the desktop app saved, so if the app has been idle for over an hour, open it once to refresh the session.
+**Paid** plugins are metered wherever they run, including when an agent spec lists them and when a delegated worker calls them. Each module's free calls are used first (the count comes from Hive); after that a call needs a positive credit balance, and every call is reported to Hive. If Chatty cannot read your balance — you are signed out, your sign-in has expired, or Hive is unreachable — a paid call is refused with "Cannot verify credits … sign in to Hive" rather than run unbilled. In the terminal app, paid plugins are metered with its own sign-in (`chatty-tui login`). Delegated workers borrow the sign-in of the app that started them (the terminal app's own when it is signed in, else the desktop's) and never refresh it, so if that app has been idle for over an hour, open it once to refresh the session.
 
 The **Teams** tab next to the plugin listing finds published agent teams and installs them with one click; see [Install a team from the marketplace](./install-team.md).
 

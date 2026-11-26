@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use hive_client::HiveSession;
 
-use super::wire::{HeldBy, HistoryAccepted};
+use super::wire::{CreatedConversation, HeldBy, HistoryAccepted};
 use crate::models::conversation::{ConversationSync, Placement};
 use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
@@ -60,6 +60,27 @@ pub trait HiveHistoryApi: Send + Sync {
         if_match: u64,
         body: &ConversationData,
     ) -> BoxFuture<'static, Result<HistoryAccepted, PushError>>;
+
+    /// Put a local conversation on the account, held by this device: a
+    /// create with `client_id` (the local id, so a retry after a lost reply
+    /// finds the same conversation) and the full conversation.
+    fn create(
+        &self,
+        client_id: &str,
+        body: &ConversationData,
+    ) -> BoxFuture<'static, Result<CreatedConversation, PushError>>;
+}
+
+/// The reply of a push request as a [`PushError`], or the success to decode.
+fn classify(status: reqwest::StatusCode) -> Option<PushError> {
+    match status {
+        status if status.is_success() => None,
+        reqwest::StatusCode::UNAUTHORIZED => Some(PushError::SignedOut),
+        status if status.is_server_error() => {
+            Some(PushError::Offline(format!("the server answered {status}")))
+        }
+        status => Some(PushError::Rejected(format!("the server answered {status}"))),
+    }
 }
 
 /// [`HiveHistoryApi`] over HTTP, authenticated as the Hive sign-in through
@@ -120,6 +141,47 @@ impl HiveHistoryApi for HttpHiveHistoryApi {
                 status => Err(PushError::Rejected(format!("the server answered {status}"))),
             }
         })
+    }
+
+    fn create(
+        &self,
+        client_id: &str,
+        body: &ConversationData,
+    ) -> BoxFuture<'static, Result<CreatedConversation, PushError>> {
+        let url = format!("{}/api/conversations", self.server_url);
+        let request = serde_json::to_value(body).map(|conversation| {
+            serde_json::json!({
+                "client_id": client_id,
+                "conversation": conversation,
+                "placement": "device",
+            })
+        });
+        let (http, auth) = (self.http.clone(), self.auth.clone());
+        Box::pin(async move {
+            let request = request.map_err(|error| PushError::Rejected(error.to_string()))?;
+            Self::create_at(http, auth, url, request).await
+        })
+    }
+}
+
+impl HttpHiveHistoryApi {
+    async fn create_at(
+        http: reqwest::Client,
+        auth: Option<Arc<HiveSession>>,
+        url: String,
+        body: serde_json::Value,
+    ) -> Result<CreatedConversation, PushError> {
+        hive_client::ensure_secure_url(&url).map_err(PushError::Rejected)?;
+        let response = send_to_server(auth.as_deref(), &url, || http.post(&url).json(&body))
+            .await
+            .map_err(|error| PushError::Offline(format!("{error:#}")))?;
+        if let Some(error) = classify(response.status()) {
+            return Err(error);
+        }
+        response
+            .json::<CreatedConversation>()
+            .await
+            .map_err(|error| PushError::Rejected(format!("unexpected reply: {error}")))
     }
 }
 
@@ -235,6 +297,59 @@ pub enum PushEvent {
     /// The server refused it for good; it is dropped, and the next turn
     /// queues a fresh one.
     Dropped { local_id: String, reason: String },
+}
+
+/// What a frontend with no queue does after a finished turn (chatty-tui):
+/// push the history of a conversation this device holds, or create a new
+/// conversation on its first turn. Returns the sync state to record, or
+/// `None` when there was nothing to send, which includes every local-only
+/// conversation past its first turn.
+///
+/// The caller has already checked that the user is signed in and that new
+/// conversations sync.
+pub async fn sync_after_turn<A: HiveHistoryApi + ?Sized>(
+    api: &A,
+    server_url: &str,
+    this_device: &str,
+    local_id: &str,
+    sync: &ConversationSync,
+    first_turn: bool,
+    body: ConversationData,
+) -> Result<Option<ConversationSync>, PushError> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let body = super::wire::push_body(body);
+    match sync {
+        ConversationSync::Synced(synced) => {
+            let Some(target) = PushTarget::for_device(sync, this_device) else {
+                return Ok(None);
+            };
+            let accepted = api
+                .put_history(&target.remote_id, target.version, &body)
+                .await?;
+            let mut synced = synced.clone();
+            synced.version = accepted.version;
+            synced.last_synced_at = Some(now_ms);
+            Ok(Some(ConversationSync::Synced(synced)))
+        }
+        ConversationSync::LocalOnly if first_turn => {
+            let created = api.create(local_id, &body).await?;
+            Ok(Some(ConversationSync::Synced(
+                crate::models::conversation::SyncedConversation {
+                    server_url: server_url.trim_end_matches('/').to_string(),
+                    remote_id: created.id,
+                    version: created.version,
+                    placement: Placement::Device {
+                        device_id: this_device.to_string(),
+                    },
+                    last_synced_at: Some(now_ms),
+                },
+            )))
+        }
+        ConversationSync::LocalOnly => Ok(None),
+    }
 }
 
 /// Pending pushes: one per conversation, oldest request first.
@@ -426,6 +541,14 @@ mod tests {
                 .push((remote_id.to_string(), if_match));
             let reply = self.replies.lock().unwrap().pop_front().expect("a reply");
             Box::pin(async move { reply })
+        }
+
+        fn create(
+            &self,
+            _client_id: &str,
+            _body: &ConversationData,
+        ) -> BoxFuture<'static, Result<CreatedConversation, PushError>> {
+            unreachable!("these tests push, they do not create")
         }
     }
 
@@ -676,5 +799,119 @@ mod tests {
             fetch_device_id(&server.uri(), None).await,
             Err(PushError::Rejected(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_new_conversation_is_created_with_its_local_id_and_held_by_this_device() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations"))
+            .and(header("authorization", "Bearer tok"))
+            .and(body_partial_json(serde_json::json!({
+                "client_id": "local-1",
+                "placement": "device",
+                "conversation": {"title": "hello"}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r-9", "version": 1, "placement": "device",
+                "placement_device": {"id": "s-2", "name": null}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = HttpHiveHistoryApi::new(&server.uri(), Some(signed_in(&server)));
+
+        let created = api.create("local-1", &body("hello")).await.unwrap();
+        assert_eq!(created.id, "r-9");
+        assert_eq!(created.version, 1);
+    }
+
+    #[test]
+    fn the_servers_own_message_is_the_notice() {
+        let held = HeldBy {
+            message: Some(
+                "This conversation is running on Work laptop. Continue it here first.".into(),
+            ),
+            ..HeldBy::default()
+        };
+        assert_eq!(
+            held.notice(),
+            "This conversation is running on Work laptop. Continue it here first."
+        );
+        assert_eq!(HeldBy::default().notice(), "Continued on another device");
+    }
+
+    /// A frontend with no queue: a local conversation is created on its first
+    /// turn, pushed afterwards, and a local one past its first turn sends
+    /// nothing.
+    #[tokio::test]
+    async fn without_a_queue_a_conversation_is_created_then_pushed_and_local_stays_local() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "r-5", "version": 1})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/conversations/r-5/history"))
+            .and(header("if-match", "1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": 2})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = HttpHiveHistoryApi::new(&server.uri(), None);
+        let url = server.uri();
+
+        let created = sync_after_turn(
+            &api,
+            &url,
+            "s-2",
+            "local",
+            &ConversationSync::LocalOnly,
+            true,
+            body("t"),
+        )
+        .await
+        .unwrap()
+        .expect("the first turn creates it");
+        let synced = created.synced().unwrap();
+        assert_eq!(synced.remote_id, "r-5");
+        assert_eq!(
+            synced.placement,
+            Placement::Device {
+                device_id: "s-2".into()
+            }
+        );
+
+        let pushed = sync_after_turn(&api, &url, "s-2", "local", &created, false, body("t"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(pushed.synced().unwrap().version, 2);
+
+        let nothing = sync_after_turn(
+            &api,
+            &url,
+            "s-2",
+            "local",
+            &ConversationSync::LocalOnly,
+            false,
+            body("t"),
+        )
+        .await
+        .unwrap();
+        assert!(nothing.is_none());
+        // Another device's conversation is not ours to push.
+        let theirs = sync_after_turn(&api, &url, "s-9", "local", &created, false, body("t"))
+            .await
+            .unwrap();
+        assert!(theirs.is_none());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 }

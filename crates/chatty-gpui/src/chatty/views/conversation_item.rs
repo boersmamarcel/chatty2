@@ -24,6 +24,9 @@ pub struct ConversationItem {
     on_delete: Option<ConversationActionCallback>,
     on_export: Option<ConversationActionCallback>,
     on_move: Option<ConversationActionCallback>,
+    /// "Keep on this device only", offered for a conversation synced to the
+    /// account (AGE-2096).
+    on_keep_local: Option<ConversationActionCallback>,
     is_collapsed: bool,
     cost_usd: Option<f64>,
     /// Runs on a `chatty-server` rather than in this process (AGE-298).
@@ -42,6 +45,7 @@ impl ConversationItem {
             on_delete: None,
             on_export: None,
             on_move: None,
+            on_keep_local: None,
             is_collapsed: false,
             cost_usd: None,
             is_hosted: false,
@@ -93,6 +97,15 @@ impl ConversationItem {
         self
     }
 
+    /// Stop syncing this conversation and keep it on this device only.
+    pub fn on_keep_local<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&str, &mut App) + Send + Sync + 'static,
+    {
+        self.on_keep_local = Some(Arc::new(callback));
+        self
+    }
+
     pub fn hosted(mut self, is_hosted: bool) -> Self {
         self.is_hosted = is_hosted;
         self
@@ -123,10 +136,12 @@ impl RenderOnce for ConversationItem {
         let id_for_delete = self.id.clone();
         let id_for_export = self.id.clone();
         let id_for_move = self.id.clone();
+        let id_for_keep = self.id.clone();
         let on_click = self.on_click.clone();
         let on_delete = self.on_delete.clone();
         let on_export = self.on_export.clone();
         let on_move = self.on_move.clone();
+        let on_keep_local = self.on_keep_local.clone();
         let is_hosted = self.is_hosted;
 
         let bg_color = if self.is_active {
@@ -231,7 +246,8 @@ impl RenderOnce for ConversationItem {
                 !self.is_collapsed
                     && (on_delete.is_some()
                         || on_export.is_some()
-                        || on_move.is_some()),
+                        || on_move.is_some()
+                        || on_keep_local.is_some()),
                 |this| {
                     // "…" button that opens a popover with Download / Delete actions
                     let trigger = Button::new(ElementId::Name(format!("menu-{}", self.id).into()))
@@ -242,6 +258,7 @@ impl RenderOnce for ConversationItem {
                     let export_btn_id = SharedString::from(format!("export-{}", self.id));
                     let delete_btn_id = SharedString::from(format!("delete-{}", self.id));
                     let move_btn_id = SharedString::from(format!("move-{}", self.id));
+                    let keep_btn_id = SharedString::from(format!("keep-{}", self.id));
 
                     this.child(
                         Popover::new(SharedString::from(format!("conv-menu-{}", self.id)))
@@ -251,6 +268,9 @@ impl RenderOnce for ConversationItem {
                                 let on_delete = on_delete.clone();
                                 let on_export = on_export.clone();
                                 let on_move = on_move.clone();
+                                let on_keep_local = on_keep_local.clone();
+                                let id_keep = id_for_keep.clone();
+                                let keep_btn_id = keep_btn_id.clone();
                                 let id_del = id_for_delete.clone();
                                 let id_exp = id_for_export.clone();
                                 let id_mov = id_for_move.clone();
@@ -333,6 +353,34 @@ impl RenderOnce for ConversationItem {
                                                 }),
                                         )
                                     })
+                                    .when_some(on_keep_local, |this, cb| {
+                                        this.child(
+                                            Button::new(keep_btn_id)
+                                                .ghost()
+                                                .xsmall()
+                                                .w_full()
+                                                .justify_start()
+                                                .child(
+                                                    h_flex()
+                                                        .w_full()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .child(
+                                                            Icon::new(IconName::Globe)
+                                                                .size(px(12.0)),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .child("Keep on this device only"),
+                                                        ),
+                                                )
+                                                .on_click(move |_event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    cb(&id_keep, cx);
+                                                }),
+                                        )
+                                    })
                                     .when_some(on_delete, |this, cb| {
                                         this.child(
                                              Button::new(delete_btn_id)
@@ -383,10 +431,10 @@ impl RenderOnce for ConversationItem {
 /// What a cloud mark says and the colour it is drawn in.
 pub fn cloud_mark_look(mark: CloudMark, cx: &App) -> (&'static str, Hsla) {
     match mark {
-        CloudMark::Running => ("Running in the cloud", cx.theme().info),
-        CloudMark::WaitingForYou => ("Waiting for you", cx.theme().warning),
-        CloudMark::Interrupted => ("Interrupted", cx.theme().warning),
-        CloudMark::Done => ("Done", cx.theme().success),
-        CloudMark::Failed => ("Something went wrong", cx.theme().danger),
+        CloudMark::Running => (mark.label(), cx.theme().info),
+        CloudMark::WaitingForYou => (mark.label(), cx.theme().warning),
+        CloudMark::Interrupted => (mark.label(), cx.theme().warning),
+        CloudMark::Done => (mark.label(), cx.theme().success),
+        CloudMark::Failed => (mark.label(), cx.theme().danger),
     }
 }

@@ -229,6 +229,15 @@ pub struct HistoryAccepted {
     pub version: u64,
 }
 
+/// The summary a `POST /api/conversations` answers with (HX-13): the id the
+/// server gave the conversation and the version it starts at.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CreatedConversation {
+    pub id: String,
+    #[serde(default)]
+    pub version: u64,
+}
+
 /// `row` as the server stores it: without the working directory and the sync
 /// columns, which describe this device and mean nothing on the server.
 pub fn push_body(mut row: ConversationData) -> ConversationData {
@@ -253,6 +262,15 @@ pub struct HeldBy {
 }
 
 impl HeldBy {
+    /// What to tell the user: the server's own message as it is, else
+    /// [`continued_on`](Self::continued_on).
+    pub fn notice(&self) -> String {
+        match self.message.as_deref().map(str::trim) {
+            Some(message) if !message.is_empty() => message.to_string(),
+            _ => self.continued_on(),
+        }
+    }
+
     /// "Continued on <device>", or the generic form when the server named
     /// none.
     pub fn continued_on(&self) -> String {

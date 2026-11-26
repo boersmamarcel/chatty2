@@ -99,6 +99,7 @@ tools = [
     ("browser_resize", "web", "browser_tools.rs", "feature: browser"),
     ("browser_click", "web", "browser_tools.rs", "feature: browser; by snapshot ref; approval off localhost/workspace"),
     ("browser_type", "web", "browser_tools.rs", "feature: browser; by snapshot ref; refuses password/card fields; never submits"),
+    ("browser_select", "web", "browser_tools.rs", "feature: browser; by snapshot ref; picks a <select> option by label or value"),
 ]
 for name, cat, src, notes in tools:
     print(f"| `{name}` | {cat} | `{src}` | {notes} |")
@@ -139,6 +140,10 @@ Sources: `crates/chatty-gpui/src/chatty/views/chat_input/slash.rs`,
 | `/model [query]` | Switch / list models | — | Yes |
 | `/tools [name]` | Open tool picker or toggle by name | — | Yes |
 | `/modules …` | Module runtime settings | — | Yes |
+| `/conversations` | List saved and cloud conversations, newest first, with where each runs (local/synced/cloud) and the cloud turn's mark; pulls the account's list when signed in to Hive (HX-19) | — | Yes |
+| `/open <n\|id>` | Open a saved conversation by its number in `/conversations` or its id: reads a stale synced copy first, follows a running cloud turn, loads its pending approvals and questions (HX-19) | — | Yes |
+| `/login` | Sign in to Hive with the terminal app's own account: prompts for email and password (not echoed); the pair is kept in `hive_tui_settings.json`, never the desktop's (AGE-2084) | — | Yes |
+| `/logout` | Sign the terminal app out of Hive and revoke its refresh token; the desktop's session is untouched (AGE-2084) | — | Yes |
 | `/update` | CLI auto-update | — | Yes |
 | `/quit` `/exit` | Quit the application | — | Yes |
 
@@ -264,6 +269,15 @@ opt-in (`false`) for security.
 | `fetch_enabled` | `bool` | `true` | Built-in read-only HTTP GET |
 | `git_enabled` | `bool` | `false` | Opt-in; workspace must be a git repo |
 | `browser_enabled` | `bool` | `false` | Opt-in built-in browser tools; may download a pinned Chrome on first use |
+| `browser_no_sandbox` | `bool` | `false` | Launch Chrome with `--no-sandbox --disable-dev-shm-usage`; for a hosted guest, where the VM is the sandbox (AGE-1912) |
+| `browser_upstream_proxy` | `Option<String>` | `null` | Send every non-loopback browser request through this upstream HTTP proxy instead of resolving names locally (AGE-1912) |
+| **`browser_upstream_token`** | `Option<String>` | `null` | Secret; sent to the upstream proxy as `Proxy-Authorization: Bearer` |
+| `browser_trace_path` | `Option<String>` | `null` | Record the browser session as a HAR 1.2 file at this workspace-relative path; `null` = no trace (AGE-1913) |
+| `browser_act_on` | `Vec<ActOnSite>` | `[]` | Origins where clicks and typing need no approval, each with a `SiteMode` (`look`, `ask_risky`, `any`) (AGE-1915) |
+| **`browser_sessions`** | `Vec<SavedSession>` | `[]` | Secret; saved logins, loaded only for origins in `browser_act_on` |
+| `browser_unattended` | `bool` | `false` | Treat the run as having no approval channel: a risky browser action returns `needs_approval` at once (AGE-2038) |
+| `browser_approved_action` | `Option<ApprovedBrowserAction>` | `null` | One browser action approved out of band (written by hive); let through once, then forgotten (AGE-2043) |
+| `browser_proof_screenshots` | `bool` | `false` | Write proof pictures into `outputs/` (at an approval, after each click, at close); only on granted sites, never with a filled password field (AGE-2008) |
 | `allow_private_network_access` | `bool` | `false` | With internet access on, let the browser reach private/internal IPs (RFC-1918) on your own network; the SSRF guard refuses them otherwise. Cloud-metadata `169.254.0.0/16` stays refused regardless (AGE-459) |
 | `execute_code_enabled` | `bool` | `false` | Exposes `execute_code` to the model |
 | `docker_code_execution_enabled` | `bool` | `false` | Docker fallback for non-Monty code |
@@ -352,12 +366,15 @@ Source: `settings/models/hive_settings.rs`.
 
 | Field | Type | Default | Notes |
 |-------|------|---------|-------|
-| `registry_url` | `String` | `http://localhost:8080` | `DEFAULT_REGISTRY_URL` |
+| `hive_url` | `String` | `default_hive_url()` | The one Hive address: sign-in, hosted conversations and the marketplace (AGE-2085) |
+| `registry_url_override` | `Option<String>` | `null` | Developer setting: a different module registry for the marketplace and downloads; an old `registry_url` in a file loads here. Read through `registry_url()`, which falls back to `hive_url` |
 | **`token`** | `Option<String>` | `null` | One-hour access JWT. Secret *(store: `token_ref` → `hive/token`)*. `is_logged_in()` = token present |
 | **`refresh_token`** | `Option<String>` | `null` | 30-day refresh token, rotated on every refresh. Secret *(store: `refresh_token_ref` → `hive/refresh_token`)* |
 | `expires_at` | `Option<DateTime>` | `null` | When `token` expires |
 | `username` | `Option<String>` | `null` | Cached for UI |
 | `email` | `Option<String>` | `null` | Cached for re-login |
+| `sync_new_conversations` | `bool` | `true` | Sync a conversation started while signed in; omitted from the file while on (AGE-2088) |
+| `sync_existing_offered` | `bool` | `false` | The one-time offer to sync earlier conversations has been shown; omitted while false |
 
 ---
 
@@ -367,6 +384,14 @@ Source: `tui_hive.rs`. The terminal app's own Hive sign-in, the same shape as
 `hive_settings.json` but a separate pair (secret refs `hive-tui/token` and
 `hive-tui/refresh_token`), so the TUI never spends the desktop's single-use
 refresh token.
+
+| Field | Type | Default | Notes |
+|-------|------|---------|-------|
+| `hive_url` | `String` | `default_hive_url()` | Same field as the desktop's; the TUI's session talks to the address it was signed in to |
+| **`token`** | `Option<String>` | `null` | One-hour access JWT. Secret *(store: `token_ref` → `hive-tui/token`)* |
+| **`refresh_token`** | `Option<String>` | `null` | Refresh token, single use. Secret *(store: `refresh_token_ref` → `hive-tui/refresh_token`)*; refreshed only by the TUI's own `HiveSession`, whose every change is saved (`SaveFlush`); a delegated worker borrows the pair and never refreshes it |
+| `expires_at`, `username`, `email` | — | `null` | As in `hive_settings.json` |
+| `registry_url_override`, `sync_*` | — | — | Present (same model) but only `hive_url` and the sign-in fields are used by the TUI |
 
 ---
 
@@ -785,6 +810,7 @@ Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This pag
 |------|------|------|-----------|
 | `MCP_UPDATE_SENDER` | `OnceLock<mpsc::Sender<Vec<McpServerConfig>>>` | Startup | Cross-cutting MCP config change notifications |
 | `MCP_SERVICE` | `OnceLock<McpService>` | Startup | Tool context has no UI handle; needs shared MCP client |
+| `HIVE_TUI_REPOSITORY` | `OnceLock<Arc<dyn HiveTuiSettingsRepository>>` | Startup (`init_repositories`) | The TUI's own Hive sign-in (`hive_tui_settings.json`); not a `RepositoryRegistry` field, so a hosted guest never snapshots it (AGE-2084) |
 
 ## Repository registry (`chatty-core/src/lib.rs`)
 
@@ -801,6 +827,7 @@ Canonical comment block: `crates/chatty-core/src/lib.rs` (top of file). This pag
 | `user_secrets_repository()` | secrets | User-provided secret values |
 | `module_settings_repository()` | modules | WASM module settings |
 | `hive_settings_repository()` | hive | Hive registry / billing |
+| `hive_tui_settings_repository()` | hive (TUI) | The terminal app's own Hive sign-in |
 | `extensions_repository()` | extensions | Browser extension config |
 | `token_tracking_repository()` | token tracking | Compaction share / context-window thresholds (ADR-0007) |
 
@@ -815,6 +842,7 @@ All repositories initialize via `init_repositories()` once at startup. Use acces
 | `AZURE_TOKEN_CACHE` | `factories/agent_factory/provider_builder.rs` | `OnceLock<Option<AzureTokenCache>>` | Azure OAuth token reuse |
 | `PLUGIN_ENGINE` | `tools/plugin_tool.rs` | `OnceLock<wasmtime::Engine>` | One Wasmtime engine for every spec plugin instance (PL-U2); limits are per store |
 | `LLM_CLIENT` | `services/http_client.rs` | `LazyLock<reqwest::Client>` | Shared connection pool behind `llm_client()`, handed to every provider agent builder |
+| `CLIENTS` | `services/http_client.rs` | `LazyLock<Mutex<HashMap<(Kind, u64), reqwest::Client>>>` | One shared `reqwest` client per kind and timeout; building a client re-reads the system root certificates (AGE-1882) |
 | `MCP_WRITE_LOCK` | `settings/models/mcp_store.rs` | `LazyLock<Mutex<()>>` | Serialize MCP JSON writes |
 | `WRITE_SLOTS` | `settings/repositories/generic_json_repository.rs` | `LazyLock<Mutex<HashMap<PathBuf, WriteSlot>>>` | Per settings file, the last save written behind an async lock, so overlapping saves of one file never interleave and an older save never lands over a newer one (AGE-562) |
 | `PATH_AUGMENTED` | `auth/azure_auth.rs` | `OnceLock<()>` | One-time PATH fix for Azure CLI |

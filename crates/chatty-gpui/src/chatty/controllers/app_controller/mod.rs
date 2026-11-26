@@ -441,6 +441,18 @@ static SKILLS_REFRESH_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// Global state to hold the main ChattyApp entity
 pub type GlobalChattyApp = crate::global_entity::GlobalWeakEntity<ChattyApp>;
 
+/// "Sync my existing conversations", asked from the settings window: create
+/// every local conversation on the account (AGE-2096).
+pub fn request_sync_existing_conversations(cx: &mut App) {
+    let Some(app) = cx
+        .try_global::<GlobalChattyApp>()
+        .and_then(|global| global.try_upgrade())
+    else {
+        return;
+    };
+    app.update(cx, |app, cx| app.sync_existing_conversations(cx));
+}
+
 pub struct ChattyApp {
     pub chat_view: Entity<ChatView>,
     pub sidebar_view: Entity<SidebarView>,
@@ -589,6 +601,9 @@ impl ChattyApp {
                 }
                 SidebarEvent::MoveConversation(conv_id) => {
                     app.confirm_conversation_move(conv_id, cx);
+                }
+                SidebarEvent::KeepConversationLocal(conv_id) => {
+                    app.keep_conversation_local(conv_id, cx);
                 }
                 SidebarEvent::ToggleCollapsed(collapsed) => {
                     // Optional: Could save collapsed state to settings here

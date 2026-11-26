@@ -62,6 +62,8 @@ libc = "0.2"
 # Scripted stream fixtures shared with chatty-gpui's characterization tests.
 chatty-core = { path = "../chatty-core", features = ["test-support"] }
 parking_lot.workspace = true
+# HX-19's characterization tests stand in for the cloud server.
+wiremock = "0.6"
 # AGE-306's chain test puts the participant socket in a temp dir.
 tempfile.workspace = true
 # The resume spike's frozen template is pinned by its hash (AGE-650).
