@@ -575,10 +575,23 @@ impl From<ChangeWire> for RemoteChange {
         } else {
             TurnStatus::Idle
         });
+        let model_id = wire.model_id.filter(|model| !model.is_empty());
+        // A cloud placement names no model of its own; the conversation's
+        // is the one its turns run on, so the composer shows that rather
+        // than "Hosted model" (AGE-2129).
+        let placement = match wire
+            .placement
+            .unwrap_or(Placement::Cloud { model_id: None })
+        {
+            Placement::Cloud { model_id: None } => Placement::Cloud {
+                model_id: model_id.clone(),
+            },
+            placement => placement,
+        };
         RemoteChange::Upsert(RemoteSummary {
             id: wire.id,
             title: wire.title,
-            model_id: wire.model_id.filter(|model| !model.is_empty()),
+            model_id,
             version: wire.version.unwrap_or(0),
             updated_at: wire
                 .updated_at_ms
@@ -587,11 +600,7 @@ impl From<ChangeWire> for RemoteChange {
                 .or(wire.last_active_at)
                 .unwrap_or(0),
             turn_status,
-            placement: with_device(
-                wire.placement
-                    .unwrap_or(Placement::Cloud { model_id: None }),
-                wire.placement_device.as_ref(),
-            ),
+            placement: with_device(placement, wire.placement_device.as_ref()),
             device_name: wire
                 .placement_device
                 .and_then(|device| device.name)

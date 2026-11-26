@@ -740,14 +740,14 @@ fn hosted(model_id: Option<&str>) -> chatty_core::models::conversation::Conversa
 
 #[gpui::test]
 fn hosted_conversation_chip_shows_server_model(cx: &mut gpui::TestAppContext) {
-    let (chip, _) = composer_in(cx, hosted(Some("platform-qwen3")));
-    assert_eq!(chip, "platform-qwen3");
+    let (chip, _) = composer_in(cx, hosted(Some("claude-sonnet-5-5")));
+    assert_eq!(chip, "Claude Sonnet 5.5");
 
     // The server named no model: say so, never the local pick.
     let (chip, _) = composer_in(cx, hosted(None));
-    assert_eq!(chip, "Hosted model");
+    assert_eq!(chip, "Default cloud model");
     let (chip, _) = composer_in(cx, hosted(Some("  ")));
-    assert_eq!(chip, "Hosted model");
+    assert_eq!(chip, "Default cloud model");
 
     // Back home, the local pick returns.
     let (chip, _) = composer_in(

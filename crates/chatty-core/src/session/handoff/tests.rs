@@ -702,7 +702,8 @@ async fn a_local_model_conversation_asks_for_a_cloud_model() {
     )
     .await
     .unwrap();
-    assert_eq!(sync.cloud_model_label().as_deref(), Some("cloud-b"));
+    // The chip reads the id as a name (AGE-2129).
+    assert_eq!(sync.cloud_model_label().as_deref(), Some("Cloud B"));
     // The local row still names its own model.
     assert_eq!(local.model_id, "llama3.2:latest");
 }
