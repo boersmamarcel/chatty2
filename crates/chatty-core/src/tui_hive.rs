@@ -28,7 +28,11 @@ pub async fn open_session(
     hive_url: &str,
     repo: Arc<dyn HiveTuiSettingsRepository>,
 ) -> (Arc<HiveSession>, SaveFlush) {
-    let mut stored = repo.load().await.unwrap_or_default();
+    let mut stored = repo
+        .load()
+        .await
+        .map_err(|e| tracing::warn!(error = ?e, "Failed to load the TUI's Hive sign-in; starting signed out"))
+        .unwrap_or_default();
     let session = Arc::new(HiveSession::new(hive_url, stored.token_pair()));
     let mut changes = session.subscribe();
     let (saved_tx, saved) = watch::channel(changes.borrow().clone());

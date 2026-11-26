@@ -353,3 +353,13 @@ async fn what_a_cloud_run_waits_on_is_answered_with_the_existing_prompts() {
     .await;
     // `expect(1)` on both mocks is checked when the server drops.
 }
+
+/// The turn push's process-wide device id is the old login session's after a
+/// sign-out or a new sign-in, so forgetting the sign-in forgets it too.
+#[tokio::test]
+async fn a_sign_in_change_forgets_the_pushes_device_id() {
+    let mut cloud = cloud().await;
+    *super::DEVICE_ID.lock().unwrap() = Some("old-session".into());
+    cloud.engine.forget_cloud_sign_in();
+    assert_eq!(super::cached_device_id(), None);
+}

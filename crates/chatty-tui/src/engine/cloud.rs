@@ -120,6 +120,7 @@ impl ChatEngine {
         self.cloud.hive_url = None;
         self.cloud.sync = None;
         self.cloud.this_device = None;
+        super::forget_this_device();
         self.cloud.held_by.clear();
     }
 

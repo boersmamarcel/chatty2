@@ -7,7 +7,7 @@ use hive_client::HiveSession;
 
 use super::wire::{ChangesPage, ConversationDetail};
 use crate::repositories::conversation_repository::BoxFuture;
-use crate::session::hosted::{SIGN_IN_TO_HIVE, send_to_server};
+use crate::session::hosted::{SIGN_IN_TO_HIVE, refused_body, send_to_server};
 
 /// Why a read failed.
 #[derive(Debug, thiserror::Error)]
@@ -86,14 +86,14 @@ impl HttpHiveConversationsApi {
         let auth = self.auth.clone();
         Box::pin(async move {
             let response = send_to_server(auth.as_deref(), &url, || http.get(&url)).await?;
-            match response.status() {
-                reqwest::StatusCode::GONE => return Err(ApiError::CursorExpired),
-                reqwest::StatusCode::UNAUTHORIZED => return Err(ApiError::SignedOut),
-                reqwest::StatusCode::NOT_FOUND if not_found => return Err(ApiError::NotFound),
-                status if !status.is_success() => {
-                    return Err(anyhow::anyhow!("the server answered {status} for {url}").into());
-                }
-                _ => {}
+            if !response.status().is_success() {
+                let (status, _) = refused_body("a sync read", &url, response).await;
+                return Err(match status {
+                    reqwest::StatusCode::GONE => ApiError::CursorExpired,
+                    reqwest::StatusCode::UNAUTHORIZED => ApiError::SignedOut,
+                    reqwest::StatusCode::NOT_FOUND if not_found => ApiError::NotFound,
+                    status => anyhow::anyhow!("the server answered {status} for {url}").into(),
+                });
             }
             response
                 .json::<T>()
@@ -142,10 +142,10 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
                 http.post(&url).json(&serde_json::json!({}))
             })
             .await?;
-            let status = response.status();
-            if status.is_success() {
+            if response.status().is_success() {
                 return Ok(());
             }
+            let (status, body) = refused_body("a turn resume", &url, response).await;
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(ApiError::SignedOut);
             }
@@ -155,9 +155,7 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
                 ));
             }
             if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT {
-                let message = response
-                    .json::<serde_json::Value>()
-                    .await
+                let message = serde_json::from_str::<serde_json::Value>(&body)
                     .ok()
                     .and_then(|body| body.get("message")?.as_str().map(str::to_string))
                     .unwrap_or_else(|| "This turn can't be resumed any more.".to_string());

@@ -540,19 +540,32 @@ fn should_sync_to_account(
     }
 }
 
-/// This process's device id on the server, found once: the one cache the
-/// turn push and `/online` share.
-static DEVICE_ID: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+/// This process's device id on the server, for the turn push (a free task with
+/// no engine). It is the current login session's id, so a sign-in or sign-out
+/// forgets it ([`forget_this_device`]), as it does the engine's own copy.
+static DEVICE_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// This device's id on `server` (its current login session), cached for the
-/// process.
+/// This device's id on `server` (its current login session), asked once per
+/// sign-in.
 pub(crate) async fn this_device(
     server: &chatty_core::session::HandoffServer,
 ) -> Result<String, chatty_core::session::HandoffError> {
-    DEVICE_ID
-        .get_or_try_init(|| chatty_core::session::this_device_id(server))
-        .await
-        .cloned()
+    if let Some(id) = cached_device_id() {
+        return Ok(id);
+    }
+    let id = chatty_core::session::this_device_id(server).await?;
+    *DEVICE_ID.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.clone());
+    Ok(id)
+}
+
+pub(super) fn cached_device_id() -> Option<String> {
+    DEVICE_ID.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// The sign-in changed: the next turn push asks for this device's id
+/// again instead of using the old login session's.
+pub(crate) fn forget_this_device() {
+    *DEVICE_ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Send a finished turn to the account (see [`ChatEngine::sync_to_account`]).

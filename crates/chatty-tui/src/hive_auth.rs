@@ -20,6 +20,7 @@ async fn hive_url() -> String {
     let desktop = chatty_core::hive_settings_repository()
         .load()
         .await
+        .map_err(|e| tracing::warn!(error = ?e, "Failed to load hive_settings.json; using the default Hive address"))
         .unwrap_or_default();
     tui_hive::hive_url(&desktop).to_string()
 }

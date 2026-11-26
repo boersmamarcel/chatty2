@@ -108,6 +108,17 @@ pub fn install_hive_session(cx: &mut App) -> Arc<HiveSession> {
     session
 }
 
+/// This device's id is the login session's (`GET /api/auth/sessions`), so it
+/// ends with the sign-in: a later sign-in is a new session with a new id, and
+/// pushing or continuing under the old one would claim a placement for a
+/// session that no longer exists.
+fn forget_this_device(cx: &mut App) {
+    if cx.has_global::<chatty_core::models::ConversationsStore>() {
+        cx.global_mut::<chatty_core::models::ConversationsStore>()
+            .set_this_device(None);
+    }
+}
+
 fn apply_session_state(state: SessionState, cx: &mut App) {
     match state {
         SessionState::SignedIn(pair) => {
@@ -121,6 +132,7 @@ fn apply_session_state(state: SessionState, cx: &mut App) {
             sync_hive_token_to_mcp(Some(pair.token.clone()), cx);
         }
         SessionState::Revoked => {
+            forget_this_device(cx);
             let settings = cx.global_mut::<HiveSettingsModel>();
             settings.set_token_pair(None);
             settings.username = None;
@@ -136,6 +148,7 @@ fn apply_session_state(state: SessionState, cx: &mut App) {
 /// Persist a pair from login/registration and hand it to the session.
 async fn sign_in(pair: TokenPair, username: String, email: String, cx: &mut AsyncApp) {
     let session = cx.update(|cx| {
+        forget_this_device(cx);
         let settings = cx.global_mut::<HiveSettingsModel>();
         settings.set_token_pair(Some(&pair));
         settings.username = Some(username);
@@ -289,6 +302,7 @@ pub fn set_sync_new_conversations(on: bool, cx: &mut App) {
 
 /// Log out: clear persisted credentials and revoke the refresh token.
 pub fn logout(cx: &mut App) {
+    forget_this_device(cx);
     if let Some(session) = hive_session(cx) {
         cx.spawn(async move |_cx: &mut AsyncApp| session.sign_out().await)
             .detach();
@@ -817,9 +831,35 @@ mod tests {
             cx.set_global(ExtensionsModel::default());
             apply_session_state(SessionState::SignedIn(pair), cx);
         });
-        assert_eq!(
-            SYNCED_TOKENS.lock().unwrap().as_slice(),
-            [Some("fresh-token".to_string())]
+        // Other tests in this module sync tokens too, in parallel.
+        assert!(
+            SYNCED_TOKENS
+                .lock()
+                .unwrap()
+                .contains(&Some("fresh-token".to_string()))
         );
+    }
+
+    /// A revoked or ended sign-in forgets this device's id: the next sign-in
+    /// is a new login session, and the old id must not be pushed under.
+    #[gpui::test]
+    fn an_ended_sign_in_forgets_this_devices_id(cx: &mut gpui::TestAppContext) {
+        use chatty_core::models::ConversationsStore;
+        cx.update(|cx| {
+            cx.set_global(HiveSettingsModel::default());
+            cx.set_global(ExtensionsModel::default());
+            cx.set_global(MarketplaceState::default());
+            let mut store = ConversationsStore::new();
+            store.set_this_device(Some("session-1".into()));
+            cx.set_global(store);
+
+            apply_session_state(SessionState::Revoked, cx);
+            assert_eq!(cx.global::<ConversationsStore>().this_device(), None);
+
+            cx.global_mut::<ConversationsStore>()
+                .set_this_device(Some("session-2".into()));
+            logout(cx);
+            assert_eq!(cx.global::<ConversationsStore>().this_device(), None);
+        });
     }
 }

@@ -29,7 +29,7 @@ use std::sync::Arc;
 use hive_client::HiveSession;
 use reqwest::StatusCode;
 
-use super::hosted::{SIGN_IN_TO_HIVE, send_to_server};
+use super::hosted::{LOG_TARGET, SIGN_IN_TO_HIVE, error_code, send_to_server};
 use crate::models::conversation::{ConversationSync, Placement, SyncedConversation};
 use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
@@ -208,21 +208,40 @@ impl HandoffServer {
         url: &str,
         build: impl Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     ) -> Result<reqwest::Response, HandoffError> {
+        // The path names the conversation (`/api/conversations/<remote id>/…`)
+        // and carries no secret; the host is the account's Hive URL.
+        let request = url.strip_prefix(self.url.as_str()).unwrap_or(url);
         let response = send_to_server(self.auth.as_deref(), url, || build(&self.http))
             .await
-            .map_err(HandoffError::Server)?;
-        match response.status() {
+            .map_err(|error| {
+                tracing::warn!(target: LOG_TARGET, request, error = format!("{error:#}"), "A hand-off request could not be sent");
+                HandoffError::Server(error)
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let text = response.text().await.unwrap_or_default();
+        tracing::warn!(
+            target: LOG_TARGET,
+            request,
+            status = status.as_u16(),
+            error_code = error_code(&text).as_deref(),
+            "The server refused a hand-off request"
+        );
+        let body = || serde_json::from_str::<ConflictBody>(&text).unwrap_or_default();
+        match status {
             StatusCode::UNAUTHORIZED => Err(HandoffError::SignedOut),
             StatusCode::NOT_FOUND => Err(HandoffError::NotFound),
             StatusCode::PRECONDITION_FAILED => Err(HandoffError::ChangedElsewhere),
             StatusCode::GONE => {
-                let body: ConflictBody = response.json().await.unwrap_or_default();
+                let body = body();
                 Err(HandoffError::DeletedOnAccount {
                     message: body.message.filter(|message| !message.trim().is_empty()),
                 })
             }
             StatusCode::CONFLICT => {
-                let body: ConflictBody = response.json().await.unwrap_or_default();
+                let body = body();
                 Err(match body.holder() {
                     Some(holder) => HandoffError::HeldElsewhere {
                         holder,
@@ -231,14 +250,10 @@ impl HandoffServer {
                     None => HandoffError::TurnRunning,
                 })
             }
-            status if !status.is_success() => {
-                let detail = response.text().await.unwrap_or_default();
-                Err(HandoffError::Server(anyhow::anyhow!(
-                    "the server answered {status}: {}",
-                    detail.trim()
-                )))
-            }
-            _ => Ok(response),
+            status => Err(HandoffError::Server(anyhow::anyhow!(
+                "the server answered {status}: {}",
+                text.trim()
+            ))),
         }
     }
 

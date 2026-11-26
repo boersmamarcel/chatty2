@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::services::no_follow_write::write_no_follow;
-use crate::session::hosted::{SIGN_IN_TO_HIVE, send_to_server};
+use crate::session::hosted::{SIGN_IN_TO_HIVE, refused_body, send_to_server};
 
 /// The largest file this client uploads or downloads. The server has its own
 /// limits; this keeps a stray multi-gigabyte attachment out of memory.
@@ -210,7 +210,8 @@ impl HiveFilesApi for HttpHiveFilesApi {
             })
             .await?;
             if !response.status().is_success() {
-                return Err(status_error(response.status(), &url));
+                let (status, _) = refused_body("a file request", &url, response).await;
+                return Err(status_error(status, &url));
             }
             response
                 .json::<UploadedFile>()
@@ -228,7 +229,8 @@ impl HiveFilesApi for HttpHiveFilesApi {
         Box::pin(async move {
             let response = send_to_server(auth.as_deref(), &url, || http.get(&url)).await?;
             if !response.status().is_success() {
-                return Err(status_error(response.status(), &url));
+                let (status, _) = refused_body("a file request", &url, response).await;
+                return Err(status_error(status, &url));
             }
             response
                 .json::<Vec<ConversationFile>>()
@@ -250,7 +252,8 @@ impl HiveFilesApi for HttpHiveFilesApi {
         Box::pin(async move {
             let response = send_to_server(auth.as_deref(), &url, || http.get(&url)).await?;
             if !response.status().is_success() {
-                return Err(status_error(response.status(), &url));
+                let (status, _) = refused_body("a file request", &url, response).await;
+                return Err(status_error(status, &url));
             }
             read_capped(
                 response.bytes_stream(),
