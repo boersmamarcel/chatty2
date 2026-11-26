@@ -59,6 +59,42 @@ pub(super) struct HiveSyncState {
     pub(super) attach_failed_at: std::collections::HashMap<String, std::time::Instant>,
 }
 
+impl HiveSyncState {
+    /// A fresh state that remembers, from the last run, which cloud
+    /// conversations were running and which this device engaged with
+    /// (AGE-2127), so a turn that finished while the app was closed is
+    /// still news on the first pull.
+    pub(super) fn with_notify_memory() -> Self {
+        let mut state = Self::default();
+        if cfg!(test) {
+            return state;
+        }
+        if let Some(path) = hive_sync::NotifyMemory::default_path() {
+            let memory = hive_sync::NotifyMemory::load(&path);
+            state.detector = TransitionDetector::with_last(memory.last);
+            state.engaged = memory.engaged;
+        }
+        state
+    }
+
+    /// Keep what [`with_notify_memory`](Self::with_notify_memory) reads.
+    pub(super) fn save_notify_memory(&self) {
+        if cfg!(test) {
+            return;
+        }
+        let Some(path) = hive_sync::NotifyMemory::default_path() else {
+            return;
+        };
+        let memory = hive_sync::NotifyMemory {
+            last: self.detector.last().clone(),
+            engaged: self.engaged.clone(),
+        };
+        if let Err(error) = memory.save(&path) {
+            warn!(target: "chatty::hive", ?error, "Could not keep the cloud notification state");
+        }
+    }
+}
+
 impl ChattyApp {
     /// Pull on every window activation and every [`PULL_INTERVAL`].
     pub(super) fn start_hive_sync(window: &mut Window, cx: &mut Context<Self>) {

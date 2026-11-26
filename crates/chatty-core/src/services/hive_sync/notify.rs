@@ -4,7 +4,8 @@
 //! frontend's. Derived from the sync pull's `turn_status`, so no server API
 //! of its own.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use super::wire::TurnStatus;
 
@@ -80,6 +81,54 @@ impl TransitionDetector {
     pub fn forget(&mut self, local_id: &str) {
         self.last.remove(local_id);
     }
+
+    /// A detector that remembers `last`, as [`NotifyMemory`] kept it.
+    pub fn with_last(last: HashMap<String, TurnStatus>) -> Self {
+        Self { last }
+    }
+
+    /// Each conversation's last seen status.
+    pub fn last(&self) -> &HashMap<String, TurnStatus> {
+        &self.last
+    }
+}
+
+/// What notifying needs to survive a restart (AGE-2127): each conversation's
+/// last seen status and which ones this device engaged with. Kept in memory
+/// only, a turn that finished while the app was closed was never news: the
+/// first pull after the start saw it idle with nothing to compare.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NotifyMemory {
+    #[serde(default)]
+    pub last: HashMap<String, TurnStatus>,
+    #[serde(default)]
+    pub engaged: HashSet<String>,
+}
+
+impl NotifyMemory {
+    /// Where the desktop keeps it: `cloud_notify.json` in chatty's config
+    /// directory.
+    pub fn default_path() -> Option<PathBuf> {
+        dirs::config_dir().map(|dir| dir.join("chatty").join("cloud_notify.json"))
+    }
+
+    /// The memory at `path`; empty when there is none or it does not read.
+    pub fn load(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write the memory to `path`, replacing it whole.
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(self)?)?;
+        std::fs::rename(tmp, path)
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +203,36 @@ mod tests {
         assert_eq!(
             observe(&mut d, "a", TurnStatus::Unknown, true).as_deref(),
             Some("Finished: Trip plan")
+        );
+    }
+
+    /// AGE-2127: a turn that was running when the app closed and finished
+    /// before it opened again notifies on the first pull after the start.
+    #[test]
+    fn a_finish_while_closed_notifies_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cloud_notify.json");
+
+        let mut d = TransitionDetector::default();
+        observe(&mut d, "a", TurnStatus::Running, true);
+        NotifyMemory {
+            last: d.last().clone(),
+            engaged: ["a".to_string()].into(),
+        }
+        .save(&path)
+        .unwrap();
+
+        // The app starts again.
+        let memory = NotifyMemory::load(&path);
+        let mut d = TransitionDetector::with_last(memory.last);
+        let engaged = memory.engaged.contains("a");
+        assert_eq!(
+            observe(&mut d, "a", TurnStatus::Idle, engaged).as_deref(),
+            Some("Finished: Trip plan")
+        );
+        assert_eq!(
+            NotifyMemory::load(&dir.path().join("none.json")),
+            NotifyMemory::default()
         );
     }
 }

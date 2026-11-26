@@ -173,7 +173,9 @@ impl ChattyApp {
             return;
         };
         // Opened on this device: finishing or waiting is worth a notification.
-        self.hive_sync.engaged.insert(conv_id.to_string());
+        if self.hive_sync.engaged.insert(conv_id.to_string()) {
+            self.hive_sync.save_notify_memory();
+        }
         self.download_cloud_files(conv_id, cx);
         if stale {
             self.sync_cloud_detail(conv_id, cx);
@@ -506,6 +508,10 @@ impl ChattyApp {
         }
         for notice in notices {
             self.show_cloud_notice(notice, cx);
+        }
+        // What the next start compares against (AGE-2127).
+        if !actions.is_empty() {
+            self.hive_sync.save_notify_memory();
         }
         // Deleted on the account while this device held it (AGE-2121): the
         // copy stays here, local-only, and the person hears it once, as when

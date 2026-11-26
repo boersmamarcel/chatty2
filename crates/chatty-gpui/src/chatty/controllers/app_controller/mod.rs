@@ -530,7 +530,7 @@ impl ChattyApp {
             _mcp_notifier: mcp_notifier,
             active_invoke_agent_ids: std::collections::HashSet::new(),
             mailboxes: std::collections::HashMap::new(),
-            hive_sync: hive_sync_ops::HiveSyncState::default(),
+            hive_sync: hive_sync_ops::HiveSyncState::with_notify_memory(),
             hive_push: hive_push_ops::HivePushState::default(),
         };
 
