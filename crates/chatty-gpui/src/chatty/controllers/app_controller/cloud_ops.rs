@@ -58,7 +58,7 @@ impl ChattyApp {
         .detach();
     }
 
-    fn is_shown(&self, conv_id: &str, cx: &App) -> bool {
+    pub(super) fn is_shown(&self, conv_id: &str, cx: &App) -> bool {
         self.chat_view
             .read(cx)
             .conversation_id()
@@ -153,7 +153,7 @@ impl ChattyApp {
 
     /// The address of `conv_id` on its server, when it runs in the cloud:
     /// `(server_url, remote_id, cache is stale)`.
-    fn cloud_address(&self, conv_id: &str, cx: &App) -> Option<(String, String, bool)> {
+    pub(super) fn cloud_address(&self, conv_id: &str, cx: &App) -> Option<(String, String, bool)> {
         let sync = cx
             .global::<ConversationsStore>()
             .get_conversation(conv_id)?
@@ -203,8 +203,18 @@ impl ChattyApp {
             let api = chatty_core::services::hive_files::HttpHiveFilesApi::new(&server_url, auth);
             let result =
                 chatty_core::services::hive_files::download_files(&api, &remote_id, &dir).await;
-            weak.update(cx, |app, _| {
+            let outputs = match &result {
+                Ok(_) => chatty_core::services::hive_files::cached_outputs(&api, &remote_id, &dir)
+                    .await
+                    .map_err(|error| {
+                        warn!(error = %error, "Could not list a cloud run's outputs");
+                    })
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            };
+            weak.update(cx, |app, cx| {
                 app.hive_sync.files_in_flight.remove(&conv_id);
+                app.show_cloud_outputs(&conv_id, &outputs, cx);
                 match result {
                     Ok(files) => {
                         debug!(conv_id = %conv_id, count = files.len(), "Cached a cloud conversation's files");

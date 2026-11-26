@@ -433,6 +433,7 @@ pub fn cloud_mark_look(mark: CloudMark, cx: &App) -> (&'static str, Hsla) {
     match mark {
         CloudMark::Running => (mark.label(), cx.theme().info),
         CloudMark::WaitingForYou => (mark.label(), cx.theme().warning),
+        CloudMark::Interrupted => (mark.label(), cx.theme().warning),
         CloudMark::Done => (mark.label(), cx.theme().success),
         CloudMark::Failed => (mark.label(), cx.theme().danger),
     }

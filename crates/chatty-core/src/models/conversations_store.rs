@@ -27,6 +27,8 @@ pub enum CloudMark {
     Running,
     /// A turn is waiting for an answer from the user.
     WaitingForYou,
+    /// The server restarted mid-turn; the turn can be resumed (HX-22).
+    Interrupted,
     /// A turn finished since this conversation was last opened.
     Done,
     /// A turn failed since this conversation was last opened.
@@ -39,6 +41,7 @@ impl CloudMark {
         match self {
             CloudMark::Running => "Running in the cloud",
             CloudMark::WaitingForYou => "Waiting for you",
+            CloudMark::Interrupted => "Interrupted",
             CloudMark::Done => "Done",
             CloudMark::Failed => "Something went wrong",
         }
@@ -94,6 +97,8 @@ pub struct ConversationsStore {
     /// Whether each synced conversation's turn is running on the server, from
     /// the last pull. Live state: never persisted (HX-10).
     turn_status: HashMap<String, TurnStatus>,
+    /// The name of the device holding each conversation, from the last pull.
+    device_names: HashMap<String, String>,
     /// Conversations whose turn finished / failed since they were last
     /// opened, for the sidebar's mark.
     finished: HashSet<String>,
@@ -120,6 +125,7 @@ impl ConversationsStore {
             this_device: None,
             frame_tx: None,
             turn_status: HashMap::new(),
+            device_names: HashMap::new(),
             finished: HashSet::new(),
             failed: HashSet::new(),
             inputs: std::sync::Mutex::new(HashMap::new()),
@@ -352,6 +358,15 @@ impl ConversationsStore {
             match action {
                 SyncAction::UpsertMetadata(remote) => {
                     self.set_turn_status(&remote.local_id, remote.turn_status);
+                    match &remote.device_name {
+                        Some(name) => {
+                            self.device_names
+                                .insert(remote.local_id.clone(), name.clone());
+                        }
+                        None => {
+                            self.device_names.remove(&remote.local_id);
+                        }
+                    }
                     self.follow_placement(&remote.local_id, Some(&remote.sync));
                     if let Some(conversation) = self.get_conversation_mut(&remote.local_id) {
                         conversation.set_title(remote.title.clone());
@@ -456,6 +471,11 @@ impl ConversationsStore {
         }
     }
 
+    /// The name of the device holding the conversation, as of the last pull.
+    pub fn device_name(&self, id: &str) -> Option<&str> {
+        self.device_names.get(id).map(String::as_str)
+    }
+
     /// Whether the conversation's turn runs on the server right now, as of
     /// the last pull.
     pub fn turn_status(&self, id: &str) -> TurnStatus {
@@ -478,6 +498,7 @@ impl ConversationsStore {
         match self.turn_status(id) {
             TurnStatus::Running => Some(CloudMark::Running),
             TurnStatus::WaitingForYou => Some(CloudMark::WaitingForYou),
+            TurnStatus::Interrupted => Some(CloudMark::Interrupted),
             _ if self.failed.contains(id) => Some(CloudMark::Failed),
             _ if self.finished.contains(id) => Some(CloudMark::Done),
             _ => None,

@@ -138,6 +138,7 @@ impl ChattyApp {
                             };
                             app.notify_cloud_changes(&actions, cx);
                             app.requeue_after_pull(cx);
+                            app.refresh_follow_up(cx);
                             // A turn started elsewhere while this conversation
                             // is open, or one whose connection a sleep cut,
                             // is followed again.

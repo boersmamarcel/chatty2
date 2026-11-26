@@ -30,7 +30,7 @@ pub mod titlebar;
 pub mod trace_components;
 pub mod transcript;
 
-pub use chat_view::{ChatView, ConnectorSignIn};
+pub use chat_view::{ChatView, ConnectorSignIn, FollowUp};
 pub use error_log_dialog::ErrorLogDialog;
 pub use handoff_dialog::{HandoffDialog, HandoffKind};
 pub use quick_open_dialog::QuickOpenDialog;

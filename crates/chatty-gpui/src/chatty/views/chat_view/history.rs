@@ -61,6 +61,9 @@ impl ChatView {
         self.delegation_runs.clear();
 
         self.messages.clear();
+        // Files and prompts of the previous conversation do not carry over (HX-22).
+        self.cloud_outputs.clear();
+        self.follow_up = None;
         self.reset_transcript_list();
         self.last_auto_opened_table_id = None;
         self.last_auto_opened_chart_id = None;
