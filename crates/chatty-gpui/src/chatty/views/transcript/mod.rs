@@ -89,7 +89,6 @@ pub use swarm_tree::{AgentTranscript, SwarmFold, SwarmTree, adapt_swarm_tree, de
 pub use table::{extract_table_preview, render_table_preview_card};
 pub use ticker::HeadlineTicker;
 pub use tool_row::ToolRow;
-#[cfg(test)]
 pub use types::BlockId;
 pub use types::{Block, Turn, TurnRole};
 

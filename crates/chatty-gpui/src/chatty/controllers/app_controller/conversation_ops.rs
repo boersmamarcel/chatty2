@@ -807,6 +807,7 @@ impl ChattyApp {
             // A conversation that runs in the cloud: bring it up to date,
             // load what its run waits on, follow its turn (HX-10, HX-11).
             self.on_cloud_conversation_shown(&conv_id, cx);
+            self.refresh_follow_up(cx);
         }
     }
 }

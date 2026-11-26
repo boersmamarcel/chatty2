@@ -475,3 +475,24 @@ async fn metadata_never_lands_on_a_different_message() {
     let data = conversation.to_conversation_data().unwrap();
     assert_eq!(data.system_traces, "[null,null,null,null]");
 }
+
+#[tokio::test]
+async fn resume_continues_only_an_interrupted_turn() {
+    use super::wire::TurnStatus;
+    let api = FakeHiveConversations::new();
+    api.save("r-1", "x", 1);
+
+    // Not interrupted: refused, nothing resumed.
+    assert!(matches!(api.resume("r-1").await, Err(ApiError::Refused(_))));
+    assert!(api.resumed().is_empty());
+
+    api.set_turn_status("r-1", TurnStatus::Interrupted);
+    api.resume("r-1").await.unwrap();
+    assert_eq!(api.resumed(), vec!["r-1".to_string()]);
+    // The server now runs it, and a pull sees that.
+    assert_eq!(
+        api.conversation("r-1").await.unwrap().turn_status,
+        Some(TurnStatus::Running)
+    );
+    assert!(matches!(api.resume("nope").await, Err(ApiError::NotFound)));
+}

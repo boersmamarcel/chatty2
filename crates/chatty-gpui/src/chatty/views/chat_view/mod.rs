@@ -75,10 +75,10 @@ use super::terminal::dock::{DockResizeDrag, TerminalDock, TerminalDockEvent, dra
 use super::thinking_indicator::{ThinkingIndicator, new_thinking_indicator};
 use super::trace_components::SystemTraceView;
 use super::transcript::{
-    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, ChosenOption,
-    ClarificationCard, FileChange, LIVE_FADE_MS, OpenArtifact, OpenTable, PLAN_LIST_TOP_PADDING,
-    PlanStrip, RunPin, RunPinKind, RunTally, SessionChangeBar, SwarmActions, TableOpen, Turn,
-    TurnFileOverview, TurnRole, adapt_message_with_trace, attachment_image_path,
+    ApprovalCard, ArtifactMode, ArtifactOpen, ArtifactView, ArtifactViewEvent, Block, BlockId,
+    ChosenOption, ClarificationCard, FileChange, LIVE_FADE_MS, OpenArtifact, OpenTable,
+    PLAN_LIST_TOP_PADDING, PlanStrip, RunPin, RunPinKind, RunTally, SessionChangeBar, SwarmActions,
+    TableOpen, Turn, TurnFileOverview, TurnRole, adapt_message_with_trace, attachment_image_path,
     block_visible_in_turn, classify_tool, extract_table_preview, file_change_from_tool,
     file_changes_from_turn, format_worked_for, format_working_for, is_lane_a_browser_tool,
     is_pdf_artifact_tool, is_pdf_path, live_headline, merge_file_changes, new_artifact_view,
@@ -353,15 +353,13 @@ fn append_cloud_outputs(
     };
     let namespace = (turn.message_index as u64).saturating_add(1);
     for path in files {
-        let shown = turn.blocks.iter().any(|block| {
-            matches!(block, Block::Artifact { path: shown, .. } if shown == path)
-        });
+        let shown = turn
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::Artifact { path: shown, .. } if shown == path));
         if !shown {
             turn.blocks.push(Block::Artifact {
-                id: super::transcript::BlockId::from_parts(
-                    namespace,
-                    &format!("cloud-output-{}", path.display()),
-                ),
+                id: BlockId::from_parts(namespace, &format!("cloud-output-{}", path.display())),
                 path: path.clone(),
                 old_content: None,
             });
@@ -2597,9 +2595,11 @@ impl ChatView {
     fn render_follow_up(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use gpui_component::button::{Button, ButtonVariants};
         let (text, label, event) = match self.follow_up.as_ref()? {
-            FollowUp::TakeItBack { message } => {
-                (message.clone(), "Continue here", ChatViewEvent::ContinueHere)
-            }
+            FollowUp::TakeItBack { message } => (
+                message.clone(),
+                "Continue here",
+                ChatViewEvent::ContinueHere,
+            ),
             FollowUp::Resume => (
                 "This turn was interrupted. You can pick it up where it stopped.".to_string(),
                 "Resume",
@@ -2623,11 +2623,14 @@ impl ChatView {
                         .items_center()
                         .gap_3()
                         .child(div().flex_1().min_w_0().text_sm().child(text))
-                        .child(Button::new("follow-up-button").primary().label(label).on_click(
-                            move |_, _, cx| {
-                                entity.update(cx, |_, cx| cx.emit(event.clone()));
-                            },
-                        )),
+                        .child(
+                            Button::new("follow-up-button")
+                                .primary()
+                                .label(label)
+                                .on_click(move |_, _, cx| {
+                                    entity.update(cx, |_, cx| cx.emit(event.clone()));
+                                }),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -5206,5 +5209,61 @@ mod kept_failed_turn_tests {
                 assert!(!last.is_streaming);
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod cloud_output_tests {
+    // Explicit: `super::*` would pull in `gpui::test`, which shadows `#[test]`.
+    use super::{Block, PathBuf, Turn, append_cloud_outputs, outputs_fingerprint};
+    use crate::chatty::views::message_component::DisplayMessage;
+    use crate::chatty::views::message_component::MessageRole;
+    use crate::chatty::views::transcript::adapt_message_with_trace;
+
+    fn assistant(history_index: usize) -> DisplayMessage {
+        DisplayMessage {
+            role: MessageRole::Assistant,
+            content: "Done.".into(),
+            is_streaming: false,
+            system_trace_view: None,
+            live_trace: None,
+            is_markdown: true,
+            attachments: Vec::new(),
+            feedback: None,
+            history_index: Some(history_index),
+            swarm_tree: None,
+        }
+    }
+
+    fn cards(turn: &Turn) -> Vec<PathBuf> {
+        turn.blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Artifact { path, .. } => Some(path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn outputs_become_cards_on_the_turn_they_hang_on_and_only_there() {
+        let report = PathBuf::from("/cache/v-2/report.md");
+        let outputs = std::collections::BTreeMap::from([(3, vec![report.clone()])]);
+
+        let first = assistant(1);
+        let mut first_turn = adapt_message_with_trace(&first, 0, false, None);
+        append_cloud_outputs(&mut first_turn, &first, &outputs);
+        assert!(cards(&first_turn).is_empty());
+
+        let second = assistant(3);
+        let mut second_turn = adapt_message_with_trace(&second, 1, false, None);
+        append_cloud_outputs(&mut second_turn, &second, &outputs);
+        assert_eq!(cards(&second_turn), vec![report.clone()]);
+        // Adding twice does not stack a second card.
+        append_cloud_outputs(&mut second_turn, &second, &outputs);
+        assert_eq!(cards(&second_turn), vec![report.clone()]);
+
+        // A new file changes the turn's cache key input.
+        assert_ne!(outputs_fingerprint(&[report]), outputs_fingerprint(&[]));
     }
 }

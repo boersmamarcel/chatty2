@@ -131,7 +131,10 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
     fn resume(&self, remote_id: &str) -> BoxFuture<'static, Result<(), ApiError>> {
         let http = self.http.clone();
         let auth = self.auth.clone();
-        let url = format!("{}/api/conversations/{remote_id}/turn/resume", self.server_url);
+        let url = format!(
+            "{}/api/conversations/{remote_id}/turn/resume",
+            self.server_url
+        );
         Box::pin(async move {
             let response = send_to_server(auth.as_deref(), &url, || {
                 http.post(&url).json(&serde_json::json!({}))
@@ -144,8 +147,7 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(ApiError::SignedOut);
             }
-            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT
-            {
+            if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT {
                 let message = response
                     .json::<serde_json::Value>()
                     .await
@@ -233,5 +235,30 @@ mod tests {
         ));
         let signed_out = api.conversation("locked").await.unwrap_err();
         assert_eq!(signed_out.to_string(), SIGN_IN_TO_HIVE);
+    }
+    #[tokio::test]
+    async fn resume_posts_to_the_route_and_a_refusal_carries_the_servers_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/ok/turn/resume"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/gone/turn/resume"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(
+                serde_json::json!({"error": "not_interrupted", "message": "That turn already finished."}),
+            ))
+            .mount(&server)
+            .await;
+        let api = HttpHiveConversationsApi::new(&server.uri(), Some(signed_in(&server)));
+
+        api.resume("ok").await.unwrap();
+        match api.resume("gone").await {
+            Err(ApiError::Refused(message)) => assert_eq!(message, "That turn already finished."),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
     }
 }
