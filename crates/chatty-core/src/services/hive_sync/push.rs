@@ -380,6 +380,53 @@ pub async fn sync_after_turn<A: HiveHistoryApi + ?Sized>(
     }
 }
 
+/// [`sync_after_turn`] answered 412 (AGE-2122): the account's copy moved on
+/// since this device last read it. Only the holder writes the history, so
+/// what changed elsewhere is metadata, such as a rename on the web. Read the
+/// account's copy and, while this device still holds it, push again on its
+/// version with its title. `Ok(None)` when another device holds it now.
+pub async fn sync_after_stale<H, C>(
+    history: &H,
+    conversations: &C,
+    server_url: &str,
+    this_device: &str,
+    local_id: &str,
+    sync: &ConversationSync,
+    mut body: ConversationData,
+) -> Result<Option<ConversationSync>, PushError>
+where
+    H: HiveHistoryApi + ?Sized,
+    C: super::api::HiveConversationsApi + ?Sized,
+{
+    let Some(synced) = sync.synced() else {
+        return Ok(None);
+    };
+    let detail = conversations
+        .conversation(&synced.remote_id)
+        .await
+        .map_err(|error| PushError::Offline(error.to_string()))?;
+    let held_here = matches!(
+        &detail.placement,
+        Some(Placement::Device { device_id }) if device_id == this_device
+    );
+    let Some(version) = detail.version.filter(|_| held_here) else {
+        return Ok(None);
+    };
+    let mut synced = synced.clone();
+    synced.version = version;
+    body.title = detail.title;
+    sync_after_turn(
+        history,
+        server_url,
+        this_device,
+        local_id,
+        &ConversationSync::Synced(synced),
+        false,
+        body,
+    )
+    .await
+}
+
 /// Pending pushes: one per conversation, oldest request first.
 #[derive(Clone, Debug, Default)]
 pub struct PushQueue {
@@ -586,6 +633,100 @@ mod tests {
 
     fn accepted(version: u64) -> Result<HistoryAccepted, PushError> {
         Ok(HistoryAccepted { version })
+    }
+
+    /// The account's copy, as [`sync_after_stale`] reads it.
+    struct OneDetail(super::super::wire::ConversationDetail);
+
+    impl super::super::api::HiveConversationsApi for OneDetail {
+        fn changes_since(
+            &self,
+            _cursor: &str,
+            _limit: usize,
+        ) -> BoxFuture<'static, Result<super::super::wire::ChangesPage, super::super::api::ApiError>>
+        {
+            unreachable!("only the detail is read")
+        }
+
+        fn conversation(
+            &self,
+            _remote_id: &str,
+        ) -> BoxFuture<
+            'static,
+            Result<super::super::wire::ConversationDetail, super::super::api::ApiError>,
+        > {
+            let detail = self.0.clone();
+            Box::pin(async move { Ok(detail) })
+        }
+
+        fn resume(
+            &self,
+            _remote_id: &str,
+        ) -> BoxFuture<'static, Result<(), super::super::api::ApiError>> {
+            unreachable!("only the detail is read")
+        }
+    }
+
+    fn held_by(device: &str, version: u64, title: &str) -> OneDetail {
+        let mut detail: super::super::wire::ConversationDetail = serde_json::from_value(
+            serde_json::json!({"id": "r-1", "title": title, "version": version}),
+        )
+        .unwrap();
+        detail.placement = Some(Placement::Device {
+            device_id: device.into(),
+        });
+        OneDetail(detail)
+    }
+
+    fn synced_here(version: u64) -> ConversationSync {
+        ConversationSync::Synced(crate::models::conversation::SyncedConversation {
+            server_url: "https://hive.example".into(),
+            remote_id: "r-1".into(),
+            version,
+            placement: Placement::Device {
+                device_id: "tui-1".into(),
+            },
+            last_synced_at: None,
+        })
+    }
+
+    /// AGE-2122: after a 412 (a rename on the web), the holder reads the
+    /// account's version and pushes again on it; another holder gets nothing.
+    #[tokio::test]
+    async fn after_a_412_the_holder_pushes_again_on_the_accounts_version() {
+        let history = Scripted::new(vec![accepted(11)]);
+        let updated = sync_after_stale(
+            &history,
+            &held_by("tui-1", 10, "Renamed on the web"),
+            "https://hive.example",
+            "tui-1",
+            "local-1",
+            &synced_here(9),
+            body("old title"),
+        )
+        .await
+        .unwrap()
+        .expect("pushed again");
+        assert_eq!(
+            *history.calls.lock().unwrap(),
+            vec![("r-1".to_string(), 10)]
+        );
+        assert_eq!(updated.synced().unwrap().version, 11);
+
+        let history = Scripted::new(vec![]);
+        let none = sync_after_stale(
+            &history,
+            &held_by("desk-2", 10, "Taken over"),
+            "https://hive.example",
+            "tui-1",
+            "local-1",
+            &synced_here(9),
+            body("old title"),
+        )
+        .await
+        .unwrap();
+        assert!(none.is_none(), "another device holds it now");
+        assert!(history.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

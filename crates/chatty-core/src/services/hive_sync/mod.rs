@@ -35,7 +35,7 @@ pub use fake::FakeHiveConversations;
 pub use notify::{CloudNotice, TransitionDetector};
 pub use push::{
     HiveHistoryApi, HttpHiveHistoryApi, PushError, PushEvent, PushJob, PushQueue, PushTarget,
-    drain, sync_after_turn,
+    drain, sync_after_stale, sync_after_turn,
 };
 pub use wire::{
     AuthSessions, ChangesPage, CloudModel, CloudModels, ConflictBody, ConversationDetail,
