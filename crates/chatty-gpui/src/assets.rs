@@ -38,6 +38,8 @@ impl AssetSource for ChattyAssets {
 
 #[derive(Debug, Clone, Copy)]
 pub enum CustomIcon {
+    /// laptop.svg - kept on this device (AGE-2129)
+    Laptop,
     // Auto-updater icons
     Refresh,       // refresh-ccw.svg - Idle state
     Loader,        // loader.svg - Checking/Installing
@@ -78,6 +80,7 @@ impl IconNamed for CustomIcon {
             CustomIcon::CircleDashed => "icons/circle-dashed.svg",
             CustomIcon::CircleDot => "icons/circle-dot.svg",
             CustomIcon::Copy => "icons/copy.svg",
+            CustomIcon::Laptop => "icons/laptop.svg",
             CustomIcon::Lock => "icons/lock.svg",
             CustomIcon::TriangleAlert => "icons/triangle-alert.svg",
             CustomIcon::CircleX => "icons/circle-x.svg",

@@ -243,14 +243,7 @@ impl RenderOnce for ConversationItem {
                             return parent;
                         }
 
-                        // Always show in dollars for consistency
-                        let cost_text = if cost >= 0.01 {
-                            format!("${:.2}", cost)
-                        } else if cost >= 0.001 {
-                            format!("${:.3}", cost)
-                        } else {
-                            format!("${:.4}", cost)
-                        };
+                        let cost_text = row_cost(cost);
 
                         parent.child(
                             div()
@@ -403,7 +396,7 @@ impl RenderOnce for ConversationItem {
                                                         .items_center()
                                                         .gap_2()
                                                         .child(
-                                                            Icon::new(IconName::Globe)
+                                                            Icon::new(CustomIcon::Laptop)
                                                                 .size(px(12.0)),
                                                         )
                                                         .child(
@@ -553,4 +546,27 @@ fn show_rename_dialog(
     window.defer(cx, move |window, cx| {
         focus.update(cx, |state, cx| state.focus(window, cx));
     });
+}
+
+/// A conversation's cost as the sidebar shows it: cents, or "< $0.01" for
+/// less. Four decimals ("$0.0000") read as broken next to "$0.45"
+/// (AGE-2129).
+fn row_cost(cost: f64) -> String {
+    if cost >= 0.01 {
+        format!("${cost:.2}")
+    } else {
+        "< $0.01".to_string()
+    }
+}
+
+#[cfg(test)]
+mod row_cost_tests {
+    use super::row_cost;
+
+    #[test]
+    fn a_rows_cost_has_one_format() {
+        assert_eq!(row_cost(0.45), "$0.45");
+        assert_eq!(row_cost(0.0123), "$0.01");
+        assert_eq!(row_cost(0.00003), "< $0.01");
+    }
 }
