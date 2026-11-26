@@ -192,7 +192,7 @@ pub fn adopt_detail(
         TurnStatus::Idle
     });
     let version = detail.version.unwrap_or(0);
-    let data = detail.to_conversation_data(&conversation.id().to_string());
+    let data = detail.to_conversation_data(conversation.id());
     conversation.replace_from_remote(data)?;
     synced.version = version;
     synced.last_synced_at = Some(now_ms);

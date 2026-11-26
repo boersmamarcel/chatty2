@@ -103,11 +103,10 @@ async fn pump(cloud: &mut Cloud, done: impl Fn(&ChatEngine) -> bool) {
         if done(&cloud.engine) {
             return;
         }
-        match tokio::time::timeout(Duration::from_millis(50), cloud.events.recv()).await {
-            Ok(Some(event)) => {
-                cloud.engine.handle_event(event);
-            }
-            _ => {}
+        if let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(50), cloud.events.recv()).await
+        {
+            cloud.engine.handle_event(event);
         }
     }
     panic!("the engine never reached the expected state");
