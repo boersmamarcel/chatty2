@@ -12,10 +12,10 @@ use chatty_core::agent_spec::SpecListing;
 use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationSync;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
+use chatty_core::services::hive_files::HiveAttachmentUploader;
 use chatty_core::session::{
-    CONTINUE_HERE_SUMMARY, Delegation, HandoffServer, HandoffSummary, NoAttachmentUpload,
-    SEND_TO_CLOUD_SUMMARY, SendToCloud, continue_here, refuse_reason, send_to_cloud,
-    this_device_id,
+    CONTINUE_HERE_SUMMARY, Delegation, HandoffServer, HandoffSummary, SEND_TO_CLOUD_SUMMARY,
+    SendToCloud, continue_here, refuse_reason, send_to_cloud,
 };
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::tools::LOCAL_AGENT_NAME;
@@ -510,7 +510,7 @@ impl ChatEngine {
         match target {
             Some(server_url) => {
                 // HX-19 replaces this command; until then it keeps the
-                // conversation's own model and uploads no attachments.
+                // conversation's own model.
                 let data = conversation.snapshot().to_data()?;
                 let new_mode = send_to_cloud(
                     &HandoffServer::new(&server_url, auth.clone()),
@@ -519,7 +519,7 @@ impl ChatEngine {
                         sync: &mode,
                         cloud_model: None,
                     },
-                    &NoAttachmentUpload,
+                    &HiveAttachmentUploader::new(&server_url, auth.clone()),
                 )
                 .await
                 .context("Failed to send the conversation to the cloud")?;
@@ -541,7 +541,7 @@ impl ChatEngine {
                     .cloud_on()
                     .expect("refuse_reason rejected a local conversation already");
                 let server = HandoffServer::new(server_url, auth.clone());
-                let device_id = this_device_id(&server)
+                let device_id = super::this_device(&server)
                     .await
                     .context("Failed to tell which device this is")?;
                 let here = continue_here(&server, &mode, &device_id)

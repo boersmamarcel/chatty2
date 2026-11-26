@@ -35,7 +35,7 @@ use crate::repositories::ConversationData;
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::services::hive_sync::wire::{
     AuthSessions, CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder,
-    PlacementChange, PlacementReply, PlacementTarget,
+    PlacementChange, PlacementReply, PlacementTarget, push_body,
 };
 
 // ── What the user is told ────────────────────────────────────────────────────
@@ -382,12 +382,7 @@ pub async fn send_to_cloud(
 fn cloud_copy(conversation: &ConversationData, model_id: &str) -> ConversationData {
     ConversationData {
         model_id: model_id.to_string(),
-        working_dir: None,
-        sync: None,
-        placement: None,
-        remote_version: None,
-        last_synced_at: None,
-        ..conversation.clone()
+        ..push_body(conversation.clone())
     }
 }
 

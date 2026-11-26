@@ -28,6 +28,8 @@ pub enum SidebarEvent {
     /// two is meant follows the conversation's current mode, which the
     /// controller reads — the sidebar only says which conversation.
     MoveConversation(String),
+    /// Stop syncing this conversation to the account (AGE-2096).
+    KeepConversationLocal(String),
     ToggleCollapsed(bool),
     LoadMore,
     /// A file was activated in Files mode (AGE-480): open it as an artifact
@@ -478,6 +480,19 @@ impl Render for SidebarView {
                     .collect()
             })
             .unwrap_or_default();
+        // Conversations synced to the account whose turns run here: the ones
+        // "Keep on this device only" applies to (AGE-2096).
+        let synced_here_ids: std::collections::HashSet<String> = cx
+            .try_global::<crate::chatty::models::ConversationsStore>()
+            .map(|store| {
+                store
+                    .metadata()
+                    .iter()
+                    .filter(|row| row.sync.synced().is_some() && !row.sync.runs_in_cloud())
+                    .map(|row| row.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         // The cloud run's status mark, from the last pull (HX-10).
         let cloud_marks: std::collections::HashMap<String, chatty_core::models::CloudMark> = cx
             .try_global::<crate::chatty::models::ConversationsStore>()
@@ -618,6 +633,17 @@ impl Render for SidebarView {
                                                         }
                                                     })
                                                     .hosted(hosted_ids.contains(id))
+                                                    .when(synced_here_ids.contains(id), |item| {
+                                                        item.on_keep_local({
+                                                            let entity = sidebar_entity.clone();
+                                                            let id = id.clone();
+                                                            move |_conv_id, cx| {
+                                                                entity.update(cx, |_, cx| {
+                                                                    cx.emit(SidebarEvent::KeepConversationLocal(id.clone()));
+                                                                });
+                                                            }
+                                                        })
+                                                    })
                                                     .cloud_mark(cloud_marks.get(id).copied())
                                                     .when(signed_in || hosted_ids.contains(id), |item| {
                                                         item.on_move({

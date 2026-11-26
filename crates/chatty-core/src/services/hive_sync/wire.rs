@@ -256,7 +256,7 @@ pub struct PlacementReply {
 
 /// A refusal's body (409, 412): why, in words the server wrote for the user,
 /// and, for `held_elsewhere`, who holds the conversation.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct ConflictBody {
     /// `held_elsewhere`, `turn_active` or `version_mismatch`.
     #[serde(default)]
@@ -270,9 +270,35 @@ pub struct ConflictBody {
     pub placement_device: Option<PlacementDevice>,
     #[serde(default)]
     pub turn_status: Option<TurnStatus>,
+    /// The version the server holds.
+    #[serde(default)]
+    pub version: Option<u64>,
 }
 
 impl ConflictBody {
+    /// What to tell the user: the server's own message as it is, else
+    /// [`continued_on`](Self::continued_on).
+    pub fn notice(&self) -> String {
+        match self.message.as_deref().map(str::trim) {
+            Some(message) if !message.is_empty() => message.to_string(),
+            _ => self.continued_on(),
+        }
+    }
+
+    /// "Continued on <device>", or the generic form when the server named
+    /// none.
+    pub fn continued_on(&self) -> String {
+        match self
+            .placement_device
+            .as_ref()
+            .and_then(|device| device.name.as_deref())
+            .filter(|name| !name.is_empty())
+        {
+            Some(name) => format!("Continued on {name}"),
+            None => "Continued on another device".to_string(),
+        }
+    }
+
     /// Is the refusal because a turn is running?
     pub fn turn_running(&self) -> bool {
         self.error.as_deref() == Some("turn_active")
@@ -289,7 +315,7 @@ impl ConflictBody {
         Some(match (self.placement.as_deref(), &self.placement_device) {
             (Some("cloud"), _) => Holder::Cloud,
             (_, device) => Holder::Device {
-                device_id: device.as_ref().map(|device| device.id.clone()),
+                device_id: device.as_ref().and_then(|device| device.id.clone()),
                 name: device.as_ref().and_then(|device| device.name.clone()),
             },
         })
@@ -305,6 +331,35 @@ pub enum Holder {
         /// The name the device signed in with, when the server keeps one.
         name: Option<String>,
     },
+}
+
+/// The reply to an accepted `PUT /api/conversations/{id}/history`: the
+/// version the server now holds. The body of the push is the conversation's
+/// stored form ([`ConversationData`]); [`push_body`] takes out what is
+/// meaningless off this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct HistoryAccepted {
+    pub version: u64,
+}
+
+/// The summary a `POST /api/conversations` answers with (HX-13): the id the
+/// server gave the conversation and the version it starts at.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CreatedConversation {
+    pub id: String,
+    #[serde(default)]
+    pub version: u64,
+}
+
+/// `row` as the server stores it: without the working directory and the sync
+/// columns, which describe this device and mean nothing on the server.
+pub fn push_body(mut row: ConversationData) -> ConversationData {
+    row.working_dir = None;
+    row.sync = None;
+    row.placement = None;
+    row.remote_version = None;
+    row.last_synced_at = None;
+    row
 }
 
 /// `GET /api/auth/sessions`: the user's login sessions. The one marked
@@ -530,7 +585,10 @@ impl From<ChangeWire> for RemoteChange {
 /// the name it signed in with.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct PlacementDevice {
-    pub id: String,
+    /// The holder's login session (HX-7).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// What the user called that device.
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -539,9 +597,11 @@ pub struct PlacementDevice {
 /// placement itself did not carry one (HX-13 sends them side by side).
 fn with_device(placement: Placement, device: Option<&PlacementDevice>) -> Placement {
     match (placement, device) {
-        (Placement::Device { device_id }, Some(device)) if device_id.is_empty() => {
+        (Placement::Device { device_id }, Some(PlacementDevice { id: Some(id), .. }))
+            if device_id.is_empty() =>
+        {
             Placement::Device {
-                device_id: device.id.clone(),
+                device_id: id.clone(),
             }
         }
         (placement, _) => placement,
@@ -763,5 +823,18 @@ mod tests {
                 device_id: "s-1".into()
             })
         );
+    }
+
+    #[test]
+    fn a_push_leaves_this_devices_paths_and_sync_state_behind() {
+        let mut row = ConversationDetail::default().to_conversation_data("local");
+        row.working_dir = Some("/home/me/project".into());
+        row.sync = Some("{}".into());
+        row.placement = Some("{}".into());
+        row.remote_version = Some(3);
+        row.last_synced_at = Some(9);
+        let body = push_body(row);
+        assert!(body.working_dir.is_none() && body.sync.is_none() && body.placement.is_none());
+        assert!(body.remote_version.is_none() && body.last_synced_at.is_none());
     }
 }

@@ -14,7 +14,8 @@ use gpui_component::button::*;
 use gpui_component::input::{Input, InputState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
 use gpui_component::{
-    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex, v_flex,
+    ActiveTheme, Disableable, Icon, IconName, Sizable, WindowExt as _, alert::Alert, h_flex,
+    switch::Switch, v_flex,
 };
 
 pub fn extensions_page() -> SettingPage {
@@ -46,6 +47,8 @@ fn hive_account_group() -> SettingGroup {
             let signed_out_of_hive = state.signed_out_of_hive;
             let account_error = state.account_error.clone();
             let server_version = state.hive_server.clone();
+            let sync_new = settings.sync_new_conversations;
+            let existing_offered = settings.sync_existing_offered;
             let muted = cx.theme().muted_foreground;
 
             let status = if is_logged_in {
@@ -91,6 +94,48 @@ fn hive_account_group() -> SettingGroup {
                             .text_color(cx.theme().danger)
                             .child(message),
                     )
+                })
+                .when(is_logged_in, |this| {
+                    this.child(
+                        Switch::new("hive-sync-new")
+                            .checked(sync_new)
+                            .label("Sync new conversations")
+                            .on_click(|checked: &bool, _window, cx| {
+                                extensions_controller::set_sync_new_conversations(*checked, cx);
+                            }),
+                    )
+                    .child(div().text_xs().text_color(muted).child(if sync_new {
+                        "New conversations are saved to your account after their first reply, so you can open them on the web and your other devices. Turn this off to keep new conversations on this device."
+                    } else {
+                        "New conversations stay on this device. Turn this on to save them to your account."
+                    }))
+                    .child(if existing_offered {
+                        div()
+                            .text_xs()
+                            .text_color(muted)
+                            .child("Your earlier conversations were offered to your account already.")
+                            .into_any_element()
+                    } else {
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new("hive-sync-existing")
+                                    .small()
+                                    .label("Sync my existing conversations")
+                                    .on_click(|_, _window, cx| {
+                                        crate::chatty::controllers::app_controller::request_sync_existing_conversations(cx);
+                                        cx.refresh_windows();
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child("Conversations from before you signed in stay on this device until you choose this."),
+                            )
+                            .into_any_element()
+                    })
                 })
                 .child(if is_logged_in {
                     h_flex()

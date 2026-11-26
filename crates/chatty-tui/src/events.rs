@@ -87,6 +87,9 @@ pub enum AppEvent {
     /// GitHub pull request lookup for the workspace branch completed.
     PullRequestDetected(Option<Box<PullRequestSummary>>),
     TitleGenerated(String),
+    /// The conversation was created on, or pushed to, the Hive account after
+    /// a turn (AGE-2096): the sync state to record.
+    SyncUpdated(chatty_core::models::conversation::ConversationSync),
     DelegationProgress(String),
     /// A one-time notice for the transcript (the shell runs unsandboxed).
     Notice(String),
@@ -181,6 +184,7 @@ impl std::fmt::Debug for AppEvent {
                 f.debug_tuple("PullRequestDetected").field(pr).finish()
             }
             Self::TitleGenerated(s) => f.debug_tuple("TitleGenerated").field(s).finish(),
+            Self::SyncUpdated(sync) => f.debug_tuple("SyncUpdated").field(sync).finish(),
             Self::Notice(s) => f.debug_tuple("Notice").field(s).finish(),
             Self::DelegationProgress(s) => f.debug_tuple("DelegationProgress").field(s).finish(),
             Self::DelegationFinished(s) => f.debug_tuple("DelegationFinished").field(s).finish(),
