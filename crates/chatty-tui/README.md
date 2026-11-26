@@ -190,7 +190,8 @@ Typing `/` in the input opens an inline slash-command menu. Use `↑/↓` to sel
 | `/copy` | Copy the latest assistant response to system clipboard |
 | `/update` | Trigger CLI auto-update when an installed CLI target exists |
 | `/cwd`, `/cd [directory]` | Show or change the working directory |
-| `/online [url\|off]` | Show where this conversation runs; send it to the cloud in your Hive account, or continue it here (HX-14) |
+| `/send-to-cloud [confirm [model]]` | Show what goes to the cloud and what stays; `confirm` sends the conversation to your Hive account (HX-19) |
+| `/continue-here` | Continue a cloud or other-device conversation on this computer (HX-19) |
 | `/verbose` | Toggle folded tool-call summaries vs full payloads |
 | `/paste [n]` | Print the full text of an elided long paste |
 | `/quit`, `/exit` | Quit |

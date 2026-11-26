@@ -40,7 +40,14 @@ pub(super) struct CloudState {
     repo: Option<Arc<dyn ConversationRepository>>,
     api: Option<Arc<dyn HiveConversationsApi>>,
     sync: Option<SyncEngine>,
-    hive_url: Option<String>,
+    pub(super) hive_url: Option<String>,
+    /// The Hive sign-in the cloud requests authenticate with.
+    pub(super) auth: Option<Arc<chatty_core::hive::HiveSession>>,
+    /// The device holding each device-placed conversation, by name, as of
+    /// the last pull.
+    held_by: HashMap<String, String>,
+    /// This device's id on the server, once known.
+    pub(super) this_device: Option<String>,
     /// Each conversation's turn as of the last pull or fetch, by local id.
     status: HashMap<String, TurnStatus>,
     /// The ids of the last `/conversations` list, which `/open <n>` counts in.
@@ -80,7 +87,7 @@ impl ChatEngine {
 
     /// The saved conversations, and the account's server when signed in.
     /// Whatever cannot be had is left unset; the commands say what is missing.
-    async fn cloud_connect(&mut self) {
+    pub(super) async fn cloud_connect(&mut self) {
         if self.cloud.repo.is_none() {
             match ConversationSqliteRepository::deferred() {
                 Ok(repo) => self.cloud.repo = Some(Arc::new(repo)),
@@ -95,9 +102,26 @@ impl ChatEngine {
                 .await
                 .unwrap_or_default();
             let url = hive.registry_url().to_string();
-            self.cloud.api = Some(Arc::new(HttpHiveConversationsApi::new(&url, Some(auth))));
+            self.cloud.api = Some(Arc::new(HttpHiveConversationsApi::new(
+                &url,
+                Some(auth.clone()),
+            )));
+            self.cloud.auth = Some(auth);
             self.cloud.hive_url = Some(url);
         }
+    }
+
+    /// A sign-in or sign-out happened: what was learned under the old one
+    /// (the account's server and sign-in, this device's id, the sync cursor)
+    /// is dropped and learned again on next use.
+    pub(crate) fn forget_cloud_sign_in(&mut self) {
+        self.cloud.api = None;
+        self.cloud.auth = None;
+        self.cloud.hive_url = None;
+        self.cloud.sync = None;
+        self.cloud.this_device = None;
+        super::forget_this_device();
+        self.cloud.held_by.clear();
     }
 
     /// `/conversations`: pull the account's list, then show every saved
@@ -136,6 +160,16 @@ impl ChatEngine {
                                 self.cloud
                                     .status
                                     .insert(row.local_id.clone(), row.turn_status);
+                                match &row.device_name {
+                                    Some(name) => {
+                                        self.cloud
+                                            .held_by
+                                            .insert(row.local_id.clone(), name.clone());
+                                    }
+                                    None => {
+                                        self.cloud.held_by.remove(&row.local_id);
+                                    }
+                                }
                             }
                         }
                         apply_to_repository(repo.as_ref(), &actions).await?;
@@ -146,7 +180,24 @@ impl ChatEngine {
             _ => note = Some(chatty_core::tui_hive::RUN_LOGIN.to_string()),
         }
         let metadata = repo.load_metadata().await?;
-        let entries = conversations::entries(&metadata, &self.cloud.status);
+        if self.cloud.this_device.is_none()
+            && metadata.iter().any(|row| {
+                matches!(
+                    row.sync.synced().map(|synced| &synced.placement),
+                    Some(chatty_core::models::conversation::Placement::Device { .. })
+                )
+            })
+            && let Some(url) = self.cloud.hive_url.clone()
+        {
+            let server = chatty_core::session::HandoffServer::new(&url, self.cloud.auth.clone());
+            self.cloud.this_device = chatty_core::session::this_device_id(&server).await.ok();
+        }
+        let entries = conversations::entries(
+            &metadata,
+            &self.cloud.status,
+            &self.cloud.held_by,
+            self.cloud.this_device.as_deref(),
+        );
         self.cloud.listing = entries.iter().map(|entry| entry.id.clone()).collect();
         let open = self.session.conversation().map(|c| c.id().to_string());
         let mut text = conversations::render(&entries, open.as_deref());
@@ -302,7 +353,7 @@ impl ChatEngine {
 
     /// Put the open conversation on screen: its history as transcript rows,
     /// its title, fresh counters.
-    fn show_conversation(&mut self) {
+    pub(super) fn show_conversation(&mut self) {
         let Some(conversation) = self.session.conversation() else {
             return;
         };

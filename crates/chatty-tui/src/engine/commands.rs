@@ -1,7 +1,6 @@
 //! Slash command parsing and handling for the TUI chat engine.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use rig_core::completion::Message;
@@ -9,35 +8,14 @@ use rig_core::completion::message::AssistantContent;
 use tracing::{info, warn};
 
 use chatty_core::agent_spec::SpecListing;
-use chatty_core::hive::HiveSession;
 use chatty_core::models::conversation::ConversationSync;
 use chatty_core::services::agent_command::{AgentCommandTarget, resolve_agent_command};
-use chatty_core::services::hive_files::HiveAttachmentUploader;
-use chatty_core::session::{
-    CONTINUE_HERE_SUMMARY, Delegation, HandoffServer, HandoffSummary, SEND_TO_CLOUD_SUMMARY,
-    SendToCloud, continue_here, refuse_reason, send_to_cloud,
-};
+use chatty_core::session::Delegation;
 use chatty_core::settings::models::a2a_store::A2aAgentConfig;
 use chatty_core::tools::LOCAL_AGENT_NAME;
 
 use super::{ChatEngine, MessageRole, ModelPicker, ModelPickerItem, ToolPicker, ToolPickerItem};
 use crate::events::AppEvent;
-
-/// Render a move's "what travels and what does not" table for a terminal.
-///
-/// The strings come from chatty-core, so the TUI prompt and the desktop
-/// dialog say the same thing and neither can drift from what the code does.
-fn push_move_summary(out: &mut String, summary: &HandoffSummary) {
-    out.push_str(summary.lead);
-    out.push_str(&format!("\n{}:\n", summary.goes_title));
-    for item in summary.goes {
-        out.push_str(&format!("  + {item}\n"));
-    }
-    out.push_str(&format!("{}:\n", summary.stays_title));
-    for item in summary.stays {
-        out.push_str(&format!("  - {item}\n"));
-    }
-}
 
 /// `/agents`' text: the remote agents, the roster's specs with what each
 /// declares, and the spec files the roster leaves out with the reason.
@@ -162,9 +140,12 @@ pub enum Command {
     Update,
     /// /cwd, /cd [directory] — show or change working directory
     Cwd(Option<String>),
-    /// /online [url|off] — show where this conversation runs, take it online,
-    /// or bring it back (AGE-298)
-    Online(Option<String>),
+    /// /send-to-cloud [confirm [model]] — show what a hand-off carries, then
+    /// send this conversation to the cloud (HX-19)
+    SendToCloud(Option<String>),
+    /// /continue-here — take a cloud or other-device conversation over on
+    /// this computer (HX-19)
+    ContinueHere,
     /// /verbose — toggle between folded tool-call summaries and full payloads
     Verbose,
     /// /paste [n] — print the full text of an elided paste
@@ -189,12 +170,6 @@ pub enum Command {
 
 /// How `/msg` is used.
 pub const MSG_USAGE: &str = "Usage: /msg <agent> <text> (/swarm shows the running agents' names)";
-
-/// The Hive sign-in a `chatty-server` checks (AGE-835): the TUI's own
-/// (AGE-2084), refreshed by this process. `None` when not signed in.
-async fn hosted_auth() -> Option<Arc<HiveSession>> {
-    crate::hive_auth::signed_in_session().await
-}
 
 impl ChatEngine {
     pub fn try_handle_command(&self, input: &str) -> Option<Command> {
@@ -229,7 +204,8 @@ impl ChatEngine {
             "/copy" => Some(Command::Copy),
             "/update" => Some(Command::Update),
             "/cwd" | "/cd" => Some(Command::Cwd(arg)),
-            "/online" => Some(Command::Online(arg)),
+            "/send-to-cloud" => Some(Command::SendToCloud(arg)),
+            "/continue-here" => Some(Command::ContinueHere),
             "/verbose" => Some(Command::Verbose),
             "/paste" => Some(Command::Paste(arg)),
             "/now" => Some(Command::Now(arg)),
@@ -447,145 +423,12 @@ impl ChatEngine {
         Ok(workspace_str)
     }
 
-    /// `/online` with no argument: where this conversation runs, and what a
-    /// move would and would not carry.
-    ///
-    /// The table is printed *before* anything moves, because taking a
-    /// conversation online is a data egress and AGE-298 asks that the user see
-    /// what leaves this machine before they agree to it. `/online <url>` is
-    /// the confirmation — there is no second prompt, because typing the URL is
-    /// already a deliberate act and the terminal has just shown the table.
-    pub fn online_status(&self) -> String {
-        let mut out = String::new();
-        match self.conversation_sync().cloud_on() {
-            None => {
-                out.push_str("This conversation runs locally.\n");
-                out.push_str("  /online <server-url>  take it online\n\n");
-                push_move_summary(&mut out, &SEND_TO_CLOUD_SUMMARY);
-            }
-            Some((server_url, remote_id)) => {
-                out.push_str(&format!(
-                    "This conversation runs on {server_url} (as {remote_id}).\n"
-                ));
-                out.push_str("  /online off  bring it back to this machine\n\n");
-                push_move_summary(&mut out, &CONTINUE_HERE_SUMMARY);
-            }
-        }
-        out
-    }
-
     /// Whether this conversation is synced, and where its turns run.
     pub fn conversation_sync(&self) -> ConversationSync {
         self.session
             .conversation()
             .map(|conv| conv.sync().clone())
             .unwrap_or_default()
-    }
-
-    /// `/online <url>` — upload this conversation's history and continue it
-    /// there. `/online off` brings it back.
-    ///
-    /// Ordering is the safety property: the history goes up first, and only a
-    /// server that has accepted it and named it causes anything local to
-    /// change. A client killed part-way through leaves the local conversation
-    /// exactly as it was, and the hosted conversation it never learned the id
-    /// of is unreachable rather than half-adopted.
-    pub async fn set_online(&mut self, target: Option<String>) -> Result<()> {
-        let going_online = target.is_some();
-        let mode = self.conversation_sync();
-        if let Some(reason) = refuse_reason(self.is_streaming, &mode, going_online) {
-            self.add_system_message(reason.to_string());
-            return Ok(());
-        }
-        let Some(conversation) = self.session.conversation() else {
-            self.add_system_message("No active conversation to move.".to_string());
-            return Ok(());
-        };
-
-        let Some(auth) = hosted_auth().await else {
-            self.add_system_message(chatty_core::tui_hive::RUN_LOGIN.to_string());
-            return Ok(());
-        };
-        let auth = Some(auth);
-        match target {
-            Some(server_url) => {
-                // HX-19 replaces this command; until then it keeps the
-                // conversation's own model.
-                let data = conversation.snapshot().to_data()?;
-                let new_mode = send_to_cloud(
-                    &HandoffServer::new(&server_url, auth.clone()),
-                    SendToCloud {
-                        conversation: &data,
-                        sync: &mode,
-                        cloud_model: None,
-                    },
-                    &HiveAttachmentUploader::new(&server_url, auth.clone()),
-                )
-                .await
-                .context("Failed to send the conversation to the cloud")?;
-                let (url, remote_id) = new_mode
-                    .cloud_on()
-                    .map(|(url, id)| (url.to_string(), id.to_string()))
-                    .expect("send_to_cloud returns a cloud placement");
-
-                self.hosted = Some(self.new_hosted(&url, &remote_id, auth));
-                if let Some(conv) = self.session.conversation_mut() {
-                    conv.set_sync(new_mode);
-                }
-                self.add_system_message(format!(
-                    "This conversation now runs on {url}. Its history stays on this machine too — /online off brings it back."
-                ));
-            }
-            None => {
-                let (server_url, _) = mode
-                    .cloud_on()
-                    .expect("refuse_reason rejected a local conversation already");
-                let server = HandoffServer::new(server_url, auth.clone());
-                let device_id = super::this_device(&server)
-                    .await
-                    .context("Failed to tell which device this is")?;
-                let here = continue_here(&server, &mode, &device_id)
-                    .await
-                    .context("Failed to continue the conversation here")?;
-                let remote = here.remote;
-
-                // This client applied every event of every hosted turn it was
-                // present for, so its local history is usually already
-                // complete. The server's history is only adopted when it is
-                // longer, which is exactly the case it exists to cover: turns
-                // that happened while this client was closed. Adopting it
-                // keeps the traces either side has (AGE-2088).
-                let local_len = self
-                    .session
-                    .conversation()
-                    .map(|conv| conv.messages().len())
-                    .unwrap_or(0);
-                let missed = remote.messages.len().saturating_sub(local_len);
-                if missed > 0 {
-                    for message in remote.messages.iter().skip(local_len) {
-                        self.append_missed_message(message);
-                    }
-                    if let Some(conv) = self.session.conversation_mut() {
-                        let local_id = conv.id().to_string();
-                        conv.replace_from_remote(remote.to_conversation_data(&local_id))
-                            .context("Failed to adopt the hosted conversation's history")?;
-                    }
-                }
-                if let Some(conv) = self.session.conversation_mut() {
-                    conv.set_sync(here.sync.clone());
-                }
-                self.hosted = None;
-                self.add_system_message(match missed {
-                    0 => "This conversation runs locally again.".to_string(),
-                    1 => "This conversation runs locally again, with 1 turn it ran without you."
-                        .to_string(),
-                    n => format!(
-                        "This conversation runs locally again, with {n} messages it ran without you."
-                    ),
-                });
-            }
-        }
-        Ok(())
     }
 
     /// Put a message the hosted run recorded while this client was away into

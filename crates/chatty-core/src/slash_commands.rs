@@ -184,12 +184,20 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         gpui: true,
         tui: true,
     },
+    // The desktop hands a conversation over from the sidebar menu (HX-16).
     SlashCommandSpec {
-        command: "/online",
-        description: "Show where this conversation runs; /online <url> takes it online, /online off brings it back",
-        insert_text: "/online",
+        command: "/send-to-cloud",
+        description: "Show what sending this conversation to your Hive account takes along; /send-to-cloud confirm sends it",
+        insert_text: "/send-to-cloud",
         execute_immediately: true,
-        // The desktop moves a conversation from the sidebar menu (AGE-298).
+        gpui: false,
+        tui: true,
+    },
+    SlashCommandSpec {
+        command: "/continue-here",
+        description: "Continue a cloud or other-device conversation on this computer",
+        insert_text: "/continue-here",
+        execute_immediately: true,
         gpui: false,
         tui: true,
     },

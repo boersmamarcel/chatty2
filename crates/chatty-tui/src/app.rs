@@ -174,13 +174,11 @@ async fn run_loop(
                             KeyAction::ShowContext => {
                                 engine.add_system_message(engine.context_summary());
                             }
-                            KeyAction::ShowOnlineStatus => {
-                                engine.add_system_message(engine.online_status());
+                            KeyAction::SendToCloud(arg) => {
+                                engine.send_to_cloud_command(arg.as_deref()).await;
                             }
-                            KeyAction::SetOnline(target) => {
-                                if let Err(e) = engine.set_online(target).await {
-                                    engine.add_system_message(e.to_string());
-                                }
+                            KeyAction::ContinueHere => {
+                                engine.continue_here_command().await;
                             }
                             KeyAction::ListConversations => {
                                 let list = engine.conversations_command().await;
@@ -200,6 +198,7 @@ async fn run_loop(
                                 );
                                 let _ = disable_raw_mode();
                                 let outcome = crate::hive_auth::login().await;
+                                engine.forget_cloud_sign_in();
                                 let _ = enable_raw_mode();
                                 let _ = execute!(
                                     io::stdout(),
@@ -214,7 +213,9 @@ async fn run_loop(
                                 });
                             }
                             KeyAction::Logout => {
-                                engine.add_system_message(crate::hive_auth::logout().await);
+                                let outcome = crate::hive_auth::logout().await;
+                                engine.forget_cloud_sign_in();
+                                engine.add_system_message(outcome);
                             }
                             KeyAction::CopyLastResponse => {
                                 if let Err(e) = engine.copy_last_response_to_clipboard() {
@@ -371,8 +372,10 @@ enum KeyAction {
     UpdateCli,
     ShowWorkingDirectory,
     ChangeWorkingDirectory(String),
-    /// `/online` — where this conversation runs, and what a move would carry.
-    ShowOnlineStatus,
+    /// `/send-to-cloud [confirm [model]]` (HX-19).
+    SendToCloud(Option<String>),
+    /// `/continue-here` (HX-19).
+    ContinueHere,
     /// `/conversations` (HX-19).
     ListConversations,
     /// `/open <n|id>` (HX-19).
@@ -381,8 +384,6 @@ enum KeyAction {
     Login,
     /// `/logout` (AGE-2084).
     Logout,
-    /// `/online <url>` takes it online; `/online off` brings it back.
-    SetOnline(Option<String>),
 }
 
 fn handle_terminal_event(
@@ -808,13 +809,8 @@ fn map_command_to_action(cmd: Command, engine: &mut ChatEngine) -> Option<KeyAct
         Command::Update => Some(KeyAction::UpdateCli),
         Command::Cwd(Some(directory)) => Some(KeyAction::ChangeWorkingDirectory(directory)),
         Command::Cwd(None) => Some(KeyAction::ShowWorkingDirectory),
-        // `/online` alone shows the table before anything leaves this machine;
-        // naming a URL is the confirmation. `off` is the way back.
-        Command::Online(None) => Some(KeyAction::ShowOnlineStatus),
-        Command::Online(Some(target)) if target.eq_ignore_ascii_case("off") => {
-            Some(KeyAction::SetOnline(None))
-        }
-        Command::Online(Some(url)) => Some(KeyAction::SetOnline(Some(url))),
+        Command::SendToCloud(arg) => Some(KeyAction::SendToCloud(arg)),
+        Command::ContinueHere => Some(KeyAction::ContinueHere),
         Command::Verbose => {
             announce_verbose_tools(engine);
             None
@@ -938,26 +934,19 @@ mod tests {
             .text()
     }
 
-    /// HX-14: `/online` has no developer switch any more; it needs a Hive
-    /// sign-in, which the move itself checks.
+    /// The hand-off commands map to their actions; the server checks the
+    /// Hive sign-in.
     #[test]
-    fn online_maps_to_its_actions() {
+    fn handoff_commands_map_to_their_actions() {
         let mut engine = test_engine(ExecutionSettingsModel::default());
 
         assert!(matches!(
-            map_command_to_action(Command::Online(None), &mut engine),
-            Some(KeyAction::ShowOnlineStatus)
+            map_command_to_action(Command::SendToCloud(None), &mut engine),
+            Some(KeyAction::SendToCloud(None))
         ));
         assert!(matches!(
-            map_command_to_action(
-                Command::Online(Some("http://localhost:8081".to_string())),
-                &mut engine
-            ),
-            Some(KeyAction::SetOnline(Some(_)))
-        ));
-        assert!(matches!(
-            map_command_to_action(Command::Online(Some("off".to_string())), &mut engine),
-            Some(KeyAction::SetOnline(None))
+            map_command_to_action(Command::ContinueHere, &mut engine),
+            Some(KeyAction::ContinueHere)
         ));
     }
 

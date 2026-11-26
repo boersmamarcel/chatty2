@@ -996,6 +996,7 @@ mod tests {
                 updated_at: 100,
                 sync: cloud.clone(),
                 turn_status: TurnStatus::Running,
+                device_name: None,
             }),
             SyncAction::ApplyTombstone {
                 local_id: "conv-0".into(),
