@@ -48,6 +48,7 @@ mod cloud_ops;
 mod conversation_ops;
 mod conversation_ops_modify;
 mod export_ops;
+mod hive_push_ops;
 mod hive_sync_ops;
 mod message_ops;
 mod message_ops_internals;
@@ -467,6 +468,8 @@ pub struct ChattyApp {
     pub running_agents: Entity<crate::chatty::views::running_agents::RunningAgentsModel>,
     /// Pulls of the conversation list from the Hive account (AGE-2088).
     hive_sync: hive_sync_ops::HiveSyncState,
+    /// Pushes of device-held conversations to the account (AGE-2096).
+    hive_push: hive_push_ops::HivePushState,
 }
 
 impl ChattyApp {
@@ -515,6 +518,7 @@ impl ChattyApp {
             active_invoke_agent_ids: std::collections::HashSet::new(),
             mailboxes: std::collections::HashMap::new(),
             hive_sync: hive_sync_ops::HiveSyncState::default(),
+            hive_push: hive_push_ops::HivePushState::default(),
         };
 
         // Store entity in global state for later access

@@ -1323,6 +1323,10 @@ impl ChattyApp {
             .map(|s| s.jsonl_auto_export)
             .unwrap_or(false);
         self.persist_and_export_conversation(&conv_id, export_atif, export_jsonl, cx);
+
+        // 9. A synced conversation this device holds goes up to the account.
+        //    Queued here, sent on its own task: the turn never waits on it.
+        self.push_after_turn(&conv_id, cx);
     }
 
     /// Handle the finalization of a stopped stream (partial response saving).

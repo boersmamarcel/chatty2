@@ -49,6 +49,9 @@ pub(super) struct HiveSyncState {
     pub(super) accept_gap: HashSet<String>,
     /// Conversations whose detail is being fetched.
     pub(super) detail_in_flight: HashSet<String>,
+    /// Conversations whose files are being brought into the local cache
+    /// (HX-15).
+    pub(super) files_in_flight: HashSet<String>,
     /// When following a conversation's turn last failed (the connection was
     /// lost, or the server had no room for another viewer). It is not
     /// followed again for [`ATTACH_COOLDOWN`]: the server's status can say
@@ -62,13 +65,20 @@ impl ChattyApp {
         cx.observe_window_activation(window, |app, window, cx| {
             if window.is_window_active() {
                 app.pull_hive(cx);
+                app.drive_hive_push(cx);
             }
         })
         .detach();
         cx.spawn(async move |weak, cx| {
             loop {
                 cx.background_executor().timer(PULL_INTERVAL).await;
-                if weak.update(cx, |app, cx| app.pull_hive(cx)).is_err() {
+                if weak
+                    .update(cx, |app, cx| {
+                        app.pull_hive(cx);
+                        app.drive_hive_push(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -127,6 +137,7 @@ impl ChattyApp {
                                 kept
                             };
                             app.notify_cloud_changes(&actions, cx);
+                            app.requeue_after_pull(cx);
                             // A turn started elsewhere while this conversation
                             // is open, or one whose connection a sleep cut,
                             // is followed again.
