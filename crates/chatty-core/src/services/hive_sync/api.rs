@@ -47,7 +47,9 @@ pub trait HiveConversationsApi: Send + Sync {
         remote_id: &str,
     ) -> BoxFuture<'static, Result<ConversationDetail, ApiError>>;
 
-    /// Resume the turn the server kept after a restart (HX-20).
+    /// Resume the turn the server kept after a restart (HX-20). The reply is
+    /// an SSE stream of the turn's frames; only its status is read, and the
+    /// caller follows the turn with `attach()`.
     fn resume(&self, remote_id: &str) -> BoxFuture<'static, Result<(), ApiError>>;
 }
 
@@ -146,6 +148,11 @@ impl HiveConversationsApi for HttpHiveConversationsApi {
             }
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 return Err(ApiError::SignedOut);
+            }
+            if status == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return Err(ApiError::Refused(
+                    "The server is restarting. Try again in a few seconds.".to_string(),
+                ));
             }
             if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::CONFLICT {
                 let message = response
@@ -255,7 +262,23 @@ mod tests {
             .await;
         let api = HttpHiveConversationsApi::new(&server.uri(), Some(signed_in(&server)));
 
+        Mock::given(method("POST"))
+            .and(path("/api/conversations/draining/turn/resume"))
+            .respond_with(
+                ResponseTemplate::new(503).set_body_json(serde_json::json!({"error": "draining"})),
+            )
+            .mount(&server)
+            .await;
         api.resume("ok").await.unwrap();
+        match api.resume("draining").await {
+            Err(ApiError::Refused(message)) => {
+                assert_eq!(
+                    message,
+                    "The server is restarting. Try again in a few seconds."
+                )
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
         match api.resume("gone").await {
             Err(ApiError::Refused(message)) => assert_eq!(message, "That turn already finished."),
             other => panic!("expected a refusal, got {other:?}"),
