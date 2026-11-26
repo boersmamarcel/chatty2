@@ -73,12 +73,13 @@ pub fn execution_settings_page() -> SettingPage {
                         .default_value(false),
                     )
                     .description(
-                        "Let the agent open pages in a real browser to review its own work — \
-                         navigate, read the page, screenshot it, check the console. Limited to \
-                         localhost and file:// URLs inside the workspace, so no site you are \
-                         signed in to is reachable. Requires a workspace directory. If no Chrome, \
-                         Chromium or Edge is installed, the first use downloads a pinned Chrome \
-                         build (~190MB, once).",
+                        "Let the AI open pages in a real browser to check its own work: open a \
+                         page, read it, take a screenshot. It opens only pages on this computer \
+                         (local servers and files in the workspace) unless internet access is on \
+                         in Settings → Internet; then it can open websites too, in a fresh \
+                         browser that is not signed in anywhere. Needs a workspace folder. If \
+                         Chrome, Chromium or Edge is not installed, the first use downloads Chrome \
+                         (about 190 MB, once).",
                     ),
                     SettingItem::new(
                         "Allow Browser Access to Private Network",
@@ -96,11 +97,10 @@ pub fn execution_settings_page() -> SettingPage {
                         .default_value(false),
                     )
                     .description(
-                        "When internet access is on, also let the browser navigate to private \
-                         IPs on your own network (e.g. 192.168.x.x, 10.x.x.x) — useful for \
-                         reaching another machine on your LAN. Off by default, so a web page \
-                         cannot use the AI to reach devices on your network. Cloud-metadata \
-                         addresses (169.254.x.x) stay blocked either way.",
+                        "Only matters when internet access is on: also let the browser open \
+                         addresses on your own network (like 192.168.x.x), for example another \
+                         computer at home. Off by default, so a website cannot use the AI to \
+                         reach devices on your network.",
                     ),
                     SettingItem::new(
                         "Enable Code Execution Tool",
@@ -115,18 +115,35 @@ pub fn execution_settings_page() -> SettingPage {
                     .description(
                         "Let the AI run short pieces of code to calculate or check things. Python runs in a built-in sandbox; turn on Docker below for other languages and packages.",
                     ),
+                    // Docker extends the code tool, so it reads as on only
+                    // while the tool is on, and turning it on turns the tool on
+                    // (AGE-2129: it showed on with the tool off).
                     SettingItem::new(
-                        "Enable Docker Fallback",
+                        "Run Other Languages in Docker",
                         SettingField::switch(
-                            |cx: &App| cx.global::<ExecutionSettingsModel>().docker_code_execution_enabled,
-                            |_val: bool, cx: &mut App| {
-                                execution_settings_controller::toggle_docker_code_execution(cx);
+                            |cx: &App| {
+                                let settings = cx.global::<ExecutionSettingsModel>();
+                                settings.execute_code_enabled
+                                    && settings.docker_code_execution_enabled
+                            },
+                            |on: bool, cx: &mut App| {
+                                let settings = cx.global::<ExecutionSettingsModel>();
+                                let (tool, docker) = (
+                                    settings.execute_code_enabled,
+                                    settings.docker_code_execution_enabled,
+                                );
+                                if on && !tool {
+                                    execution_settings_controller::toggle_execute_code(cx);
+                                }
+                                if on != docker {
+                                    execution_settings_controller::toggle_docker_code_execution(cx);
+                                }
                             },
                         )
                         .default_value(false),
                     )
                     .description(
-                        "Allow execute_code to fall back to isolated Docker containers for unsupported Python snippets and non-Python languages. Requires Docker to be installed and running.",
+                        "Let the code tool run languages other than Python, and Python packages the built-in sandbox lacks, in isolated Docker containers. Needs Docker installed and running. Turning this on also turns on the code tool.",
                     ),
                     SettingItem::new(
                         "Docker Host",
