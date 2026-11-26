@@ -1014,6 +1014,30 @@ pub fn error_code(body: &str) -> Option<String> {
     .then(|| code.to_string())
 }
 
+/// Read a refused response's body once and log one line for it: the request
+/// path (it names the conversation, `/api/conversations/<remote id>/…`), the
+/// status and the server's error code — never the body itself. Returns the
+/// status and the body for the caller to map.
+pub(crate) async fn refused_body(
+    what: &str,
+    url: &str,
+    response: reqwest::Response,
+) -> (reqwest::StatusCode, String) {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let request = reqwest::Url::parse(url)
+        .map(|url| url.path().to_string())
+        .unwrap_or_default();
+    tracing::warn!(
+        target: LOG_TARGET,
+        request,
+        status = status.as_u16(),
+        error_code = error_code(&body).as_deref(),
+        "The server refused {what}"
+    );
+    (status, body)
+}
+
 /// Log a refused hosted request (any non-2xx answer) with the conversation's
 /// remote id, the status and the server's error code, reading the body for
 /// the code only.
