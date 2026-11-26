@@ -17,6 +17,9 @@ pub struct MemoryBrowserState {
     pub stats: Option<MemoryStats>,
     /// Index of the currently expanded entry, if any.
     pub expanded_index: Option<usize>,
+    /// The page has loaded the store once on its own (AGE-2129); it does
+    /// not again, whatever that load found.
+    pub auto_loaded: bool,
 }
 
 impl MemoryBrowserState {
