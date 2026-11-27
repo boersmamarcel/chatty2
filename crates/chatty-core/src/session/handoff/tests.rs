@@ -820,3 +820,62 @@ fn the_summary_says_what_goes_and_what_stays() {
         assert!(!all.contains(internal), "internal word {internal:?}");
     }
 }
+
+/// AGE-2156: a hand-off read goes through the capped reader. A reply over
+/// the limit is refused with an error naming the limit, and nothing local
+/// changes; one at the limit is read.
+#[tokio::test]
+async fn a_reply_over_the_limit_is_refused_with_a_clear_error() {
+    let server = MockServer::start().await;
+    let detail = serde_json::json!({"id": "r-1", "title": "x".repeat(4096)}).to_string();
+    Mock::given(method("GET"))
+        .and(path("/api/conversations/r-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(detail.clone()))
+        .mount(&server)
+        .await;
+
+    let small = HandoffServer::new(&server.uri(), None).with_max_body(1024);
+    let error = fetch_conversation(&small, "r-1").await.unwrap_err();
+    assert!(matches!(&error, HandoffError::TooLarge(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "The server's reply is larger than 1024 bytes, the most this app reads from your Hive \
+         account. Nothing on this computer changed."
+    );
+
+    let exact = HandoffServer::new(&server.uri(), None).with_max_body(detail.len());
+    assert_eq!(fetch_conversation(&exact, "r-1").await.unwrap().id, "r-1");
+}
+
+#[tokio::test]
+async fn push_history_and_placement_replies_are_capped() {
+    let server = MockServer::start().await;
+    let padding = "x".repeat(4096);
+    Mock::given(method("PUT"))
+        .and(path("/api/conversations/r-1/history"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"version": 5, "pad": padding})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/conversations/r-1/placement"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"version": 5, "pad": padding})),
+        )
+        .mount(&server)
+        .await;
+    let small = HandoffServer::new(&format!("{}/", server.uri()), None).with_max_body(1024);
+    let local = row("cloud-a");
+    let error = push_history(&small, "r-1", 4, &local).await.unwrap_err();
+    assert!(matches!(error, HandoffError::TooLarge(_)), "{error:?}");
+    let error = change_placement(&small, "r-1", PlacementTarget::Cloud, 4)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HandoffError::TooLarge(_)), "{error:?}");
+
+    let big = HandoffServer::new(&format!("{}/", server.uri()), None);
+    assert_eq!(push_history(&big, "r-1", 4, &local).await.unwrap(), 5);
+}

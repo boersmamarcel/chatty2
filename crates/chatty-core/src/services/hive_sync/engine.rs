@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 
 use super::wire::{ChangesPage, FULL_SYNC_CURSOR, RemoteChange, RemoteSummary, TurnStatus};
-use crate::models::conversation::{ConversationSync, SyncedConversation};
+use crate::models::conversation::{ConversationSync, Placement, SyncedConversation};
 use crate::repositories::ConversationMetadata;
 
 /// What a server-side deletion does to the local row synced to it: a
@@ -19,6 +19,18 @@ fn deletion(local_id: String, synced: &SyncedConversation) -> SyncAction {
             SyncAction::DetachDeleted { local_id }
         }
         _ => SyncAction::ApplyTombstone { local_id },
+    }
+}
+
+/// What a conversation archived on the server (AGE-1840) does here: it is not
+/// listed. A cloud one's cached copy goes, as for a deletion; unarchiving it
+/// raises its version, so the next pull lists it again. A device-placed one
+/// is left as it is, since this device's copy may be the only one, and one
+/// this device has never seen is not created.
+fn archival(matched: Option<(String, SyncedConversation)>) -> Option<SyncAction> {
+    match matched? {
+        (_, synced) if matches!(synced.placement, Placement::Device { .. }) => None,
+        (local_id, _) => Some(SyncAction::ApplyTombstone { local_id }),
     }
 }
 
@@ -167,7 +179,11 @@ impl SyncEngine {
                     if let Some(seen) = &mut self.resync {
                         seen.insert(summary.id.clone());
                     }
-                    actions.extend(self.upsert(local, matched, summary));
+                    if summary.archived {
+                        actions.extend(archival(matched));
+                    } else {
+                        actions.extend(self.upsert(local, matched, summary));
+                    }
                 }
             }
         }

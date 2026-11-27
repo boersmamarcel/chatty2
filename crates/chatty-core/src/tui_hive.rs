@@ -81,18 +81,19 @@ pub fn is_signed_in(session: &HiveSession) -> bool {
 
 /// Sign in with email and password and install the pair on `session`.
 /// The address must answer `GET /api/version` like a Hive server first
-/// (AGE-2085), the same check the desktop makes.
+/// (AGE-2085), the same check the desktop makes. Returns what to tell the
+/// person when that server no longer serves this version (AGE-2157).
 pub async fn sign_in(
     session: &HiveSession,
     hive_url: &str,
     email: &str,
     password: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let client = HiveRegistryClient::new(hive_url).with_device(
         hive_client::ClientKind::Tui,
         crate::hive_device::terminal_device_name(),
     );
-    client.server_version().await.with_context(|| {
+    let version = client.server_version().await.with_context(|| {
         format!("Could not use {hive_url}; check the Hive address in hive_settings.json")
     })?;
     let pair = client
@@ -100,7 +101,7 @@ pub async fn sign_in(
         .await
         .context("Hive sign-in failed")?;
     session.sign_in(pair).await;
-    Ok(())
+    Ok(version.client_too_old(env!("CARGO_PKG_VERSION")))
 }
 
 /// The Hive address: the desktop's `hive_settings`, which the TUI only reads.

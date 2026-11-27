@@ -315,6 +315,8 @@ pub enum ChatViewEvent {
     ContinueHere,
     /// "Resume" on an interrupted cloud turn (HX-22).
     ResumeTurn,
+    /// "New conversation" on a conversation too large to sync (AGE-2156).
+    StartNewConversation,
 }
 
 /// The one line the chat offers under the transcript when the conversation
@@ -326,6 +328,9 @@ pub enum FollowUp {
     TakeItBack { message: String },
     /// The cloud turn was interrupted by a server restart.
     Resume,
+    /// The server refused the conversation as too large to sync (413,
+    /// AGE-2156): it is not syncing, and a new conversation is.
+    TooLargeToSync,
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
@@ -2607,6 +2612,11 @@ impl ChatView {
                 "This turn was interrupted. You can pick it up where it stopped.".to_string(),
                 "Resume",
                 ChatViewEvent::ResumeTurn,
+            ),
+            FollowUp::TooLargeToSync => (
+                chatty_core::services::hive_sync::TOO_LARGE_TO_SYNC.to_string(),
+                "New conversation",
+                ChatViewEvent::StartNewConversation,
             ),
         };
         let entity = cx.entity();

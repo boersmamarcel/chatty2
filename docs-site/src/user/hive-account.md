@@ -18,6 +18,8 @@ Once you are signed in, a new conversation is saved to your account after its fi
 - **Keep on this device only**, in a conversation's **⋯** menu, stops saving that one conversation. Its copy in your account is left as it is; delete it on the web if you no longer want it there.
 - **Sync my existing conversations**, offered once in the same place, saves the conversations you had before you signed in. Nothing older is saved without that.
 
+A conversation can grow too large for your account to take, for example after many large tool results. Chatty then says under the conversation that it is no longer syncing; your other devices keep the last copy that fit. It is still saved on this computer. Start a new conversation (the **New conversation** button, or `/new` in the terminal) to keep syncing.
+
 ## Send a conversation to the cloud
 
 In the sidebar, open the conversation's **⋯** menu and choose **Send to the cloud…**. The dialog shows what goes and what stays before anything leaves this computer:

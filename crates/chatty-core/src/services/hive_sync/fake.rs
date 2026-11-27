@@ -74,6 +74,7 @@ impl FakeHiveConversations {
                     turn_status: TurnStatus::Idle,
                     placement: Placement::Cloud { model_id: None },
                     device_name: None,
+                    archived: false,
                 },
                 seq,
             ),
@@ -176,7 +177,7 @@ impl HiveConversationsApi for FakeHiveConversations {
                 version: Some(summary.version),
                 placement: Some(summary.placement.clone()),
                 turn_status: Some(summary.turn_status),
-                updated_at: Some(summary.updated_at),
+                last_active_at: Some(summary.updated_at),
                 ..ConversationDetail::default()
             })
             .ok_or(ApiError::NotFound);

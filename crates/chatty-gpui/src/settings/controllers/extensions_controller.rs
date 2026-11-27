@@ -2,7 +2,9 @@ use crate::chatty::services::mcp_service::McpService;
 use crate::settings::controllers::module_settings_controller;
 use crate::settings::models::AgentConfigNotifier;
 use crate::settings::models::marketplace_state::MarketplaceState;
-use chatty_core::hive::{ClientError, HiveRegistryClient, HiveSession, SessionState, TokenPair};
+use chatty_core::hive::{
+    ClientError, HiveRegistryClient, HiveSession, ServerVersion, SessionState, TokenPair,
+};
 use chatty_core::install;
 use chatty_core::services::A2aClient;
 use chatty_core::settings::models::a2a_store::A2aAgentStatus;
@@ -221,12 +223,9 @@ async fn checked_hive_client(
         chatty_core::hive_device::device_name(),
     );
     let version = client.server_version().await?;
-    cx.update(|cx| {
-        cx.global_mut::<MarketplaceState>().hive_server = Some(version.server);
-        cx.refresh_windows();
-    })
-    .map_err(|e| warn!(error = ?e, "Failed to record the Hive server version"))
-    .ok();
+    cx.update(|cx| record_hive_server(Some(version), cx))
+        .map_err(|e| warn!(error = ?e, "Failed to record the Hive server version"))
+        .ok();
     Ok(client)
 }
 
@@ -243,9 +242,20 @@ pub fn set_hive_url(url: &str, cx: &mut App) {
         settings.hive_url = url;
         settings.clone()
     };
-    cx.global_mut::<MarketplaceState>().hive_server = None;
+    record_hive_server(None, cx);
     save_hive_settings_async(model, cx);
     refresh_hive_server(cx);
+}
+
+/// Keep what the Hive server said about itself for the account panel: its
+/// version, and whether it still serves this version of Chatty.
+fn record_hive_server(version: Option<ServerVersion>, cx: &mut App) {
+    let state = cx.global_mut::<MarketplaceState>();
+    state.client_too_old = version
+        .as_ref()
+        .and_then(|version| version.client_too_old(env!("CARGO_PKG_VERSION")));
+    state.hive_server = version.map(|version| version.server);
+    cx.refresh_windows();
 }
 
 /// Look up the Hive server's version for the account panel; a server that
@@ -254,12 +264,9 @@ fn refresh_hive_server(cx: &mut App) {
     let hive_url = cx.global::<HiveSettingsModel>().hive_url.clone();
     cx.spawn(async move |cx| {
         let version = HiveRegistryClient::new(&hive_url).server_version().await;
-        cx.update(|cx| {
-            cx.global_mut::<MarketplaceState>().hive_server = version.ok().map(|v| v.server);
-            cx.refresh_windows();
-        })
-        .map_err(|e| warn!(error = ?e, "Failed to record the Hive server version"))
-        .ok();
+        cx.update(|cx| record_hive_server(version.ok(), cx))
+            .map_err(|e| warn!(error = ?e, "Failed to record the Hive server version"))
+            .ok();
     })
     .detach();
 }

@@ -27,6 +27,7 @@
 use std::sync::Arc;
 
 use hive_client::HiveSession;
+use hive_client::net::CappedReadError;
 use reqwest::StatusCode;
 
 use super::hosted::{LOG_TARGET, SIGN_IN_TO_HIVE, error_code, send_to_server};
@@ -37,6 +38,7 @@ use crate::services::hive_sync::wire::{
     AuthSessions, CloudModels, ConflictBody, ConversationDetail, CreateConversation, Holder,
     PlacementChange, PlacementReply, PlacementTarget, push_body,
 };
+use crate::services::hive_sync::{MAX_CONVERSATION_BYTES, limit_text, read_json_capped};
 
 // ── What the user is told ────────────────────────────────────────────────────
 
@@ -142,6 +144,13 @@ pub enum HandoffError {
     /// The attachment upload failed.
     #[error("Could not upload this conversation's attachments: {0:#}. Try again.")]
     Attachments(anyhow::Error),
+    /// A reply past [`MAX_CONVERSATION_BYTES`] (AGE-2156): refused unread
+    /// rather than held in memory. The string is the limit.
+    #[error(
+        "The server's reply is larger than {0}, the most this app reads from your Hive \
+         account. Nothing on this computer changed."
+    )]
+    TooLarge(String),
     /// Anything else: unreachable, refused, or a reply this build cannot read.
     #[error("Could not reach your Hive account: {0:#}. Check your connection and try again.")]
     Server(anyhow::Error),
@@ -185,6 +194,8 @@ pub struct HandoffServer {
     http: reqwest::Client,
     url: String,
     auth: Option<Arc<HiveSession>>,
+    /// The most one reply may be ([`MAX_CONVERSATION_BYTES`]).
+    max_body: usize,
 }
 
 impl HandoffServer {
@@ -195,7 +206,16 @@ impl HandoffServer {
             http: reqwest::Client::new(),
             url: url.trim_end_matches('/').to_string(),
             auth,
+            max_body: MAX_CONVERSATION_BYTES,
         }
+    }
+
+    /// The same server with a smaller reply limit, so a test need not send
+    /// 64 MiB.
+    #[cfg(test)]
+    pub(crate) fn with_max_body(mut self, max_body: usize) -> Self {
+        self.max_body = max_body;
+        self
     }
 
     /// The base URL, without a trailing slash.
@@ -221,7 +241,7 @@ impl HandoffServer {
         if status.is_success() {
             return Ok(response);
         }
-        let text = response.text().await.unwrap_or_default();
+        let text = read_error_text(response).await;
         tracing::warn!(
             target: LOG_TARGET,
             request,
@@ -257,13 +277,20 @@ impl HandoffServer {
         }
     }
 
+    /// Decode a reply through hive-client's capped reader (AGE-2156).
     async fn json<T: serde::de::DeserializeOwned>(
+        &self,
         response: reqwest::Response,
     ) -> Result<T, HandoffError> {
-        response
-            .json()
+        read_json_capped(response, self.max_body)
             .await
-            .map_err(|error| HandoffError::Server(anyhow::anyhow!("unexpected reply: {error}")))
+            .map_err(|error| match error {
+                CappedReadError::Overflow => {
+                    tracing::warn!(target: LOG_TARGET, max_body = self.max_body, "A hand-off reply was over the limit");
+                    HandoffError::TooLarge(limit_text(self.max_body))
+                }
+                CappedReadError::Stream(error) => HandoffError::Server(error),
+            })
     }
 }
 
@@ -271,7 +298,7 @@ impl HandoffServer {
 pub async fn cloud_models(server: &HandoffServer) -> Result<CloudModels, HandoffError> {
     let url = format!("{}/api/settings/models", server.url);
     let response = server.send(&url, |http| http.get(&url)).await?;
-    HandoffServer::json(response).await
+    server.json(response).await
 }
 
 /// This device's id as the server knows it: the caller's login session, the
@@ -280,7 +307,7 @@ pub async fn cloud_models(server: &HandoffServer) -> Result<CloudModels, Handoff
 pub async fn this_device_id(server: &HandoffServer) -> Result<String, HandoffError> {
     let url = format!("{}/api/auth/sessions", server.url);
     let response = server.send(&url, |http| http.get(&url)).await?;
-    let sessions: AuthSessions = HandoffServer::json(response).await?;
+    let sessions: AuthSessions = server.json(response).await?;
     sessions.current.ok_or_else(|| {
         HandoffError::Server(anyhow::anyhow!(
             "the server did not say which sign-in is this device's"
@@ -295,7 +322,7 @@ pub async fn fetch_conversation(
 ) -> Result<ConversationDetail, HandoffError> {
     let url = format!("{}/api/conversations/{remote_id}", server.url);
     let response = server.send(&url, |http| http.get(&url)).await?;
-    HandoffServer::json(response).await
+    server.json(response).await
 }
 
 // ── Attachments (HX-15) ──────────────────────────────────────────────────────
@@ -427,7 +454,7 @@ async fn create(
     let response = server
         .send(&url, |http| http.post(&url).json(&body))
         .await?;
-    let created: ConversationDetail = HandoffServer::json(response).await?;
+    let created: ConversationDetail = server.json(response).await?;
     Ok((created.id, created.version.unwrap_or(0)))
 }
 
@@ -445,7 +472,7 @@ async fn push_history(
                 .json(row)
         })
         .await?;
-    let reply: PlacementReply = response.json().await.unwrap_or_default();
+    let reply = placement_reply(server, response).await?;
     Ok(reply.version.unwrap_or(version + 1))
 }
 
@@ -463,7 +490,39 @@ async fn change_placement(
     let response = server
         .send(&url, |http| http.post(&url).json(&body))
         .await?;
-    Ok(response.json().await.unwrap_or_default())
+    placement_reply(server, response).await
+}
+
+/// A placement reply through the capped reader. An empty or unreadable body
+/// is the default reply; one over the limit is refused (AGE-2156).
+async fn placement_reply(
+    server: &HandoffServer,
+    response: reqwest::Response,
+) -> Result<PlacementReply, HandoffError> {
+    match server.json(response).await {
+        Err(error @ HandoffError::TooLarge(_)) => Err(error),
+        Err(_) => Ok(PlacementReply::default()),
+        Ok(reply) => Ok(reply),
+    }
+}
+
+/// The most of an error reply read: it only feeds an error message.
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// An error reply's text, at most [`MAX_ERROR_BODY_BYTES`] of it.
+async fn read_error_text(response: reqwest::Response) -> String {
+    use hive_client::net::{Overflow, read_capped};
+    match read_capped(
+        response.bytes_stream(),
+        MAX_ERROR_BODY_BYTES,
+        Overflow::Truncate,
+        |_| {},
+    )
+    .await
+    {
+        Ok(body) => String::from_utf8_lossy(&body.bytes).into_owned(),
+        Err(_) => String::new(),
+    }
 }
 
 // ── Continue on this device ──────────────────────────────────────────────────

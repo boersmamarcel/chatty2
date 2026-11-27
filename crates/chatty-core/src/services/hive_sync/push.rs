@@ -33,6 +33,14 @@ use crate::session::hosted::{LOG_TARGET, SIGN_IN_TO_HIVE, error_code, send_to_se
 pub const DELETED_ON_ACCOUNT: &str =
     "This conversation was deleted from your Hive account. It stays on this computer.";
 
+/// What the user is told when the server refuses a conversation as too
+/// large to sync (413), with the next step. The same words on every
+/// frontend; the desktop's button and the terminal's `/new` both start that
+/// new conversation.
+pub const TOO_LARGE_TO_SYNC: &str = "Not syncing: this conversation is too large for your \
+     Hive account, so your other devices don't get its latest turns. It is still saved on \
+     this computer. Start a new conversation to keep syncing.";
+
 /// Why a push did not land.
 #[derive(Debug, thiserror::Error)]
 pub enum PushError {
@@ -54,6 +62,11 @@ pub enum PushError {
     /// The server could not be reached: the push waits.
     #[error("could not reach the server: {0}")]
     Offline(String),
+    /// 413: the conversation is larger than the server takes. Every later
+    /// push of it fails the same way until it shrinks, which it never does,
+    /// so the user is told ([`TOO_LARGE_TO_SYNC`]) instead of only a log.
+    #[error("the conversation is too large for the server to accept")]
+    TooLarge,
     /// The server refused the push for a reason a retry will not change.
     #[error("the server refused the push: {0}")]
     Rejected(String),
@@ -85,6 +98,7 @@ fn classify(status: reqwest::StatusCode) -> Option<PushError> {
     match status {
         status if status.is_success() => None,
         reqwest::StatusCode::UNAUTHORIZED => Some(PushError::SignedOut),
+        reqwest::StatusCode::PAYLOAD_TOO_LARGE => Some(PushError::TooLarge),
         status if status.is_server_error() => {
             Some(PushError::Offline(format!("the server answered {status}")))
         }
@@ -166,6 +180,7 @@ impl HiveHistoryApi for HttpHiveHistoryApi {
                     serde_json::from_str::<ConflictBody>(&text).unwrap_or_default(),
                 ))),
                 reqwest::StatusCode::UNAUTHORIZED => Err(PushError::SignedOut),
+                reqwest::StatusCode::PAYLOAD_TOO_LARGE => Err(PushError::TooLarge),
                 status if status.is_server_error() => {
                     Err(PushError::Offline(format!("the server answered {status}")))
                 }
@@ -322,6 +337,10 @@ pub enum PushEvent {
     /// The server refused it for good; it is dropped, and the next turn
     /// queues a fresh one.
     Dropped { local_id: String, reason: String },
+    /// 413: the conversation is too large for the server. It is dropped like
+    /// [`Dropped`](Self::Dropped), and the owner shows the conversation as
+    /// not syncing ([`TOO_LARGE_TO_SYNC`]).
+    TooLarge { local_id: String },
     /// 410: deleted on the account. Make it local-only, keep the local copy,
     /// and show `message` once.
     Deleted { local_id: String, message: String },
@@ -510,6 +529,7 @@ impl PushQueue {
                 PushEvent::Offline
             }
             Err(PushError::Rejected(reason)) => PushEvent::Dropped { local_id, reason },
+            Err(PushError::TooLarge) => PushEvent::TooLarge { local_id },
             Err(PushError::Deleted(message)) => PushEvent::Deleted { local_id, message },
         }
     }
@@ -768,6 +788,7 @@ mod tests {
             ("locked", 401, serde_json::json!({})),
             ("down", 503, serde_json::json!({})),
             ("bad", 422, serde_json::json!({})),
+            ("huge", 413, serde_json::json!({})),
         ] {
             Mock::given(method("PUT"))
                 .and(path(format!("/api/conversations/{id}/history")))
@@ -791,6 +812,35 @@ mod tests {
         assert!(matches!(put("locked").await, PushError::SignedOut));
         assert!(matches!(put("down").await, PushError::Offline(_)));
         assert!(matches!(put("bad").await, PushError::Rejected(_)));
+        assert!(matches!(put("huge").await, PushError::TooLarge));
+    }
+
+    /// AGE-2156: a 413 on a push or a create is its own error, and settles as
+    /// `TooLarge` (shown to the user), not queued again.
+    #[tokio::test]
+    async fn a_conversation_too_large_for_the_server_is_its_own_outcome() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/conversations"))
+            // hive answers 413 in plain text: only the status is read.
+            .respond_with(ResponseTemplate::new(413).set_body_string("length limit exceeded"))
+            .mount(&server)
+            .await;
+        let api = HttpHiveHistoryApi::new(&server.uri(), None);
+        let error = api.create("local-1", &body("t")).await.unwrap_err();
+        assert!(matches!(error, PushError::TooLarge), "{error:?}");
+
+        let mut queue = PushQueue::default();
+        queue.enqueue("c1");
+        assert_eq!(queue.take().as_deref(), Some("c1"));
+        let event = queue.settle("c1", Err(PushError::TooLarge));
+        assert_eq!(
+            event,
+            PushEvent::TooLarge {
+                local_id: "c1".into()
+            }
+        );
+        assert!(queue.is_empty(), "a retry would only hear 413 again");
     }
 
     #[tokio::test]

@@ -981,6 +981,14 @@ mod tests {
             .expect("a Hive server answers");
         assert_eq!(version.server, "1.4.0");
         assert_eq!(version.min_client.as_deref(), Some("0.9.0"));
+        // AGE-2157: `min_client` is compared with this client's version.
+        assert_eq!(version.client_too_old("0.9.0"), None);
+        assert_eq!(version.client_too_old("1.0.0"), None);
+        let notice = version.client_too_old("0.8.2").expect("0.8.2 is too old");
+        assert!(
+            notice.contains("0.9.0") && notice.contains("Update Chatty"),
+            "{notice}"
+        );
 
         // A server with no such route (404), a web page, and JSON that names
         // no server are all "not a Hive server".

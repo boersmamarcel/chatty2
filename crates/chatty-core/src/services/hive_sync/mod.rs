@@ -28,14 +28,15 @@ pub mod wire;
 
 use std::time::Duration;
 
-pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi};
+pub use api::{ApiError, HiveConversationsApi, HttpHiveConversationsApi, MAX_CONVERSATION_BYTES};
+pub(crate) use api::{limit_text, read_json_capped};
 pub use engine::{PageOutcome, RemoteRow, SyncAction, SyncEngine, apply_to_rows};
 #[cfg(any(test, feature = "test-support"))]
 pub use fake::FakeHiveConversations;
 pub use notify::{CloudNotice, NotifyMemory, TransitionDetector};
 pub use push::{
     HiveHistoryApi, HttpHiveHistoryApi, PushError, PushEvent, PushJob, PushQueue, PushTarget,
-    drain, sync_after_stale, sync_after_turn,
+    TOO_LARGE_TO_SYNC, drain, sync_after_stale, sync_after_turn,
 };
 pub use wire::{
     AuthSessions, ChangesPage, CloudModel, CloudModels, ConflictBody, ConversationDetail,
@@ -151,11 +152,12 @@ pub async fn apply_to_repository<R: ConversationRepository + ?Sized>(
                         let mut data = ConversationDetail {
                             title: remote.title.clone(),
                             model_id: remote.model_id.clone().unwrap_or_default(),
-                            created_at: Some(remote.updated_at),
-                            updated_at: Some(remote.updated_at),
+                            last_active_at: Some(remote.updated_at),
                             ..ConversationDetail::default()
                         }
                         .to_conversation_data(&remote.local_id);
+                        // A new row has no local creation time to keep.
+                        data.created_at = remote.updated_at;
                         set_sync_columns(&mut data, &remote.sync);
                         data
                     }
@@ -182,7 +184,8 @@ pub async fn apply_to_repository<R: ConversationRepository + ?Sized>(
 }
 
 /// Replace a loaded synced conversation's history with the server's `detail`
-/// and record the version it is at, so the copy is no longer stale. Returns
+/// and record the version it is at (the local version is kept when the server
+/// sends none), so the copy is no longer stale. Returns
 /// the turn status the detail reports. Both frontends adopt a fetched detail
 /// through this; the caller persists the conversation afterwards.
 ///
@@ -203,10 +206,18 @@ pub fn adopt_detail(
     } else {
         TurnStatus::Idle
     });
-    let version = detail.version.unwrap_or(0);
+    let version = detail.version;
     let data = detail.to_conversation_data(conversation.id());
     conversation.replace_from_remote(data)?;
-    synced.version = version;
+    match version {
+        Some(version) => synced.version = version,
+        // Resetting to 0 would make the next `If-Match` a guaranteed 412.
+        None => tracing::warn!(
+            local_id = %conversation.id(),
+            version = synced.version,
+            "The server's detail carries no version; keeping the local one"
+        ),
+    }
     synced.last_synced_at = Some(now_ms);
     conversation.set_sync(ConversationSync::Synced(synced));
     Ok(status)

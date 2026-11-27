@@ -36,6 +36,7 @@ use crate::models::execution_approval_store::{PendingApprovals, request_executio
 use crate::settings::models::execution_settings::ApprovalMode;
 use crate::tools::add_attachment_tool::PendingArtifacts;
 
+use crate::services::browser::gate::RiskyApproval;
 use crate::services::browser::session::{DEFAULT_TIMEOUT_SECS, with_deadline};
 use crate::services::browser::sites;
 use crate::services::browser::snapshot::{AxNode, flatten_ax_tree};
@@ -192,6 +193,8 @@ impl Tool for BrowserNavigateTool {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         let session = self.manager.session().await?;
+        // No approved action carries over into a navigation (AGE-2154).
+        session.gate().reset_risky();
         let url = navigate_checked(
             self.manager.is_unattended(),
             || async { session.navigate(&args.url).await.map_err(ToolError::from) },
@@ -795,6 +798,7 @@ async fn prepare_action(
         Arc<crate::services::browser::BrowserSession>,
         crate::services::browser::SnapshotNode,
         bool,
+        Option<RiskyApproval>,
     ),
     ToolError,
 > {
@@ -822,7 +826,8 @@ async fn prepare_action(
     let off_lane_a = action_needs_approval(&url, manager.workspace().ok());
     // Anything the interceptor refused before this action is not this action's.
     session.gate().take_outcome();
-    session.gate().set_allow_risky(false);
+    session.gate().reset_risky();
+    let mut approval = None;
     let gate = sites::decide(
         act_on,
         &url,
@@ -854,7 +859,7 @@ async fn prepare_action(
             // click refused for a covered button keeps it for the retry.
             let origin = sites::origin_of(&url).unwrap_or_default();
             if manager.approved_action_matches(&origin, &bare_url(&url), &describe(&node)) {
-                session.gate().set_allow_risky(true);
+                approval = Some(session.gate().approve_risky_for(&origin));
                 false
             } else {
                 let title = page_title(&page).await;
@@ -900,7 +905,7 @@ async fn prepare_action(
             false
         }
     };
-    Ok((session, node, look))
+    Ok((session, node, look, approval))
 }
 
 /// The page's title, or empty.
@@ -1048,11 +1053,12 @@ async fn after_action(
     session: &crate::services::browser::BrowserSession,
     node: &crate::services::browser::SnapshotNode,
     look: bool,
+    approval: Option<RiskyApproval>,
     control: &str,
 ) -> Result<(), ToolError> {
     let gate = session.gate();
     // The action went through: an approval it used is spent (AGE-2043).
-    if gate.allows_risky() {
+    if approval.is_some() {
         manager.spend_approved_action();
     }
     // The interceptor answers asynchronously; give a submit time to be seen.
@@ -1060,6 +1066,8 @@ async fn after_action(
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     let outcome = gate.take_outcome();
+    // Whatever happens next, page requests are refused again (AGE-2154).
+    drop(approval);
     if let Some((_, url)) = outcome.risky_blocked {
         let title = match session.page() {
             Ok(page) => page_title(&page).await,
@@ -1119,7 +1127,7 @@ impl Tool for BrowserClickTool {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        let (session, node, look) = prepare_action(
+        let (session, node, look, approval) = prepare_action(
             &self.manager,
             self.pending_approvals.as_ref(),
             &args.r#ref,
@@ -1131,7 +1139,7 @@ impl Tool for BrowserClickTool {
         let clicked = describe(&node);
 
         let result = session.click(&node).await?;
-        after_action(&self.manager, &session, &node, look, &clicked).await?;
+        after_action(&self.manager, &session, &node, look, approval, &clicked).await?;
         if let Some(check) = inspect_page(&session).await {
             return Err(site_check_error(&check, self.manager.is_unattended()));
         }
@@ -1241,7 +1249,7 @@ impl Tool for BrowserTypeTool {
                 "text is longer than {MAX_TEXT_LEN} characters; split it up"
             )));
         }
-        let (session, node, look) = prepare_action(
+        let (session, node, look, approval) = prepare_action(
             &self.manager,
             self.pending_approvals.as_ref(),
             &args.r#ref,
@@ -1253,7 +1261,7 @@ impl Tool for BrowserTypeTool {
         let typed_into = describe(&node);
 
         let value = session.type_text(&node, &args.text).await?;
-        after_action(&self.manager, &session, &node, look, &typed_into).await?;
+        after_action(&self.manager, &session, &node, look, approval, &typed_into).await?;
         info!(r#ref = %args.r#ref, typed_into = %typed_into, chars = args.text.chars().count(), "browser: typed");
         Ok(TypeOutput {
             typed_into,
@@ -1361,7 +1369,7 @@ impl Tool for BrowserSelectTool {
                 "option is longer than {MAX_TEXT_LEN} characters"
             )));
         }
-        let (session, node, look) = prepare_action(
+        let (session, node, look, approval) = prepare_action(
             &self.manager,
             self.pending_approvals.as_ref(),
             &args.r#ref,
@@ -1373,7 +1381,7 @@ impl Tool for BrowserSelectTool {
         let selected_in = describe(&node);
 
         let selected = session.select_option(&node, &args.option).await?;
-        after_action(&self.manager, &session, &node, look, &selected_in).await?;
+        after_action(&self.manager, &session, &node, look, approval, &selected_in).await?;
         info!(r#ref = %args.r#ref, selected_in = %selected_in, selected = %selected, "browser: selected");
         Ok(SelectOutput {
             selected_in,

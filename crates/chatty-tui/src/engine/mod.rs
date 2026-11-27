@@ -568,15 +568,45 @@ pub(crate) fn forget_this_device() {
     *DEVICE_ID.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+/// What a turn's push to the account came to.
+#[derive(Debug)]
+enum AccountSync {
+    /// The sync state to record (created, or a newer version).
+    Updated(chatty_core::models::conversation::ConversationSync),
+    /// 410: deleted on the account. Local-only from now on, the local copy
+    /// kept; the server's message is shown once.
+    Deleted(String),
+    /// 413 (AGE-2156): too large for the server. It stays synced, but is not
+    /// syncing, and the user is told so, with the next step.
+    TooLarge,
+}
+
+impl AccountSync {
+    /// The events that carry this outcome into the engine.
+    fn into_events(self) -> Vec<AppEvent> {
+        use chatty_core::models::conversation::ConversationSync;
+        match self {
+            Self::Updated(sync) => vec![AppEvent::SyncUpdated(sync)],
+            Self::Deleted(message) => vec![
+                AppEvent::SyncUpdated(ConversationSync::LocalOnly),
+                AppEvent::Notice(message),
+            ],
+            Self::TooLarge => vec![AppEvent::Notice(format!(
+                "{} Type /new to start one.",
+                chatty_core::services::hive_sync::TOO_LARGE_TO_SYNC
+            ))],
+        }
+    }
+}
+
 /// Send a finished turn to the account (see [`ChatEngine::sync_to_account`]).
 /// `None` when the user is not signed in, has new-conversation sync off for a
-/// new conversation, or the server could not be reached; `Some(Err(message))`
-/// when the conversation was deleted on the account (410).
+/// new conversation, or the server could not be reached.
 async fn push_turn_to_account(
     snapshot: chatty_core::models::conversation::ConversationSnapshot,
     sync: chatty_core::models::conversation::ConversationSync,
     first_turn: bool,
-) -> Option<Result<chatty_core::models::conversation::ConversationSync, String>> {
+) -> Option<AccountSync> {
     use chatty_core::models::conversation::ConversationSync;
     use chatty_core::services::hive_sync::{HttpHiveHistoryApi, sync_after_turn};
 
@@ -616,24 +646,28 @@ async fn push_turn_to_account(
     )
     .await
     {
-        Ok(updated) => updated.map(Ok),
+        Ok(updated) => updated.map(AccountSync::Updated),
         // Deleted on the account: local-only from now on, the local copy
         // kept, and the server's message shown once.
-        Err(chatty_core::services::hive_sync::PushError::Deleted(message)) => Some(Err(message)),
+        Err(chatty_core::services::hive_sync::PushError::Deleted(message)) => {
+            Some(AccountSync::Deleted(message))
+        }
+        Err(chatty_core::services::hive_sync::PushError::TooLarge) => Some(AccountSync::TooLarge),
         // 412: the account's copy moved on (a rename on the web). Only the
         // holder writes the history, so what changed is metadata: take the
         // server's version and title, and push once more (AGE-2122).
-        Err(chatty_core::services::hive_sync::PushError::Stale) => push_after_stale(
-            &api,
-            &server_url,
-            session,
-            &device,
-            &snapshot.id,
-            &sync,
-            retry_body,
-        )
-        .await
-        .map(Ok),
+        Err(chatty_core::services::hive_sync::PushError::Stale) => {
+            push_after_stale(
+                &api,
+                &server_url,
+                session,
+                &device,
+                &snapshot.id,
+                &sync,
+                retry_body,
+            )
+            .await
+        }
         Err(error) => {
             tracing::debug!(%error, "Could not sync the conversation to Hive");
             None
@@ -651,8 +685,8 @@ async fn push_after_stale(
     local_id: &str,
     sync: &chatty_core::models::conversation::ConversationSync,
     body: chatty_core::repositories::ConversationData,
-) -> Option<chatty_core::models::conversation::ConversationSync> {
-    use chatty_core::services::hive_sync::{HttpHiveConversationsApi, sync_after_stale};
+) -> Option<AccountSync> {
+    use chatty_core::services::hive_sync::{HttpHiveConversationsApi, PushError, sync_after_stale};
 
     let conversations = HttpHiveConversationsApi::new(server_url, Some(session));
     match sync_after_stale(
@@ -666,7 +700,8 @@ async fn push_after_stale(
     )
     .await
     {
-        Ok(Some(updated)) => Some(updated),
+        Ok(Some(updated)) => Some(AccountSync::Updated(updated)),
+        Err(PushError::TooLarge) => Some(AccountSync::TooLarge),
         Ok(None) => {
             tracing::info!(target: "chatty::hive", conv_id = %local_id, "Not pushing after a 412: another device holds it now");
             None
@@ -1881,17 +1916,10 @@ impl ChatEngine {
         let snapshot = conversation.snapshot();
         let tx = self.event_tx.clone();
         tokio::spawn(async move {
-            match push_turn_to_account(snapshot, sync, first_turn).await {
-                Some(Ok(updated)) => {
-                    let _ = tx.send(AppEvent::SyncUpdated(updated));
+            if let Some(outcome) = push_turn_to_account(snapshot, sync, first_turn).await {
+                for event in outcome.into_events() {
+                    let _ = tx.send(event);
                 }
-                Some(Err(message)) => {
-                    let _ = tx.send(AppEvent::SyncUpdated(
-                        chatty_core::models::conversation::ConversationSync::LocalOnly,
-                    ));
-                    let _ = tx.send(AppEvent::Notice(message));
-                }
-                None => {}
             }
         });
     }
@@ -1991,6 +2019,35 @@ mod tests {
         assert!(should_sync_to_account(&device, false));
         let cloud = ConversationSync::cloud("http://localhost", "r-1", None);
         assert!(!should_sync_to_account(&cloud, false));
+    }
+
+    /// AGE-2156: a conversation too large for the server is not recorded as
+    /// synced anew and not turned local; the user is told it is not syncing,
+    /// and what to do. A 410 still turns it local with the server's words.
+    #[test]
+    fn a_conversation_too_large_to_sync_says_so_with_the_next_step() {
+        use chatty_core::models::conversation::ConversationSync;
+        let events = super::AccountSync::TooLarge.into_events();
+        match events.as_slice() {
+            [AppEvent::Notice(notice)] => {
+                assert!(
+                    notice.starts_with(chatty_core::services::hive_sync::TOO_LARGE_TO_SYNC),
+                    "{notice}"
+                );
+                assert!(notice.contains("/new"), "{notice}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match super::AccountSync::Deleted("gone".into())
+            .into_events()
+            .as_slice()
+        {
+            [
+                AppEvent::SyncUpdated(ConversationSync::LocalOnly),
+                AppEvent::Notice(message),
+            ] => assert_eq!(message, "gone"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// AGE-1277: a fresh approval prompt is not armed; one shown longer

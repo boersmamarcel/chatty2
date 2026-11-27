@@ -890,43 +890,45 @@ impl Conversation {
     /// Adopt the server's copy of a synced conversation (AGE-2088).
     ///
     /// The server is canonical for a synced conversation (plan D3), so its
-    /// history, traces, attachment refs, timestamps, feedback, usage and
-    /// totals replace this device's. Unlike
+    /// history, usage and totals replace this device's. Unlike
     /// [`import_history`](Self::import_history), which starts every message's
-    /// metadata empty, nothing the server sent is dropped.
+    /// metadata empty, the server's traces and timestamps are kept.
     ///
-    /// Per-message metadata the server did *not* send for a message — a
-    /// server that keeps fewer columns than this device does — is kept from
-    /// this device's copy, but only where the message at that index is the
-    /// same one, so metadata never lands on the wrong row. Usage the server
-    /// did not send is kept the same way.
+    /// Where the message at an index is the same one this device holds, its
+    /// trace, timestamp and feedback stay this device's when it has them: the
+    /// server sends only a projection of a trace (AGE-2157), and the full one
+    /// this device recorded is the richer copy of the same turn. The server's
+    /// fill the messages this device has none for. Metadata never lands on a
+    /// different message. Usage the server did not send is kept, and so is
+    /// usage that holds delegated-agent or plugin lines, which the server's
+    /// projection cannot carry. The creation time stays this device's when
+    /// `data` has none (`created_at` 0).
+    ///
+    /// Attachment paths never come from `data` (AGE-2143): a path the server
+    /// names is not a file on this device, and must never become one this
+    /// device reads or uploads. A message keeps this device's attachments
+    /// only where it is the same message.
     ///
     /// What stays this device's own: the local id, the bound model and agent,
     /// the working directory, and the sync state, which the caller sets once
     /// it knows what version it adopted.
     pub fn replace_from_remote(&mut self, data: ConversationData) -> Result<()> {
         let mut entries = entries_of(&data)?;
-        let traces = Self::deserialize_traces(&data.system_traces).unwrap_or_default();
-        let attachments =
-            Self::deserialize_attachment_paths(&data.attachment_paths).unwrap_or_default();
-        let timestamps =
-            Self::deserialize_message_timestamps(&data.message_timestamps).unwrap_or_default();
-        let feedback =
-            Self::deserialize_message_feedback(&data.message_feedback).unwrap_or_default();
-        for (index, (entry, local)) in entries.iter_mut().zip(&self.entries).enumerate() {
+        for entry in &mut entries {
+            entry.attachment_paths = Vec::new();
+        }
+        for (entry, local) in entries.iter_mut().zip(&self.entries) {
             if !same_message(&entry.message, &local.message) {
                 continue;
             }
-            if traces.get(index).is_none_or(Option::is_none) {
+            entry.attachment_paths = local.attachment_paths.clone();
+            if local.system_trace.is_some() {
                 entry.system_trace = local.system_trace.clone();
             }
-            if attachments.get(index).is_none() {
-                entry.attachment_paths = local.attachment_paths.clone();
-            }
-            if timestamps.get(index).is_none_or(Option::is_none) {
+            if local.timestamp.is_some() {
                 entry.timestamp = local.timestamp;
             }
-            if feedback.get(index).is_none_or(Option::is_none) {
+            if local.feedback.is_some() {
                 entry.feedback = local.feedback.clone();
             }
         }
@@ -935,7 +937,16 @@ impl Conversation {
         if !data.title.is_empty() {
             self.title = data.title;
         }
-        if let Ok(usage) = Self::deserialize_token_usage(&data.token_usage)
+        // The server's usage is a projection of each turn's own lines;
+        // delegated-agent and plugin lines are not in it (AGE-2157). A local
+        // record holding any of those is the fuller one: it stays.
+        let local_has_unprojected = self
+            .token_usage
+            .message_usages
+            .iter()
+            .any(|line| line.delegated_to.is_some() || line.plugin.is_some());
+        if !local_has_unprojected
+            && let Ok(usage) = Self::deserialize_token_usage(&data.token_usage)
             && !usage.message_usages.is_empty()
         {
             self.token_usage = usage;

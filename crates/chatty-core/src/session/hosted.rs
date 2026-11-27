@@ -743,7 +743,11 @@ async fn drive_turn<F: FnMut(SessionEvent)>(
                 format!("the server's response stream failed: {error}"),
             )
         })?;
-        for (name, data) in frames.push(&chunk) {
+        let parsed = frames.push(&chunk).map_err(|error| {
+            tracing::warn!(target: LOG_TARGET, remote_id, %error, "Stopped reading a hosted turn");
+            StreamError::new(StreamErrorKind::Other, error.to_string())
+        })?;
+        for (name, data) in parsed {
             match decode_frame(&name, &data) {
                 Ok(HostedFrame::Session(event)) => emit(event),
                 // A frame the server could not serialize is reported: a hole
@@ -877,7 +881,18 @@ async fn drive_attach<F: FnMut(SessionEvent)>(
                 // Closed, failed or quiet: reconnect unless the turn ended.
                 Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
             };
-            for (name, data) in frames.push(&chunk) {
+            let parsed = match frames.push(&chunk) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return lost(
+                        emit,
+                        format!(
+                            "Stopped following the cloud run: {error}. Reopen the conversation to see it."
+                        ),
+                    );
+                }
+            };
+            for (name, data) in parsed {
                 delivered = true;
                 match decode_frame(&name, &data) {
                     Ok(HostedFrame::Attached {
@@ -1157,6 +1172,10 @@ pub enum InputOutcome {
     Denied,
     Answered,
     Withdrawn,
+    /// An outcome this build does not know (a newer server's): the input is
+    /// settled all the same.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One `event:`/`data:` frame off the wire.
@@ -1255,19 +1274,58 @@ fn decode_frame(name: &str, data: &str) -> std::result::Result<HostedFrame, Stri
 ///
 /// Bytes are buffered and only complete lines are decoded, so a multi-byte
 /// character split across two chunks arrives intact.
-#[derive(Default)]
+///
+/// One line, and one frame's data, may be at most `max_bytes`
+/// ([`MAX_SSE_FRAME_BYTES`]); past it [`push`](Self::push) fails with
+/// [`SseTooLarge`], so a stream that never sends a newline cannot grow memory
+/// without end (AGE-2156).
 struct SseFrames {
     buffer: Vec<u8>,
     event: Option<String>,
     data: Vec<String>,
+    /// The bytes of `data`, joined.
+    data_len: usize,
+    max_bytes: usize,
+}
+
+/// The most one SSE line, or one frame's data, may be (AGE-2156). A frame is
+/// one session event as JSON, usually one `data:` line; the largest is a
+/// tool result, which is far smaller than this.
+const MAX_SSE_FRAME_BYTES: usize = 32 * 1024 * 1024;
+
+/// An SSE line or frame went past [`SseFrames`]' limit, in bytes.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the server sent an event larger than {}, the most this app reads",
+    crate::services::hive_sync::limit_text(*.0)
+)]
+struct SseTooLarge(usize);
+
+impl Default for SseFrames {
+    fn default() -> Self {
+        Self::with_max_bytes(MAX_SSE_FRAME_BYTES)
+    }
 }
 
 impl SseFrames {
-    fn push(&mut self, chunk: &[u8]) -> Vec<(String, String)> {
+    fn with_max_bytes(max_bytes: usize) -> Self {
+        Self {
+            buffer: Vec::new(),
+            event: None,
+            data: Vec::new(),
+            data_len: 0,
+            max_bytes,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<(String, String)>, SseTooLarge> {
         self.buffer.extend_from_slice(chunk);
         let mut out = Vec::new();
 
         while let Some(newline) = self.buffer.iter().position(|&b| b == b'\n') {
+            if newline > self.max_bytes {
+                return Err(SseTooLarge(self.max_bytes));
+            }
             let raw: Vec<u8> = self.buffer.drain(..=newline).collect();
             let line = String::from_utf8_lossy(&raw[..newline]);
             let line = line.trim_end_matches('\r');
@@ -1279,15 +1337,25 @@ impl SseFrames {
                     out.push((event, self.data.join("\n")));
                 }
                 self.data.clear();
+                self.data_len = 0;
             } else if let Some(value) = line.strip_prefix("event:") {
                 self.event = Some(value.trim().to_string());
             } else if let Some(value) = line.strip_prefix("data:") {
-                self.data
-                    .push(value.strip_prefix(' ').unwrap_or(value).to_string());
+                let value = value.strip_prefix(' ').unwrap_or(value);
+                // The joining newline counts too.
+                self.data_len += value.len() + usize::from(!self.data.is_empty());
+                if self.data_len > self.max_bytes {
+                    return Err(SseTooLarge(self.max_bytes));
+                }
+                self.data.push(value.to_string());
             }
             // `:` comments and any other field are ignored, per the SSE spec.
         }
-        out
+        // What is left is a line still waiting for its newline.
+        if self.buffer.len() > self.max_bytes {
+            return Err(SseTooLarge(self.max_bytes));
+        }
+        Ok(out)
     }
 }
 
@@ -1313,7 +1381,44 @@ mod tests {
     use super::*;
 
     fn drain(frames: &mut SseFrames, chunk: &str) -> Vec<(String, String)> {
-        frames.push(chunk.as_bytes())
+        frames.push(chunk.as_bytes()).expect("under the limit")
+    }
+
+    /// AGE-2156: a stream that never sends a newline, a line too long, and a
+    /// frame of many lines too long together each stop the parser with an
+    /// error instead of growing its buffer; at the limit is fine.
+    #[test]
+    fn a_line_or_frame_over_the_limit_is_an_error_not_a_growing_buffer() {
+        let mut endless = SseFrames::with_max_bytes(16);
+        assert!(drain(&mut endless, "data: 0123456789").is_empty());
+        assert_eq!(endless.push(b"abcdef"), Err(SseTooLarge(16)));
+
+        let mut long_line = SseFrames::with_max_bytes(16);
+        assert_eq!(
+            long_line.push(b"data: 0123456789abcdef\n\n"),
+            Err(SseTooLarge(16))
+        );
+
+        let mut long_frame = SseFrames::with_max_bytes(16);
+        assert_eq!(
+            long_frame.push(b"event: text\ndata: 012345\ndata: 678901\ndata: 2345\n\n"),
+            Err(SseTooLarge(16))
+        );
+
+        // 16 bytes of data over two lines (7 + newline + 8), then a blank
+        // line: one frame, and the count starts again for the next.
+        let mut at_limit = SseFrames::with_max_bytes(16);
+        let frame = "event: t\ndata:0123456\ndata:01234567\n\n";
+        assert_eq!(
+            drain(&mut at_limit, frame),
+            vec![("t".to_string(), "0123456\n01234567".to_string())]
+        );
+        assert_eq!(drain(&mut at_limit, frame).len(), 1);
+
+        assert_eq!(
+            SseTooLarge(MAX_SSE_FRAME_BYTES).to_string(),
+            "the server sent an event larger than 32 MiB, the most this app reads"
+        );
     }
 
     #[test]
@@ -1350,9 +1455,10 @@ mod tests {
         assert!(
             frames
                 .push(b"event: text\ndata: {\"Text\":\"caf\xC3")
+                .unwrap()
                 .is_empty()
         );
-        let out = frames.push(b"\xA9\"}\n\n");
+        let out = frames.push(b"\xA9\"}\n\n").unwrap();
         assert_eq!(
             out,
             vec![("text".to_string(), "{\"Text\":\"café\"}".to_string())]
@@ -1534,6 +1640,15 @@ mod tests {
                 HostedFrame::BrokerInputSettled {
                     id: "approval-1".into(),
                     outcome: InputOutcome::Withdrawn,
+                },
+            ),
+            // A newer server's outcome still settles the input (AGE-2157).
+            (
+                "broker_input_settled",
+                json!({"id": "approval-1", "outcome": "expired"}),
+                HostedFrame::BrokerInputSettled {
+                    id: "approval-1".into(),
+                    outcome: InputOutcome::Unknown,
                 },
             ),
             (

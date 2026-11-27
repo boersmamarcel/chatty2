@@ -35,14 +35,26 @@ pub struct GateOutcome {
     pub risky_blocked: Option<(String, String)>,
 }
 
+/// Holds the approval of one risky action; dropping it ends the approval.
+#[must_use = "dropping the guard ends the approval"]
+pub struct RiskyApproval {
+    gate: Arc<SiteGate>,
+}
+
+impl Drop for RiskyApproval {
+    fn drop(&mut self) {
+        self.gate.reset_risky();
+    }
+}
+
 pub struct SiteGate {
     act_on: Vec<ActOnSite>,
     /// Only sessions whose origin is granted.
     sessions: Vec<SavedSession>,
     unattended: bool,
-    /// An approved action is running: let its risky requests through until
-    /// the next action begins (AGE-2043).
-    allow_risky: std::sync::atomic::AtomicBool,
+    /// The origin of the approved action that is running: its risky requests
+    /// (and only those) go through until the action ends (AGE-2043, AGE-2154).
+    approved_origin: Mutex<Option<String>>,
     outcome: Mutex<GateOutcome>,
 }
 
@@ -56,7 +68,7 @@ impl SiteGate {
             act_on: options.act_on.clone(),
             sessions,
             unattended: options.unattended,
-            allow_risky: std::sync::atomic::AtomicBool::new(false),
+            approved_origin: Mutex::new(None),
             outcome: Mutex::new(GateOutcome::default()),
         })
     }
@@ -75,15 +87,34 @@ impl SiteGate {
         })
     }
 
-    /// Let risky requests through (an approved action) or refuse them again.
-    pub fn set_allow_risky(&self, allow: bool) {
-        self.allow_risky
-            .store(allow, std::sync::atomic::Ordering::SeqCst);
+    /// Let risky requests to `origin` through while the returned guard lives
+    /// (an approved action). Dropping the guard refuses them again, on every
+    /// path out of the action.
+    pub fn approve_risky_for(self: &Arc<Self>, origin: &str) -> RiskyApproval {
+        *self.approved_origin.lock() = Some(origin.to_string());
+        RiskyApproval { gate: self.clone() }
     }
 
-    /// Whether risky requests are let through right now (an approved action).
+    /// Whether an approved action is running right now.
     pub fn allows_risky(&self) -> bool {
-        self.allow_risky.load(std::sync::atomic::Ordering::SeqCst)
+        self.approved_origin.lock().is_some()
+    }
+
+    /// Whether the approved action lets a request to `url` through: only its
+    /// own origin.
+    fn risky_allowed_for(&self, url: &str) -> bool {
+        match (
+            self.approved_origin.lock().as_deref(),
+            sites::origin_of(url),
+        ) {
+            (Some(approved), Some(origin)) => approved == origin,
+            _ => false,
+        }
+    }
+
+    /// Refuse risky requests again (a navigate, the end of an action).
+    pub fn reset_risky(&self) {
+        *self.approved_origin.lock() = None;
     }
 
     /// Take (and reset) what was refused.
@@ -236,7 +267,7 @@ impl SiteGate {
                 let id = event.request_id.clone();
                 let method = event.request.method.clone();
                 let url = event.request.url.clone();
-                let allow_risky = gate.allow_risky.load(std::sync::atomic::Ordering::SeqCst);
+                let allow_risky = gate.risky_allowed_for(&url);
                 let verdict = sites::judge_request(
                     &gate.act_on,
                     gate.unattended && !allow_risky,
@@ -282,5 +313,78 @@ impl SiteGate {
                 }
             }
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::browser::LaunchOptions;
+
+    fn gate() -> Arc<SiteGate> {
+        let options = LaunchOptions {
+            act_on: vec![
+                ActOnSite {
+                    origin: "https://a.test".into(),
+                    mode: SiteMode::AskRisky,
+                },
+                ActOnSite {
+                    origin: "https://b.test".into(),
+                    mode: SiteMode::AskRisky,
+                },
+            ],
+            unattended: true,
+            ..Default::default()
+        };
+        SiteGate::new(&options)
+    }
+
+    /// The interceptor's verdict for a POST to `url` right now.
+    fn post_verdict(gate: &SiteGate, url: &str) -> RequestVerdict {
+        sites::judge_request(
+            &gate.act_on,
+            gate.unattended && !gate.risky_allowed_for(url),
+            "POST",
+            url,
+        )
+    }
+
+    #[test]
+    fn approval_lets_only_the_approved_origin_through() {
+        let gate = gate();
+        let _approval = gate.approve_risky_for("https://a.test");
+        assert_eq!(
+            post_verdict(&gate, "https://a.test/delete"),
+            RequestVerdict::Allow
+        );
+        assert_eq!(
+            post_verdict(&gate, "https://b.test/delete"),
+            RequestVerdict::BlockRisky
+        );
+    }
+
+    #[test]
+    fn dropping_the_approval_refuses_risky_requests_again() {
+        let gate = gate();
+        drop(gate.approve_risky_for("https://a.test"));
+        assert!(!gate.allows_risky());
+        assert_eq!(
+            post_verdict(&gate, "https://a.test/delete"),
+            RequestVerdict::BlockRisky
+        );
+    }
+
+    #[test]
+    fn navigate_reset_refuses_page_posts_after_an_approved_click() {
+        let gate = gate();
+        let approval = gate.approve_risky_for("https://a.test");
+        // after_action ends the approval (it takes the guard); a later
+        // navigate resets again and the page's own POST is refused.
+        drop(approval);
+        gate.reset_risky();
+        assert_eq!(
+            post_verdict(&gate, "https://a.test/delete"),
+            RequestVerdict::BlockRisky
+        );
     }
 }

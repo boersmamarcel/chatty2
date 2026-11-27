@@ -1,10 +1,11 @@
 //! Every request and response shape of chatty-server's conversation sync API,
 //! in one place (AGE-2088).
 //!
-//! Written against the shape HX-8 (AGE-2087) documents, before that issue
-//! merged: when it lands, this file is the one to adjust. Decoding is
-//! deliberately tolerant — unknown fields are ignored, and fields HX-8 adds
-//! are optional — so a server a release behind or ahead still decodes.
+//! Matched to what chatty-server sends (hive's
+//! `services/chatty-server/src/wire.rs`: `ConversationSummary`,
+//! `ConversationChanges`, `ConversationDetail`) in AGE-2157. Decoding is
+//! deliberately tolerant — unknown fields are ignored, and newer fields are
+//! optional — so a server a release behind or ahead still decodes.
 //!
 //! * `GET /api/conversations?since=<cursor>&limit=<n>` → [`ChangesPage`]:
 //!   conversations changed after the cursor, oldest first, each the full
@@ -17,16 +18,23 @@
 //!   before the newest tombstone the server has pruned is answered 410
 //!   (`cursor_expired`); `since` combined with another list filter, or a
 //!   malformed cursor, is a 422.
-//! * `GET /api/conversations/{id}` → [`ConversationDetail`], which adds
-//!   `version`, `placement` and `turn_status` to the conversation.
+//! * `GET /api/conversations/{id}` → [`ConversationDetail`]: the history,
+//!   the turns' `traces` and `usage` (sparse, by message index), the totals,
+//!   and `version`, `placement` and `turn_status`.
 
-use std::path::PathBuf;
+use std::time::{Duration, UNIX_EPOCH};
 
 use rig_core::completion::Message;
 use serde::{Deserialize, Deserializer};
 
 use crate::models::conversation::Placement;
+use crate::models::message_types::{
+    ApprovalBlock, ApprovalState, SystemTrace, ToolCallBlock, ToolCallState, ToolSource, TraceItem,
+    friendly_tool_name,
+};
+use crate::models::token_usage::{ConversationTokenUsage, TokenUsage};
 use crate::repositories::ConversationData;
+use crate::services::swarm_trace::AGENTS_TRACE_KEY;
 
 /// The `since` cursor of a full sync: every conversation and every tombstone
 /// the server still holds.
@@ -95,15 +103,21 @@ pub struct RemoteSummary {
     /// The name of the device that holds the conversation, when the server
     /// says (`placement_device.name`). Live, like `turn_status`: never persisted.
     pub device_name: Option<String>,
+    /// Archived on the server (AGE-1840): not listed on this device.
+    pub archived: bool,
 }
 
-/// `GET /api/conversations/{id}`: the conversation, and as much of the
-/// server's stored row as it sends.
+/// `GET /api/conversations/{id}`: the conversation, as chatty-server's
+/// `ConversationDetail` sends it (AGE-2157).
 ///
-/// The history is required; the per-message metadata and totals are
-/// optional, so a server that does not send them yet decodes, and
+/// The history is required; the traces, usage and totals are optional, so a
+/// server that does not send them yet decodes, and
 /// [`Conversation::replace_from_remote`](crate::models::conversation::Conversation::replace_from_remote)
 /// keeps this device's copy of whatever is absent.
+///
+/// There are no attachment paths here, on purpose (AGE-2143): a path the
+/// server names is a path on some other machine, and must never become one
+/// this device reads or uploads.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct ConversationDetail {
     pub id: String,
@@ -125,27 +139,100 @@ pub struct ConversationDetail {
     pub placement_device: Option<PlacementDevice>,
     #[serde(default)]
     pub messages: Vec<Message>,
+    /// The turns' traces, sparse: only the messages that have one, by index.
     #[serde(default)]
-    pub system_traces: Option<Vec<Option<serde_json::Value>>>,
+    pub traces: Vec<MessageTrace>,
+    /// What each turn's own requests spent, sparse and by index like
+    /// `traces`. chatty-server leaves it out when there is none.
     #[serde(default)]
-    pub attachment_paths: Option<Vec<Vec<PathBuf>>>,
-    #[serde(default)]
-    pub message_timestamps: Option<Vec<Option<i64>>>,
-    #[serde(default)]
-    pub message_feedback: Option<Vec<serde_json::Value>>,
-    #[serde(default)]
-    pub token_usage: Option<serde_json::Value>,
+    pub usage: Vec<MessageUsage>,
     #[serde(default)]
     pub tool_call_count: Option<u32>,
     #[serde(default)]
     pub context_tokens: Option<u32>,
-    #[serde(default, deserialize_with = "unix_seconds_opt")]
-    pub created_at: Option<i64>,
-    #[serde(default, deserialize_with = "unix_seconds_opt")]
-    pub updated_at: Option<i64>,
-    /// chatty-server's name for it (AGE-2124): Unix seconds.
+    /// The conversation's time (AGE-2124): Unix seconds. chatty-server sends
+    /// no other.
     #[serde(default)]
     pub last_active_at: Option<i64>,
+}
+
+/// One turn's trace in a [`ConversationDetail`]: chatty-server's projection
+/// of the trace stored on the message at `message_index`.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct MessageTrace {
+    pub message_index: usize,
+    #[serde(default)]
+    pub items: Vec<TraceItemWire>,
+    /// The turn's swarm (chatty-core's `AgentRecord`s), as stored under
+    /// [`AGENTS_TRACE_KEY`]. Kept as sent.
+    #[serde(default)]
+    pub agents: Vec<serde_json::Value>,
+    /// When the turn started and ended.
+    #[serde(default)]
+    pub times: Option<TurnTimes>,
+}
+
+/// When a turn started and ended, in Unix milliseconds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct TurnTimes {
+    #[serde(default)]
+    pub started_ms: u64,
+    #[serde(default)]
+    pub ended_ms: u64,
+}
+
+/// One item of a [`MessageTrace`]: the two kinds chatty-server projects.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TraceItemWire {
+    ToolCall {
+        #[serde(default)]
+        id: String,
+        name: String,
+        /// The arguments, as the JSON string the tool was given.
+        #[serde(default)]
+        input: String,
+        /// `None` for a call the turn never got an answer to.
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    Approval {
+        id: String,
+        #[serde(default)]
+        command: String,
+        #[serde(default)]
+        is_sandboxed: bool,
+        state: ApprovalStateWire,
+        /// Unix seconds.
+        #[serde(default)]
+        created_at: Option<i64>,
+    },
+    /// A kind this build does not know; left out.
+    #[serde(other)]
+    Unknown,
+}
+
+/// How an approval in a finished turn was answered. There is no pending: a
+/// trace is only on the wire once its turn is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStateWire {
+    /// The turn ended without a decision.
+    Unanswered,
+    Approved,
+    Denied,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One turn's own usage in a [`ConversationDetail`], by the index of the
+/// turn's final message.
+#[derive(Clone, Debug, Deserialize)]
+pub struct MessageUsage {
+    pub message_index: usize,
+    pub usage: TokenUsage,
 }
 
 impl ConversationDetail {
@@ -169,28 +256,37 @@ impl ConversationDetail {
     /// The row this detail describes, as this device stores it, under
     /// `local_id`. A column the server did not send is written empty, which
     /// is what tells `replace_from_remote` to keep this device's copy of it.
+    /// Attachment paths are always empty: they never come from the server.
     /// The sync columns are left empty: the caller sets the sync state.
     pub fn to_conversation_data(&self, local_id: &str) -> ConversationData {
-        fn json<T: serde::Serialize>(value: &Option<T>, empty: &str) -> String {
-            value
-                .as_ref()
-                .and_then(|value| serde_json::to_string(value).ok())
-                .unwrap_or_else(|| empty.to_string())
+        fn json<T: serde::Serialize>(value: &T, empty: &str) -> String {
+            serde_json::to_string(value).unwrap_or_else(|_| empty.to_string())
         }
+        let (traces, timestamps) = self.per_message();
+        let token_usage = if self.usage.is_empty() {
+            "{}".to_string()
+        } else {
+            let mut total = ConversationTokenUsage::new();
+            for line in &self.usage {
+                total.add_usage(line.usage.clone());
+            }
+            json(&total, "{}")
+        };
         ConversationData {
             id: local_id.to_string(),
             title: self.title.clone(),
             model_id: self.model_id.clone(),
-            message_history: serde_json::to_string(&self.messages)
-                .unwrap_or_else(|_| "[]".to_string()),
-            system_traces: json(&self.system_traces, "[]"),
-            token_usage: json(&self.token_usage, "{}"),
-            attachment_paths: json(&self.attachment_paths, "[]"),
-            message_timestamps: json(&self.message_timestamps, "[]"),
-            message_feedback: json(&self.message_feedback, "[]"),
+            message_history: json(&self.messages, "[]"),
+            system_traces: json(&traces, "[]"),
+            token_usage,
+            attachment_paths: "[]".to_string(),
+            message_timestamps: json(&timestamps, "[]"),
+            message_feedback: "[]".to_string(),
             regeneration_records: "[]".to_string(),
-            created_at: self.created_at.or(self.last_active_at).unwrap_or(0),
-            updated_at: self.updated_at.or(self.last_active_at).unwrap_or(0),
+            // The server sends no creation time; 0 tells `replace_from_remote`
+            // to keep this device's own.
+            created_at: 0,
+            updated_at: self.last_active_at.unwrap_or(0),
             working_dir: None,
             agent_task_snapshot: None,
             sync: None,
@@ -200,6 +296,101 @@ impl ConversationDetail {
             tool_call_count: self.tool_call_count.unwrap_or(0),
             context_tokens: self.context_tokens.unwrap_or(0),
         }
+    }
+
+    /// The sparse `traces` as this device stores them, one slot per message:
+    /// each as a [`SystemTrace`] (with the swarm under [`AGENTS_TRACE_KEY`]),
+    /// and the time the turn ended as its message's timestamp. Both are empty
+    /// when the server sent no trace, so nothing is invented.
+    fn per_message(&self) -> (Vec<Option<serde_json::Value>>, Vec<Option<i64>>) {
+        if self.traces.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        let len = self.messages.len();
+        let mut traces = vec![None; len];
+        let mut timestamps = vec![None; len];
+        for trace in self.traces.iter().filter(|trace| trace.message_index < len) {
+            let index = trace.message_index;
+            let system_trace = SystemTrace {
+                items: trace.items.iter().filter_map(trace_item).collect(),
+                ..SystemTrace::default()
+            };
+            let mut value = match serde_json::to_value(&system_trace) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(?error, index, "could not store a server trace");
+                    continue;
+                }
+            };
+            if !trace.agents.is_empty()
+                && let Some(object) = value.as_object_mut()
+            {
+                object.insert(
+                    AGENTS_TRACE_KEY.to_string(),
+                    serde_json::Value::Array(trace.agents.clone()),
+                );
+            }
+            traces[index] = Some(value);
+            timestamps[index] = trace
+                .times
+                .filter(|times| times.ended_ms > 0)
+                .map(|times| (times.ended_ms / 1_000) as i64);
+        }
+        (traces, timestamps)
+    }
+}
+
+/// A server trace item as this device's trace holds it.
+fn trace_item(item: &TraceItemWire) -> Option<TraceItem> {
+    match item {
+        TraceItemWire::ToolCall {
+            id,
+            name,
+            input,
+            output,
+            error,
+        } => Some(TraceItem::ToolCall(ToolCallBlock {
+            id: id.clone(),
+            tool_name: name.clone(),
+            display_name: friendly_tool_name(name),
+            input: input.clone(),
+            output: output.clone(),
+            output_preview: None,
+            state: match (error, output) {
+                (Some(error), _) => ToolCallState::Error(error.clone()),
+                (None, Some(_)) => ToolCallState::Success,
+                // Never answered: the turn was cancelled, which is how this
+                // device marks such a call too.
+                (None, None) => ToolCallState::Error("Cancelled".to_string()),
+            },
+            duration: None,
+            text_before: String::new(),
+            source: ToolSource::default(),
+            execution_engine: None,
+        })),
+        TraceItemWire::Approval {
+            id,
+            command,
+            is_sandboxed,
+            state,
+            created_at,
+        } => Some(TraceItem::ApprovalPrompt(ApprovalBlock {
+            id: id.clone(),
+            command: command.clone(),
+            is_sandboxed: *is_sandboxed,
+            state: match state {
+                ApprovalStateWire::Approved => ApprovalState::Approved,
+                // The turn is over, so an unanswered approval can never be
+                // answered and its command did not run. Pending would show
+                // the live prompt for it.
+                ApprovalStateWire::Denied
+                | ApprovalStateWire::Unanswered
+                | ApprovalStateWire::Unknown => ApprovalState::Denied,
+            },
+            created_at: UNIX_EPOCH + Duration::from_secs(created_at.unwrap_or(0).max(0) as u64),
+            asker: None,
+        })),
+        TraceItemWire::Unknown => None,
     }
 }
 
@@ -547,6 +738,9 @@ struct ChangeWire {
     placement: Option<Placement>,
     #[serde(default)]
     placement_device: Option<PlacementDevice>,
+    /// Sent only when true.
+    #[serde(default)]
+    archived: bool,
 }
 
 impl<'de> Deserialize<'de> for ChangesPage {
@@ -605,6 +799,7 @@ impl From<ChangeWire> for RemoteChange {
                 .placement_device
                 .and_then(|device| device.name)
                 .filter(|name| !name.is_empty()),
+            archived: wire.archived,
         })
     }
 }
@@ -731,6 +926,7 @@ mod tests {
                 turn_status: TurnStatus::WaitingForYou,
                 placement: Placement::Cloud { model_id: None },
                 device_name: None,
+                archived: false,
             })
         );
         assert_eq!(page.changes[1], RemoteChange::Deleted { id: "b".into() });
@@ -752,6 +948,198 @@ mod tests {
             panic!("a is an upsert")
         };
         assert_eq!(a.turn_status, TurnStatus::Running);
+    }
+
+    /// A `GET /api/conversations/{id}` body shaped exactly like
+    /// chatty-server's `ConversationDetail` (hive
+    /// `services/chatty-server/src/wire.rs`), totals flattened in, with the
+    /// fields this client ignores (`cost_usd`, `team`, `turn_spend`,
+    /// `agent_costs_usd`, `markup_usd`) present.
+    fn hive_detail() -> serde_json::Value {
+        use crate::services::swarm_trace::{AgentNode, AgentRecord};
+        let root = AgentRecord {
+            node: AgentNode::new("root", "root", None),
+            parent: None,
+            started_by: None,
+            conversation: None,
+        };
+        let mut usage = TokenUsage::new(120, 40);
+        usage.estimated_cost_usd = Some(0.0042);
+        serde_json::json!({
+            "id": "r-1",
+            "title": "Cloud chat",
+            "model_id": "platform-qwen3",
+            "turn_active": false,
+            "cost_usd": 0.0062,
+            "tool_call_count": 3,
+            "last_active_at": 1_795_708_470,
+            "context_tokens": 2_048,
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "look"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "done"}]},
+                {"role": "user", "content": [{"type": "text", "text": "and?"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "this"}]},
+            ],
+            "traces": [{
+                "message_index": 1,
+                "items": [
+                    {"type": "tool_call", "id": "c-1", "name": "read_file",
+                     "input": "{\"path\":\"a.txt\"}", "output": "hello", "error": null},
+                    {"type": "tool_call", "id": "c-2", "name": "shell_execute",
+                     "input": "{}", "output": null, "error": "exit 1"},
+                    {"type": "tool_call", "id": "c-3", "name": "shell_execute",
+                     "input": "{}", "output": null, "error": null},
+                    {"type": "approval", "id": "a-1", "command": "rm x",
+                     "is_sandboxed": true, "state": "approved", "created_at": 1_795_708_400},
+                    {"type": "approval", "id": "a-2", "command": "rm y",
+                     "is_sandboxed": false, "state": "unanswered", "created_at": null},
+                    {"type": "a_kind_from_later"}
+                ],
+                "agents": [serde_json::to_value(&root).unwrap()],
+                "agent_costs_usd": [0.002],
+                "times": {"started_ms": 1_795_708_390_000_u64, "ended_ms": 1_795_708_470_500_u64,
+                          "agents": [{"started_ms": 1_795_708_390_000_u64, "ended_ms": 1_795_708_470_500_u64}]}
+            }, {
+                // An index past the history is ignored, not a panic.
+                "message_index": 9, "items": []
+            }],
+            "usage": [{
+                "message_index": 3,
+                "usage": serde_json::to_value(&usage).unwrap(),
+                "markup_usd": 0.002
+            }],
+            "team": null,
+            "turn_spend": null,
+            "version": 7,
+            "placement": "cloud",
+            "placement_device": null,
+            "turn_status": "idle"
+        })
+    }
+
+    /// AGE-2157: what chatty-server sends — `traces`, `usage` and
+    /// `last_active_at` — reaches the stored row.
+    #[test]
+    fn chatty_servers_detail_maps_traces_usage_and_times() {
+        let detail: ConversationDetail = serde_json::from_value(hive_detail()).unwrap();
+        assert_eq!(detail.version, Some(7));
+        assert!(!detail.turn_running());
+        let data = detail.to_conversation_data("local-1");
+
+        let traces: Vec<Option<serde_json::Value>> =
+            serde_json::from_str(&data.system_traces).unwrap();
+        assert_eq!(traces.len(), 4, "one slot per message");
+        assert!(traces[0].is_none() && traces[2].is_none() && traces[3].is_none());
+        let stored = traces[1].clone().unwrap();
+        assert_eq!(stored[AGENTS_TRACE_KEY][0]["name"], "root");
+        let trace: SystemTrace = serde_json::from_value(stored).unwrap();
+        assert_eq!(trace.items.len(), 5, "the unknown kind is left out");
+        let TraceItem::ToolCall(read) = &trace.items[0] else {
+            panic!("a tool call")
+        };
+        assert_eq!(
+            (read.id.as_str(), read.tool_name.as_str()),
+            ("c-1", "read_file")
+        );
+        assert_eq!(read.output.as_deref(), Some("hello"));
+        assert_eq!(read.state, ToolCallState::Success);
+        let TraceItem::ToolCall(failed) = &trace.items[1] else {
+            panic!("a tool call")
+        };
+        assert_eq!(failed.state, ToolCallState::Error("exit 1".into()));
+        let TraceItem::ToolCall(cancelled) = &trace.items[2] else {
+            panic!("a tool call")
+        };
+        assert_eq!(cancelled.state, ToolCallState::Error("Cancelled".into()));
+        let TraceItem::ApprovalPrompt(approved) = &trace.items[3] else {
+            panic!("an approval")
+        };
+        assert_eq!(approved.state, ApprovalState::Approved);
+        assert!(approved.is_sandboxed);
+        assert_eq!(
+            approved.created_at,
+            UNIX_EPOCH + Duration::from_secs(1_795_708_400)
+        );
+        let TraceItem::ApprovalPrompt(unanswered) = &trace.items[4] else {
+            panic!("an approval")
+        };
+        assert_eq!(
+            unanswered.state,
+            ApprovalState::Denied,
+            "a finished turn's unanswered approval is never a live prompt"
+        );
+
+        let timestamps: Vec<Option<i64>> = serde_json::from_str(&data.message_timestamps).unwrap();
+        assert_eq!(timestamps, vec![None, Some(1_795_708_470), None, None]);
+
+        let usage: ConversationTokenUsage = serde_json::from_str(&data.token_usage).unwrap();
+        assert_eq!(usage.message_usages.len(), 1);
+        assert_eq!(
+            (usage.total_input_tokens, usage.total_output_tokens),
+            (120, 40)
+        );
+
+        assert_eq!(data.attachment_paths, "[]");
+        assert_eq!(
+            (data.created_at, data.updated_at),
+            (0, 1_795_708_470),
+            "no creation time is invented from the last activity"
+        );
+        assert_eq!((data.tool_call_count, data.context_tokens), (3, 2_048));
+    }
+
+    /// AGE-2143: paths in a detail never reach the stored row, whatever the
+    /// server sends.
+    #[test]
+    fn a_detail_never_carries_attachment_paths() {
+        let mut value = hive_detail();
+        value["attachment_paths"] = serde_json::json!([["/home/u/.ssh/id_ed25519"], [], [], []]);
+        let detail: ConversationDetail = serde_json::from_value(value).unwrap();
+        let data = detail.to_conversation_data("local-1");
+        assert_eq!(data.attachment_paths, "[]");
+        assert!(!format!("{data:?}").contains("id_ed25519"));
+    }
+
+    /// A `?since=` page shaped like chatty-server's `ConversationChanges`:
+    /// `ConversationSummary`s (totals flattened, `archived` only when true)
+    /// and a `{id, deleted}` tombstone.
+    #[test]
+    fn chatty_servers_change_feed_maps_archived() {
+        let summary = |id: &str, archived: Option<bool>| {
+            let mut value = serde_json::json!({
+                "id": id, "title": "T", "model_id": "platform-qwen3",
+                "message_count": 2, "turn_active": false,
+                "workspace_id": "0b5f5c9e-4f6e-4d0a-9a3b-2f1c1e0d9a7b",
+                "cost_usd": null, "tool_call_count": 0,
+                "last_active_at": 1_795_708_470, "context_tokens": 0,
+                "version": 3, "placement": "cloud", "placement_device": null,
+                "turn_status": "idle"
+            });
+            if let Some(archived) = archived {
+                value["archived"] = archived.into();
+            }
+            value
+        };
+        let page: ChangesPage = serde_json::from_value(serde_json::json!({
+            "conversations": [
+                summary("a", None),
+                summary("b", Some(true)),
+                {"id": "c", "deleted": true}
+            ],
+            "next_cursor": "42"
+        }))
+        .unwrap();
+        assert_eq!(page.next_cursor.as_deref(), Some("42"));
+        let RemoteChange::Upsert(a) = &page.changes[0] else {
+            panic!("an upsert")
+        };
+        assert!(!a.archived);
+        assert_eq!(a.updated_at, 1_795_708_470);
+        let RemoteChange::Upsert(b) = &page.changes[1] else {
+            panic!("an upsert")
+        };
+        assert!(b.archived);
+        assert_eq!(page.changes[2], RemoteChange::Deleted { id: "c".into() });
     }
 
     #[test]
