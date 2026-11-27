@@ -217,7 +217,7 @@ pub mod view_image_tool;
 pub mod worker_progress;
 
 pub use add_attachment_tool::{AddAttachmentTool, PendingArtifacts};
-pub use agent_todo_tool::{UpdateTodoTool, VerifyCompletionTool, WriteTodosTool};
+pub use agent_todo_tool::{VerifyCompletionTool, WriteTodosTool};
 #[cfg(feature = "archive")]
 pub use archive_tool::{ExtractArchiveTool, ListArchiveTool};
 pub use ask_user_tool::AskUserTool;

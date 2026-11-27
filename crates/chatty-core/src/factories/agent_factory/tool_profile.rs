@@ -38,7 +38,7 @@ const READ_SET: &[&str] = &[
 /// The todo plan: for the roles that run open-ended multi-step work — the
 /// unprofiled main agent and a leader. A worker gets one bounded task from
 /// its leader and does not plan it again (AGE-479).
-const TODO_PLAN: &[&str] = &["write_todos", "update_todo", "verify_completion"];
+const TODO_PLAN: &[&str] = &["write_todos", "verify_completion"];
 
 /// Delegation. No profile names these: a spec's `swarm.delegates_to`
 /// decides whether an agent has them (PL-S2 DP-1), so every profile lets
@@ -515,7 +515,7 @@ mod tests {
             }
         }
 
-        for tool in ["write_todos", "update_todo", "verify_completion"] {
+        for tool in ["write_todos", "verify_completion"] {
             assert!(
                 COORDINATOR.allows(tool),
                 "a leader plans open-ended work with {tool}"

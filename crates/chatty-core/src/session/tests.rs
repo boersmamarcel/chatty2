@@ -257,14 +257,12 @@ async fn finished_plan_turn(count: usize) -> Vec<SessionEvent> {
 
     let controller = AgentTaskController::new();
     let todos = (1..=count)
-        .map(|n| (format!("t{n}"), format!("Step {n}"), format!("Do step {n}")))
+        .map(|n| {
+            crate::services::TodoEntry::pending(format!("t{n}"), format!("Step {n}"), "")
+                .with_status(AgentTodoStatus::Done)
+        })
         .collect();
-    controller.write_todos("Ship".into(), todos).unwrap();
-    for n in 1..=count {
-        controller
-            .update_todo(format!("t{n}"), AgentTodoStatus::Done, None, None)
-            .unwrap();
-    }
+    controller.write_todos(Some("Ship".into()), todos).unwrap();
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let stream = crate::services::scripted_stream(scenario("text_only").items, cancel_flag.clone());

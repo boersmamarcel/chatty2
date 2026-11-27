@@ -275,7 +275,6 @@ fn dump_hash_order_for_parent() {
     let names: std::collections::HashMap<&str, ()> = [
         "list_tools",
         "write_todos",
-        "update_todo",
         "verify_completion",
         "list_agents",
         "invoke_agent",

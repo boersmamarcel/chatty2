@@ -366,7 +366,7 @@ pub fn run_budget_note(
 
 /// `output` with `note` after it. Text and JSON results become one text
 /// block; a multimodal result keeps its blocks and gains a text block.
-fn with_note(output: &ToolOutput, note: &str) -> ToolOutput {
+pub(crate) fn with_note(output: &ToolOutput, note: &str) -> ToolOutput {
     if let Some(text) = output.as_text() {
         return ToolOutput::text(format!("{text}\n\n{note}"));
     }

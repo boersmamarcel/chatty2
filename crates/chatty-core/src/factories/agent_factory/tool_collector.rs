@@ -14,7 +14,7 @@ use crate::tools::{
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, SendMessageTool, ShellCdTool,
     ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool,
-    UpdateTodoTool, VerifyCompletionTool, ViewImageTool, WriteFileTool, WriteTodosTool,
+    VerifyCompletionTool, ViewImageTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -100,7 +100,6 @@ pub(super) struct NativeTools {
     pub tool_profile: Option<&'static ToolProfile>,
     pub list_tools: ListToolsTool,
     pub write_todos_tool: WriteTodosTool,
-    pub update_todo_tool: UpdateTodoTool,
     pub verify_completion_tool: VerifyCompletionTool,
     pub fs_read: Option<FsReadTools>,
     pub doc_retriever: Option<DocRetrieverTool>,
@@ -188,7 +187,6 @@ impl NativeTools {
         let mut b = builder;
         b = add(b, profile, self.list_tools);
         b = add(b, profile, self.write_todos_tool);
-        b = add(b, profile, self.update_todo_tool);
         b = add(b, profile, self.verify_completion_tool);
         if let Some(t) = self.list_agents_tool {
             b = add(b, profile, t);
@@ -389,7 +387,6 @@ macro_rules! native_tools {
         tool_profile: $tool_profile:expr,
         list_tools: $list_tools:expr,
         write_todos_tool: $write_todos_tool:expr,
-        update_todo_tool: $update_todo_tool:expr,
         verify_completion_tool: $verify_completion_tool:expr,
         fs_read: $fs_read:expr,
         doc_retriever: $doc_retriever:expr,
@@ -439,7 +436,6 @@ macro_rules! native_tools {
             tool_profile: $tool_profile,
             list_tools: $list_tools,
             write_todos_tool: $write_todos_tool,
-            update_todo_tool: $update_todo_tool,
             verify_completion_tool: $verify_completion_tool,
             fs_read: $fs_read,
             doc_retriever: $doc_retriever,
