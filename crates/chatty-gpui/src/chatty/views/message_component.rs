@@ -47,7 +47,7 @@ pub struct DisplayMessage {
     pub history_index: Option<usize>,
     /// A note from the app, not a reply from the model (the hand-off's
     /// "This conversation now runs in the cloud", a slash command's answer):
-    /// shown muted, with no feedback or regenerate (AGE-2129).
+    /// set off by a line, with no feedback or regenerate (AGE-2129).
     pub is_notice: bool,
     /// A delegation row's runs, when its callee delegated in turn (TB-4).
     /// Live-only: built from the turn's forwarded events, never persisted.
@@ -881,10 +881,14 @@ where
                 ))
                 .into_any_element()
         }
-        // A note from the app reads as one: muted and smaller, no actions.
-        MessageRole::Assistant if msg.is_notice => final_container
-            .text_sm()
-            .text_color(cx.theme().muted_foreground)
+        // A note from the app reads as one: set off by a muted line at its
+        // left, and no actions (markdown sets its own text colour).
+        MessageRole::Assistant if msg.is_notice => div()
+            .w_full()
+            .pl_3()
+            .border_l_2()
+            .border_color(cx.theme().border)
+            .child(final_container)
             .into_any_element(),
         _ => final_container.into_any_element(),
     }
