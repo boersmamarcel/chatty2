@@ -250,22 +250,21 @@ async fn a_stream_error_turn_saves_the_usage_of_its_completed_calls() {
     );
 }
 
-/// The todo protocol's other nudge: a plan whose todos are all done but
-/// never verified asks for `verify_completion` once the turn ends.
-#[tokio::test]
-async fn a_finished_plan_without_verification_is_nudged_after_the_turn() {
+/// Drives a text-only turn over `controller` after writing a plan of
+/// `count` todos and marking them all done; returns the turn's events.
+async fn finished_plan_turn(count: usize) -> Vec<SessionEvent> {
     use crate::services::AgentTodoStatus;
 
     let controller = AgentTaskController::new();
-    controller
-        .write_todos(
-            "Ship".into(),
-            vec![("t1".into(), "Implement".into(), "Implement change".into())],
-        )
-        .unwrap();
-    controller
-        .update_todo("t1".into(), AgentTodoStatus::Done, None, None)
-        .unwrap();
+    let todos = (1..=count)
+        .map(|n| (format!("t{n}"), format!("Step {n}"), format!("Do step {n}")))
+        .collect();
+    controller.write_todos("Ship".into(), todos).unwrap();
+    for n in 1..=count {
+        controller
+            .update_todo(format!("t{n}"), AgentTodoStatus::Done, None, None)
+            .unwrap();
+    }
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
     let stream = crate::services::scripted_stream(scenario("text_only").items, cancel_flag.clone());
@@ -281,12 +280,30 @@ async fn a_finished_plan_without_verification_is_nudged_after_the_turn() {
         move |event| sink.borrow_mut().push(event),
     )
     .await;
+    events.take()
+}
 
-    let events = events.borrow();
+/// The todo protocol's other nudge: a plan of 3 or more todos that are all
+/// done but never verified asks for `verify_completion` once the turn ends.
+#[tokio::test]
+async fn a_finished_plan_without_verification_is_nudged_after_the_turn() {
+    let events = finished_plan_turn(3).await;
     assert!(matches!(
         events.last(),
         Some(SessionEvent::FollowUp(prompt)) if prompt.contains("verify_completion")
     ));
+}
+
+/// AGE-2188: a one-todo plan that is done ends the turn with no follow-up.
+#[tokio::test]
+async fn a_finished_small_plan_ends_the_turn_without_a_nudge() {
+    let events = finished_plan_turn(1).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::FollowUp(_))),
+        "{events:?}"
+    );
 }
 
 #[tokio::test]

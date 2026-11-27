@@ -12,6 +12,12 @@ const MAX_TODOS: usize = 12;
 /// (AGE-150). `reset()` restores the budget when a new user turn starts.
 const MAX_PROTOCOL_FOLLOW_UPS: usize = 3;
 
+/// A plan with fewer todos than this ends without `verify_completion`
+/// once every todo is done (AGE-2188). A one- or two-step plan is cheap
+/// bookkeeping; asking for an evidence round on top made the model pay
+/// five or more extra tool calls for a small task.
+const VERIFY_FROM_TODOS: usize = 3;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTodoStatus {
@@ -345,12 +351,24 @@ impl AgentTaskController {
     /// is the model's call, made from the `write_todos` description
     /// (AGE-479). The protocol only steers a plan that exists.
     ///
+    /// A small plan (fewer than [`VERIFY_FROM_TODOS`] todos) whose todos are
+    /// all done needs no verification round either (AGE-2188).
+    ///
     /// The in-progress check comes first on purpose: an in-progress todo makes
     /// `verify_completion` fail with `TodosNotDone`, so asking for verification
     /// there is an instruction the state machine forbids (AGE-150).
     pub fn stream_end_follow_up(&self) -> Option<String> {
         let mut state = self.state.lock();
         if !state.write_todos_called || state.verified {
+            return None;
+        }
+
+        if state.todos.len() < VERIFY_FROM_TODOS
+            && state
+                .todos
+                .iter()
+                .all(|todo| todo.status == AgentTodoStatus::Done)
+        {
             return None;
         }
 
@@ -663,8 +681,34 @@ mod tests {
         assert!(!is_protocol_follow_up_text("Please summarize the report."));
     }
 
+    fn three_todos() -> Vec<(String, String, String)> {
+        let mut todos = todos();
+        todos.push(("t3".into(), "Test".into(), "Run the tests.".into()));
+        todos
+    }
+
     #[test]
     fn stream_end_requires_verification_after_todos() {
+        let controller = controller();
+        controller
+            .write_todos("Ship".into(), three_todos())
+            .unwrap();
+        for id in ["t1", "t2", "t3"] {
+            controller
+                .update_todo(id.into(), AgentTodoStatus::Done, None, None)
+                .unwrap();
+        }
+
+        let prompt = controller.stream_end_follow_up();
+
+        assert!(prompt.is_some());
+        assert!(prompt.unwrap().contains("verify_completion"));
+    }
+
+    /// AGE-2188: a one- or two-todo plan that is all done ends the turn
+    /// without an evidence round.
+    #[test]
+    fn a_small_finished_plan_needs_no_verification() {
         let controller = controller();
         controller.write_todos("Ship".into(), todos()).unwrap();
         controller
@@ -674,10 +718,21 @@ mod tests {
             .update_todo("t2".into(), AgentTodoStatus::Done, None, None)
             .unwrap();
 
-        let prompt = controller.stream_end_follow_up();
+        assert!(controller.stream_end_follow_up().is_none());
+        assert!(!controller.snapshot().verification_skipped);
+    }
 
-        assert!(prompt.is_some());
-        assert!(prompt.unwrap().contains("verify_completion"));
+    /// A small plan left unfinished is still steered: an open todo means
+    /// the agent stopped early.
+    #[test]
+    fn a_small_unfinished_plan_is_still_nudged() {
+        let controller = controller();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        controller
+            .update_todo("t1".into(), AgentTodoStatus::Done, None, None)
+            .unwrap();
+
+        assert!(controller.stream_end_follow_up().is_some());
     }
 
     #[test]

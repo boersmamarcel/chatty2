@@ -35,10 +35,14 @@ impl Tool for WriteTodosTool {
     type Output = AgentTaskResponse;
 
     fn description(&self) -> String {
-        "Write the ordered todo plan for a task that needs 3 or more distinct tool calls across several files or steps, before starting the work. \
+        "Write the ordered todo plan for a task that needs 3 or more distinct tool calls across several files or steps. \
+         Call it when the size is clear: at the start for a task that is plainly multi-step, or partway through once a task turns out bigger than it looked. \
          Skip this tool when the task needs fewer than 3 distinct tool calls or can be answered in one response. \
          Never call it for: reading or listing one file, a single edit or rename, or answering a question from information already in the conversation. \
-         At most one call per invocation, with a goal and up to 12 concrete todos; revise individual todos with update_todo."
+         No plan: 'what does parse_config do?' (read one file, answer); 'fix the typo in the README' (one edit); 'rename foo to bar in two files' (two edits, nothing to track); 'summarise the report above' (already in the conversation). \
+         Plan: 'add a dark-mode setting, wire it into the settings page and run the tests' (several files plus a test run); 'fix the 9 failing tests' (one todo per failure, so none is forgotten); a search that found the same change in 8 files (one todo per file). \
+         At most one call per invocation, with a goal and up to 12 concrete todos; revise individual todos with update_todo. \
+         A plan of 1 or 2 todos needs no verify_completion once every todo is done."
             .to_string()
     }
 
@@ -204,7 +208,7 @@ impl Tool for VerifyCompletionTool {
 
     fn description(&self) -> String {
         "Check a plan written by write_todos against evidence before writing the final reply: one concrete evidence line per todo. \
-         If goal_achieved is false, done todos are reopened so work continues. Only for tasks with a plan; skip it otherwise."
+         If goal_achieved is false, done todos are reopened so work continues. Only for a plan of 3 or more todos; skip it otherwise."
             .to_string()
     }
 
@@ -273,6 +277,20 @@ mod tests {
         assert!(description.contains("information already in the conversation"));
     }
 
+    /// AGE-2188: worked examples on both sides of the threshold, and the
+    /// choice may be made partway through a task, not only before it.
+    #[test]
+    fn write_todos_description_gives_examples_and_allows_a_late_plan() {
+        let description = WriteTodosTool::new(AgentTaskController::new()).description();
+        assert!(description.contains("No plan: 'what does parse_config do?'"));
+        assert!(description.contains("'fix the typo in the README'"));
+        assert!(description.contains("Plan: 'add a dark-mode setting"));
+        assert!(description.contains("'fix the 9 failing tests'"));
+        assert!(description.contains("partway through once a task turns out bigger"));
+        assert!(!description.contains("before starting the work"));
+        assert!(description.contains("A plan of 1 or 2 todos needs no verify_completion"));
+    }
+
     /// The lifecycle rules live in the descriptions now, not in the preamble:
     /// nothing in them implies a plan is mandatory.
     #[test]
@@ -285,6 +303,6 @@ mod tests {
 
         let verify = VerifyCompletionTool::new(controller).description();
         assert!(verify.contains("before writing the final reply"));
-        assert!(verify.contains("skip it otherwise"));
+        assert!(verify.contains("Only for a plan of 3 or more todos; skip it otherwise"));
     }
 }
