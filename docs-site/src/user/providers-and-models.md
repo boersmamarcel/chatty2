@@ -6,7 +6,7 @@ Everything lives on one page: **Settings → Models & Providers**. The roster li
 
 ## Connect a provider
 
-Click **Manage keys**. One sheet holds all three providers; each row shows its status and has **Save** and **Test** buttons. Keys are stored with your app settings, never in your project files. Removing a key hides that provider's models but keeps their settings.
+Click **Manage keys**. One sheet holds all three providers; each row shows its status and has **Save** and **Test** buttons. Keys are stored with your app settings, never in your project files. Removing a key hides that provider's models but keeps their settings. Saving an OpenRouter key loads its curated models at once, and saving the Ollama address re-runs discovery. Each row also links to where you get a key, an installer or the setup guide.
 
 ### OpenRouter
 
