@@ -327,6 +327,40 @@ fn apply_gateway_result(
 /// `refresh_runtime` — the same reload path a settings-file edit gets
 /// after a restart, run live instead so the tutorial's "quit and restart
 /// Chatty" step is no longer needed.
+/// Put the agent `name` in, or take it out of, the list your conversations
+/// can use (Settings → Agents). An empty `virtual_agents` means the default
+/// list, so the first change writes that list out before editing it; the
+/// last agent switched off leaves `local-agent`, never an empty list that
+/// would bring the default back.
+pub fn set_agent_in_conversations(name: &str, on: bool, cx: &mut App) {
+    let listings = crate::settings::models::AgentSpecsModel::cached(cx);
+    let declared = cx.global::<ModuleSettingsModel>().virtual_agents.clone();
+    let mut roster = chatty_core::agent_spec::roster_names_of(&declared, &listings);
+    let present = roster.iter().any(|n| n == name);
+    match (on, present) {
+        (true, false) => roster.push(name.to_string()),
+        (false, true) => roster.retain(|n| n != name),
+        _ => return,
+    }
+    if roster.is_empty() {
+        roster.push(chatty_core::tools::LOCAL_AGENT_NAME.to_string());
+    }
+    info!(agent = name, on, "Agent list for conversations changed");
+    cx.global_mut::<ModuleSettingsModel>().virtual_agents = roster;
+    let settings = cx.global::<ModuleSettingsModel>().clone();
+    refresh_runtime(cx);
+    cx.refresh_windows();
+    cx.spawn(|_cx: &mut AsyncApp| async move {
+        if let Err(e) = chatty_core::module_settings_repository()
+            .save(settings)
+            .await
+        {
+            error!(error = ?e, "Failed to save module settings");
+        }
+    })
+    .detach();
+}
+
 pub fn toggle_module_runtime(cx: &mut App) {
     let old_enabled = cx.global::<ModuleSettingsModel>().enabled;
     let new_enabled = !old_enabled;
