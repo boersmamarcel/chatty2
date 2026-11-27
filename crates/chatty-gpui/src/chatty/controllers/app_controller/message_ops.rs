@@ -1002,6 +1002,7 @@ impl ChattyApp {
         }
         self.chat_view.update(cx, |view, cx| {
             view.clear_pending_clarification(cx);
+            view.clear_pending_approval(cx);
         });
 
         // Extract trace before stopping.

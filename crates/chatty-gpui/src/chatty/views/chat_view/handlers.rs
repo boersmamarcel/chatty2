@@ -581,6 +581,29 @@ impl ChatView {
         cx.notify();
     }
 
+    /// A stopped turn asks nothing any more (AGE-2129): its approval card
+    /// stayed on screen after Stop. The request is denied, which also frees
+    /// a tool still waiting on it, and recorded so in the trace that is
+    /// saved with the turn.
+    pub fn clear_pending_approval(&mut self, cx: &mut Context<Self>) {
+        // Only the stopped conversation's request: one from another
+        // conversation still waits.
+        if self
+            .pending_approval
+            .as_ref()
+            .is_none_or(|pending| self.conversation_id.as_ref() != Some(&pending.conversation_id))
+        {
+            return;
+        }
+        let Some(pending) = self.pending_approval.take() else {
+            return;
+        };
+        if let Some(store) = cx.try_global::<crate::chatty::models::ConversationsStore>() {
+            store.resolve_approval(&pending.id, false);
+        }
+        self.handle_approval_resolved(&pending.id, false, cx);
+    }
+
     /// Handle approval decision from the floating bar, the plan strip, or the
     /// approve/deny keyboard shortcuts. A no-op when nothing is pending.
     pub fn handle_floating_approval(&mut self, approved: bool, cx: &mut Context<Self>) {
