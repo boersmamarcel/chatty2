@@ -52,7 +52,7 @@
 //!
 //! | # | Stage | What it does |
 //! |---|-------|--------------|
-//! | 0 | Terminal context | Stub every `<terminal_context>` snapshot but the newest (AGE-587) |
+//! | 0 | Terminal context | Stub every `<terminal_context>` snapshot but the newest (AGE-587), and the `<file_context>` blocks of every message but the newest that has any (AGE-2169) |
 //! | 1 | Cap | Stub every tool result over `tool_result_cap_bytes` outside the tail |
 //! | 2 | Compact | Replace every tool result outside the tail with a one-liner |
 //! | 3 | Snip | Keep the first `keep_head` and last `keep_tail` messages and the latest user message, drop the rest |
@@ -206,7 +206,7 @@ use self::stages::{KEEP_HEAD, KEEP_TAIL, TOOL_RESULT_CAP_BYTES};
 /// Which stage was the last one applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextShaperStage {
-    /// Older terminal snapshots stubbed (AGE-587).
+    /// Older terminal snapshots and dragged files stubbed (AGE-587, AGE-2169).
     TerminalContext,
     Cap,
     Compact,

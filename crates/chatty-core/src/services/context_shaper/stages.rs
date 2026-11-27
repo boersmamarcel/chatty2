@@ -1,4 +1,4 @@
-//! The shaping stages: terminal-context stubbing, cap, compact, snip and trim,
+//! The shaping stages: terminal-context and dragged-file stubbing, cap, compact, snip and trim,
 //! the round-trip-safe cut points they share, and the request assembly that
 //! applies them (with the compaction and the results ledger) before a call.
 
@@ -9,6 +9,7 @@ use rig_core::completion::message::{CallId, Text, ToolResult, ToolResultContent}
 use rig_core::message::UserContent;
 use tracing::{debug, warn};
 
+use crate::services::composer_context::stub_older_file_contexts;
 use crate::services::results_ledger;
 use crate::services::terminal::context::stub_older_contexts;
 use crate::services::{call_ids, enforce_tool_round_trips, result_ids, tool_round_trips_intact};
@@ -195,7 +196,10 @@ impl ContextShaper {
         // Stage 0: every terminal snapshot but the newest (AGE-587). The
         // screen it showed has moved on; the newest one says where it is.
         let mut stage = ContextShaperStage::TerminalContext;
-        for i in stub_older_contexts(&mut messages) {
+        // Files dragged into older messages go with them (AGE-2169).
+        let mut stubbed = stub_older_contexts(&mut messages);
+        stubbed.extend(stub_older_file_contexts(&mut messages));
+        for i in stubbed {
             counts[i] = counter.count_message(&messages[i]);
         }
 

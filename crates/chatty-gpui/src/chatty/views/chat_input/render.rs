@@ -28,12 +28,16 @@ use crate::assets::CustomIcon;
 use crate::settings::models::providers_store::ProviderType;
 
 use super::super::attachment_validation::{PDF_EXTENSION, is_image_extension};
-use super::super::terminal::context::render_context_chip;
+use super::super::sidebar_file_tree::DraggedEntries;
+use super::super::terminal::context::{ChipSpec, render_chip, render_context_chip};
 use super::ThumbnailCache;
 use super::at_mention::{at_menu_items_for, render_at_menu};
 use super::slash::render_slash_menu;
 use super::{ChatInput, ChatInputEvent, ChatInputState};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
+use chatty_core::services::composer_context::{
+    BlockKind, ContextBlock, OpenArtifact, display_path,
+};
 
 // ---------------------------------------------------------------------------
 // Path / type helpers
@@ -49,6 +53,101 @@ fn is_pdf(path: &Path) -> bool {
     path.extension()
         .map(|ext| ext.to_string_lossy().to_lowercase() == PDF_EXTENSION)
         .unwrap_or(false)
+}
+
+/// The chips for the dragged files and the open artifact. The preview of a
+/// dragged file shows its path; its text is read when the message is sent.
+fn render_composer_context_chips(
+    state: &Entity<ChatInputState>,
+    paths: &[PathBuf],
+    open: Option<&OpenArtifact>,
+    root: Option<&Path>,
+    cx: &App,
+) -> AnyElement {
+    let files = paths.iter().enumerate().map(|(index, path)| {
+        let shown = display_path(path, root);
+        let folder = path.is_dir();
+        let state = state.clone();
+        render_chip(
+            format!("composer-context-{index}"),
+            ChipSpec {
+                icon: if folder {
+                    gpui_component::IconName::FolderClosed
+                } else {
+                    gpui_component::IconName::File
+                },
+                label: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| shown.clone())
+                    + if folder { "/" } else { "" },
+                tooltip: "Sent with this message. Click to see the path.",
+                remove_tooltip: "Don't send this with the message",
+                preview: shown,
+            },
+            Some(std::rc::Rc::new(move |cx: &mut App| {
+                state.update(cx, |state, cx| state.remove_context_path(index, cx));
+            })),
+            cx,
+        )
+    });
+    let open = open.map(|open| {
+        let block = ContextBlock::for_open(open);
+        let state = state.clone();
+        render_chip(
+            "composer-context-open",
+            ChipSpec {
+                icon: gpui_component::IconName::Eye,
+                label: block.label(),
+                tooltip: "What you have open is named in this message, so the agent knows what you mean. Click to see it.",
+                remove_tooltip: "Don't name the open item in this message",
+                preview: block.block,
+            },
+            Some(std::rc::Rc::new(move |cx: &mut App| {
+                state.update(cx, |state, cx| state.dismiss_open_artifact(cx));
+            })),
+            cx,
+        )
+    });
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap_1()
+        .px_2()
+        .mt_2()
+        .children(files)
+        .children(open)
+        .into_any_element()
+}
+
+/// The chips for a sent message's context blocks (no ×).
+pub fn render_sent_context_chips(id: &str, blocks: &[ContextBlock], cx: &App) -> AnyElement {
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .gap_1()
+        .mt_2()
+        .children(blocks.iter().enumerate().map(|(index, block)| {
+            render_chip(
+                format!("{id}-{index}"),
+                ChipSpec {
+                    icon: match block.kind {
+                        BlockKind::File => gpui_component::IconName::File,
+                        BlockKind::Folder => gpui_component::IconName::FolderClosed,
+                        BlockKind::Open => gpui_component::IconName::Eye,
+                    },
+                    label: block.label(),
+                    tooltip: "Sent with this message. Click to see it.",
+                    remove_tooltip: "",
+                    preview: block.block.clone(),
+                },
+                None,
+                cx,
+            )
+        }))
+        .into_any_element()
 }
 
 fn provider_icon(provider_type: &ProviderType) -> CustomIcon {
@@ -162,6 +261,8 @@ impl RenderOnce for ChatInput {
         let show_attachment_button = supports_images || supports_pdf;
         let attachments = self.state.read(cx).get_attachments().to_vec();
         let terminal_context = self.state.read(cx).terminal_context().cloned();
+        let context_paths = self.state.read(cx).context_paths().to_vec();
+        let open_artifact = self.state.read(cx).open_artifact().cloned();
         let state_for_terminal_context = self.state.clone();
         let is_streaming = self.state.read(cx).is_streaming();
 
@@ -175,6 +276,7 @@ impl RenderOnce for ChatInput {
             .and_then(|s| s.workspace_dir.clone())
             .map(PathBuf::from);
         let effective_working_dir = per_chat_working_dir.clone().or(global_workspace_dir);
+        let context_root = effective_working_dir.clone();
         let has_working_dir_override = per_chat_working_dir.is_some();
 
         // Model display name: full text for the tooltip, elided text for the
@@ -458,9 +560,11 @@ impl RenderOnce for ChatInput {
                     cx,
                 ))
             })
-            // Main input box.
+            // Main input box. Files dragged from the file tree drop here
+            // as context.
             .child(
                 div()
+                    .id("composer-drop-target")
                     .w_full()
                     .min_w_0()
                     .flex()
@@ -469,6 +573,21 @@ impl RenderOnce for ChatInput {
                     .rounded_2xl()
                     .border_1()
                     .border_color(cx.theme().border)
+                    .drag_over::<DraggedEntries>(|style, _, _, cx| {
+                        style
+                            .border_color(cx.theme().drag_border)
+                            .bg(cx.theme().drop_target)
+                    })
+                    .on_drop::<DraggedEntries>({
+                        let state = self.state.clone();
+                        move |dragged, window, cx| {
+                            let paths = dragged.paths.clone();
+                            state.update(cx, |state, cx| {
+                                state.add_context_paths(paths, cx);
+                                state.input.update(cx, |input, cx| input.focus(window, cx));
+                            });
+                        }
+                    })
                     .child(
                         div()
                             .w_full()
@@ -781,6 +900,15 @@ impl RenderOnce for ChatInput {
                                             },
                                         )),
                                 )
+                            })
+                            .when(!context_paths.is_empty() || open_artifact.is_some(), |d| {
+                                d.child(render_composer_context_chips(
+                                    &self.state,
+                                    &context_paths,
+                                    open_artifact.as_ref(),
+                                    context_root.as_deref(),
+                                    cx,
+                                ))
                             })
                             .when_some(terminal_context, |d, context| {
                                 let state = state_for_terminal_context.clone();

@@ -47,6 +47,9 @@ pub(super) struct QueuedSend {
     /// The `<terminal_context>` block the composer attached (AGE-587),
     /// taken when the message was sent, not when it runs.
     pub terminal_context: Option<String>,
+    /// Dragged files and the open artifact (`composer_context` blocks),
+    /// read when the message was sent.
+    pub context_blocks: Vec<String>,
     /// `/agent <name> <prompt>`: hand the turn to that agent through the
     /// conversation's broker instead of asking the model (AGE-744).
     /// `message` is then the command as typed.
@@ -73,6 +76,7 @@ impl ChattyApp {
         message: String,
         attachments: Vec<PathBuf>,
         terminal_context: Option<String>,
+        context_blocks: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         self.send(
@@ -80,6 +84,7 @@ impl ChattyApp {
                 message,
                 attachments,
                 terminal_context,
+                context_blocks,
                 delegation: None,
             },
             cx,
@@ -108,6 +113,7 @@ impl ChattyApp {
                 message,
                 attachments: Vec::new(),
                 terminal_context: None,
+                context_blocks: Vec::new(),
                 delegation: Some(delegation),
             },
             cx,
@@ -125,10 +131,14 @@ impl ChattyApp {
         // account's copy. Refuse with the holder's words and give the text
         // back; "Continue here" takes it over first.
         if let Some(message) = self.held_elsewhere(&conv_id, cx) {
-            let text = send.message;
+            // Dragged files go back as chips with the text (AGE-2169).
+            let text = std::iter::once(send.message)
+                .chain(send.context_blocks)
+                .collect::<Vec<_>>()
+                .join("\n");
             self.chat_view.update(cx, |view, cx| {
-                view.chat_input_state().update(cx, |input, _cx| {
-                    input.restore_draft_text(text);
+                view.chat_input_state().update(cx, |input, cx| {
+                    input.restore_draft_text(text, cx);
                 });
             });
             self.notify_window(message, cx);
@@ -173,6 +183,7 @@ impl ChattyApp {
             message,
             attachments: vec![],
             terminal_context: None,
+            context_blocks: Vec::new(),
             delegation: None,
         };
         let Some(conv_id) = self.active_conversation_id(cx) else {
@@ -262,6 +273,7 @@ impl ChattyApp {
             message,
             attachments,
             terminal_context,
+            context_blocks,
             delegation,
         } = send;
         debug!(
@@ -411,10 +423,13 @@ impl ChattyApp {
                     if show_in_transcript {
                         // The same text a reload shows: the snapshot after
                         // what was typed, rendered as a chip (AGE-587).
-                        let shown = match &terminal_context {
-                            Some(block) => format!("{message}\n{block}"),
-                            None => message.clone(),
-                        };
+                        // Dragged files and the open artifact go between
+                        // them, as chips too.
+                        let shown = std::iter::once(message.as_str())
+                            .chain(context_blocks.iter().map(String::as_str))
+                            .chain(terminal_context.as_deref())
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         view.add_user_message(shown, attachments.clone(), cx);
                         debug!("User message added to UI");
                     } else {
@@ -511,6 +526,13 @@ impl ChattyApp {
                 )];
                 // The terminal snapshot is part of the user turn, after the
                 // typed text, and persisted with it (AGE-587).
+                // Dragged files and the open artifact: each its own part
+                // after the typed text, before the terminal snapshot.
+                for block in context_blocks {
+                    contents.push(rig_core::message::UserContent::Text(
+                        rig_core::completion::message::Text::new(block),
+                    ));
+                }
                 if let Some(block) = terminal_context {
                     info!(
                         tokens = chatty_core::token_budget::counter::TokenCounter::for_model("")
@@ -1139,8 +1161,8 @@ impl ChattyApp {
         // silently losing what the user typed (AGE-243).
         if let Some(text) = rolled_back_text {
             chat_view.update(cx, |view, cx| {
-                view.chat_input_state().update(cx, |input, _cx| {
-                    input.restore_draft_text(text);
+                view.chat_input_state().update(cx, |input, cx| {
+                    input.restore_draft_text(text, cx);
                 });
             });
         }
@@ -1447,8 +1469,8 @@ impl ChattyApp {
         // silently losing what the user typed (AGE-243).
         if let Some(text) = rolled_back_text {
             chat_view.update(cx, |view, cx| {
-                view.chat_input_state().update(cx, |input, _cx| {
-                    input.restore_draft_text(text);
+                view.chat_input_state().update(cx, |input, cx| {
+                    input.restore_draft_text(text, cx);
                 });
             });
         }
@@ -1534,7 +1556,7 @@ impl ChattyApp {
         // release mid-stream is left to the running turn: its next tool call
         // succeeds now, and the row it just got says why.
         if !taken && !streaming {
-            self.send_message(browser_handback_message(&url), vec![], None, cx);
+            self.send_message(browser_handback_message(&url), vec![], None, Vec::new(), cx);
         }
     }
 

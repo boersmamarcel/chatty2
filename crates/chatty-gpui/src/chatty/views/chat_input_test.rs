@@ -769,3 +769,125 @@ fn hosted_conversation_hides_local_model_picker(cx: &mut gpui::TestAppContext) {
         .1
     );
 }
+
+/// A file dragged from the tree is sent as a `<file_context>` block with its
+/// text, an image the model cannot take too, and the open artifact as an
+/// `<artifact_open>` reference unless × was pressed on it.
+#[gpui::test]
+fn chat_input_sends_dragged_files_and_the_open_artifact(cx: &mut gpui::TestAppContext) {
+    use chatty_core::services::composer_context::OpenArtifact;
+    use gpui::AppContext as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.md");
+    std::fs::write(&notes, "ship it\n").unwrap();
+    let image = dir.path().join("shot.png");
+    std::fs::write(&image, [0u8; 8]).unwrap();
+
+    cx.update(gpui_component::init);
+    let vcx = cx.add_empty_window();
+    let state = vcx.update(|window, cx| {
+        let input = cx.new(|cx| gpui_component::input::InputState::new(window, cx));
+        cx.new(|_| super::ChatInputState::new(input))
+    });
+    let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    vcx.update(|_window, cx| {
+        let sent = sent.clone();
+        cx.subscribe(&state, move |_, event: &super::ChatInputEvent, _| {
+            if let super::ChatInputEvent::Send { context_blocks, .. } = event {
+                sent.borrow_mut().push(context_blocks.clone());
+            }
+        })
+        .detach();
+        state.update(cx, |state, cx| {
+            state.set_working_dir_silent(Some(dir.path().to_path_buf()));
+            state.set_capabilities(false, false);
+            state.add_context_paths(vec![notes.clone(), image.clone(), notes.clone()], cx);
+            assert_eq!(state.context_paths(), &[notes.clone(), image.clone()]);
+            assert!(state.get_attachments().is_empty());
+            state.set_open_artifact(
+                Some(OpenArtifact::File {
+                    path: "docs/plan.md".into(),
+                }),
+                cx,
+            );
+            state.send_message(cx);
+            assert!(state.context_paths().is_empty());
+
+            // × on the Viewing chip holds until the viewer shows another file.
+            state.dismiss_open_artifact(cx);
+            assert!(state.open_artifact().is_none());
+            state.set_open_artifact(
+                Some(OpenArtifact::File {
+                    path: "docs/other.md".into(),
+                }),
+                cx,
+            );
+            assert!(state.open_artifact().is_some());
+        });
+    });
+    let sent = sent.borrow();
+    assert_eq!(sent.len(), 1);
+    let blocks = &sent[0];
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[0].starts_with("<file_context path=\"notes.md\""));
+    assert!(blocks[0].contains("\nship it\n</file_context>"));
+    assert!(blocks[1].contains("path=\"shot.png\" binary=\"true\""));
+    assert!(blocks[2].starts_with("<artifact_open kind=\"file\" path=\"docs/plan.md\""));
+}
+
+/// With image support, a dragged image is an ordinary attachment.
+#[gpui::test]
+fn chat_input_attaches_a_dragged_image_the_model_can_take(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let image = dir.path().join("shot.png");
+    std::fs::write(&image, [0u8; 8]).unwrap();
+
+    cx.update(gpui_component::init);
+    let vcx = cx.add_empty_window();
+    let state = vcx.update(|window, cx| {
+        let input = cx.new(|cx| gpui_component::input::InputState::new(window, cx));
+        cx.new(|_| super::ChatInputState::new(input))
+    });
+    vcx.update(|_window, cx| {
+        state.update(cx, |state, cx| {
+            state.set_capabilities(true, false);
+            state.add_context_paths(vec![image.clone()], cx);
+            assert!(state.context_paths().is_empty());
+            assert_eq!(state.get_attachments(), std::slice::from_ref(&image));
+        });
+    });
+}
+
+/// AGE-2169: a rolled-back message gives its dragged files back as chips,
+/// and its typed text without the blocks.
+#[gpui::test]
+fn chat_input_restores_dragged_files_after_a_rollback(cx: &mut gpui::TestAppContext) {
+    use chatty_core::services::composer_context::{ContextBlock, OpenArtifact};
+    use chatty_core::token_budget::counter::TokenCounter;
+    use gpui::AppContext as _;
+
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.md");
+    std::fs::write(&notes, "ship it\n").unwrap();
+    let file = ContextBlock::for_path(&notes, "notes.md", &TokenCounter::for_model("")).block;
+    let open = ContextBlock::for_open(&OpenArtifact::Review).block;
+
+    cx.update(gpui_component::init);
+    let vcx = cx.add_empty_window();
+    let state = vcx.update(|window, cx| {
+        let input = cx.new(|cx| gpui_component::input::InputState::new(window, cx));
+        cx.new(|_| super::ChatInputState::new(input))
+    });
+    vcx.update(|window, cx| {
+        state.update(cx, |state, cx| {
+            state.set_working_dir_silent(Some(dir.path().to_path_buf()));
+            state.restore_draft_text(format!("what is this?\n\n{file}\n\n{open}"), cx);
+            state.clear_if_needed(window, cx);
+            assert_eq!(state.context_paths(), std::slice::from_ref(&notes));
+            assert_eq!(state.input.read(cx).text().to_string(), "what is this?");
+        });
+    });
+}

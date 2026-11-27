@@ -32,6 +32,9 @@ pub mod browser;
 pub mod budget_stop;
 pub mod captured_chat;
 pub mod chart_svg_renderer;
+/// Files the user dragged into the desktop composer and the artifact open
+/// in its viewer, as blocks of the user turn.
+pub mod composer_context;
 /// The summary a context compaction replaces older messages with.
 pub mod context_compaction;
 pub mod context_shaper;
