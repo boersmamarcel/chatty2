@@ -182,11 +182,23 @@ impl ModelConfig {
 #[derive(Clone)]
 pub struct ModelsModel {
     models: Vec<ModelConfig>,
+    /// Set once the roster has been read from disk, so "no models" can be
+    /// told apart from "not loaded yet".
+    loaded: bool,
 }
 
 impl ModelsModel {
     pub fn new() -> Self {
-        Self { models: Vec::new() }
+        Self {
+            models: Vec::new(),
+            loaded: false,
+        }
+    }
+
+    /// Whether the saved roster has been loaded. Before then an empty list
+    /// means nothing.
+    pub fn is_loaded(&self) -> bool {
+        self.loaded
     }
 
     /// The local price book (AGE-682): every model in the roster that has
@@ -242,6 +254,7 @@ impl ModelsModel {
             .into_iter()
             .map(ModelConfig::with_prices_per_million)
             .collect();
+        self.loaded = true;
     }
 
     /// IDs a provider sync should drop: its own [`ModelSource::Sync`] entries
@@ -329,6 +342,14 @@ pub fn resolve_model_query<'a>(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn an_empty_roster_counts_as_loaded_only_after_replace_all() {
+        let mut store = ModelsModel::new();
+        assert!(!store.is_loaded(), "not read from disk yet");
+        store.replace_all(Vec::new());
+        assert!(store.is_loaded(), "read from disk, and empty");
+    }
 
     fn model(id: &str, provider: ProviderType, source: ModelSource) -> ModelConfig {
         let mut config = ModelConfig::new(
