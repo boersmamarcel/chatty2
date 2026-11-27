@@ -497,6 +497,22 @@ impl RenderOnce for ChatInput {
                                         // team without it and points here (AGE-822).
                                         let (dir_name, full_path_for_tooltip) =
                                             match effective_working_dir {
+                                                // A folder that no longer exists says so,
+                                                // rather than looking ready (AGE-2129).
+                                                Some(dir) if !dir.is_dir() => (
+                                                    format!(
+                                                        "{} (missing)",
+                                                        dir.file_name()
+                                                            .map(|n| n.to_string_lossy().to_string())
+                                                            .unwrap_or_else(|| {
+                                                                dir.to_string_lossy().to_string()
+                                                            })
+                                                    ),
+                                                    format!(
+                                                        "{} no longer exists: choose another folder",
+                                                        dir.to_string_lossy()
+                                                    ),
+                                                ),
                                                 Some(dir) => (
                                                     dir.file_name()
                                                         .map(|n| n.to_string_lossy().to_string())
