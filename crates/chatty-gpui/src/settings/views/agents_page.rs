@@ -1,11 +1,12 @@
 //! Settings → Agents (PL-U5): every agent spec the workspace reaches, with
-//! New spec, Edit and Duplicate (PL-U5b, AGE-718; the form is
+//! New agent, Edit, Duplicate and a "Use in conversations" switch (PL-U5b, AGE-718; the form is
 //! [`agent_spec_editor`](super::agent_spec_editor)). One kind of local
 //! agent — a spec, run by the harness — whatever
 //! file or preset defined it; the broker serves the roster at
 //! `/a2a/{name}`, and `list_agents`, `invoke_agent` and `/agent` reach them
 //! by name. Remote A2A agents are listed below them.
 
+use crate::settings::controllers::module_settings_controller;
 use crate::settings::models::agent_specs::{broker_reachable, served_names};
 use crate::settings::models::extensions_store::ExtensionsModel;
 use crate::settings::models::{AgentSpecsModel, DiscoveredModulesModel};
@@ -15,6 +16,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::*;
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage};
+use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme, Sizable, h_flex, v_flex};
 
 pub fn agents_page() -> SettingPage {
@@ -129,10 +131,13 @@ fn spec_row(index: usize, listing: &SpecListing, served: bool, cx: &App) -> AnyE
     let (status, color): (&str, Hsla) = match (&listing.spec, listing.shadowed) {
         (_, true) => ("Replaced by your copy", cx.theme().muted_foreground),
         (Err(_), false) => ("Does not load", cx.theme().danger),
-        (Ok(_), false) if served => ("Available", gpui::rgb(0x16A34A).into()),
         (Ok(spec), false) if !spec.swarm.exposed => ("Hidden", cx.theme().muted_foreground),
-        (Ok(_), false) => ("Not available", cx.theme().muted_foreground),
+        (Ok(_), false) => ("", cx.theme().muted_foreground),
     };
+    // An agent that can be offered gets a switch instead of a badge: on, your
+    // conversations can use it (`/agent <name>`, or the AI hands work to it).
+    let switchable = status.is_empty() && broker_reachable(cx);
+    let name = listing.name.clone();
 
     v_flex()
         .w_full()
@@ -143,7 +148,7 @@ fn spec_row(index: usize, listing: &SpecListing, served: bool, cx: &App) -> AnyE
                 .gap_2()
                 .items_center()
                 .child(name_label(&listing.name, cx))
-                .child(badge(status, color))
+                .when(!status.is_empty(), |el| el.child(badge(status, color)))
                 .child(
                     div()
                         .flex_1()
@@ -152,6 +157,19 @@ fn spec_row(index: usize, listing: &SpecListing, served: bool, cx: &App) -> AnyE
                         .text_color(cx.theme().muted_foreground)
                         .child(listing.source.label()),
                 )
+                .when(switchable, |el| {
+                    el.child(
+                        Switch::new(SharedString::from(format!("agents-use-{index}")))
+                            .checked(served)
+                            .small()
+                            .label("Use in conversations")
+                            .on_click(move |checked: &bool, _window, cx| {
+                                module_settings_controller::set_agent_in_conversations(
+                                    &name, *checked, cx,
+                                );
+                            }),
+                    )
+                })
                 .when(listing.spec.is_ok(), |el| {
                     el.child(row_actions(index, listing))
                 }),
