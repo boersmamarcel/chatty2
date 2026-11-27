@@ -560,8 +560,8 @@ impl RenderOnce for ChatInput {
                     cx,
                 ))
             })
-            // Main input box. Files dragged from the file tree drop here
-            // as context.
+            // Main input box. Files dragged from the file tree, or from
+            // the file manager outside the app, drop here as context.
             .child(
                 div()
                     .id("composer-drop-target")
@@ -582,6 +582,21 @@ impl RenderOnce for ChatInput {
                         let state = self.state.clone();
                         move |dragged, window, cx| {
                             let paths = dragged.paths.clone();
+                            state.update(cx, |state, cx| {
+                                state.add_context_paths(paths, cx);
+                                state.input.update(cx, |input, cx| input.focus(window, cx));
+                            });
+                        }
+                    })
+                    .drag_over::<ExternalPaths>(|style, _, _, cx| {
+                        style
+                            .border_color(cx.theme().drag_border)
+                            .bg(cx.theme().drop_target)
+                    })
+                    .on_drop::<ExternalPaths>({
+                        let state = self.state.clone();
+                        move |dropped, window, cx| {
+                            let paths = dropped.paths().to_vec();
                             state.update(cx, |state, cx| {
                                 state.add_context_paths(paths, cx);
                                 state.input.update(cx, |input, cx| input.focus(window, cx));
