@@ -43,7 +43,10 @@ impl ChatView {
             execution_settings
                 .and_then(|settings| settings.workspace_dir.clone().map(PathBuf::from))
         });
-        let workspace_set = workspace_dir.is_some();
+        // A folder that no longer exists is no workspace (AGE-2129): the
+        // card showed a deleted /tmp folder as ready.
+        let workspace_missing = workspace_dir.as_ref().is_some_and(|dir| !dir.is_dir());
+        let workspace_set = workspace_dir.is_some() && !workspace_missing;
         let fs_read_enabled = execution_settings
             .is_some_and(|settings| workspace_set && settings.filesystem_read_enabled);
         let fs_write_enabled = execution_settings
@@ -173,6 +176,8 @@ impl ChatView {
                             .map(|path| summarize_workspace(path))
                             .unwrap_or_else(|| "ready".to_string())
                     )
+                } else if workspace_missing {
+                    "workspace missing".to_string()
                 } else {
                     "workspace needed".to_string()
                 },
