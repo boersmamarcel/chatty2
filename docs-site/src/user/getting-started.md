@@ -29,6 +29,8 @@ Chatty checks for new releases in the background and offers them in the status f
 
 ## 2. Connect a provider and add a model
 
+Until a model is set up, the start screen lists the three providers, links to where each one gives you a key or an installer, and has an **Open Settings** button.
+
 1. Click the gear icon in the title bar to open Settings, then **Models & Providers**.
 2. **Manage keys** — paste an OpenRouter key, point at a local Ollama, or connect Azure OpenAI. Press **Test** to check it.
 3. **Add model** — search the provider's catalogue, tick the models you want, then **Add**.

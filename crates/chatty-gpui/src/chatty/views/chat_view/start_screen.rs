@@ -6,28 +6,50 @@
 //!   shown when a conversation has no messages yet.
 //! - `render_status_badge` / `summarize_workspace` — helpers used only
 //!   by `render_start_screen`.
+//! - `render_provider_setup` — the guide shown instead of the capability
+//!   summary while no model is set up, so a fresh install says what to do.
 //!
 //! This is all pure-view code with no behaviour beyond reading global
 //! settings. Pulled out because the start screen alone is ~250 lines of
 //! nested element builders, which made the main `render` path harder
 //! to read.
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
-use gpui_component::ActiveTheme;
+use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::{ActiveTheme, Sizable};
 use std::path::{Path, PathBuf};
 
 use crate::settings::models::agent_specs::served_names;
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
+use crate::settings::models::models_store::ModelsModel;
 use crate::settings::models::{
     AgentSpecsModel, DiscoveredModulesModel, ExtensionsModel, ModuleLoadStatus,
     ModuleSettingsModel, SearchSettingsModel,
 };
+
+/// Where each provider explains how to get going. Verified 2026-11-27.
+const OPENROUTER_KEYS_URL: &str = "https://openrouter.ai/settings/keys";
+const OLLAMA_DOWNLOAD_URL: &str = "https://ollama.com/download";
+const AZURE_SETUP_URL: &str =
+    "https://learn.microsoft.com/en-us/azure/foundry-classic/openai/how-to/create-resource";
+const PROVIDERS_GUIDE_URL: &str =
+    "https://boersmamarcel.github.io/chatty2/user/providers-and-models.html";
 
 use super::ChatView;
 
 impl ChatView {
     /// Render a desktop-adapted onboarding screen for a new/empty chat.
     pub(super) fn render_start_screen(&self, cx: &Context<Self>) -> impl IntoElement {
+        // A fresh install has no model, and nothing else on this screen
+        // works without one: say how to get one instead (first-run guide).
+        let needs_provider = cx
+            .try_global::<ModelsModel>()
+            .is_some_and(|models| models.is_loaded() && models.models().is_empty());
+        if needs_provider {
+            return render_provider_setup(cx).into_any_element();
+        }
+
         let (workspace_override, skill_count) = {
             let input = self.chat_input_state.read(cx);
             (input.working_dir().cloned(), input.available_skills().len())
@@ -270,7 +292,170 @@ impl ChatView {
                         ),
                 ),
         )
+        .into_any_element()
     }
+}
+
+/// The first-run guide: the three providers, what each is for, where to get
+/// a key, and where in Settings it goes.
+fn render_provider_setup(cx: &App) -> Div {
+    let option = |id: &'static str,
+                  name: &'static str,
+                  blurb: &'static str,
+                  hint: Option<&'static str>,
+                  link_label: &'static str,
+                  url: &'static str| {
+        div()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .py_2()
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().foreground)
+                            .child(name),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(blurb),
+                    )
+                    .when_some(hint, |this, hint| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(hint),
+                        )
+                    }),
+            )
+            .child(
+                Button::new(id)
+                    .label(link_label)
+                    .small()
+                    .outline()
+                    .on_click(move |_, _, cx| cx.open_url(url)),
+            )
+    };
+
+    div().w_full().flex().justify_center().items_center().child(
+        div()
+            .w_full()
+            .max_w(px(640.))
+            .px_4()
+            .py_6()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(cx.theme().foreground)
+                            .child("Welcome to Chatty"),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(560.))
+                            .text_sm()
+                            .text_center()
+                            .line_height(relative(1.4))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                "Chatty needs a model to talk to before it can answer. Pick one of these to start:",
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary)
+                    .px_4()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .child(option(
+                        "setup-openrouter",
+                        "OpenRouter",
+                        "One key for Claude, GPT, Gemini and hundreds more. You pay per use.",
+                        Some("Sign in, add credit, then create a key."),
+                        "Get a key ↗",
+                        OPENROUTER_KEYS_URL,
+                    ))
+                    .child(option(
+                        "setup-ollama",
+                        "Ollama",
+                        "Free, and runs on your own computer. No key needed.",
+                        Some("Install it, then pull a model in a terminal: ollama pull gemma4"),
+                        "Download ↗",
+                        OLLAMA_DOWNLOAD_URL,
+                    ))
+                    .child(option(
+                        "setup-azure",
+                        "Azure OpenAI",
+                        "For an organisation with an Azure subscription.",
+                        Some("Create a resource and a deployment, then copy its key and endpoint."),
+                        "Setup guide ↗",
+                        AZURE_SETUP_URL,
+                    )),
+            )
+            .child(
+                div()
+                    .max_w(px(560.))
+                    .text_sm()
+                    .text_center()
+                    .line_height(relative(1.4))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        "Then open Settings → Models & Providers → Manage keys, paste the key (or the Ollama address) and press Save. Its models appear in the picker below.",
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(
+                        Button::new("setup-open-settings")
+                            .label("Open Settings")
+                            .small()
+                            .primary()
+                            .on_click(|_, _, cx| {
+                                cx.defer(|cx| {
+                                    crate::settings::controllers::SettingsView::open_or_focus_settings_window(cx);
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("setup-read-guide")
+                            .label("Step-by-step guide ↗")
+                            .small()
+                            .ghost()
+                            .on_click(|_, _, cx| cx.open_url(PROVIDERS_GUIDE_URL)),
+                    ),
+            ),
+    )
 }
 
 fn render_status_badge(

@@ -32,6 +32,15 @@ fn set_test_state(
     states.push((provider_type, state));
 }
 
+/// A small "where do I get this" link under a provider row.
+fn guide_link(id: &'static str, label: &'static str, url: &'static str) -> Button {
+    Button::new(id)
+        .label(label)
+        .xsmall()
+        .ghost()
+        .on_click(move |_, _, cx| cx.open_url(url))
+}
+
 fn azure_field(
     cx: &App,
     read: impl Fn(&crate::settings::models::providers_store::ProviderConfig) -> Option<String>,
@@ -196,11 +205,24 @@ impl ModelsListView {
                                                 .outline()
                                                 .on_click(move |_, _, cx| {
                                                     let key = openrouter_key.read(cx).value().to_string();
+                                                    let has_key = !key.trim().is_empty();
                                                     providers_controller::update_or_create_provider(
                                                         cx,
                                                         ProviderType::OpenRouter,
                                                         key,
                                                     );
+                                                    // Boot only syncs when a key is already
+                                                    // saved: without this a first key showed
+                                                    // no models until the next launch.
+                                                    if has_key {
+                                                        cx.spawn(async move |cx: &mut AsyncApp| {
+                                                            crate::settings::providers::openrouter::sync_openrouter_models(cx)
+                                                                .await
+                                                                .map_err(|e| tracing::warn!(error = ?e, "OpenRouter sync after saving a key failed"))
+                                                                .ok();
+                                                        })
+                                                        .detach();
+                                                    }
                                                 })
                                         })
                                         .child({
@@ -244,6 +266,11 @@ impl ModelsListView {
                                 .when_some(test_label(&ProviderType::OpenRouter), |this, (color, msg)| {
                                     this.child(div().text_xs().text_color(color).child(msg))
                                 })
+                                .child(h_flex().child(guide_link(
+                                    "openrouter-get-key",
+                                    "No key yet? Create one at openrouter.ai ↗",
+                                    "https://openrouter.ai/settings/keys",
+                                )))
                         })
                         // ── Ollama ────────────────────────────────────────
                         .child({
@@ -276,6 +303,7 @@ impl ModelsListView {
                                                 .on_click(move |_, _, cx| {
                                                     let url = ollama_url.read(cx).value().to_string();
                                                     providers_controller::update_or_create_ollama(cx, url);
+                                                    crate::settings::providers::resync_ollama_models(cx);
                                                 })
                                         })
                                         .child({
@@ -326,6 +354,11 @@ impl ModelsListView {
                                         .text_color(colors.muted_fg)
                                         .child("No key needed — a local instance is detected automatically."),
                                 )
+                                .child(h_flex().child(guide_link(
+                                    "ollama-download",
+                                    "Not installed? Download Ollama ↗",
+                                    "https://ollama.com/download",
+                                )))
                         })
                         // ── Azure OpenAI ──────────────────────────────────
                         .child({
@@ -490,7 +523,12 @@ impl ModelsListView {
                                                                 );
                                                             })
                                                     }),
-                                            ),
+                                            )
+                                            .child(h_flex().child(guide_link(
+                                                "azure-setup-guide",
+                                                "How to create a resource and find its key ↗",
+                                                "https://learn.microsoft.com/en-us/azure/foundry-classic/openai/how-to/create-resource",
+                                            ))),
                                     )
                                 })
                         })
