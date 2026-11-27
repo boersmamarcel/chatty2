@@ -40,9 +40,9 @@ Every request is recorded (`requests()`, `requests_for(key)`) with its body,
 arrival and finish time; `max_concurrency()` is the peak number in flight.
 One server is one endpoint.
 
-Mind the headless recovery policy when scripting errors: a worker retries any
-provider status other than 401/403/429 after 10 s, 20 s, …, and a 401 once
-immediately. Two `Error(401)`s end a worker's turn fast. A `402` whose body
+Mind the headless recovery policy when scripting errors: a worker retries a
+429 or a 5xx after 10 s, 20 s, …, never another 4xx (AGE-2178), and a 401
+once immediately. Two `Error(401)`s end a worker's turn fast. A `402` whose body
 names `budget_exceeded` or `cap_exceeded` is never retried (AGE-903).
 
 ## Writing a swarm test

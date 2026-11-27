@@ -128,6 +128,7 @@ pub(super) async fn build_provider_agent(
         request_recorder,
         tool_loader,
         supports_images: model_config.supports_images,
+        images_refused: Default::default(),
         model_id: model_config.model_identifier.clone(),
         plugin_usage: Vec::new(),
         run_inbox: None,

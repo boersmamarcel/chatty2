@@ -226,6 +226,10 @@ pub struct AgentClient {
     /// from history (e.g. after switching to a text-only model mid-conversation)
     /// fails as a clear, model-visible note instead of a provider 400.
     supports_images: bool,
+    /// Set once the provider refused a request for carrying an image
+    /// (AGE-2178), so later requests strip images up front as for a model
+    /// configured text-only. Shared by this client's clones.
+    images_refused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The model id sent to the provider, which the stream's usage records
     /// name (AGE-682).
     model_id: String,
@@ -1804,10 +1808,21 @@ impl AgentClient {
     }
 
     /// Whether this agent's model accepts image input, per `ModelConfig`
-    /// at build time. `stream_prompt` uses this to strip images from a
-    /// request rather than let the provider 400 on them.
+    /// at build time, unless the provider has since refused an image
+    /// ([`Self::images_refused`]). `stream_prompt` uses this to strip
+    /// images from a request rather than let the provider 400 on them.
     pub fn supports_images(&self) -> bool {
         self.supports_images
+            && !self
+                .images_refused
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The flag `stream_prompt` sets when the provider refuses a request
+    /// for carrying an image (AGE-2178), which makes this agent text-only
+    /// from then on.
+    pub fn images_refused(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.images_refused.clone()
     }
 }
 

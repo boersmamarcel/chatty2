@@ -1352,6 +1352,8 @@ mod append_only_prefix;
 #[cfg(test)]
 mod failed_turn_history;
 #[cfg(test)]
+mod image_refusal;
+#[cfg(test)]
 mod spec_budget;
 #[cfg(test)]
 mod tests;
