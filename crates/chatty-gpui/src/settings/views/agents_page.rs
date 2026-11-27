@@ -22,7 +22,7 @@ pub fn agents_page() -> SettingPage {
         .description(
             "The agents Chatty can hand work to. Each one has a role, a model and the \
              tools it may use. Start a task with /agent <name>, or let an agent ask \
-             another for help. New spec, Edit and Duplicate save your changes and take \
+             another for help. New agent, Edit and Duplicate save your changes and take \
              effect at once; editing a built-in agent saves your own copy of it.",
         )
         .resettable(false)
@@ -31,18 +31,18 @@ pub fn agents_page() -> SettingPage {
 
 fn specs_group() -> SettingGroup {
     SettingGroup::new()
-        .title("Agent specs")
+        .title("Agents")
         .items(vec![SettingItem::render(|_options, _window, cx| {
             let listings = AgentSpecsModel::listings(cx);
             let served = served_names(&listings, cx);
             // What the conversations' roster actually reaches, whatever the
             // module runtime's switch says (AGE-759).
             let status = if !broker_reachable(cx) {
-                "No broker is available here, so none of these are served.".to_string()
+                "None of these can run yet: Chatty has not started its agents. Restart Chatty if this stays.".to_string()
             } else if served.is_empty() {
-                "The broker serves none of these.".to_string()
+                "None of these are switched on for your conversations.".to_string()
             } else {
-                format!("Served by the broker: {}", served.join(", "))
+                format!("Available in your conversations: {}", served.join(", "))
             };
 
             v_flex()
@@ -72,7 +72,7 @@ fn specs_group() -> SettingGroup {
                                     Button::new("agents-new-spec")
                                         .small()
                                         .primary()
-                                        .label("New spec")
+                                        .label("New agent")
                                         .on_click(|_, window, cx| {
                                             agent_spec_editor::open_new_spec(window, cx)
                                         }),
@@ -116,7 +116,7 @@ fn default_worker_row(name: &str, cx: &App) -> AnyElement {
                 .gap_2()
                 .items_center()
                 .child(name_label(name, cx))
-                .child(badge("Served", gpui::rgb(0x16A34A).into())),
+                .child(badge("Available", gpui::rgb(0x16A34A).into())),
         )
         .child(detail(
             "The default worker: the default model, the full tool set.",
@@ -127,11 +127,11 @@ fn default_worker_row(name: &str, cx: &App) -> AnyElement {
 
 fn spec_row(index: usize, listing: &SpecListing, served: bool, cx: &App) -> AnyElement {
     let (status, color): (&str, Hsla) = match (&listing.spec, listing.shadowed) {
-        (_, true) => ("Shadowed", cx.theme().muted_foreground),
+        (_, true) => ("Replaced by your copy", cx.theme().muted_foreground),
         (Err(_), false) => ("Does not load", cx.theme().danger),
-        (Ok(_), false) if served => ("Served", gpui::rgb(0x16A34A).into()),
-        (Ok(spec), false) if !spec.swarm.exposed => ("Not exposed", cx.theme().muted_foreground),
-        (Ok(_), false) => ("Not in the roster", cx.theme().muted_foreground),
+        (Ok(_), false) if served => ("Available", gpui::rgb(0x16A34A).into()),
+        (Ok(spec), false) if !spec.swarm.exposed => ("Hidden", cx.theme().muted_foreground),
+        (Ok(_), false) => ("Not available", cx.theme().muted_foreground),
     };
 
     v_flex()
@@ -210,11 +210,11 @@ fn spec_details(spec: &AgentSpec, cx: &App) -> Vec<AnyElement> {
         spec.agent.model.as_deref().unwrap_or("the default")
     )];
     run.push(format!(
-        "Profile: {}",
-        spec.tools.profile.as_deref().unwrap_or("the full tool set")
+        "Tools: {}",
+        spec.tools.profile.as_deref().unwrap_or("all")
     ));
     if !spec.tools.disable.is_empty() {
-        run.push(format!("Disabled: {}", spec.tools.disable.join(", ")));
+        run.push(format!("without {}", spec.tools.disable.join(", ")));
     }
     lines.push(detail(&run.join(" · "), cx));
     if !spec.plugins.is_empty() {
@@ -243,18 +243,18 @@ fn spec_details(spec: &AgentSpec, cx: &App) -> Vec<AnyElement> {
         lines.push(detail(&format!("Plugins: {}", plugins.join("; ")), cx));
     }
     let mut swarm = vec![if spec.swarm.exposed {
-        "Exposed".to_string()
+        "Other agents can call it".to_string()
     } else {
-        "Not exposed".to_string()
+        "Only you can start it".to_string()
     }];
     if !spec.swarm.delegates_to.is_empty() {
         swarm.push(format!(
-            "delegates to {}",
+            "hands work to {}",
             spec.swarm.delegates_to.join(", ")
         ));
     }
     if let Some(callers) = &spec.swarm.callers {
-        swarm.push(format!("callers {}", callers.join(", ")));
+        swarm.push(format!("called by {}", callers.join(", ")));
     }
     lines.push(detail(&swarm.join(" · "), cx));
     lines

@@ -267,11 +267,11 @@ fn apply_scan_snapshot(
 fn gateway_running_status(gateway: &ProtocolGateway) -> String {
     match (gateway.socket_path(), gateway.token_path()) {
         (Some(socket), Some(token)) => format!(
-            "Gateway running on {} (token in {})",
+            "Plugins are running. Other apps connect at {} (key in {})",
             socket.display(),
             token.display()
         ),
-        _ => "Gateway running".to_string(),
+        _ => "Plugins are running".to_string(),
     }
 }
 
@@ -301,7 +301,7 @@ fn apply_gateway_result(
                 true
             }
             Err(err) => {
-                state.gateway_status = format!("Gateway failed to start: {err}");
+                state.gateway_status = format!("Plugins could not start: {err}");
                 state.gateway = None;
                 state.gateway_workspace = None;
                 false
@@ -439,7 +439,7 @@ pub fn refresh_runtime(cx: &mut App) {
                     let state = cx.global_mut::<DiscoveredModulesModel>();
                     if settings.enabled {
                         state.gateway_status =
-                            "Gateway will start on the first delegation".to_string();
+                            "Plugins start when an agent first needs one".to_string();
                     }
                     state.lazy_broker = Some(broker);
                     true

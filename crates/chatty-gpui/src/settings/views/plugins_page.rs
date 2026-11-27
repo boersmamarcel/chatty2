@@ -37,9 +37,9 @@ pub fn plugins_page() -> SettingPage {
 /// `toggle_module_runtime` rebuilds the gateway live, so no restart is
 /// needed either way. The broker is there whatever it says (AGE-759).
 fn module_runtime_group() -> SettingGroup {
-    SettingGroup::new().title("Module runtime").items(vec![
+    SettingGroup::new().title("Plugin runner").items(vec![
         SettingItem::new(
-            "Enable module runtime",
+            "Run plugins",
             SettingField::switch(
                 |cx: &App| cx.global::<ModuleSettingsModel>().enabled,
                 |_val: bool, cx: &mut App| {
@@ -49,8 +49,8 @@ fn module_runtime_group() -> SettingGroup {
             .default_value(false),
         )
         .description(
-            "Loads WASM modules and serves them on the gateway's HTTP port. Off by default. \
-             Delegated agents do not need it: the local agent broker runs either way.",
+            "Starts the installed plugins so agents can use them. Off by default. \
+             Agents handing work to each other do not need it.",
         ),
     ])
 }
@@ -91,7 +91,7 @@ fn plugins_group() -> SettingGroup {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("No plugins in the module directory."),
+                            .child("No plugins installed yet."),
                     )
                 })
                 .children(plugins.into_iter().map(|(module, from_hive)| {
@@ -128,7 +128,7 @@ fn plugins_group() -> SettingGroup {
                         format!("Runs: {}", module.execution_mode)
                     });
                     facts.push(if used_by.is_empty() {
-                        "Used by no agent spec yet: Add to agent… lists it in one.".to_string()
+                        "No agent uses it yet: Add to agent… gives it to one.".to_string()
                     } else {
                         format!("Used by: {}", used_by.join("; "))
                     });

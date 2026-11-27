@@ -21,9 +21,8 @@ pub fn search_settings_page() -> SettingPage {
             SettingGroup::new()
                 .title("Internet Access")
                 .description(
-                    "Master switch for all internet-facing tools. When disabled, the AI \
-                     cannot fetch web pages, search the web, use browser automation, \
-                     or run code in cloud sandboxes.",
+                    "One switch for everything below. Off, the AI cannot open web pages, \
+                     search the web, use a cloud browser or run code in the cloud.",
                 )
                 .items(vec![
                     SettingItem::new(
@@ -37,8 +36,8 @@ pub fn search_settings_page() -> SettingPage {
                         .default_value(true),
                     )
                     .description(
-                        "Enables the built-in web fetch tool and gates all other internet \
-                     services below. Disable to completely prevent internet access.",
+                        "Lets the AI open web pages, and turns on the services below that you \
+                     set up. Turn it off to keep the AI off the internet entirely.",
                     ),
                 ]),
             // ── Web Search ───────────────────────────────────────────────
@@ -163,15 +162,15 @@ pub fn search_settings_page() -> SettingPage {
                 ]),
             // ── Keyless Search ───────────────────────────────────────────
             SettingGroup::new()
-                .title("Keyless search")
+                .title("Better results without a search key (optional)")
                 .description(
-                    "Without an API key, results can be reordered by a local cross-encoder \
-                     (e.g. bge-reranker-v2-m3 behind a /rerank endpoint): better top \
-                     results for about one second more per search. Leave empty to skip.",
+                    "If you run a ranking model on this computer, Chatty can use it to put \
+                     the best results first when no search key is set, for about a second \
+                     more per search. Most people leave this empty.",
                 )
                 .items(vec![
                     SettingItem::new(
-                        "Rerank Endpoint",
+                        "Ranking Server Address",
                         SettingField::input(
                             |cx: &App| {
                                 cx.global::<SearchSettingsModel>()
@@ -185,9 +184,9 @@ pub fn search_settings_page() -> SettingPage {
                             },
                         ),
                     )
-                    .description("Full URL, e.g. http://127.0.0.1:8001/rerank (vLLM or llama.cpp server)."),
+                    .description("Where the ranking model answers, for example http://127.0.0.1:8001/rerank."),
                     SettingItem::new(
-                        "Rerank Model",
+                        "Ranking Model",
                         SettingField::input(
                             |cx: &App| {
                                 cx.global::<SearchSettingsModel>()
@@ -201,9 +200,9 @@ pub fn search_settings_page() -> SettingPage {
                             },
                         ),
                     )
-                    .description("Model name the server expects, e.g. BAAI/bge-reranker-v2-m3."),
+                    .description("The model's name as that server knows it, for example BAAI/bge-reranker-v2-m3."),
                     SettingItem::new(
-                        "Test Reranker",
+                        "Test Ranking Server",
                         SettingField::render(|_options, _window, cx| {
                             let (color, message) = match cx.try_global::<RerankTestStatus>() {
                                 Some(RerankTestStatus::Testing) => {
@@ -235,19 +234,18 @@ pub fn search_settings_page() -> SettingPage {
                                 .into_any_element()
                         }),
                     )
-                    .description("Sends one /rerank request to the endpoint above."),
+                    .description("Asks the server above to rank one test search."),
                 ]),
             // ── Browser Automation ───────────────────────────────────────
             SettingGroup::new()
-                .title("Browser Automation")
+                .title("Cloud Browser")
                 .description(
-                    "Cloud service that lets the AI control a real web browser \
-                     to interact with websites (fill forms, click buttons, extract data). \
-                     Powered by browser-use.com.",
+                    "A browser in the cloud (browser-use.com) the AI can use on websites: \
+                     fill in forms, click through pages, read what they show.",
                 )
                 .items(vec![
                     SettingItem::new(
-                        "Enable Browser Automation",
+                        "Enable Cloud Browser",
                         SettingField::switch(
                             |cx: &App| cx.global::<SearchSettingsModel>().browser_use_enabled,
                             |_val: bool, cx: &mut App| {
@@ -256,7 +254,7 @@ pub fn search_settings_page() -> SettingPage {
                         )
                         .default_value(true),
                     )
-                    .description("Activate the browser_use tool. ↗ Sends page content to browser-use.com."),
+                    .description("Let the AI use the cloud browser. ↗ The pages it visits go through browser-use.com."),
                     SettingItem::new(
                         "API Key",
                         masked_api_key_field(
@@ -296,7 +294,7 @@ pub fn search_settings_page() -> SettingPage {
                         )
                         .default_value(true),
                     )
-                    .description("Activate the daytona_run tool. ↗ Runs code in a remote cloud sandbox."),
+                    .description("Let the AI run code on a computer in the cloud. ↗ The code and its files go to daytona.io."),
                     SettingItem::new(
                         "API Key",
                         masked_api_key_field(

@@ -718,10 +718,10 @@ pub fn open_add_to_agent(module: &str, window: &mut Window, cx: &mut App) {
             (label, listing.name.clone())
         })
         .collect();
-    options.push(("New spec…".to_string(), NEW.to_string()));
+    options.push(("New agent…".to_string(), NEW.to_string()));
     let first = options[0].1.clone();
     let target_choice = Rc::new(Choice::new(options, &first, window, cx));
-    let new_name = text_input("", "name of the new spec", window, cx);
+    let new_name = text_input("", "name of the new agent", window, cx);
     let granted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let errors: Rc<RefCell<Vec<FieldError>>> = Rc::new(RefCell::new(Vec::new()));
     let listings = Rc::new(listings);
@@ -758,7 +758,7 @@ pub fn open_add_to_agent(module: &str, window: &mut Window, cx: &mut App) {
                         el.child(
                             v_flex()
                                 .gap_1()
-                                .child(div().text_xs().text_color(muted).child("New spec's name"))
+                                .child(div().text_xs().text_color(muted).child("New agent's name"))
                                 .child(Input::new(&new_name).small()),
                         )
                     })
