@@ -112,11 +112,24 @@ impl Render for SettingsView {
                                 "Theme",
                                 SettingField::render(move |_options, _window, cx| {
                                     let theme_opts = theme_options.clone();
-                                    let current_theme = cx
+                                    let saved_theme = cx
                                         .global::<GeneralSettingsModel>()
                                         .theme_name
                                         .clone()
                                         .unwrap_or_else(|| "Ayu".to_string());
+                                    // A saved theme that is not installed was shown
+                                    // as selected while another was in use
+                                    // (AGE-2129): show the one in use.
+                                    let current_theme = if theme_opts
+                                        .iter()
+                                        .any(|(value, _)| value.as_ref() == saved_theme)
+                                    {
+                                        saved_theme
+                                    } else {
+                                        crate::settings::utils::theme_utils::extract_base_theme_name(
+                                            cx.theme().theme_name().as_ref(),
+                                        )
+                                    };
 
                                     let current_label = current_theme.clone();
 

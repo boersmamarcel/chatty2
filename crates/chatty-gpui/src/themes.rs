@@ -32,8 +32,27 @@ pub(crate) fn get_themes_dir() -> PathBuf {
         }
     }
 
+    // Next to the executable (the Windows installer puts them there), or a
+    // few folders up from it (a build in the repo's `target/release`). The
+    // working directory alone found none when the app was started from
+    // anywhere else, and the saved theme silently fell back (AGE-2129).
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(found) = themes_near(&exe_path)
+    {
+        return found;
+    }
+
     // Default to ./themes for development and Linux/Windows
     PathBuf::from("./themes")
+}
+
+/// A `themes` folder beside `exe` or up to three folders above it.
+fn themes_near(exe: &std::path::Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .take(4)
+        .map(|dir| dir.join("themes"))
+        .find(|themes| themes.is_dir())
 }
 
 /// Monospace families to try, in order, when the theme's own cannot be
@@ -225,4 +244,26 @@ pub(crate) fn apply_theme_from_settings(cx: &mut App) {
     // Mark initialization complete - now the observer can save user changes
     THEME_INIT_COMPLETE.store(true, Ordering::SeqCst);
     debug!("Theme initialization complete, observer now active");
+}
+
+#[cfg(test)]
+mod themes_dir_tests {
+    use super::themes_near;
+
+    #[test]
+    fn themes_are_found_beside_or_above_the_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("target/release/chatty");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        assert_eq!(themes_near(&exe), None);
+
+        std::fs::create_dir_all(root.path().join("themes")).unwrap();
+        assert_eq!(themes_near(&exe), Some(root.path().join("themes")));
+
+        std::fs::create_dir_all(root.path().join("target/release/themes")).unwrap();
+        assert_eq!(
+            themes_near(&exe),
+            Some(root.path().join("target/release/themes"))
+        );
+    }
 }
