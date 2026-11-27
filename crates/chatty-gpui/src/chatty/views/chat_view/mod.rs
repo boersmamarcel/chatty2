@@ -1056,6 +1056,7 @@ impl ChatView {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         });
 
         debug!(total_messages = self.messages.len(), "User message added");
@@ -1078,6 +1079,7 @@ impl ChatView {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         });
 
         // Reset the thinking indicator so the elapsed counter restarts
@@ -1250,6 +1252,7 @@ impl ChatView {
                 feedback: None,
                 history_index: None,
                 swarm_tree: None,
+                is_notice: false,
             }),
         }
         cx.notify();
@@ -5232,6 +5235,7 @@ mod cloud_output_tests {
             feedback: None,
             history_index: Some(history_index),
             swarm_tree: None,
+            is_notice: false,
         }
     }
 

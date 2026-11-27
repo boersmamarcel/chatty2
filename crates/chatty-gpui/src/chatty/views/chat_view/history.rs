@@ -102,6 +102,7 @@ impl ChatView {
                             feedback: None,
                             history_index: Some(idx),
                             swarm_tree: None,
+                            is_notice: false,
                         });
                     }
                 }
@@ -142,6 +143,7 @@ impl ChatView {
                             feedback,
                             history_index: Some(idx),
                             swarm_tree: None,
+                            is_notice: false,
                         });
                     }
                 }

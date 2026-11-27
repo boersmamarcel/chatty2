@@ -45,6 +45,10 @@ pub struct DisplayMessage {
     pub feedback: Option<MessageFeedback>,
     // Index into the conversation's history (parallel arrays) for this message
     pub history_index: Option<usize>,
+    /// A note from the app, not a reply from the model (the hand-off's
+    /// "This conversation now runs in the cloud", a slash command's answer):
+    /// set off by a line, with no feedback or regenerate (AGE-2129).
+    pub is_notice: bool,
     /// A delegation row's runs, when its callee delegated in turn (TB-4).
     /// Live-only: built from the turn's forwarded events, never persisted.
     pub swarm_tree: Option<std::sync::Arc<super::transcript::SwarmTree>>,
@@ -750,17 +754,27 @@ where
         // Wrap with action buttons for finalized assistant messages
         let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
         return match msg.role {
-            MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
+            MessageRole::Assistant if is_finalized && !msg.content.is_empty() && !msg.is_notice => {
+                div()
+                    .child(message_with_content)
+                    .child(render_assistant_actions(
+                        &msg.content,
+                        &msg.feedback,
+                        index,
+                        is_last_message,
+                        on_feedback,
+                        on_regenerate,
+                        cx,
+                    ))
+                    .into_any_element()
+            }
+            // A note from the app: set off by a line, no actions (AGE-2129).
+            MessageRole::Assistant if msg.is_notice => div()
+                .w_full()
+                .pl_3()
+                .border_l_2()
+                .border_color(cx.theme().border)
                 .child(message_with_content)
-                .child(render_assistant_actions(
-                    &msg.content,
-                    &msg.feedback,
-                    index,
-                    is_last_message,
-                    on_feedback,
-                    on_regenerate,
-                    cx,
-                ))
                 .into_any_element(),
             _ => message_with_content.into_any_element(),
         };
@@ -858,20 +872,31 @@ where
     // (hide feedback row while still streaming or content is empty)
     let is_finalized = !msg.is_streaming && msg.live_trace.is_none();
     match msg.role {
-        MessageRole::Assistant if is_finalized && !msg.content.is_empty() => div()
+        MessageRole::Assistant if is_finalized && !msg.content.is_empty() && !msg.is_notice => {
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(final_container)
+                .child(render_assistant_actions(
+                    &msg.content,
+                    &msg.feedback,
+                    index,
+                    is_last_message,
+                    on_feedback,
+                    on_regenerate,
+                    cx,
+                ))
+                .into_any_element()
+        }
+        // A note from the app reads as one: set off by a muted line at its
+        // left, and no actions (markdown sets its own text colour).
+        MessageRole::Assistant if msg.is_notice => div()
             .w_full()
-            .flex()
-            .flex_col()
+            .pl_3()
+            .border_l_2()
+            .border_color(cx.theme().border)
             .child(final_container)
-            .child(render_assistant_actions(
-                &msg.content,
-                &msg.feedback,
-                index,
-                is_last_message,
-                on_feedback,
-                on_regenerate,
-                cx,
-            ))
             .into_any_element(),
         _ => final_container.into_any_element(),
     }
@@ -964,6 +989,7 @@ mod tests {
             feedback: None,
             history_index: Some(1),
             swarm_tree: None,
+            is_notice: false,
         }
     }
 
