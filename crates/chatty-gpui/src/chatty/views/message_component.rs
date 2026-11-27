@@ -768,6 +768,14 @@ where
                     ))
                     .into_any_element()
             }
+            // A note from the app: set off by a line, no actions (AGE-2129).
+            MessageRole::Assistant if msg.is_notice => div()
+                .w_full()
+                .pl_3()
+                .border_l_2()
+                .border_color(cx.theme().border)
+                .child(message_with_content)
+                .into_any_element(),
             _ => message_with_content.into_any_element(),
         };
     }
