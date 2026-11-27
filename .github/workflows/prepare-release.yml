@@ -310,6 +310,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Land version bump via pull request
+        id: land_bump
         if: steps.mode.outputs.mode == 'bump-and-cut' && steps.tag_check.outputs.exists != 'true'
         env:
           # The App opens, labels and merges the PR. The App may only read
@@ -411,15 +412,26 @@ jobs:
           git checkout -B main origin/main
           MAIN_VER="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           if [ "$MAIN_VER" != "$NEW" ]; then
-            echo "::warning::main still has version $MAIN_VER (wanted $NEW). Tagging the bump commit $SHA so artifacts can still build."
-            git checkout "$SHA"
+            # Do not tag the bump branch's commit: release.yml refuses a tag
+            # that is not on main, so that release would have no artifacts
+            # (v0.9.4). The bump PR keeps its auto-merge and its cut-release
+            # label; its merge runs this workflow again in tag-only mode,
+            # which tags main and builds.
+            echo "::notice::Bump PR #$PR is not merged yet (main has $MAIN_VER, wanted $NEW). Its merge tags $TAG and builds."
+            echo "on_main=false" >> "$GITHUB_OUTPUT"
           else
             echo "main is at $NEW"
+            echo "on_main=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create tag and GitHub release
         id: tag_release
-        if: steps.mode.outputs.mode != 'dry-run' && steps.tag_check.outputs.exists != 'true'
+        # `on_main` is empty in tag-only mode (the bump step did not run) and
+        # `false` while the bump PR still waits on its checks.
+        if: >-
+          steps.mode.outputs.mode != 'dry-run' &&
+          steps.tag_check.outputs.exists != 'true' &&
+          steps.land_bump.outputs.on_main != 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}

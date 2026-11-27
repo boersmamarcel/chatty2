@@ -2,7 +2,11 @@ name: Privileged labels
 
 # Closed-system: only repository_owner and github-actions[bot] may apply
 # ship:auto, release:patch|minor|major, or cut-release. Anyone else gets the
-# label removed and a PR comment.
+# label removed and a PR comment. One exception: prepare-release opens its
+# version-bump PR as the hive-nurse App (AGE-2131), which labels it
+# cut-release; that label on a same-repo `release/v*` branch stays, or the
+# tag-after-merge path never runs and the release tags a commit that is not
+# on main (v0.9.4, 2026-11-27).
 
 on:
   pull_request:
@@ -20,7 +24,11 @@ jobs:
        github.event.label.name == 'release:major' ||
        github.event.label.name == 'cut-release') &&
       github.actor != github.repository_owner &&
-      github.actor != 'github-actions[bot]'
+      github.actor != 'github-actions[bot]' &&
+      !(github.event.label.name == 'cut-release' &&
+        github.actor == 'hive-nurse-agent[bot]' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.event.pull_request.head.ref, 'release/v'))
     runs-on: ubuntu-latest
     steps:
       - name: Remove privileged label and comment
