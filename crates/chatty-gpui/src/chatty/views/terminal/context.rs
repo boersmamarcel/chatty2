@@ -85,20 +85,59 @@ pub fn render_context_chip(
     on_remove: Option<RemoveChip>,
     cx: &App,
 ) -> AnyElement {
+    render_chip(
+        id,
+        ChipSpec {
+            icon: IconName::SquareTerminal,
+            label: context.label(),
+            tooltip: "Terminal snapshot sent with this message. Click to see it.",
+            remove_tooltip: "Don't send the terminal snapshot with this message",
+            preview: context.block.clone(),
+        },
+        on_remove,
+        cx,
+    )
+}
+
+/// What a context chip shows (the terminal snapshot's, or a dragged file's
+/// and the open artifact's).
+pub struct ChipSpec {
+    pub icon: IconName,
+    pub label: String,
+    pub tooltip: &'static str,
+    pub remove_tooltip: &'static str,
+    /// The exact block, shown when the chip is clicked.
+    pub preview: String,
+}
+
+/// A context chip: the label, a click previews the exact block, and ×
+/// (when `on_remove` is given) leaves it out of the message.
+pub fn render_chip(
+    id: impl Into<String>,
+    spec: ChipSpec,
+    on_remove: Option<RemoveChip>,
+    cx: &App,
+) -> AnyElement {
     let id: String = id.into();
-    let block = context.block.clone();
+    let ChipSpec {
+        icon,
+        label,
+        tooltip,
+        remove_tooltip,
+        preview: block,
+    } = spec;
     let preview = Popover::new(ElementId::Name(format!("{id}-preview").into()))
         .trigger(
             Button::new(ElementId::Name(format!("{id}-chip").into()))
                 .ghost()
                 .xsmall()
-                .icon(Icon::new(IconName::SquareTerminal))
-                .label(context.label())
-                .tooltip("Terminal snapshot sent with this message. Click to see it."),
+                .icon(Icon::new(icon))
+                .label(label)
+                .tooltip(tooltip),
         )
         .content(move |_, _, cx| {
             div()
-                .id("terminal-context-preview")
+                .id("context-chip-preview")
                 .p_3()
                 .max_w(px(720.))
                 .max_h(px(420.))
@@ -131,7 +170,7 @@ pub fn render_context_chip(
                     .ghost()
                     .xsmall()
                     .icon(Icon::new(IconName::Close))
-                    .tooltip("Don't send the terminal snapshot with this message")
+                    .tooltip(remove_tooltip)
                     .on_click(move |_, _, cx| on_remove(cx)),
             )
         })

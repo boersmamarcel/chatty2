@@ -825,6 +825,14 @@ where
         }
         MessageRole::Assistant => (msg.content.as_str(), None),
     };
+    // Dragged files and the open artifact sit between the text and the
+    // snapshot, also as chips.
+    let (user_text, composer_context) = match msg.role {
+        MessageRole::User => {
+            chatty_core::services::composer_context::split_composer_context(user_text)
+        }
+        MessageRole::Assistant => (user_text, Vec::new()),
+    };
 
     let final_container = if should_interleave {
         // Render interleaved content (text mixed with tool calls)
@@ -855,6 +863,15 @@ where
     } else {
         // Non-markdown plain text
         container.child(user_text.to_string())
+    };
+    let final_container = if composer_context.is_empty() {
+        final_container
+    } else {
+        final_container.child(super::chat_input::render_sent_context_chips(
+            &format!("msg-{index}-composer-context"),
+            &composer_context,
+            cx,
+        ))
     };
     let final_container = match terminal_context {
         Some(context) => final_container.child(div().flex().flex_row().mt_2().child(

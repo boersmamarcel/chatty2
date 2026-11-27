@@ -74,7 +74,9 @@ pub use artifact_kind::{
     is_pdf_artifact_tool, is_pdf_path, produced_path_is_openable, read_artifact_source,
     resolve_artifact_path, tool_file_path,
 };
-pub use artifact_view::{ArtifactMode, ArtifactView, ArtifactViewEvent, new_artifact_view};
+pub use artifact_view::{
+    ArtifactMode, ArtifactView, ArtifactViewEvent, Showing, new_artifact_view,
+};
 pub use block_render::{SwarmActions, render_typed_block};
 pub use clarification::{ChosenOption, ClarificationCard, ClarificationSummary};
 pub use plan::{PLAN_LIST_TOP_PADDING, PlanStrip};

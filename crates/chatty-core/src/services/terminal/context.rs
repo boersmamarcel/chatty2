@@ -300,14 +300,14 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn escape_attr(text: &str) -> String {
+pub(crate) fn escape_attr(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-fn unescape_attr(text: &str) -> String {
+pub(crate) fn unescape_attr(text: &str) -> String {
     text.replace("&quot;", "\"")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -315,7 +315,7 @@ fn unescape_attr(text: &str) -> String {
 }
 
 /// The value of `name="…"` in a tag's attributes.
-fn attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
     let key = format!("{name}=\"");
     let start = attrs.find(&key)? + key.len();
     let len = attrs[start..].find('"')?;

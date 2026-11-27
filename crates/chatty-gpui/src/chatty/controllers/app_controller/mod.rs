@@ -665,6 +665,7 @@ impl ChattyApp {
                     message,
                     attachments,
                     terminal_context,
+                    context_blocks,
                 } => {
                     debug!(message = %message, attachment_count = attachments.len(), "ChatInputEvent::Send received");
                     // Intercept arg-based slash commands before sending to LLM.
@@ -675,6 +676,7 @@ impl ChattyApp {
                         message.clone(),
                         attachments.clone(),
                         terminal_context.clone(),
+                        context_blocks.clone(),
                         cx,
                     );
                 }

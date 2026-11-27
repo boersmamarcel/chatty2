@@ -117,6 +117,14 @@ pub fn presentation_on_open(current: ArtifactMode, opening_same_path: bool) -> A
     }
 }
 
+/// What the panel shows ([`ArtifactView::showing`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Showing {
+    File(PathBuf),
+    Browser(String),
+    Review,
+}
+
 #[derive(Clone, Debug)]
 pub enum ArtifactViewEvent {
     Closed,
@@ -437,6 +445,26 @@ impl ArtifactView {
 
     pub fn path(&self) -> Option<&PathBuf> {
         self.path.as_ref()
+    }
+
+    /// What the panel shows, for the composer to name in the next message:
+    /// the session's changes, the browser's page, or a file on disk. `None`
+    /// while closed, or for a table or chart that is not a file.
+    pub fn showing(&self) -> Option<Showing> {
+        if self.mode == ArtifactMode::Closed {
+            return None;
+        }
+        if self.session_review {
+            return Some(Showing::Review);
+        }
+        if self.browser_shown {
+            return (!self.browser_current_url.is_empty())
+                .then(|| Showing::Browser(self.browser_current_url.clone()));
+        }
+        self.path
+            .as_ref()
+            .filter(|path| path.is_file())
+            .map(|path| Showing::File(path.clone()))
     }
 
     pub fn set_chrome(

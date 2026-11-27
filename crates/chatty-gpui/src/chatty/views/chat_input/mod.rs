@@ -25,6 +25,7 @@
 mod at_mention;
 mod pr_status_bar_view;
 mod render;
+pub use render::render_sent_context_chips;
 mod slash;
 
 // Re-export the public surface for external callers and the unit-test
@@ -49,7 +50,11 @@ use tracing::{debug, warn};
 use super::attachment_validation::validate_attachment;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use crate::settings::models::providers_store::ProviderType;
+use chatty_core::services::composer_context::{
+    BlockKind, ContextBlock, OpenArtifact, display_path, split_composer_context,
+};
 use chatty_core::services::terminal::context::{TerminalContext, split_terminal_context};
+use chatty_core::token_budget::counter::TokenCounter;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
@@ -65,6 +70,9 @@ pub enum ChatInputEvent {
         attachments: Vec<PathBuf>,
         /// The terminal snapshot block to attach (AGE-587).
         terminal_context: Option<String>,
+        /// Dragged files and the open artifact, as `<file_context>` /
+        /// `<artifact_open>` blocks, in order.
+        context_blocks: Vec<String>,
     },
     ModelChanged(String),
     Stop,
@@ -160,6 +168,14 @@ pub struct ChatInputState {
     /// The block last removed with × or sent: not offered again until the
     /// terminal shows something else.
     terminal_context_done: Option<String>,
+    /// Files and folders dragged in from the file tree, read when the
+    /// message is sent.
+    context_paths: Vec<PathBuf>,
+    /// What the artifact viewer shows, kept current by the chat view.
+    open_artifact: Option<OpenArtifact>,
+    /// The open artifact × was pressed on: left out until the viewer shows
+    /// something else.
+    open_artifact_dismissed: Option<OpenArtifact>,
 }
 
 impl ChatInputState {
@@ -194,7 +210,99 @@ impl ChatInputState {
             pending_restore_text: None,
             terminal_context: None,
             terminal_context_done: None,
+            context_paths: Vec::new(),
+            open_artifact: None,
+            open_artifact_dismissed: None,
         }
+    }
+
+    /// Files and folders dropped on the composer from the file tree. An
+    /// image or PDF the model can take becomes an attachment; anything else
+    /// goes in as its text (a folder as its listing).
+    pub fn add_context_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        for path in paths {
+            let ext = path
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let attachable = validate_attachment(&path).is_ok()
+                && if ext == super::attachment_validation::PDF_EXTENSION {
+                    self.supports_pdf
+                } else {
+                    // Send filters everything but a PDF as an image.
+                    self.supports_images
+                };
+            if attachable {
+                self.add_attachments(vec![path], cx);
+            } else if !self.context_paths.contains(&path) {
+                self.context_paths.push(path);
+            }
+        }
+        cx.notify();
+    }
+
+    pub fn context_paths(&self) -> &[PathBuf] {
+        &self.context_paths
+    }
+
+    /// × on a dragged file's chip.
+    pub fn remove_context_path(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.context_paths.len() {
+            self.context_paths.remove(index);
+            cx.notify();
+        }
+    }
+
+    /// What the viewer shows now (`None` when it is closed).
+    pub fn set_open_artifact(&mut self, open: Option<OpenArtifact>, cx: &mut Context<Self>) {
+        if open != self.open_artifact {
+            if open != self.open_artifact_dismissed {
+                self.open_artifact_dismissed = None;
+            }
+            self.open_artifact = open;
+            cx.notify();
+        }
+    }
+
+    /// The open artifact the next message refers to, unless dismissed.
+    pub fn open_artifact(&self) -> Option<&OpenArtifact> {
+        self.open_artifact
+            .as_ref()
+            .filter(|open| self.open_artifact_dismissed.as_ref() != Some(*open))
+    }
+
+    /// × on the "Viewing" chip: leave it out until the viewer shows
+    /// something else.
+    pub fn dismiss_open_artifact(&mut self, cx: &mut Context<Self>) {
+        self.open_artifact_dismissed = self.open_artifact.clone();
+        cx.notify();
+    }
+
+    /// The workspace dragged paths are shown relative to.
+    pub fn context_root(&self, cx: &App) -> Option<PathBuf> {
+        self.working_dir.clone().or_else(|| {
+            cx.try_global::<crate::settings::models::execution_settings::ExecutionSettingsModel>()
+                .and_then(|s| s.workspace_dir.clone())
+                .map(PathBuf::from)
+        })
+    }
+
+    /// The dragged files' blocks (read now) and the open artifact's.
+    fn take_context_blocks(&mut self, cx: &App) -> Vec<String> {
+        let root = self.context_root(cx);
+        let counter = TokenCounter::for_model("");
+        let mut blocks: Vec<String> = self
+            .context_paths
+            .drain(..)
+            .map(|path| {
+                let shown = display_path(&path, root.as_deref());
+                ContextBlock::for_path(&path, &shown, &counter).block
+            })
+            .collect();
+        if let Some(open) = self.open_artifact() {
+            blocks.push(ContextBlock::for_open(open).block);
+        }
+        blocks
     }
 
     /// The snapshot the next message would carry (AGE-587), `None` when the
@@ -408,7 +516,7 @@ impl ChatInputState {
 
         debug!(message = %message, attachment_count = attachments.len(), "send_message called");
 
-        if message.trim().is_empty() && attachments.is_empty() {
+        if message.trim().is_empty() && attachments.is_empty() && self.context_paths.is_empty() {
             warn!("Message is empty and no attachments, not sending");
             return;
         }
@@ -418,11 +526,14 @@ impl ChatInputState {
             self.terminal_context_done = terminal_context.clone();
         }
 
+        let context_blocks = self.take_context_blocks(cx);
+
         debug!("Emitting ChatInputEvent::Send");
         cx.emit(ChatInputEvent::Send {
             message: message.clone(),
             attachments: attachments.clone(),
             terminal_context,
+            context_blocks,
         });
 
         self.should_clear = true;
@@ -445,12 +556,29 @@ impl ChatInputState {
     /// `Conversation::finalize_turn` rolled back the pending user message
     /// (`TurnOutcome::DroppedAndRolledBack`) so the user doesn't lose what
     /// they typed (AGE-243).
-    pub fn restore_draft_text(&mut self, text: String) {
+    pub fn restore_draft_text(&mut self, text: String, cx: &App) {
         // The terminal snapshot the message carried is not the user's text.
         // Its snapshot was rolled back with it: offer it again.
-        let text = split_terminal_context(&text).0.to_string();
+        let text = split_terminal_context(&text).0;
+        // Dragged files come back as chips (AGE-2169); the open artifact's
+        // reference is rebuilt from the viewer anyway.
+        let (text, blocks) = split_composer_context(text);
+        let root = self.context_root(cx);
+        for block in blocks {
+            if block.kind == BlockKind::Open {
+                continue;
+            }
+            let path = PathBuf::from(&block.target);
+            let path = match &root {
+                Some(root) if path.is_relative() => root.join(path),
+                _ => path,
+            };
+            if path.exists() && !self.context_paths.contains(&path) {
+                self.context_paths.push(path);
+            }
+        }
         self.terminal_context_done = None;
-        self.pending_restore_text = Some(text);
+        self.pending_restore_text = Some(text.to_string());
     }
 
     /// Clear the input if needed

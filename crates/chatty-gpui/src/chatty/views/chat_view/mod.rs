@@ -268,6 +268,9 @@ pub struct ChatView {
     /// Watches the dock for the above; armed on first render, since it
     /// needs an entity handle `ChatView::new` does not have.
     terminal_dock_observer: Option<Subscription>,
+    /// Watches the artifact panel so the composer names what it shows;
+    /// armed on first render like `terminal_dock_observer`.
+    artifact_observer: Option<Subscription>,
 }
 
 /// How often the composer's terminal-snapshot chip is brought up to date
@@ -756,7 +759,27 @@ impl ChatView {
             terminal_context_poll: None,
             terminal_context_key: None,
             terminal_dock_observer: None,
+            artifact_observer: None,
         }
+    }
+
+    /// Tell the composer what the artifact panel shows, so the next message
+    /// names it (a message about "this" then says which artifact it means).
+    pub fn sync_open_artifact(&mut self, cx: &mut Context<Self>) {
+        use crate::chatty::views::transcript::Showing;
+        use chatty_core::services::composer_context::{OpenArtifact, display_path};
+
+        let showing = self.artifact_view.read(cx).showing();
+        let root = self.chat_input_state.read(cx).context_root(cx);
+        let open = showing.map(|showing| match showing {
+            Showing::File(path) => OpenArtifact::File {
+                path: display_path(&path, root.as_deref()),
+            },
+            Showing::Browser(url) => OpenArtifact::Browser { url },
+            Showing::Review => OpenArtifact::Review,
+        });
+        self.chat_input_state
+            .update(cx, |state, cx| state.set_open_artifact(open, cx));
     }
 
     /// The dock changed: poll the terminal for the composer's snapshot chip
@@ -2067,6 +2090,11 @@ impl ChatView {
         self.reset_clarification_inputs(window, cx);
         self.sync_pr_status(cx);
         self.ensure_scroll_handler(cx);
+        if self.artifact_observer.is_none() {
+            self.artifact_observer = Some(cx.observe(&self.artifact_view, |view, _, cx| {
+                view.sync_open_artifact(cx);
+            }));
+        }
         if self.terminal_dock_observer.is_none() {
             self.terminal_dock_observer = Some(cx.observe(&self.terminal_dock, |view, _, cx| {
                 view.sync_terminal_context(cx);
