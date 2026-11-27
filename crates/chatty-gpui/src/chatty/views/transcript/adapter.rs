@@ -774,6 +774,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, true);
         assert!(turn.collapsed);
@@ -820,6 +821,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turns = adapt_messages(&[msg], &[true]);
         assert_eq!(turns.len(), 1, "live turn must stay in the transcript");
@@ -874,6 +876,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -928,6 +931,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -975,6 +979,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1028,6 +1033,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1077,6 +1083,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         }
     }
 
@@ -1302,6 +1309,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1355,6 +1363,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(
@@ -1400,6 +1409,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         };
         let turn = adapt_message(&msg, 0, false);
         assert!(

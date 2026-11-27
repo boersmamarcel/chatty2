@@ -106,6 +106,7 @@ impl ChatView {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         });
 
         let idx = self.messages.len() - 1;
@@ -248,6 +249,7 @@ impl ChatView {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: true,
         });
         cx.notify();
         self.activate_sticky_scroll();

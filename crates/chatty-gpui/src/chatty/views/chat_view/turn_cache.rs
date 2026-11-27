@@ -320,6 +320,7 @@ mod tests {
             feedback: None,
             history_index: None,
             swarm_tree: None,
+            is_notice: false,
         }
     }
 
