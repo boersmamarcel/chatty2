@@ -23,6 +23,10 @@ const VERIFY_FROM_TODOS: usize = 3;
 /// judgement stands: a task its team has no part in still finishes.
 const MAX_DELEGATION_NUDGES: usize = 2;
 
+/// What a coordinator that has not delegated is told (AGE-2179), by
+/// `verify_completion` and at the end of a turn.
+const DELEGATION_NUDGE: &str = "you have not delegated any of this work. You coordinate: call invoke_agent so your team does it,";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTodoStatus {
@@ -127,9 +131,7 @@ pub enum AgentTaskError {
     #[error("all todos must be done before verify_completion can succeed")]
     TodosNotDone,
     /// A coordinator that read and planned but started no worker (AGE-2179).
-    #[error(
-        "not verified: you have not delegated any of this work. You coordinate: call invoke_agent so your team does it, then verify again."
-    )]
+    #[error("not verified: {DELEGATION_NUDGE} then verify again.")]
     NotDelegated,
 }
 
@@ -396,7 +398,22 @@ impl AgentTaskController {
     /// there is an instruction the state machine forbids (AGE-150).
     pub fn stream_end_follow_up(&self) -> Option<String> {
         let mut state = self.state.lock();
-        if !state.write_todos_called || state.verified {
+        if state.verified {
+            return None;
+        }
+        // A coordinator that started no worker is told to, plan or not: a
+        // small plan, or none, would otherwise end here unasked (AGE-2179).
+        if self.requires_delegation
+            && !state.delegated
+            && state.delegation_nudges < MAX_DELEGATION_NUDGES
+        {
+            state.delegation_nudges += 1;
+            tracing::warn!("Agent protocol: coordinator turn ended without a delegation");
+            return Some(format!(
+                "Agent protocol follow-up: {DELEGATION_NUDGE} then reply."
+            ));
+        }
+        if !state.write_todos_called {
             return None;
         }
 
@@ -721,6 +738,43 @@ mod tests {
             verify_done(&controller).unwrap_err(),
             AgentTaskError::NotDelegated
         ));
+    }
+
+    /// A coordinator's turn that ends without a delegation is nudged, even
+    /// on a small finished plan (which AGE-2188 lets end unverified) or no
+    /// plan at all, under the same cap the verification nudge counts on.
+    #[test]
+    fn a_coordinator_turn_ending_without_a_delegation_is_nudged() {
+        let controller = controller().requiring_delegation(true);
+        controller
+            .write_todos(
+                "Ship".into(),
+                vec![("t1".into(), "Plan".into(), "Plan it".into())],
+            )
+            .unwrap();
+        controller
+            .update_todo("t1".into(), AgentTodoStatus::Done, None, None)
+            .unwrap();
+        let nudge = controller.stream_end_follow_up().expect("a nudge");
+        assert!(nudge.contains("invoke_agent"), "{nudge}");
+        assert!(is_protocol_follow_up_text(&nudge));
+        assert!(matches!(
+            controller.verify_completion(true, "done".into(), vec!["t1: ok".into()], None),
+            Err(AgentTaskError::NotDelegated)
+        ));
+        assert!(
+            controller.stream_end_follow_up().is_none(),
+            "the cap is spent"
+        );
+
+        let controller = AgentTaskController::new().requiring_delegation(true);
+        assert!(controller.stream_end_follow_up().is_some(), "no plan");
+        controller.note_delegation();
+        assert!(controller.stream_end_follow_up().is_none(), "delegated");
+        assert!(
+            AgentTaskController::new().stream_end_follow_up().is_none(),
+            "anyone else"
+        );
     }
 
     /// Every other agent verifies as before.

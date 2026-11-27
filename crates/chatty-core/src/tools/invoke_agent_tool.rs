@@ -451,6 +451,14 @@ impl InvokeAgentTool {
         self
     }
 
+    /// A worker is about to be asked to start: the agent resolved and every
+    /// gate let the call through (AGE-2179).
+    fn note_delegation(&self) {
+        if let Some(controller) = self.task_controller.as_ref() {
+            controller.note_delegation();
+        }
+    }
+
     /// Forget a budget stop: a new run starts (AGE-903).
     pub fn clear_budget_stop(&self) {
         self.budget_stop.send_replace(None);
@@ -801,10 +809,6 @@ impl InvokeAgentTool {
                 "Prompt cannot be empty".to_string(),
             ));
         }
-        // A delegation was asked for, whatever comes of it (AGE-2179).
-        if let Some(controller) = self.task_controller.as_ref() {
-            controller.note_delegation();
-        }
         // A lead that keeps its notes in the workspace offers every note
         // file to its other callees (AGE-1295).
         if let Some(store) = self.note_store.as_ref() {
@@ -859,6 +863,7 @@ impl InvokeAgentTool {
             // The broker checks what is left against the chain and
             // refuses a spent budget itself, with an edge-log row.
             info!(agent = %local, "Delegating to a local worker over the fabric");
+            self.note_delegation();
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: local.to_string(),
                 prompt: prompt.clone(),
@@ -902,6 +907,7 @@ impl InvokeAgentTool {
             self.check_budget(&agent_name)?;
             info!(agent = %agent_name, url = %config.url, "Invoking remote A2A agent");
             self.warn_if_outside_the_fleet(&agent_name, AgentOrigin::RemoteConfigured, &config.url);
+            self.note_delegation();
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: agent_name.clone(),
                 prompt: prompt.clone(),
@@ -1833,15 +1839,22 @@ mod tests {
         );
     }
 
-    /// AGE-2179: a delegation the model asks for is noted on its plan,
-    /// whatever comes of the call; an empty agent name is not one.
+    /// AGE-2179: a delegation is noted on the caller's plan once a worker is
+    /// asked to start, whatever comes of it; a call refused before that (no
+    /// such agent, a disabled one, an empty name) is not one.
     #[tokio::test]
     async fn a_delegation_is_noted_on_the_callers_plan() {
         use crate::services::AgentTaskController;
         use crate::services::agent_task_controller::AgentTaskError;
 
         let controller = AgentTaskController::new().requiring_delegation(true);
-        let tool = InvokeAgentTool::new(Vec::new()).with_task_controller(controller.clone());
+        let mut disabled = make_agent("off", "http://127.0.0.1:1/a2a", true);
+        disabled.enabled = false;
+        let tool = InvokeAgentTool::new(vec![
+            make_agent("voucher", "http://127.0.0.1:1/a2a", true),
+            disabled,
+        ])
+        .with_task_controller(controller.clone());
         let verify = || {
             controller
                 .write_todos(
@@ -1867,11 +1880,16 @@ mod tests {
             files: None,
         };
 
-        let _ = tool.call(&mut ToolContext::new(), call(" ")).await;
+        for refused in [" ", "nobody", "off"] {
+            let result = tool.call(&mut ToolContext::new(), call(refused)).await;
+            assert!(result.is_err(), "{refused:?} is refused");
+        }
+        // One nudge of the two: a pass below is the delegation, not the cap.
         assert!(matches!(verify(), Err(AgentTaskError::NotDelegated)));
 
-        let refused = tool.call(&mut ToolContext::new(), call("nobody")).await;
-        assert!(refused.is_err(), "no such agent");
+        // No server at the URL: the call fails after the worker was asked.
+        let failed = tool.call(&mut ToolContext::new(), call("voucher")).await;
+        assert!(failed.is_err(), "nothing listens there");
         assert!(verify().unwrap().snapshot.verified);
     }
 
