@@ -46,7 +46,7 @@ impl ListToolsTool {
         native_tools.extend(vec![
             ToolInfo {
                 name: "write_todos".to_string(),
-                description: "Write the ordered todo plan for a task that needs 3 or more distinct tool calls; skip it for anything smaller.".to_string(),
+                description: "Write the ordered todo plan for a task that needs 3 or more distinct tool calls, at the start or once a task turns out bigger; skip it for anything smaller.".to_string(),
                 source: "native".to_string(),
             },
             ToolInfo {
@@ -56,7 +56,7 @@ impl ListToolsTool {
             },
             ToolInfo {
                 name: "verify_completion".to_string(),
-                description: "Check a written plan against concrete evidence before the final reply; failed verification reopens work.".to_string(),
+                description: "Check a plan of 3 or more todos against concrete evidence before the final reply; failed verification reopens work.".to_string(),
                 source: "native".to_string(),
             },
         ]);
