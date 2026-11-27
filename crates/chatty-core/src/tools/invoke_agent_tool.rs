@@ -414,6 +414,9 @@ pub struct InvokeAgentTool {
     /// calls still running hang up. Shared by the clones of this tool —
     /// the calls rig runs side by side — and cleared when a run starts.
     budget_stop: Arc<tokio::sync::watch::Sender<Option<String>>>,
+    /// The calling agent's plan, told of every delegation so a
+    /// coordinator's `verify_completion` knows it delegated (AGE-2179).
+    task_controller: Option<crate::services::AgentTaskController>,
 }
 
 impl InvokeAgentTool {
@@ -435,6 +438,24 @@ impl InvokeAgentTool {
             handoff_ledger: None,
             note_store: None,
             budget_stop: Arc::new(tokio::sync::watch::Sender::new(None)),
+            task_controller: None,
+        }
+    }
+
+    /// Tell `controller` of every delegation this tool starts (AGE-2179).
+    pub fn with_task_controller(
+        mut self,
+        controller: crate::services::AgentTaskController,
+    ) -> Self {
+        self.task_controller = Some(controller);
+        self
+    }
+
+    /// A worker is about to be asked to start: the agent resolved and every
+    /// gate let the call through (AGE-2179).
+    fn note_delegation(&self) {
+        if let Some(controller) = self.task_controller.as_ref() {
+            controller.note_delegation();
         }
     }
 
@@ -842,6 +863,7 @@ impl InvokeAgentTool {
             // The broker checks what is left against the chain and
             // refuses a spent budget itself, with an edge-log row.
             info!(agent = %local, "Delegating to a local worker over the fabric");
+            self.note_delegation();
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: local.to_string(),
                 prompt: prompt.clone(),
@@ -885,6 +907,7 @@ impl InvokeAgentTool {
             self.check_budget(&agent_name)?;
             info!(agent = %agent_name, url = %config.url, "Invoking remote A2A agent");
             self.warn_if_outside_the_fleet(&agent_name, AgentOrigin::RemoteConfigured, &config.url);
+            self.note_delegation();
             self.send_progress(InvokeAgentProgress::Started {
                 agent_name: agent_name.clone(),
                 prompt: prompt.clone(),
@@ -1814,6 +1837,60 @@ mod tests {
             "the warning names the origin: {}",
             said[0]
         );
+    }
+
+    /// AGE-2179: a delegation is noted on the caller's plan once a worker is
+    /// asked to start, whatever comes of it; a call refused before that (no
+    /// such agent, a disabled one, an empty name) is not one.
+    #[tokio::test]
+    async fn a_delegation_is_noted_on_the_callers_plan() {
+        use crate::services::AgentTaskController;
+        use crate::services::agent_task_controller::AgentTaskError;
+
+        let controller = AgentTaskController::new().requiring_delegation(true);
+        let mut disabled = make_agent("off", "http://127.0.0.1:1/a2a", true);
+        disabled.enabled = false;
+        let tool = InvokeAgentTool::new(vec![
+            make_agent("voucher", "http://127.0.0.1:1/a2a", true),
+            disabled,
+        ])
+        .with_task_controller(controller.clone());
+        let verify = || {
+            controller
+                .write_todos(
+                    "Ship".into(),
+                    vec![("t1".into(), "Plan".into(), "Plan it".into())],
+                )
+                .ok();
+            controller
+                .update_todo(
+                    "t1".into(),
+                    crate::services::AgentTodoStatus::Done,
+                    None,
+                    None,
+                )
+                .unwrap();
+            controller.verify_completion(true, "done".into(), vec!["t1: ok".into()], None)
+        };
+        let call = |agent: &str| InvokeAgentArgs {
+            agent: agent.to_string(),
+            prompt: "write the report".to_string(),
+            include_trace: false,
+            handle: None,
+            files: None,
+        };
+
+        for refused in [" ", "nobody", "off"] {
+            let result = tool.call(&mut ToolContext::new(), call(refused)).await;
+            assert!(result.is_err(), "{refused:?} is refused");
+        }
+        // One nudge of the two: a pass below is the delegation, not the cap.
+        assert!(matches!(verify(), Err(AgentTaskError::NotDelegated)));
+
+        // No server at the URL: the call fails after the worker was asked.
+        let failed = tool.call(&mut ToolContext::new(), call("voucher")).await;
+        assert!(failed.is_err(), "nothing listens there");
+        assert!(verify().unwrap().snapshot.verified);
     }
 
     /// The flag is off by default, and the hook is silent until someone turns

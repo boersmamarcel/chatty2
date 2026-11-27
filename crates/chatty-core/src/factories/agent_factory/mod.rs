@@ -1413,7 +1413,14 @@ impl AgentClient {
         let list_tools = ListToolsTool::new_with_config(&tool_availability, mcp_tool_info.clone());
 
         // Create agent todo protocol tools (always available, scoped to this agent build)
-        let agent_task_controller = crate::services::AgentTaskController::new();
+        // A coordinator's work is its team's: its verification passes only
+        // once it has delegated (AGE-2179).
+        let agent_task_controller = crate::services::AgentTaskController::new()
+            .requiring_delegation(
+                role.delegates
+                    && tool_profile
+                        .is_some_and(|profile| profile.name() == tool_profile::COORDINATOR.name()),
+            );
         let write_todos_tool = WriteTodosTool::new(agent_task_controller.clone());
         let update_todo_tool = UpdateTodoTool::new(agent_task_controller.clone());
         let verify_completion_tool = VerifyCompletionTool::new(agent_task_controller.clone());
@@ -1478,8 +1485,9 @@ impl AgentClient {
         }
 
         // Create invoke_agent tool (registered when the role delegates).
-        let mut invoke_agent_tool =
-            InvokeAgentTool::new(remote_agents).with_local_agents(local_agents);
+        let mut invoke_agent_tool = InvokeAgentTool::new(remote_agents)
+            .with_local_agents(local_agents)
+            .with_task_controller(agent_task_controller.clone());
         if let Some(broker) = lazy_broker {
             invoke_agent_tool = invoke_agent_tool.with_lazy_broker(broker);
         }
@@ -1804,10 +1812,22 @@ impl AgentClient {
     }
 
     /// Whether this agent's model accepts image input, per `ModelConfig`
-    /// at build time. `stream_prompt` uses this to strip images from a
-    /// request rather than let the provider 400 on them.
+    /// at build time, unless the provider has since refused an image
+    /// ([`Self::images_refused`]). `stream_prompt` uses this to strip
+    /// images from a request rather than let the provider 400 on them.
     pub fn supports_images(&self) -> bool {
         self.supports_images
+            && !self
+                .context_shaper
+                .images_refused()
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The flag `stream_prompt` sets when the provider refuses a request
+    /// for carrying an image (AGE-2178), which makes this agent text-only
+    /// from then on.
+    pub fn images_refused(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.context_shaper.images_refused()
     }
 }
 

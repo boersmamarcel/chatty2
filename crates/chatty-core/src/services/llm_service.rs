@@ -636,7 +636,7 @@ fn failed_run_messages(
 
 /// The text a dropped image is replaced with, so the model knows content
 /// was removed instead of silently seeing fewer items than it sent/expects.
-const IMAGE_UNSUPPORTED_NOTE: &str =
+pub(crate) const IMAGE_UNSUPPORTED_NOTE: &str =
     "[Image omitted: the current model does not accept image input.]";
 
 /// Strip image content from a request the configured model cannot accept,
@@ -691,6 +691,68 @@ fn strip_unsupported_images(
     let contents = strip_user_content(contents);
 
     (history, contents)
+}
+
+/// How many times one turn answers a provider's refusal of an image by
+/// sending the request again without images (AGE-2178). Once is the usual
+/// case; the agent is text-only from then on, but an image a tool returns
+/// later in the same run reaches the provider before the next turn strips
+/// it up front.
+const MAX_IMAGE_REFUSAL_RECOVERIES: usize = 2;
+
+/// How a provider says its model takes no images at all, lowercase: vLLM
+/// serving a model with `--limit-mm-per-prompt '{"image":0}'`, OpenAI's
+/// text-only chat models, and the wording vision-less OpenAI-compatible
+/// servers and OpenRouter use. A refusal of one image (too large, a bad
+/// format) is not one: the model takes images, just not that one.
+const NO_IMAGE_INPUT: &[&str] = &[
+    "at most 0 image",
+    "image_url is only supported by certain models",
+    "does not support image",
+    "doesn't support image",
+    "support image input",
+];
+
+/// Whether `err` is the provider refusing the request because its model
+/// takes no images (a 400, or OpenRouter's 404 when no endpoint of the
+/// model does, whose body says so, see [`NO_IMAGE_INPUT`]). Sending it again
+/// unchanged can only fail the same way.
+fn is_image_refusal(err: &PromptError) -> bool {
+    err.provider_response_status()
+        .is_some_and(|status| matches!(status.as_u16(), 400 | 404))
+        && err.provider_response_body().is_some_and(|body| {
+            let body = body.to_ascii_lowercase();
+            NO_IMAGE_INPUT.iter().any(|phrase| body.contains(phrase))
+        })
+}
+
+/// The request `sent` (history, then the prompt last) with every image
+/// replaced by [`IMAGE_UNSUPPORTED_NOTE`], split into history and prompt.
+/// `Err(sent)` back, unchanged, when it carries no image or does not end on
+/// a user message, so a refusal that is not about this request's images is
+/// reported as it was.
+fn without_images(sent: Vec<Message>) -> Result<(Vec<Message>, Message), Vec<Message>> {
+    let is_image = |content: &UserContent| match content {
+        UserContent::Image(_) => true,
+        UserContent::ToolResult(result) => result
+            .content
+            .iter()
+            .any(|c| matches!(c, ToolResultContent::Image(_))),
+        _ => false,
+    };
+    let carries_image = sent.iter().any(|message| match message {
+        Message::User { content } => content.iter().any(is_image),
+        _ => false,
+    });
+    if !carries_image || !matches!(sent.last(), Some(Message::User { .. })) {
+        return Err(sent);
+    }
+    let mut history = sent;
+    let Some(Message::User { content }) = history.pop() else {
+        unreachable!("checked above: the request ends on a user message");
+    };
+    let (history, content) = strip_unsupported_images(history, content, false);
+    Ok((history, Message::User { content }))
 }
 
 /// How many of a leader's tool calls in one response run at once.
@@ -763,6 +825,7 @@ pub async fn stream_prompt(
         delegator.clear_budget_stop();
     }
     let rig_agent = agent.agent.clone();
+    let images_refused = agent.images_refused();
     let round_limit = agent.round_limit().clone();
     let concurrency = tool_concurrency(agent);
     let cut_offs = CutOffCalls::default();
@@ -798,6 +861,7 @@ pub async fn stream_prompt(
         let mut said = String::new();
         let mut arguments = ArgumentTail::default();
         let mut earlier_runs: Vec<Message> = Vec::new();
+        let mut image_refusals = 0;
         loop {
             tokio::select! {
                 item = agent_stream.next() => {
@@ -867,6 +931,40 @@ pub async fn stream_prompt(
                                     continue;
                                 }
                                 cut_unanswered = true;
+                            }
+                            // The provider refused the images this request
+                            // carries (AGE-2178): send it again without them,
+                            // and treat the model as text-only from now on.
+                            if let Err(e) = &result
+                                && image_refusals < MAX_IMAGE_REFUSAL_RECOVERIES
+                                && is_image_refusal(e)
+                                && let Some(sent) = request_recorder.take()
+                            {
+                                match without_images(sent) {
+                                    Ok((history, prompt)) => {
+                                        image_refusals += 1;
+                                        warn!(
+                                            error = %e,
+                                            recovery = image_refusals,
+                                            max = MAX_IMAGE_REFUSAL_RECOVERIES,
+                                            "Provider refused image input; sending the request again without images"
+                                        );
+                                        images_refused.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        text_in_last_call = false;
+                                        last_call_cut_off = false;
+                                        said.clear();
+                                        arguments.clear();
+                                        earlier_runs = history.get(history_len..).unwrap_or_default().to_vec();
+                                        let budget = turn_budget.continued(calls);
+                                        agent_stream =
+                                            start_run(&rig_agent, concurrency, history, prompt, budget, round_limit.clone(), &cut_offs);
+                                        continue;
+                                    }
+                                    // Not about this request's images: keep
+                                    // it for the failed run's record.
+                                    Err(sent) => request_recorder
+                                        .record(sent.into_iter().map(std::sync::Arc::new).collect()),
+                                }
                             }
                             if let Err(e) = &result
                                 && let Some(chunks) = budget_spent_end(e, history_len, text_in_last_call)

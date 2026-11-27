@@ -1121,7 +1121,8 @@ verdict in `expected.json`) and specs are frozen at their merge
 preset name. `participant/analyst_swarm.rs` (`analyst_swarm_smoke`) runs it on the swarm
 kit's fake model with the real plugin. Besides them, five standalone specs ship: `data-analyst`,
 `researcher`, `reviewer`, `typesetter` and `writer`, and the coding and curation teams below. `data-analyst` (AGE-992) answers
-questions from the data files in its workspace with the `coder` profile (DuckDB's
+questions from the data files in its workspace, quoting the data documentation's definition of
+each metric a question names before it computes it (AGE-2182), with the `coder` profile (DuckDB's
 `query_data` and friends, `calculate`, code execution), capped at 60 tool turns and 15
 minutes per delegation. `typesetter` (AGE-946) assembles the approved texts
 it is handed into one Typst document and compiles it with `compile_typst`, fixing compile

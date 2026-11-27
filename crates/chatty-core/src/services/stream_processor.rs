@@ -177,6 +177,15 @@ pub fn decide_recovery(
                 RecoveryAction::Stop
             }
         }
+        // A 4xx other than 401/403/429 is the provider refusing this
+        // request: sent again unchanged it fails the same way (AGE-2178).
+        // 408, 409 and 425 say "not now" rather than "not this", so they
+        // keep the transport schedule below.
+        StreamErrorKind::ProviderStatus(code)
+            if (400..=499).contains(&code) && !matches!(code, 408 | 409 | 425) =>
+        {
+            RecoveryAction::Stop
+        }
         // Headless retries on a fixed schedule (today's behaviour); the
         // desktop and interactive TUI show the error with no auto retry.
         StreamErrorKind::RateLimited
@@ -1340,6 +1349,35 @@ mod tests {
             assert_eq!(
                 decide_recovery(StreamErrorKind::Auth, surface, 1),
                 RecoveryAction::Stop
+            );
+        }
+    }
+
+    /// AGE-2178: a 4xx refusal is the same request every time, so no
+    /// surface retries it, headless included; a 5xx, and the transient
+    /// 408/409/425, still retry there.
+    #[test]
+    fn a_client_error_status_is_never_retried() {
+        for code in [400, 404, 413, 422, 499] {
+            for surface in ALL_SURFACES {
+                assert_eq!(
+                    decide_recovery(StreamErrorKind::ProviderStatus(code), surface, 0),
+                    RecoveryAction::Stop,
+                    "{code} on {surface:?}"
+                );
+            }
+        }
+        for code in [408, 409, 425, 500] {
+            assert!(
+                matches!(
+                    decide_recovery(
+                        StreamErrorKind::ProviderStatus(code),
+                        StreamSurface::Headless,
+                        0
+                    ),
+                    RecoveryAction::Retry { .. }
+                ),
+                "{code}"
             );
         }
     }

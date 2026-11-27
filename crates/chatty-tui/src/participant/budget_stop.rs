@@ -76,7 +76,7 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
 }
 
 /// The refused call is terminal: classified as a spent budget, never
-/// retried (a `ProviderStatus` would be, after 10 s, on the worker's
+/// retried (a 5xx `ProviderStatus` would be, after 10 s, on the worker's
 /// headless surface), and the leader reads the typed stop.
 #[tokio::test]
 async fn budget_402_is_terminal_not_retried() {

@@ -62,6 +62,8 @@ Chatty records three capabilities per model and uses them to show or hide the at
 
 Starting values by provider: OpenRouter models accept images and PDFs; Azure OpenAI models accept images but not PDFs; Ollama models are detected one by one, so a vision model gets the image button and a text-only model does not.
 
+If a model marked as taking images refuses one anyway, Chatty sends the request again without the image, tells the model the image was left out, and sends that model no more images in the conversation until you switch models or restart the app.
+
 ## Next
 
 - [Getting started](./getting-started.md)

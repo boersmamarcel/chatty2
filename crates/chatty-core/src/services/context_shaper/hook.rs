@@ -109,7 +109,17 @@ impl AgentHook for ContextShaper {
             return OutcomeAction::Proceed;
         };
         let tool_name = event.tool_name().unwrap_or_default();
-        let recorded = self.record_round_output(result.output());
+        // The provider refused an image earlier in this run (AGE-2178): an
+        // image a tool returns now would only be refused again.
+        let without_images = self
+            .inner
+            .images_refused
+            .load(Ordering::Relaxed)
+            .then(|| without_images(result.output()))
+            .flatten();
+        let recorded = self
+            .record_round_output(without_images.as_ref().unwrap_or(result.output()))
+            .or(without_images);
         if recorded.is_some() {
             warn!(
                 tool = tool_name,
@@ -136,6 +146,28 @@ impl AgentHook for ContextShaper {
             ),
         )
     }
+}
+
+/// `output` with each image replaced by the note a text-only model gets
+/// (AGE-2178); `None` when it has none.
+fn without_images(output: &ToolOutput) -> Option<ToolOutput> {
+    let content = output.clone().into_content();
+    if !content
+        .iter()
+        .any(|c| matches!(c, ToolResultContent::Image(_)))
+    {
+        return None;
+    }
+    let content = content
+        .into_iter()
+        .map(|c| match c {
+            ToolResultContent::Image(_) => {
+                ToolResultContent::text(crate::services::llm_service::IMAGE_UNSUPPORTED_NOTE)
+            }
+            other => other,
+        })
+        .collect();
+    ToolOutput::content(content).ok()
 }
 
 /// `output` with `messages` (already wrapped) after it, as one more text
