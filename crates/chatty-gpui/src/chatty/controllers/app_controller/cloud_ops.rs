@@ -3,7 +3,7 @@
 //! finishes (HX-10, HX-11, HX-12).
 //!
 //! A cloud conversation is a synced conversation whose turns run on the
-//! user's `chatty-server` ([`ConversationSync::runs_in_cloud`]). This device
+//! user's `chatty-server` ([`chatty_core::models::conversation::ConversationSync::runs_in_cloud`]). This device
 //! holds a cache of it. Opening one therefore does three things, in this
 //! order: bring the cache up to date when it is stale, load the approvals and
 //! questions the run is waiting on, and follow the turn when one is running —
@@ -18,11 +18,10 @@
 use std::time::UNIX_EPOCH;
 
 use chatty_core::models::clarification_store::ClarifyingQuestion;
-use chatty_core::models::conversation::ConversationSync;
 use chatty_core::models::execution_approval_store::ApprovalDetail;
 use chatty_core::services::hive_sync::{
     ApiError, CloudNotice, ConversationDetail, HiveConversationsApi, HttpHiveConversationsApi,
-    TurnStatus,
+    TurnStatus, adopt_detail,
 };
 use chatty_core::session::{
     AttachOutcome, BrokerRequest, HostedFrame, InputOutcome, connector_settings_url,
@@ -306,33 +305,23 @@ impl ChattyApp {
             debug!(conv_id = %conv_id, "A turn started; keeping the cloud copy for later");
             return;
         }
-        let version = detail.version.unwrap_or(0);
-        let status = detail.turn_status.unwrap_or(if detail.turn_active {
-            TurnStatus::Running
-        } else {
-            TurnStatus::Idle
-        });
         let now_ms = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|since| since.as_millis() as i64)
             .unwrap_or(0);
-        let data = detail.to_conversation_data(conv_id);
         let adopted = cx.update_global::<ConversationsStore, _>(|store, _| {
-            let synced = store
-                .get_conversation(conv_id)
-                .and_then(|conversation| conversation.sync().synced().cloned());
-            let (Some(mut synced), Some(conversation)) =
-                (synced, store.get_conversation_mut(conv_id))
-            else {
+            let Some(conversation) = store.get_conversation_mut(conv_id) else {
                 return false;
             };
-            if let Err(error) = conversation.replace_from_remote(data) {
-                warn!(conv_id = %conv_id, error = ?error, "Could not adopt the server's history");
-                return false;
-            }
-            synced.version = version;
-            synced.last_synced_at = Some(now_ms);
-            store.set_conversation_sync(conv_id, ConversationSync::Synced(synced));
+            let status = match adopt_detail(conversation, detail, now_ms) {
+                Ok(status) => status,
+                Err(error) => {
+                    warn!(conv_id = %conv_id, error = ?error, "Could not adopt the server's history");
+                    return false;
+                }
+            };
+            let sync = conversation.sync().clone();
+            store.set_conversation_sync(conv_id, sync);
             store.set_turn_status(conv_id, status);
             true
         });

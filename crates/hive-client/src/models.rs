@@ -185,6 +185,24 @@ pub struct ServerVersion {
     pub min_client: Option<String>,
 }
 
+impl ServerVersion {
+    /// What to tell the person when this server no longer serves a client at
+    /// `client_version`: its `min_client` is newer (AGE-2157). `None` when it
+    /// serves it, or when either is not a version, so a server that sends
+    /// none, or something else, is trusted as before.
+    pub fn client_too_old(&self, client_version: &str) -> Option<String> {
+        let min = self.min_client.as_deref()?.trim();
+        let needed = semver::Version::parse(min).ok()?;
+        let have = semver::Version::parse(client_version.trim()).ok()?;
+        (have < needed).then(|| {
+            format!(
+                "This Hive server needs Chatty {min} or newer, and this is Chatty \
+                 {client_version}. Update Chatty to keep using it."
+            )
+        })
+    }
+}
+
 /// Most a `/api/version` answer may weigh; a real one is a few hundred bytes.
 pub(crate) const MAX_VERSION_BYTES: usize = 16 * 1024;
 
@@ -431,6 +449,33 @@ mod tests {
                 .map(|&n| Ok(bytes::Bytes::from(vec![0u8; n])))
                 .collect::<Vec<_>>(),
         )
+    }
+
+    /// AGE-2157: `GET /api/version` as chatty-server's `VersionInfo` sends it
+    /// (`min_client` is always there, `0.0.0` when unset).
+    #[test]
+    fn min_client_from_chatty_server_is_compared_with_the_client() {
+        let version: ServerVersion = serde_json::from_value(serde_json::json!({
+            "server": "0.4.0",
+            "chatty2_rev": "5c9f25bf6da7ffe77cce96eba89e27eb6848f602",
+            "wire": "3f1a",
+            "min_client": "0.0.0"
+        }))
+        .unwrap();
+        assert_eq!(version.client_too_old("0.9.0"), None);
+
+        let version = ServerVersion {
+            min_client: Some("0.10.0".into()),
+            ..version
+        };
+        assert!(version.client_too_old("0.9.0").is_some());
+        assert_eq!(version.client_too_old("0.10.0"), None);
+        assert_eq!(version.client_too_old("not a version"), None);
+        let unreadable = ServerVersion {
+            min_client: Some("soon".into()),
+            ..version
+        };
+        assert_eq!(unreadable.client_too_old("0.9.0"), None);
     }
 
     /// A body with no `Content-Length` is cut at the first chunk that would

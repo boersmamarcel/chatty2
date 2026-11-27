@@ -4,10 +4,58 @@
 use std::sync::Arc;
 
 use hive_client::HiveSession;
+use hive_client::net::{CappedReadError, Overflow, read_capped};
 
 use super::wire::{ChangesPage, ConversationDetail};
 use crate::repositories::conversation_repository::BoxFuture;
 use crate::session::hosted::{SIGN_IN_TO_HIVE, refused_body, send_to_server};
+
+/// The most this app reads of one conversation reply from the server: the
+/// detail a pull or an open fetches, and the hand-off replies (AGE-2156).
+/// Generous on purpose: the server refuses a create or history body over
+/// 32 MiB, so a conversation it holds fits in this with room to spare;
+/// anything past it is a server or a proxy gone wrong, not a conversation, and
+/// is refused instead of held in memory.
+pub const MAX_CONVERSATION_BYTES: usize = 64 * 1024 * 1024;
+
+/// `cap` as the user reads it: whole MiB when it is that large.
+pub(crate) fn limit_text(cap: usize) -> String {
+    const MIB: usize = 1024 * 1024;
+    if cap >= MIB && cap.is_multiple_of(MIB) {
+        format!("{} MiB", cap / MIB)
+    } else {
+        format!("{cap} bytes")
+    }
+}
+
+/// Decode a JSON reply, reading at most `cap` bytes of it through
+/// hive-client's capped reader. A longer body is
+/// [`CappedReadError::Overflow`] and is never buffered past the cap; a
+/// failed read or a body that is not a `T` is
+/// [`CappedReadError::Stream`] with the reason.
+pub(crate) async fn read_json_capped<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    cap: usize,
+) -> Result<T, CappedReadError<anyhow::Error>> {
+    let body = read_capped(response.bytes_stream(), cap, Overflow::Error, |_| {})
+        .await
+        .map_err(|error| match error {
+            CappedReadError::Overflow => CappedReadError::Overflow,
+            CappedReadError::Stream(error) => {
+                CappedReadError::Stream(anyhow::anyhow!("reading the reply failed: {error}"))
+            }
+        })?;
+    serde_json::from_slice(&body.bytes)
+        .map_err(|error| CappedReadError::Stream(anyhow::anyhow!("unexpected reply: {error}")))
+}
+
+/// What [`read_json_capped`]'s overflow says: the reply, and the limit.
+fn too_large(what: &str, cap: usize) -> String {
+    format!(
+        "{what} is larger than {}, the most this app reads from the server",
+        limit_text(cap)
+    )
+}
 
 /// Why a read failed.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +109,8 @@ pub struct HttpHiveConversationsApi {
     http: reqwest::Client,
     server_url: String,
     auth: Option<Arc<HiveSession>>,
+    /// The most one reply may be ([`MAX_CONVERSATION_BYTES`]).
+    max_body: usize,
 }
 
 impl HttpHiveConversationsApi {
@@ -69,7 +119,16 @@ impl HttpHiveConversationsApi {
             http: reqwest::Client::new(),
             server_url: server_url.trim_end_matches('/').to_string(),
             auth,
+            max_body: MAX_CONVERSATION_BYTES,
         }
+    }
+
+    /// The same API with a smaller reply limit, so a test need not send
+    /// 64 MiB.
+    #[cfg(test)]
+    fn with_max_body(mut self, max_body: usize) -> Self {
+        self.max_body = max_body;
+        self
     }
 
     /// The server this API talks to, without a trailing slash.
@@ -84,6 +143,7 @@ impl HttpHiveConversationsApi {
     ) -> BoxFuture<'static, Result<T, ApiError>> {
         let http = self.http.clone();
         let auth = self.auth.clone();
+        let max_body = self.max_body;
         Box::pin(async move {
             let response = send_to_server(auth.as_deref(), &url, || http.get(&url)).await?;
             if !response.status().is_success() {
@@ -95,10 +155,15 @@ impl HttpHiveConversationsApi {
                     status => anyhow::anyhow!("the server answered {status} for {url}").into(),
                 });
             }
-            response
-                .json::<T>()
+            read_json_capped::<T>(response, max_body)
                 .await
-                .map_err(|error| anyhow::anyhow!("unexpected reply from {url}: {error}").into())
+                .map_err(|error| match error {
+                    CappedReadError::Overflow => {
+                        anyhow::anyhow!(too_large(&format!("the reply from {url}"), max_body))
+                            .into()
+                    }
+                    CappedReadError::Stream(error) => anyhow::anyhow!("{url}: {error:#}").into(),
+                })
         })
     }
 }
@@ -240,6 +305,33 @@ mod tests {
         ));
         let signed_out = api.conversation("locked").await.unwrap_err();
         assert_eq!(signed_out.to_string(), SIGN_IN_TO_HIVE);
+    }
+
+    /// AGE-2156: the detail is read through the capped reader. One over the
+    /// limit is a clear error naming it; one at the limit is read.
+    #[tokio::test]
+    async fn a_detail_over_the_limit_is_refused_with_a_clear_error() {
+        let server = MockServer::start().await;
+        let detail = serde_json::json!({"id": "r-1", "title": "x".repeat(4096)}).to_string();
+        Mock::given(method("GET"))
+            .and(path("/api/conversations/r-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(detail.clone()))
+            .mount(&server)
+            .await;
+
+        let small = HttpHiveConversationsApi::new(&server.uri(), None).with_max_body(1024);
+        let error = small.conversation("r-1").await.unwrap_err();
+        assert!(matches!(error, ApiError::Other(_)), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("is larger than 1024 bytes, the most this app reads from the server"),
+            "{error}"
+        );
+
+        let exact = HttpHiveConversationsApi::new(&server.uri(), None).with_max_body(detail.len());
+        assert_eq!(exact.conversation("r-1").await.unwrap().id, "r-1");
+        assert_eq!(limit_text(MAX_CONVERSATION_BYTES), "64 MiB");
     }
     #[tokio::test]
     async fn resume_posts_to_the_route_and_a_refusal_carries_the_servers_message() {

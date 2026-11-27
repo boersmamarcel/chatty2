@@ -467,9 +467,13 @@ fn local_row() -> ConversationData {
     data.attachment_paths = r#"[["/tmp/a.png"],[]]"#.to_string();
     data.message_timestamps = "[10,11]".to_string();
     data.message_feedback = r#"[null,"ThumbsUp"]"#.to_string();
+    data.created_at = 900;
     data
 }
 
+/// The detail as chatty-server sends it (`traces` and `usage` sparse, by
+/// message index; the time as `last_active_at`), plus the
+/// `attachment_paths` a server must never be able to set here (AGE-2143).
 fn server_detail(traces: Option<serde_json::Value>) -> ConversationDetail {
     let mut value = serde_json::json!({
         "id": "r-1",
@@ -483,18 +487,35 @@ fn server_detail(traces: Option<serde_json::Value>) -> ConversationDetail {
             {"role": "user", "content": [{"type": "text", "text": "and then?"}]},
             {"role": "assistant", "content": [{"type": "text", "text": "this"}]},
         ],
-        "message_timestamps": [null, null, 20, 21],
-        "token_usage": {
-            "message_usages": [{"input_tokens": 7, "output_tokens": 9}],
-            "total_input_tokens": 7, "total_output_tokens": 9, "total_estimated_cost_usd": 0.0
-        },
-        "created_at": 900,
-        "updated_at": 2_000,
+        "usage": [{"message_index": 3, "usage": {"input_tokens": 7, "output_tokens": 9}}],
+        "attachment_paths": [["/home/u/.ssh/id_ed25519"], [], ["/etc/passwd"], []],
+        "last_active_at": 2_000,
     });
     if let Some(traces) = traces {
-        value["system_traces"] = traces;
+        value["traces"] = traces;
     }
     serde_json::from_value(value).expect("the detail decodes")
+}
+
+/// A server trace of one tool call on the message at `index`, ended at
+/// Unix second `ended`.
+fn server_trace(index: usize, call: &str, ended: u64) -> serde_json::Value {
+    serde_json::json!({
+        "message_index": index,
+        "items": [{"type": "tool_call", "id": call, "name": "read_file",
+                   "input": "{}", "output": "ok", "error": null}],
+        "times": {"started_ms": (ended - 1) * 1_000, "ended_ms": ended * 1_000}
+    })
+}
+
+fn tool_call_ids(trace: &Option<serde_json::Value>) -> Vec<String> {
+    trace
+        .as_ref()
+        .and_then(|trace| trace["items"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| item["ToolCall"]["id"].as_str().map(str::to_string))
+        .collect()
 }
 
 /// The server's traces, timestamps and usage are adopted (D3), and a server
@@ -502,8 +523,8 @@ fn server_detail(traces: Option<serde_json::Value>) -> ConversationDetail {
 /// device's — nothing is wiped, unlike `import_history`.
 #[tokio::test]
 async fn bringing_a_conversation_back_keeps_its_traces() {
-    // The server sends no traces at all (today's chatty-server): the local
-    // ones survive on the messages they belong to.
+    // The server sends no traces at all: the local ones survive on the
+    // messages they belong to.
     let mut conversation = conversation_from(local_row()).await;
     conversation
         .replace_from_remote(server_detail(None).to_conversation_data("local-1"))
@@ -520,30 +541,118 @@ async fn bringing_a_conversation_back_keeps_its_traces() {
         r#"[null,{"items":["local trace"]},null,null]"#
     );
     assert_eq!(data.attachment_paths, r#"[["/tmp/a.png"],[],[],[]]"#);
-    assert_eq!(data.message_timestamps, "[10,11,20,21]");
+    assert_eq!(data.message_timestamps, "[10,11,null,null]");
     assert_eq!(data.message_feedback, r#"[null,"ThumbsUp",null,null]"#);
     assert_eq!(data.created_at, 900);
     assert_eq!(conversation.token_usage().total_input_tokens, 7);
 
-    // The server sends its own traces: they win, including for the turns
-    // this device never saw.
+    // The server sends its traces (AGE-2157): they fill the turns this
+    // device never saw, with the time each ended; the richer trace this
+    // device recorded for the same message stays.
     let mut conversation = conversation_from(local_row()).await;
     conversation
         .replace_from_remote(
             server_detail(Some(serde_json::json!([
-                null,
-                {"items": ["server trace"]},
-                null,
-                {"items": ["cloud turn"]}
+                server_trace(1, "server-1", 30),
+                server_trace(3, "cloud-3", 40),
             ])))
             .to_conversation_data("local-1"),
         )
         .unwrap();
     let data = conversation.to_conversation_data().unwrap();
+    let traces: Vec<Option<serde_json::Value>> = serde_json::from_str(&data.system_traces).unwrap();
     assert_eq!(
-        data.system_traces,
-        r#"[null,{"items":["server trace"]},null,{"items":["cloud turn"]}]"#
+        traces[1],
+        Some(serde_json::json!({"items": ["local trace"]}))
     );
+    assert_eq!(tool_call_ids(&traces[3]), vec!["cloud-3".to_string()]);
+    assert_eq!(data.message_timestamps, "[10,11,null,40]");
+}
+
+/// AGE-2157: the server's usage is a projection without delegated-agent and
+/// plugin lines, so a local record holding one is not replaced by it.
+#[tokio::test]
+async fn adopting_a_detail_keeps_local_usage_with_delegated_or_plugin_lines() {
+    let mut usage = crate::models::token_usage::ConversationTokenUsage::new();
+    usage.add_usage(crate::models::token_usage::TokenUsage::new(100, 50));
+    let mut delegated = crate::models::token_usage::TokenUsage::new(30, 20);
+    delegated.delegated_to = Some("local-coder".to_string());
+    usage.add_usage(delegated);
+    let mut row = local_row();
+    row.token_usage = serde_json::to_string(&usage).unwrap();
+
+    let mut conversation = conversation_from(row).await;
+    conversation
+        .replace_from_remote(server_detail(None).to_conversation_data("local-1"))
+        .unwrap();
+    let kept = conversation.token_usage();
+    assert_eq!(kept.message_usages.len(), 2);
+    assert_eq!(
+        kept.message_usages[1].delegated_to.as_deref(),
+        Some("local-coder")
+    );
+    assert_eq!(kept.total_input_tokens, 130);
+    let data = conversation.to_conversation_data().unwrap();
+    assert_eq!(
+        data.created_at, 900,
+        "the creation time stays this device's"
+    );
+}
+
+/// AGE-2143: paths the server names never become this device's attachment
+/// paths, on a message this device has or on one it has not.
+#[tokio::test]
+async fn the_servers_attachment_paths_are_never_adopted() {
+    let mut conversation = conversation_from(local_row()).await;
+    conversation
+        .replace_from_remote(server_detail(None).to_conversation_data("local-1"))
+        .unwrap();
+    let data = conversation.to_conversation_data().unwrap();
+    assert_eq!(data.attachment_paths, r#"[["/tmp/a.png"],[],[],[]]"#);
+
+    // Even a row that names paths — `replace_from_remote` only ever gets the
+    // server's — gives none to a message this device does not hold.
+    let mut conversation = conversation_from(local_row()).await;
+    let mut row = server_detail(None).to_conversation_data("local-1");
+    row.attachment_paths = r#"[["/home/u/.ssh/id_ed25519"],[],["/etc/passwd"],[]]"#.into();
+    conversation.replace_from_remote(row).unwrap();
+    let data = conversation.to_conversation_data().unwrap();
+    assert_eq!(data.attachment_paths, r#"[["/tmp/a.png"],[],[],[]]"#);
+}
+
+fn synced_at(version: u64) -> ConversationSync {
+    ConversationSync::Synced(SyncedConversation {
+        server_url: "https://hive.example".to_string(),
+        remote_id: "r-1".to_string(),
+        version,
+        placement: Placement::Cloud { model_id: None },
+        last_synced_at: None,
+    })
+}
+
+/// A detail that carries a server version is adopted at that version.
+#[tokio::test]
+async fn adopting_a_detail_records_the_servers_version() {
+    let mut conversation = conversation_from(local_row()).await;
+    conversation.set_sync(synced_at(2));
+    adopt_detail(&mut conversation, server_detail(None), 123).unwrap();
+    let synced = conversation.sync().synced().cloned().unwrap();
+    assert_eq!(synced.version, 5);
+    assert_eq!(synced.last_synced_at, Some(123));
+}
+
+/// A detail without a server version keeps the local version rather than
+/// resetting it to 0, which would make the next `If-Match` a guaranteed 412.
+#[tokio::test]
+async fn adopting_a_detail_without_a_version_keeps_the_local_one() {
+    let mut conversation = conversation_from(local_row()).await;
+    conversation.set_sync(synced_at(4));
+    let mut detail = server_detail(None);
+    detail.version = None;
+    adopt_detail(&mut conversation, detail, 123).unwrap();
+    let synced = conversation.sync().synced().cloned().unwrap();
+    assert_eq!(synced.version, 4);
+    assert_eq!(synced.last_synced_at, Some(123));
 }
 
 /// Metadata is only carried across for the same message at the same index:
@@ -558,6 +667,51 @@ async fn metadata_never_lands_on_a_different_message() {
         .unwrap();
     let data = conversation.to_conversation_data().unwrap();
     assert_eq!(data.system_traces, "[null,null,null,null]");
+    assert_eq!(data.attachment_paths, "[[],[],[],[]]");
+}
+
+/// AGE-2157: a conversation archived on the server is not listed here. A
+/// cloud one's cached copy goes; a device-placed one is left alone; one this
+/// device has not seen is not created.
+#[test]
+fn an_archived_conversation_is_not_listed_here() {
+    let page: ChangesPage = serde_json::from_value(serde_json::json!({
+        "conversations": [
+            {"id": "r-cloud", "version": 2, "placement": "cloud", "archived": true},
+            {"id": "r-device", "version": 2, "placement": "device",
+             "placement_device": {"id": "desk-1", "name": "Desk"}, "archived": true},
+            {"id": "r-new", "version": 1, "placement": "cloud", "archived": true},
+        ],
+        "next_cursor": "9"
+    }))
+    .unwrap();
+    let device = ConversationSync::Synced(SyncedConversation {
+        server_url: SERVER.into(),
+        remote_id: "r-device".into(),
+        version: 1,
+        placement: Placement::Device {
+            device_id: "desk-1".into(),
+        },
+        last_synced_at: Some(1),
+    });
+    let rows = vec![
+        ConversationMetadata {
+            sync: ConversationSync::cloud(SERVER, "r-cloud", None),
+            ..local_only("cached", "Ran in the cloud", 2)
+        },
+        ConversationMetadata {
+            sync: device,
+            ..local_only("mine", "Ran on this desktop", 1)
+        },
+    ];
+    let mut engine = SyncEngine::new(SERVER);
+    let outcome = engine.apply_page(&rows, page, PAGE_LIMIT);
+    assert_eq!(
+        outcome.actions,
+        vec![SyncAction::ApplyTombstone {
+            local_id: "cached".into()
+        }]
+    );
 }
 
 #[tokio::test]

@@ -50,6 +50,7 @@ fn hive_account_group() -> SettingGroup {
             let signed_out_of_hive = state.signed_out_of_hive;
             let account_error = state.account_error.clone();
             let server_version = state.hive_server.clone();
+            let client_too_old = state.client_too_old.clone();
             let sync_new = settings.sync_new_conversations;
             let existing_offered = settings.sync_existing_offered;
             let muted = cx.theme().muted_foreground;
@@ -88,6 +89,14 @@ fn hive_account_group() -> SettingGroup {
                             .text_xs()
                             .text_color(muted)
                             .child(format!("Server version: {version}")),
+                    )
+                })
+                .when_some(client_too_old, |this, message| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().danger)
+                            .child(message),
                     )
                 })
                 .when_some(account_error, |this, message| {

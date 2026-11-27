@@ -35,6 +35,9 @@ pub struct MarketplaceState {
     pub account_error: Option<String>,
     /// The Hive server's own version, once it has answered `/api/version`.
     pub hive_server: Option<String>,
+    /// Set when that server no longer serves this version of Chatty
+    /// (`min_client`, AGE-2157): what the account panel tells the person.
+    pub client_too_old: Option<String>,
     pub tab: MarketplaceTab,
     /// The last team search's results.
     pub team_results: Vec<AgentSpecListing>,

@@ -69,8 +69,12 @@ pub async fn login() -> Result<String> {
     if email.is_empty() || password.is_empty() {
         bail!("an email and a password are both needed");
     }
-    tui_hive::sign_in(&session, &url, &email, &password).await?;
-    Ok(format!("Signed in to Hive at {url} as {email}."))
+    let too_old = tui_hive::sign_in(&session, &url, &email, &password).await?;
+    let signed_in = format!("Signed in to Hive at {url} as {email}.");
+    Ok(match too_old {
+        Some(notice) => format!("{signed_in} {notice}"),
+        None => signed_in,
+    })
 }
 
 /// Sign out and revoke the TUI's refresh token. The desktop's is untouched.

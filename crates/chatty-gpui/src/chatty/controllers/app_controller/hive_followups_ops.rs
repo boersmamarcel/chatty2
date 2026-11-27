@@ -18,9 +18,11 @@ const HELD_ELSEWHERE: &str =
     "This conversation is running on another device. Continue it here first.";
 
 /// What a conversation's follow-up line says, from what this device knows:
-/// `None` when there is nothing to offer.
+/// `None` when there is nothing to offer. `too_large`: the server refused it
+/// as too large to sync (AGE-2156); another device holding it says more.
 pub(super) fn follow_up_for(
     interrupted: bool,
+    too_large: bool,
     refused_push: Option<Option<String>>,
     placement: Option<&Placement>,
     this_device: Option<&str>,
@@ -45,7 +47,7 @@ pub(super) fn follow_up_for(
                 format!("This conversation is running on {name}. Continue it here first.")
             })))
         }
-        _ => None,
+        _ => too_large.then_some(FollowUp::TooLargeToSync),
     }
 }
 
@@ -65,6 +67,7 @@ impl ChattyApp {
         let this_device = store.this_device();
         let holder = store.device_name(conv_id).map(str::to_string);
         match follow_up_for(
+            false,
             false,
             self.hive_push.held_message(conv_id),
             placement.as_ref(),
@@ -95,6 +98,7 @@ impl ChattyApp {
         }
         let follow_up = follow_up_for(
             interrupted,
+            self.hive_push.is_too_large(&conv_id),
             self.hive_push.held_message(&conv_id),
             placement.as_ref(),
             this_device.as_deref(),
@@ -235,7 +239,7 @@ mod tests {
     fn an_interrupted_turn_offers_resume_before_anything_else() {
         let held = Some(Some("held".to_string()));
         assert_eq!(
-            follow_up_for(true, held, Some(&device("other")), Some("me"), None),
+            follow_up_for(true, false, held, Some(&device("other")), Some("me"), None),
             Some(FollowUp::Resume)
         );
     }
@@ -245,6 +249,7 @@ mod tests {
         let message = "This conversation is running on Work laptop. Continue it here first.";
         assert_eq!(
             follow_up_for(
+                false,
                 false,
                 Some(Some(message.to_string())),
                 None,
@@ -257,7 +262,7 @@ mod tests {
         );
         // The server sent no message: the generic line.
         assert_eq!(
-            follow_up_for(false, Some(None), None, None, None),
+            follow_up_for(false, false, Some(None), None, None, None),
             Some(FollowUp::TakeItBack {
                 message: HELD_ELSEWHERE.to_string()
             })
@@ -267,27 +272,63 @@ mod tests {
     #[test]
     fn a_pull_that_finds_another_device_holding_it_shows_the_banner() {
         assert_eq!(
-            follow_up_for(false, None, Some(&device("laptop")), Some("me"), None),
+            follow_up_for(
+                false,
+                false,
+                None,
+                Some(&device("laptop")),
+                Some("me"),
+                None
+            ),
             Some(FollowUp::TakeItBack {
                 message: HELD_ELSEWHERE.to_string()
             })
         );
         // Held here, or this device's id not known yet: nothing to say.
         assert_eq!(
-            follow_up_for(false, None, Some(&device("me")), Some("me"), None),
+            follow_up_for(false, false, None, Some(&device("me")), Some("me"), None),
             None
         );
         assert_eq!(
-            follow_up_for(false, None, Some(&device("laptop")), None, None),
+            follow_up_for(false, false, None, Some(&device("laptop")), None, None),
             None
         );
-        assert_eq!(follow_up_for(false, None, None, Some("me"), None), None);
+        assert_eq!(
+            follow_up_for(false, false, None, None, Some("me"), None),
+            None
+        );
+    }
+
+    /// AGE-2156: a conversation the server refused as too large says it is
+    /// not syncing, whether it is synced (held here) or never got created;
+    /// a turn to resume or another device holding it comes first.
+    #[test]
+    fn a_conversation_too_large_to_sync_says_so() {
+        assert_eq!(
+            follow_up_for(false, true, None, Some(&device("me")), Some("me"), None),
+            Some(FollowUp::TooLargeToSync)
+        );
+        assert_eq!(
+            follow_up_for(false, true, None, None, None, None),
+            Some(FollowUp::TooLargeToSync)
+        );
+        assert_eq!(
+            follow_up_for(true, true, None, None, None, None),
+            Some(FollowUp::Resume)
+        );
+        assert_eq!(
+            follow_up_for(false, true, None, Some(&device("laptop")), Some("me"), None),
+            Some(FollowUp::TakeItBack {
+                message: HELD_ELSEWHERE.to_string()
+            })
+        );
     }
 
     #[test]
     fn the_banner_names_the_holder_and_goes_once_the_conversation_is_ours() {
         assert_eq!(
             follow_up_for(
+                false,
                 false,
                 None,
                 Some(&device("laptop")),
@@ -302,7 +343,14 @@ mod tests {
         // Taken back: the placement is this device's, so a refused push from
         // before no longer shows the banner.
         assert_eq!(
-            follow_up_for(false, Some(None), Some(&device("me")), Some("me"), None),
+            follow_up_for(
+                false,
+                false,
+                Some(None),
+                Some(&device("me")),
+                Some("me"),
+                None
+            ),
             None
         );
     }

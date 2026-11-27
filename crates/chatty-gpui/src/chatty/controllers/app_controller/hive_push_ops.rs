@@ -51,6 +51,10 @@ pub(super) struct HivePushState {
     creates: std::collections::HashSet<String>,
     /// A lookup of this device's id is running (HX-22).
     device_lookup: bool,
+    /// Conversations the server refused as too large (413, AGE-2156): not
+    /// syncing, which the line under the conversation says, until a push of
+    /// it lands again.
+    too_large: std::collections::HashSet<String>,
 }
 
 /// Where a create gets the conversation from.
@@ -75,6 +79,11 @@ impl HivePushState {
     /// Whether this device's id is being looked up now.
     pub(super) fn device_lookup_running(&self) -> bool {
         self.device_lookup
+    }
+
+    /// Whether the server refused `id` as too large to sync (AGE-2156).
+    pub(super) fn is_too_large(&self, id: &str) -> bool {
+        self.too_large.contains(id)
     }
 }
 
@@ -173,6 +182,7 @@ impl ChattyApp {
         self.hive_push.creates.remove(conv_id);
         self.hive_push.stale.remove(conv_id);
         self.hive_push.held_by.remove(conv_id);
+        self.hive_push.too_large.remove(conv_id);
         cx.update_global::<ConversationsStore, _>(|store, _| {
             store.set_conversation_sync(conv_id, ConversationSync::LocalOnly);
         });
@@ -389,6 +399,9 @@ impl ChattyApp {
         match self.hive_push.queue.settle(local_id, accepted) {
             PushEvent::Pushed { local_id, version } => {
                 self.hive_push.creates.remove(&local_id);
+                if self.hive_push.too_large.remove(&local_id) {
+                    self.refresh_follow_up(cx);
+                }
                 let Some(remote_id) = remote_id else {
                     return false;
                 };
@@ -439,6 +452,11 @@ impl ChattyApp {
                 self.hive_push.creates.remove(&local_id);
                 false
             }
+            PushEvent::TooLarge { local_id } => {
+                self.hive_push.creates.remove(&local_id);
+                self.too_large_to_sync(local_id, cx);
+                false
+            }
             PushEvent::Deleted { local_id, message } => {
                 self.hive_push.creates.remove(&local_id);
                 self.deleted_on_account(&local_id, message, cx);
@@ -466,6 +484,9 @@ impl ChattyApp {
             PushEvent::Pushed { local_id, version } => {
                 self.hive_push.stale.remove(&local_id);
                 self.hive_push.held_by.remove(&local_id);
+                if self.hive_push.too_large.remove(&local_id) {
+                    self.refresh_follow_up(cx);
+                }
                 cx.update_global::<ConversationsStore, _>(|store, _| {
                     let Some(mut synced) = store
                         .get_conversation(&local_id)
@@ -506,11 +527,24 @@ impl ChattyApp {
                 warn!(conv_id = %local_id, %reason, "The server refused a history push");
                 false
             }
+            PushEvent::TooLarge { local_id } => {
+                self.too_large_to_sync(local_id, cx);
+                false
+            }
             PushEvent::Deleted { local_id, message } => {
                 self.deleted_on_account(&local_id, message, cx);
                 false
             }
         }
+    }
+
+    /// 413: the conversation is too large for the server (AGE-2156). Nothing
+    /// is queued again (the next turn tries once more); the line under the
+    /// conversation says it is not syncing, and offers a new one.
+    fn too_large_to_sync(&mut self, local_id: String, cx: &mut Context<Self>) {
+        warn!(conv_id = %local_id, "The server refused this conversation as too large; it is not syncing");
+        self.hive_push.too_large.insert(local_id);
+        self.refresh_follow_up(cx);
     }
 
     /// 410: the conversation was deleted on the account and its id stays
@@ -526,6 +560,7 @@ impl ChattyApp {
         self.hive_push.queue.forget(local_id);
         self.hive_push.stale.remove(local_id);
         self.hive_push.held_by.remove(local_id);
+        self.hive_push.too_large.remove(local_id);
         let loaded = cx.update_global::<ConversationsStore, _>(|store, _| {
             store.set_conversation_sync(local_id, ConversationSync::LocalOnly);
             store.get_conversation(local_id).is_some()

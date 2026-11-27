@@ -780,6 +780,7 @@ impl ChattyApp {
                 }
                 ChatViewEvent::ContinueHere => app.continue_here(cx),
                 ChatViewEvent::ResumeTurn => app.resume_turn(cx),
+                ChatViewEvent::StartNewConversation => app.start_new_conversation(cx),
                 ChatViewEvent::WithdrawQueued(id) => {
                     debug!(?id, "ChatViewEvent::WithdrawQueued received");
                     app.withdraw(*id, cx);

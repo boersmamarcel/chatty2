@@ -7,9 +7,11 @@
 //! status and headers. Never a response body.
 //!
 //! Secrets are redacted *before* they are stored, not when the file is
-//! written: `Cookie`, `Set-Cookie`, `Authorization` and `Proxy-Authorization`
-//! values, and any form/JSON/multipart field whose name contains `password`,
-//! `passwd`, `token`, `secret` or `card`.
+//! written: the values of headers whose name contains `token`, `key`,
+//! `secret`, `auth` or `session` (plus `Cookie` and `Set-Cookie`), and any
+//! query, form, JSON or multipart field whose name contains `password`,
+//! `passwd`, `token`, `secret`, `card`, `code`, `key`, `sig`, `signature` or
+//! `credential`. The stored URL and `queryString` are redacted the same way.
 //!
 //! This is not the ring buffer behind `browser_network`: the trace keeps up
 //! to [`MAX_ENTRIES`] entries, then stops adding and records that it was cut.
@@ -30,13 +32,28 @@ pub const MAX_POST_BYTES: usize = 64 * 1024;
 /// What a secret value becomes.
 pub const REDACTED: &str = "[redacted]";
 
-const SENSITIVE_HEADERS: [&str; 4] = [
+/// A header is redacted when its lowercase name contains any of these.
+const SENSITIVE_HEADERS: [&str; 7] = [
     "cookie",
-    "set-cookie",
-    "authorization",
-    "proxy-authorization",
+    "token",
+    "key",
+    "secret",
+    "auth",
+    "session",
+    "credential",
 ];
-const SENSITIVE_FIELDS: [&str; 5] = ["password", "passwd", "token", "secret", "card"];
+const SENSITIVE_FIELDS: [&str; 10] = [
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "card",
+    "code",
+    "key",
+    "sig",
+    "signature",
+    "credential",
+];
 
 /// Turn the configured relative trace path into one inside the workspace.
 /// `None` when there is no workspace or the path is absolute or climbs out.
@@ -52,6 +69,30 @@ pub fn resolve_trace_path(workspace: Option<&Path>, rel: &Path) -> Option<PathBu
 fn is_sensitive_field(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     SENSITIVE_FIELDS.iter().any(|s| name.contains(s))
+}
+
+/// The URL with the value of every sensitive query parameter replaced. Other
+/// parameters and the fragment are kept byte for byte.
+fn redact_url(url: &str) -> String {
+    let Some((base, rest)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    let (query, fragment) = match rest.split_once('#') {
+        Some((q, f)) => (q, Some(f)),
+        None => (rest, None),
+    };
+    let query = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((n, _)) if is_sensitive_field(&percent_decode(n)) => format!("{n}={REDACTED}"),
+            _ => pair.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    match fragment {
+        Some(f) => format!("{base}?{query}#{f}"),
+        None => format!("{base}?{query}"),
+    }
 }
 
 fn percent_decode(s: &str) -> String {
@@ -186,8 +227,11 @@ fn headers_from(value: &Value) -> Vec<(String, String)> {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            let value = if SENSITIVE_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+            let lower = name.to_ascii_lowercase();
+            let value = if SENSITIVE_HEADERS.iter().any(|s| lower.contains(s)) {
                 REDACTED.to_string()
+            } else if matches!(lower.as_str(), "location" | "content-location" | "referer") {
+                redact_url(&text)
             } else {
                 text
             };
@@ -380,7 +424,7 @@ impl HarRecorder {
         state.entries.push(Entry {
             started: started_at(wall_time),
             method: method.to_string(),
-            url: url.to_string(),
+            url: redact_url(url),
             headers,
             content_type,
             post,
@@ -538,6 +582,56 @@ mod tests {
     }
 
     #[test]
+    fn non_standard_auth_headers_are_redacted() {
+        let h = json!({"X-API-Key":"k","X-Auth-Token":"t","X-CSRF-Token":"c",
+            "X-Client-Secret":"s","X-Session-Id":"i","Accept":"*/*"});
+        for (n, v) in &headers_from(&h) {
+            if n == "Accept" {
+                assert_eq!(v, "*/*");
+            } else {
+                assert_eq!(v, REDACTED, "{n}");
+            }
+        }
+    }
+
+    #[test]
+    fn secrets_in_urls_and_query_string_are_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = rec(dir.path());
+        let urls = [
+            "https://a/cb?code=C0DE&state=ok",
+            "https://a/x?access_token=AT&page=2",
+            "https://a/x?api_key=AK&page=2",
+            "https://a/x?key=K1&page=2",
+            "https://a/o?X-Amz-Signature=SIG&X-Amz-Credential=CRED&page=2",
+            "https://a/o?sig=S1&signature=S2&page=2",
+            "https://a/x?api%5Fkey=ENC&page=2#frag",
+        ];
+        for (i, u) in urls.iter().enumerate() {
+            r.on_request(&i.to_string(), 0.0, "GET", u, &json!({}), None, None);
+        }
+        let har = r.to_har();
+        let text = har.to_string();
+        for leaked in [
+            "C0DE", "\"AT\"", "AK", "K1", "SIG", "CRED", "S1", "S2", "ENC",
+        ] {
+            assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+        }
+        let entries = &har["log"]["entries"];
+        assert_eq!(
+            entries[0]["request"]["url"],
+            "https://a/cb?code=[redacted]&state=ok"
+        );
+        assert_eq!(
+            entries[6]["request"]["url"],
+            "https://a/x?api%5Fkey=[redacted]&page=2#frag"
+        );
+        let qs = &entries[1]["request"]["queryString"];
+        assert_eq!(qs[0], json!({"name":"access_token","value":REDACTED}));
+        assert_eq!(qs[1], json!({"name":"page","value":"2"}));
+    }
+
+    #[test]
     fn post_data_is_cut_beyond_64_kib_and_marked() {
         let dir = tempfile::tempdir().unwrap();
         let r = rec(dir.path());
@@ -612,5 +706,40 @@ mod tests {
         assert_eq!(e["response"]["headers"][0]["value"], REDACTED);
         assert!(!std::fs::read_to_string(&file).unwrap().contains("\"p\""));
         assert!(!file.with_extension("har.tmp").exists());
+    }
+
+    #[test]
+    fn urls_in_location_and_referer_headers_are_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = rec(dir.path());
+        r.on_request(
+            "1",
+            0.0,
+            "GET",
+            "https://a/start",
+            &json!({"Referer":"https://app/p?access_token=REFTOK&page=2"}),
+            None,
+            None,
+        );
+        r.on_request(
+            "1",
+            0.0,
+            "GET",
+            "https://app/cb",
+            &json!({}),
+            None,
+            Some(ResponseInfo {
+                status: 302,
+                status_text: "Found",
+                headers: &json!({"Location":"https://app/cb?code=AUTHCODE&state=STATE1"}),
+                mime: "text/html",
+            }),
+        );
+        let har = r.to_har();
+        let text = har.to_string();
+        for leaked in ["REFTOK", "AUTHCODE"] {
+            assert!(!text.contains(leaked), "{leaked} leaked: {text}");
+        }
+        assert!(text.contains("page=2"), "{text}");
     }
 }
