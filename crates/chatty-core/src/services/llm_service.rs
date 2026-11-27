@@ -636,7 +636,7 @@ fn failed_run_messages(
 
 /// The text a dropped image is replaced with, so the model knows content
 /// was removed instead of silently seeing fewer items than it sent/expects.
-const IMAGE_UNSUPPORTED_NOTE: &str =
+pub(crate) const IMAGE_UNSUPPORTED_NOTE: &str =
     "[Image omitted: the current model does not accept image input.]";
 
 /// Strip image content from a request the configured model cannot accept,
@@ -700,17 +700,30 @@ fn strip_unsupported_images(
 /// it up front.
 const MAX_IMAGE_REFUSAL_RECOVERIES: usize = 2;
 
-/// Whether `err` is the provider refusing the request for the images it
-/// carries: a 400 whose body names images, e.g. vLLM serving a model with
-/// `--limit-mm-per-prompt '{"image":0}'` (`At most 0 image(s) may be
-/// provided in one prompt.`). Sending it again unchanged can only fail the
-/// same way.
+/// How a provider says its model takes no images at all, lowercase: vLLM
+/// serving a model with `--limit-mm-per-prompt '{"image":0}'`, OpenAI's
+/// text-only chat models, and the wording vision-less OpenAI-compatible
+/// servers and OpenRouter use. A refusal of one image (too large, a bad
+/// format) is not one: the model takes images, just not that one.
+const NO_IMAGE_INPUT: &[&str] = &[
+    "at most 0 image",
+    "image_url is only supported by certain models",
+    "does not support image",
+    "doesn't support image",
+    "support image input",
+];
+
+/// Whether `err` is the provider refusing the request because its model
+/// takes no images (a 400, or OpenRouter's 404 when no endpoint of the
+/// model does, whose body says so, see [`NO_IMAGE_INPUT`]). Sending it again
+/// unchanged can only fail the same way.
 fn is_image_refusal(err: &PromptError) -> bool {
     err.provider_response_status()
-        .is_some_and(|status| status.as_u16() == 400)
-        && err
-            .provider_response_body()
-            .is_some_and(|body| body.to_ascii_lowercase().contains("image"))
+        .is_some_and(|status| matches!(status.as_u16(), 400 | 404))
+        && err.provider_response_body().is_some_and(|body| {
+            let body = body.to_ascii_lowercase();
+            NO_IMAGE_INPUT.iter().any(|phrase| body.contains(phrase))
+        })
 }
 
 /// The request `sent` (history, then the prompt last) with every image

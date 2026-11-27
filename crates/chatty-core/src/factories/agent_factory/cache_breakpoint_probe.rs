@@ -122,7 +122,6 @@ fn build_arm(arm: Arm, key: &str, model: &str, preamble: &str) -> AgentClient {
         request_recorder: Default::default(),
         tool_loader: None,
         supports_images: model_config.supports_images,
-        images_refused: Default::default(),
         model_id: model_config.model_identifier.clone(),
         plugin_usage: Vec::new(),
         run_inbox: None,

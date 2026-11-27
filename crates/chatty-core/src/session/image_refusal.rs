@@ -189,3 +189,66 @@ async fn another_400_is_sent_once_and_not_retried() {
     assert_eq!(daemon.requests().len(), 1);
     assert_eq!(session.recovery_action(&errors[0]), RecoveryAction::Stop);
 }
+
+/// An image a tool returns after the refusal, in the same run, is replaced
+/// by the note when it is recorded, so the run's later requests carry none
+/// and the turn still ends with an answer.
+#[tokio::test]
+async fn a_tool_image_after_the_refusal_is_not_sent() {
+    let daemon = FakeDaemon::scripted(Script::new().route(
+        MODEL,
+        [
+            image_refusal(),
+            Reply::tool_call("view_image", serde_json::json!({ "path": "pic.png" })),
+            Reply::tool_call("view_image", serde_json::json!({ "path": "pic.png" })),
+            Reply::tool_call("view_image", serde_json::json!({ "path": "pic.png" })),
+            Reply::text("No image to look at."),
+        ],
+    ));
+    let (mut session, workspace) = session_on(&daemon).await;
+    std::fs::write(
+        workspace.path().join("pic.png"),
+        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR",
+    )
+    .unwrap();
+
+    let events = run_turn(&mut session, with_image("What does the picture show?")).await;
+
+    assert!(errors(&events).is_empty(), "{:?}", errors(&events));
+    let sent = bodies(&daemon);
+    assert_eq!(sent.len(), 5, "one refusal, then the run without images");
+    for body in &sent[1..] {
+        assert!(!body.contains("image_url"), "{body}");
+    }
+    assert!(sent[4].contains("Image omitted"), "{}", sent[4]);
+}
+
+/// A refusal of one image, not of images, leaves the model's images on: the
+/// turn ends with the error and nothing is turned off.
+#[tokio::test]
+async fn an_image_size_error_does_not_turn_images_off() {
+    let daemon = FakeDaemon::scripted(Script::new().route(
+        MODEL,
+        [Reply::ErrorBody(
+            400,
+            serde_json::json!({ "error": {
+                "message": "Image exceeds 5 MB maximum: 7340032 bytes > 5242880 bytes",
+                "code": 400
+            }}),
+        )],
+    ));
+    let (mut session, _workspace) = session_on(&daemon).await;
+
+    let events = run_turn(&mut session, with_image("What does the picture show?")).await;
+
+    assert_eq!(errors(&events).len(), 1, "{:?}", errors(&events));
+    assert_eq!(daemon.requests().len(), 1);
+    assert!(
+        session
+            .conversation()
+            .expect("the conversation")
+            .agent()
+            .supports_images(),
+        "the model still takes images"
+    );
+}

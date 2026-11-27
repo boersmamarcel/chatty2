@@ -327,6 +327,9 @@ struct Inner {
     round_recorded: Mutex<usize>,
     /// Requests the provider refused as over the window (AGE-978).
     overflows: WindowOverflows,
+    /// Set once the provider refused an image (AGE-2178): every tool result
+    /// recorded from then on has its images replaced by a note.
+    images_refused: Arc<AtomicBool>,
 }
 
 impl ContextShaper {
@@ -371,7 +374,16 @@ impl ContextShaper {
                 window_exhausted: AtomicBool::new(false),
                 round_recorded: Mutex::new(0),
                 overflows: WindowOverflows::default(),
+                images_refused: Arc::default(),
             }),
         }
+    }
+
+    /// The flag `stream_prompt` sets when the provider refuses a request for
+    /// carrying an image (AGE-2178). Once set, the agent is text-only: this
+    /// guard replaces the images of every tool result it records, and the
+    /// next run's request is stripped up front.
+    pub fn images_refused(&self) -> Arc<AtomicBool> {
+        self.inner.images_refused.clone()
     }
 }
