@@ -12,6 +12,11 @@ const MAX_TODOS: usize = 12;
 /// (AGE-150). `reset()` restores the budget when a new user turn starts.
 const MAX_PROTOCOL_FOLLOW_UPS: usize = 3;
 
+/// How many times one user turn's `verify_completion` refuses a coordinator
+/// that has not delegated yet (AGE-2179). After that the model's own
+/// judgement stands: a task its team has no part in still finishes.
+const MAX_DELEGATION_NUDGES: usize = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTodoStatus {
@@ -115,6 +120,11 @@ pub enum AgentTaskError {
     MissingEvidence,
     #[error("all todos must be done before verify_completion can succeed")]
     TodosNotDone,
+    /// A coordinator that read and planned but started no worker (AGE-2179).
+    #[error(
+        "not verified: you have not delegated any of this work. You coordinate: call invoke_agent so your team does it, then verify again."
+    )]
+    NotDelegated,
 }
 
 #[derive(Debug, Default)]
@@ -128,16 +138,35 @@ struct AgentTaskState {
     blocked_counts: HashMap<String, usize>,
     follow_up_count: usize,
     verification_skipped: bool,
+    /// Whether this turn called `invoke_agent` (AGE-2179).
+    delegated: bool,
+    delegation_nudges: usize,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct AgentTaskController {
     state: Arc<Mutex<AgentTaskState>>,
+    /// A coordinator that delegates: its `verify_completion` passes only
+    /// once it has delegated (AGE-2179). Fixed at build, kept by `reset`.
+    requires_delegation: bool,
 }
 
 impl AgentTaskController {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A controller whose `verify_completion` refuses success until the
+    /// agent has delegated this turn ([`Self::note_delegation`]), for a
+    /// coordinator, whose work is done by its team (AGE-2179).
+    pub fn requiring_delegation(mut self, required: bool) -> Self {
+        self.requires_delegation = required;
+        self
+    }
+
+    /// The agent called `invoke_agent` this turn.
+    pub fn note_delegation(&self) {
+        self.state.lock().delegated = true;
     }
 
     /// Clear all task state so a new user turn starts from scratch.
@@ -307,6 +336,14 @@ impl AgentTaskController {
                 .any(|todo| todo.status != AgentTodoStatus::Done)
         {
             return Err(AgentTaskError::TodosNotDone);
+        }
+        if goal_achieved
+            && self.requires_delegation
+            && !state.delegated
+            && state.delegation_nudges < MAX_DELEGATION_NUDGES
+        {
+            state.delegation_nudges += 1;
+            return Err(AgentTaskError::NotDelegated);
         }
 
         state.verified = goal_achieved;
@@ -617,6 +654,63 @@ mod tests {
             .verify_completion(true, "not yet".into(), vec!["t1: pending".into()], None)
             .unwrap_err();
         assert!(matches!(error, AgentTaskError::TodosNotDone));
+    }
+
+    /// Every todo done, verified as achieved.
+    fn verify_done(controller: &AgentTaskController) -> Result<AgentTaskResponse, AgentTaskError> {
+        for id in ["t1", "t2"] {
+            controller
+                .update_todo(id.into(), AgentTodoStatus::Done, None, None)
+                .unwrap();
+        }
+        controller.verify_completion(true, "done".into(), vec!["t1: ok".into()], None)
+    }
+
+    /// AGE-2179: a coordinator that never delegated is told to, not passed;
+    /// twice at most, so a task its team has no part in still ends.
+    #[test]
+    fn a_coordinator_that_never_delegated_is_nudged_twice_then_passed() {
+        let controller = controller().requiring_delegation(true);
+        controller.write_todos("Ship".into(), todos()).unwrap();
+
+        let error = verify_done(&controller).unwrap_err();
+        assert!(matches!(error, AgentTaskError::NotDelegated));
+        assert!(error.to_string().contains("invoke_agent"), "{error}");
+        assert!(!controller.snapshot().verified);
+        assert!(matches!(
+            verify_done(&controller).unwrap_err(),
+            AgentTaskError::NotDelegated
+        ));
+        assert!(verify_done(&controller).unwrap().snapshot.verified);
+    }
+
+    #[test]
+    fn a_coordinator_that_delegated_passes() {
+        let controller = controller().requiring_delegation(true);
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        controller.note_delegation();
+        assert!(verify_done(&controller).unwrap().snapshot.verified);
+    }
+
+    /// Delegation is per user turn; the requirement is per agent.
+    #[test]
+    fn a_reset_forgets_the_delegation_but_keeps_the_requirement() {
+        let controller = controller().requiring_delegation(true);
+        controller.note_delegation();
+        controller.reset();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        assert!(matches!(
+            verify_done(&controller).unwrap_err(),
+            AgentTaskError::NotDelegated
+        ));
+    }
+
+    /// Every other agent verifies as before.
+    #[test]
+    fn an_agent_not_required_to_delegate_passes_without_delegating() {
+        let controller = controller();
+        controller.write_todos("Ship".into(), todos()).unwrap();
+        assert!(verify_done(&controller).unwrap().snapshot.verified);
     }
 
     #[test]

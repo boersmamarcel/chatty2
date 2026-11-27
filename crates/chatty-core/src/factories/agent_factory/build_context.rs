@@ -648,6 +648,27 @@ cap_usd = 2.5
     /// The tool names `spec` is built with: the tools of the first request
     /// its agent sends to a fake model.
     async fn tools_of(spec: &AgentSpec) -> Vec<String> {
+        let (agent, daemon, _workspace) = agent_of(spec).await;
+        // Only the request matters: the fake answers every request as a
+        // stream, which a one-shot `prompt` need not parse.
+        let _ = agent.agent.prompt("go").await;
+        let request = daemon.requests().into_iter().next().expect("one request");
+        request.json()["tools"]
+            .as_array()
+            .expect("the request carries tools")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// The agent `spec` builds, against a fake model.
+    async fn agent_of(
+        spec: &AgentSpec,
+    ) -> (
+        super::super::AgentClient,
+        crate::testing::fake_model::FakeDaemon,
+        tempfile::TempDir,
+    ) {
         use crate::settings::models::models_store::ModelConfig;
         use crate::settings::models::providers_store::{ProviderConfig, ProviderType};
         use crate::testing::fake_model::{FakeDaemon, Reply, Script};
@@ -683,16 +704,7 @@ cap_usd = 2.5
         )
         .await
         .expect("the agent builds");
-        // Only the request matters: the fake answers every request as a
-        // stream, which a one-shot `prompt` need not parse.
-        let _ = agent.client.agent.prompt("go").await;
-        let request = daemon.requests().into_iter().next().expect("one request");
-        request.json()["tools"]
-            .as_array()
-            .expect("the request carries tools")
-            .iter()
-            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
-            .collect()
+        (agent.client, daemon, workspace)
     }
 
     /// DP-1: a profile no longer implies delegation. A `coordinator` with an
@@ -720,6 +732,41 @@ cap_usd = 2.5
             !tools.contains(&"write_todos".to_string()),
             "the coder profile applies: {tools:?}"
         );
+    }
+
+    /// AGE-2179: a coordinator that delegates verifies only after it has
+    /// delegated; one that delegates to no one, and any other profile,
+    /// verifies as before.
+    #[tokio::test]
+    async fn only_a_delegating_coordinator_must_delegate_before_it_verifies() {
+        use crate::services::AgentTodoStatus;
+        use crate::services::agent_task_controller::AgentTaskError;
+
+        async fn verify(profile: &str, delegates: bool) -> Result<(), AgentTaskError> {
+            let mut spec = AgentSpec::named("lead");
+            spec.tools.profile = Some(profile.to_string());
+            if delegates {
+                spec.swarm.delegates_to = vec!["local-coder".to_string()];
+            }
+            let (agent, _daemon, _workspace) = agent_of(&spec).await;
+            let plan = agent.task_controller();
+            plan.write_todos(
+                "Ship".into(),
+                vec![("t1".into(), "Plan".into(), "Plan it".into())],
+            )
+            .unwrap();
+            plan.update_todo("t1".into(), AgentTodoStatus::Done, None, None)
+                .unwrap();
+            plan.verify_completion(true, "done".into(), vec!["t1: ok".into()], None)
+                .map(|_| ())
+        }
+
+        assert!(matches!(
+            verify("coordinator", true).await,
+            Err(AgentTaskError::NotDelegated)
+        ));
+        assert!(verify("coordinator", false).await.is_ok());
+        assert!(verify("coder+coordinator", true).await.is_ok());
     }
 
     #[test]

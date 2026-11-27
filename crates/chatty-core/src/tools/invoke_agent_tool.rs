@@ -414,6 +414,9 @@ pub struct InvokeAgentTool {
     /// calls still running hang up. Shared by the clones of this tool —
     /// the calls rig runs side by side — and cleared when a run starts.
     budget_stop: Arc<tokio::sync::watch::Sender<Option<String>>>,
+    /// The calling agent's plan, told of every delegation so a
+    /// coordinator's `verify_completion` knows it delegated (AGE-2179).
+    task_controller: Option<crate::services::AgentTaskController>,
 }
 
 impl InvokeAgentTool {
@@ -435,7 +438,17 @@ impl InvokeAgentTool {
             handoff_ledger: None,
             note_store: None,
             budget_stop: Arc::new(tokio::sync::watch::Sender::new(None)),
+            task_controller: None,
         }
+    }
+
+    /// Tell `controller` of every delegation this tool starts (AGE-2179).
+    pub fn with_task_controller(
+        mut self,
+        controller: crate::services::AgentTaskController,
+    ) -> Self {
+        self.task_controller = Some(controller);
+        self
     }
 
     /// Forget a budget stop: a new run starts (AGE-903).
@@ -787,6 +800,10 @@ impl InvokeAgentTool {
             return Err(InvokeAgentError::InvocationFailed(
                 "Prompt cannot be empty".to_string(),
             ));
+        }
+        // A delegation was asked for, whatever comes of it (AGE-2179).
+        if let Some(controller) = self.task_controller.as_ref() {
+            controller.note_delegation();
         }
         // A lead that keeps its notes in the workspace offers every note
         // file to its other callees (AGE-1295).
@@ -1814,6 +1831,48 @@ mod tests {
             "the warning names the origin: {}",
             said[0]
         );
+    }
+
+    /// AGE-2179: a delegation the model asks for is noted on its plan,
+    /// whatever comes of the call; an empty agent name is not one.
+    #[tokio::test]
+    async fn a_delegation_is_noted_on_the_callers_plan() {
+        use crate::services::AgentTaskController;
+        use crate::services::agent_task_controller::AgentTaskError;
+
+        let controller = AgentTaskController::new().requiring_delegation(true);
+        let tool = InvokeAgentTool::new(Vec::new()).with_task_controller(controller.clone());
+        let verify = || {
+            controller
+                .write_todos(
+                    "Ship".into(),
+                    vec![("t1".into(), "Plan".into(), "Plan it".into())],
+                )
+                .ok();
+            controller
+                .update_todo(
+                    "t1".into(),
+                    crate::services::AgentTodoStatus::Done,
+                    None,
+                    None,
+                )
+                .unwrap();
+            controller.verify_completion(true, "done".into(), vec!["t1: ok".into()], None)
+        };
+        let call = |agent: &str| InvokeAgentArgs {
+            agent: agent.to_string(),
+            prompt: "write the report".to_string(),
+            include_trace: false,
+            handle: None,
+            files: None,
+        };
+
+        let _ = tool.call(&mut ToolContext::new(), call(" ")).await;
+        assert!(matches!(verify(), Err(AgentTaskError::NotDelegated)));
+
+        let refused = tool.call(&mut ToolContext::new(), call("nobody")).await;
+        assert!(refused.is_err(), "no such agent");
+        assert!(verify().unwrap().snapshot.verified);
     }
 
     /// The flag is off by default, and the hook is silent until someone turns
