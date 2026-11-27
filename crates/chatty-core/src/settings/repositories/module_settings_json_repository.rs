@@ -40,19 +40,31 @@ impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
                 .await
                 .map_err(|e| RepositoryError::IoError(e.to_string()))?;
 
-            let mut settings: ModuleSettingsModel =
-                serde_json::from_str(&contents).map_err(|e| {
-                    let msg = e.to_string();
-                    if msg.contains("unknown field `gateway_port`") {
-                        // AGE-914: say what to do, not just what is wrong.
-                        RepositoryError::SerializationError(format!(
-                            "{}: remove `gateway_port` (dropped in v0.6.0) ({msg})",
-                            path.display()
-                        ))
-                    } else {
-                        RepositoryError::SerializationError(msg)
-                    }
-                })?;
+            let mut value: serde_json::Value = serde_json::from_str(&contents)
+                .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
+            // `gateway_port` was dropped in v0.6.0. A file that still has it
+            // is migrated, not refused: the key goes and the file is written
+            // back, so nobody gets stuck on an old settings file (AGE-777).
+            if let Some(object) = value.as_object_mut()
+                && object.remove("gateway_port").is_some()
+            {
+                tracing::info!(
+                    path = %path.display(),
+                    "Removed the old gateway_port setting (dropped in v0.6.0)"
+                );
+                let migrated = serde_json::to_string_pretty(&value)
+                    .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
+                let tmp = path.with_extension("json.migrate.tmp");
+                tokio::fs::write(&tmp, migrated)
+                    .await
+                    .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+                tokio::fs::rename(&tmp, &path)
+                    .await
+                    .map_err(|e| RepositoryError::IoError(e.to_string()))?;
+            }
+
+            let mut settings: ModuleSettingsModel = serde_json::from_value(value)
+                .map_err(|e| RepositoryError::SerializationError(e.to_string()))?;
 
             // Normalize the module directory path after loading.
             let normalized_dir = normalize_module_dir(settings.module_dir.clone());
@@ -73,29 +85,23 @@ impl ModuleSettingsRepository for ModuleSettingsJsonRepository {
 mod tests {
     use super::*;
 
-    /// An old file that still has `gateway_port` is refused like any other
-    /// unknown key, with an error naming it (AGE-777).
+    /// An old file that still has `gateway_port` loads: the key is removed
+    /// and the file written back without it (AGE-777).
     #[tokio::test]
-    async fn old_settings_with_gateway_port_are_refused_naming_the_key() {
+    async fn old_settings_with_gateway_port_are_migrated() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("module_settings.json");
         std::fs::write(&path, r#"{"enabled":true,"gateway_port":8420}"#).unwrap();
 
         let repo = ModuleSettingsJsonRepository::with_path(path.clone());
-        let msg = repo.load().await.unwrap_err().to_string();
+        let settings = repo.load().await.expect("an old file loads");
 
+        assert!(settings.enabled, "the other settings are kept");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("gateway_port"), "key removed: {written}");
         assert!(
-            msg.contains("gateway_port"),
-            "error should name the key: {msg}"
-        );
-        assert!(
-            msg.contains("module_settings.json: remove `gateway_port` (dropped in v0.6.0)"),
-            "error should name the file and the fix: {msg}"
-        );
-        assert!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("gateway_port")
+            written.contains("\"enabled\": true"),
+            "rest kept: {written}"
         );
     }
 
