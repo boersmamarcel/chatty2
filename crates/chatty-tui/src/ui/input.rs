@@ -12,9 +12,9 @@ use crate::ui::theme;
 
 // Pure helpers shared with the GPUI desktop app (AGE-172) — see
 // `chatty_core::at_mention` for the shared source and its own unit tests.
-pub use chatty_core::at_mention::{
-    apply_at_to_input, at_menu_items_for, at_query_from, load_files_for_dir,
-};
+#[cfg(test)]
+pub use chatty_core::at_mention::at_menu_items_for;
+pub use chatty_core::at_mention::{AtFiles, apply_at_to_input, at_query_from, load_files_for_dir};
 use chatty_core::paste;
 
 /// The slash menu's rows are shared with the GPUI desktop app
@@ -29,8 +29,13 @@ pub struct InputState {
     slash_menu: SlashMenu,
     /// Filesystem skills loaded from the project and global skill directories.
     available_skills: Vec<SkillEntry>,
-    /// Cached list of files for the `@` mention picker.
-    pub at_menu_files: Vec<String>,
+    /// The `@` picker's index of the working folder (AGE-2192).
+    pub at_menu_files: AtFiles,
+    /// Whether the last key left an `@` query in play, so the index is
+    /// reloaded only when the picker opens.
+    at_menu_was_open: bool,
+    /// A background re-index, taken in by [`Self::take_at_files_reload`].
+    at_menu_reload: Option<std::sync::mpsc::Receiver<Vec<String>>>,
     /// Index of the highlighted item in the `@` mention picker.
     at_menu_selected: usize,
     at_menu_scroll_offset: usize,
@@ -52,7 +57,9 @@ impl InputState {
             textarea,
             slash_menu: SlashMenu::new(MenuWrap::Clamp),
             available_skills: Vec::new(),
-            at_menu_files: Vec::new(),
+            at_menu_files: AtFiles::default(),
+            at_menu_was_open: false,
+            at_menu_reload: None,
             at_menu_selected: 0,
             at_menu_scroll_offset: 0,
         }
@@ -206,7 +213,7 @@ impl InputState {
     /// Return filtered items from the cached file list for the current input.
     pub fn at_menu_items(&self) -> Vec<&String> {
         let text = self.textarea.lines().join("\n");
-        at_menu_items_for(&text, &self.at_menu_files)
+        self.at_menu_files.items_for(&text)
     }
 
     /// Whether the current input contains an `@` query (regardless of whether
@@ -264,17 +271,50 @@ impl InputState {
         Some(items[idx].clone())
     }
 
-    /// Load files from `dir` if the cache is empty.
-    pub fn ensure_at_files_loaded(&mut self, dir: &std::path::Path) {
-        if self.at_menu_files.is_empty() {
-            self.at_menu_files = load_files_for_dir(dir);
+    /// When the input has just opened the `@` picker, index `dir`: right
+    /// away the first time (nothing to show otherwise), else on a
+    /// background thread while the previous index serves, so files made
+    /// since show up without a large folder stalling the keystroke.
+    pub fn refresh_at_files(&mut self, dir: &std::path::Path) {
+        let open = self.has_at_query();
+        let opened = open && !self.at_menu_was_open;
+        self.at_menu_was_open = open;
+        if !opened {
+            return;
         }
+        if self.at_menu_files.is_empty() {
+            self.at_menu_files = AtFiles::new(load_files_for_dir(dir));
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir = dir.to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_files_for_dir(&dir));
+        });
+        self.at_menu_reload = Some(rx);
+    }
+
+    /// Take in a finished background re-index; `true` when the index
+    /// changed and the menu should be redrawn.
+    pub fn take_at_files_reload(&mut self) -> bool {
+        let Some(files) = self
+            .at_menu_reload
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        else {
+            return false;
+        };
+        self.at_menu_reload = None;
+        self.at_menu_files = AtFiles::new(files);
+        true
     }
 
     /// Invalidate the cached `@` file list so it will be reloaded from the new
     /// working directory on the next `@` query.
     pub fn invalidate_at_files(&mut self) {
-        self.at_menu_files.clear();
+        self.at_menu_files = AtFiles::default();
+        self.at_menu_reload = None;
+        self.at_menu_was_open = false;
         self.at_menu_selected = 0;
         self.at_menu_scroll_offset = 0;
     }
@@ -297,7 +337,9 @@ pub fn render_input(frame: &mut Frame, area: Rect, input_state: &InputState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{InputState, SlashMenuItem, apply_at_to_input, at_menu_items_for, at_query_from};
+    use super::{
+        AtFiles, InputState, SlashMenuItem, apply_at_to_input, at_menu_items_for, at_query_from,
+    };
 
     fn has_command(items: &[SlashMenuItem], command: &str) -> bool {
         items.iter().any(|i| i.display_command() == command)
@@ -432,7 +474,7 @@ mod tests {
     #[test]
     fn is_at_menu_open_after_files_loaded() {
         let mut input = InputState::new();
-        input.at_menu_files = vec!["README.md".to_string(), "src".to_string()];
+        input.at_menu_files = AtFiles::new(vec!["README.md".to_string(), "src".to_string()]);
         input.set_input_text("@");
         assert!(input.is_at_menu_open());
 
@@ -446,7 +488,7 @@ mod tests {
     #[test]
     fn invalidate_at_files_clears_cache() {
         let mut input = InputState::new();
-        input.at_menu_files = vec!["file.txt".to_string()];
+        input.at_menu_files = AtFiles::new(vec!["file.txt".to_string()]);
         input.at_menu_selected = 2;
         input.at_menu_scroll_offset = 5;
         input.invalidate_at_files();

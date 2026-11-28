@@ -33,9 +33,18 @@ pub fn render_at_menu(frame: &mut Frame, area: Rect, input_state: &mut InputStat
 
     let list_items: Vec<ListItem> = items
         .iter()
-        .map(|name| {
-            let line = Line::from(vec![Span::styled(name.to_string(), theme::success())]);
-            ListItem::new(line)
+        .map(|entry| {
+            // The name, then the folder it is in, dimmed (AGE-2192).
+            let trimmed = entry.trim_end_matches('/');
+            let (name, folder) = match trimmed.rfind('/') {
+                Some(at) => (&entry[at + 1..], &entry[..at]),
+                None => (entry.as_str(), ""),
+            };
+            let mut spans = vec![Span::styled(name.to_string(), theme::success())];
+            if !folder.is_empty() {
+                spans.push(Span::styled(format!("  {folder}"), theme::muted()));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 

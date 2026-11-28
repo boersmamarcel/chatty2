@@ -31,7 +31,7 @@ use super::super::attachment_validation::{PDF_EXTENSION, is_image_extension};
 use super::super::sidebar_file_tree::DraggedEntries;
 use super::super::terminal::context::{ChipSpec, render_chip, render_context_chip};
 use super::ThumbnailCache;
-use super::at_mention::{at_menu_items_for, render_at_menu};
+use super::at_mention::render_at_menu;
 use super::slash::render_slash_menu;
 use super::{ChatInput, ChatInputEvent, ChatInputState};
 use crate::settings::models::execution_settings::ExecutionSettingsModel;
@@ -295,7 +295,8 @@ impl RenderOnce for ChatInput {
         // --- @ mention menu ---
         let at_items: Vec<String> = {
             let state = self.state.read(cx);
-            at_menu_items_for(&input_text, &state.at_menu_files)
+            state
+                .at_menu_items_for_text(&input_text)
                 .into_iter()
                 .cloned()
                 .collect()

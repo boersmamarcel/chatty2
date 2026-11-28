@@ -592,15 +592,13 @@ impl ChatView {
                         state.reset_slash_menu_selection_if_query_changed(&new_text);
                         state.reset_at_menu_selection_if_query_changed(&new_text);
 
-                        // Load files for the @ menu on first use.
+                        // Re-index the folder for the @ menu each time it opens.
                         let global_dir = cx
                             .try_global::<ExecutionSettingsModel>()
                             .and_then(|s| s.workspace_dir.clone())
                             .map(std::path::PathBuf::from)
                             .or_else(|| std::env::current_dir().ok());
-                        if state.refresh_at_files_if_needed(&new_text, global_dir) {
-                            cx.notify();
-                        }
+                        state.refresh_at_files_if_needed(&new_text, global_dir, cx);
                     });
                 }
                 _ => {}

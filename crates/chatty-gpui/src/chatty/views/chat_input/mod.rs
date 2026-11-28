@@ -50,6 +50,7 @@ use tracing::{debug, warn};
 use super::attachment_validation::validate_attachment;
 use crate::chatty::services::pdf_thumbnail::render_pdf_thumbnail;
 use crate::settings::models::providers_store::ProviderType;
+use chatty_core::at_mention::{AtFiles, mention_blocks};
 use chatty_core::services::composer_context::{
     BlockKind, ContextBlock, OpenArtifact, display_path, split_composer_context,
 };
@@ -146,8 +147,14 @@ pub struct ChatInputState {
     /// The text Escape dismissed the `/agent ` picker at; it stays closed
     /// until the text changes.
     agent_picker_dismissed_for: Option<String>,
-    /// Cached list of files for the `@` mention picker (loaded on first use).
-    at_menu_files: Vec<String>,
+    /// The `@` picker's index of the working folder, reloaded in the
+    /// background each time the picker opens (AGE-2192).
+    at_menu_files: AtFiles,
+    /// Whether the last input change left an `@` query in play, so the
+    /// index is reloaded only when the picker opens.
+    at_menu_was_open: bool,
+    /// The reload in flight; replacing it drops (cancels) the older one.
+    at_menu_load: Option<Task<()>>,
     /// Index of the highlighted item in the `@` mention picker.
     at_menu_selected: usize,
     /// Scroll state for the `@` mention picker so keyboard navigation can keep
@@ -202,7 +209,9 @@ impl ChatInputState {
             available_agents: Vec::new(),
             agent_picker_open: false,
             agent_picker_dismissed_for: None,
-            at_menu_files: Vec::new(),
+            at_menu_files: AtFiles::default(),
+            at_menu_was_open: false,
+            at_menu_load: None,
             at_menu_selected: 0,
             at_menu_scroll_handle: ScrollHandle::new(),
             last_at_query: None,
@@ -287,18 +296,27 @@ impl ChatInputState {
         })
     }
 
-    /// The dragged files' blocks (read now) and the open artifact's.
-    fn take_context_blocks(&mut self, cx: &App) -> Vec<String> {
+    /// The dragged files' blocks (read now), those of the small text files
+    /// `message` `@`-mentions (AGE-2192), and the open artifact's.
+    fn take_context_blocks(&mut self, message: &str, cx: &App) -> Vec<String> {
         let root = self.context_root(cx);
         let counter = TokenCounter::for_model("");
-        let mut blocks: Vec<String> = self
-            .context_paths
-            .drain(..)
+        let dragged = std::mem::take(&mut self.context_paths);
+        let mut blocks: Vec<String> = dragged
+            .iter()
             .map(|path| {
-                let shown = display_path(&path, root.as_deref());
-                ContextBlock::for_path(&path, &shown, &counter).block
+                let shown = display_path(path, root.as_deref());
+                ContextBlock::for_path(path, &shown, &counter).block
             })
             .collect();
+        // The folder the picker offered, so a chosen path resolves.
+        if let Some(mention_root) = root.or_else(|| std::env::current_dir().ok()) {
+            blocks.extend(
+                mention_blocks(message, &mention_root, &dragged)
+                    .into_iter()
+                    .map(|block| block.block),
+            );
+        }
         if let Some(open) = self.open_artifact() {
             blocks.push(ContextBlock::for_open(open).block);
         }
@@ -410,7 +428,9 @@ impl ChatInputState {
     pub fn set_working_dir(&mut self, dir: Option<PathBuf>, cx: &mut Context<Self>) {
         self.working_dir = dir.clone();
         // Invalidate the cached file list so it is reloaded from the new dir.
-        self.at_menu_files.clear();
+        self.at_menu_files = AtFiles::default();
+        self.at_menu_load = None;
+        self.at_menu_was_open = false;
         cx.emit(ChatInputEvent::WorkingDirChanged(dir));
         cx.notify();
     }
@@ -526,7 +546,7 @@ impl ChatInputState {
             self.terminal_context_done = terminal_context.clone();
         }
 
-        let context_blocks = self.take_context_blocks(cx);
+        let context_blocks = self.take_context_blocks(&message, cx);
 
         debug!("Emitting ChatInputEvent::Send");
         cx.emit(ChatInputEvent::Send {
