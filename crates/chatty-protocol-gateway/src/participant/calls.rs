@@ -13,9 +13,18 @@
 //! worker for it, and the task's updates become the call's progress and
 //! result. Dropping the call's stream — the caller cancelled, or its
 //! connection closed — cancels the task and reaps the worker, the same way a
-//! caller hanging up on the SSE stream does. That is how cancelling a
-//! leader's task reaps its whole subtree: each hop's worker dies with the
-//! call that started it, and its own calls die with its connection.
+//! caller hanging up on the SSE stream does.
+//!
+//! The runs of one root form a tree (ADR-0092): every task a node is handed
+//! records the run its call was made from. A stop or a deadline on a task
+//! stops its whole subtree first, bottom-up — the subtree is marked so
+//! nothing in it starts another run, then its deepest level is stopped and
+//! waited for until its workers are gone, then the level above — and only
+//! then does the task's own call report its end, within the call's
+//! [`deadline_grace`]. A caller that hangs up cannot wait, so dropping a
+//! call sends the same stops in the same order without waiting; and each
+//! hop's worker still dies with the call that started it, its own calls
+//! with its connection.
 //!
 //! A `send_message` call (tree messages, TM-1) never starts a run: the
 //! gate checks the recipient against the caller — a node's owner, a node's
@@ -610,14 +619,68 @@ impl Drop for RaisedQuestion {
 /// The running calls [`BrokerCalls::cancel`] can stop.
 type Stops = Arc<Mutex<Vec<Stoppable>>>;
 
-/// One running call: the node its callee runs as, the name its caller
-/// addressed, and the line that stops it.
+/// One running call: the node its callee runs as, the task it runs, the
+/// name its caller addressed, and the line that stops it.
 struct Stoppable {
     id: u64,
     node: String,
+    task_id: String,
     agent: String,
     by_root: bool,
-    stop: oneshot::Sender<()>,
+    stop: oneshot::Sender<Stop>,
+}
+
+/// A stop sent to a running call. `reaped`, when set, hears once the
+/// call's worker and everything under it are gone (ADR-0092): a cancel
+/// above it waits for that before it stops the next level up.
+#[derive(Default)]
+struct Stop {
+    reaped: Option<oneshot::Sender<()>>,
+}
+
+/// Take the entries running any of `task_ids` off `stops`.
+fn take_stops(stops: &Stops, task_ids: &[String]) -> Vec<Stoppable> {
+    let mut stops = locked(stops);
+    let (taken, running): (Vec<_>, Vec<_>) = stops
+        .drain(..)
+        .partition(|entry| task_ids.contains(&entry.task_id));
+    *stops = running;
+    taken
+}
+
+/// Stop every run under the task `task_id` that `node` serves, bottom-up
+/// (ADR-0092): mark the subtree so none of it starts anything more, then
+/// stop its deepest level, wait until each of those calls has reaped its
+/// worker, and go on to the level above, all by `until`. Called before the
+/// task's own call reports its end, so a cancelled or timed-out task ends
+/// with nothing left running under it. A level that is not gone by
+/// `until` is left to go with its caller's connection.
+async fn stop_subtree(
+    stops: &Stops,
+    registry: &ParticipantRegistry,
+    node: &str,
+    task_id: &str,
+    until: tokio::time::Instant,
+) {
+    let levels = registry.begin_cancel(node, task_id);
+    for level in levels {
+        let reaped: Vec<_> = take_stops(stops, &level)
+            .into_iter()
+            .map(|entry| {
+                let (tx, rx) = oneshot::channel();
+                debug!(node = %entry.node, under = %node, "Stopping a run under a cancelled one");
+                let _ = entry.stop.send(Stop { reaped: Some(tx) });
+                rx
+            })
+            .collect();
+        if tokio::time::timeout_at(until, futures::future::join_all(reaped))
+            .await
+            .is_err()
+        {
+            warn!(node = %node, "The runs under a cancelled task were not all gone in time");
+            return;
+        }
+    }
 }
 
 /// A running call's entry in [`Stops`]; leaves it when the call ends.
@@ -643,12 +706,14 @@ fn stoppable(
     caller: &Peer,
     agent: &str,
     node: &str,
-) -> (oneshot::Receiver<()>, StopGuard) {
+    task_id: &str,
+) -> (oneshot::Receiver<Stop>, StopGuard) {
     let id = NEXT_STOPPABLE.fetch_add(1, Ordering::Relaxed);
     let (stop, stopped) = oneshot::channel();
     locked(stops).push(Stoppable {
         id,
         node: node.to_string(),
+        task_id: task_id.to_string(),
         agent: agent.to_string(),
         by_root: *caller == Peer::Root,
         stop,
@@ -1190,9 +1255,21 @@ impl BrokerCalls {
         }
         for entry in stopped {
             info!(node = %entry.node, "The user stopped a run");
-            let _ = entry.stop.send(());
+            let _ = entry.stop.send(Stop::default());
         }
         Ok(())
+    }
+
+    /// Stop the calls running the tasks `levels` names, one level after
+    /// another, without waiting for any of them (ADR-0092): what a caller
+    /// that hung up does to the runs under the task it dropped.
+    pub(crate) fn stop_now(&self, levels: &[Vec<String>]) {
+        for level in levels {
+            for entry in take_stops(&self.stops, level) {
+                debug!(node = %entry.node, "Stopping a run whose caller's task was cancelled");
+                let _ = entry.stop.send(Stop::default());
+            }
+        }
     }
 
     /// Log a refusal of a loopback HTTP request naming `what` — a role, a
@@ -2035,12 +2112,15 @@ impl BrokerCalls {
             },
         };
         // When the broker stops a callee that outran its deadline (DP-3).
-        let cut = stamp.chain.deadline.map(|deadline| {
-            let left = deadline
+        let left = stamp.chain.deadline.map(|deadline| {
+            deadline
                 .duration_since(std::time::SystemTime::now())
-                .unwrap_or_default();
-            tokio::time::Instant::now() + left + deadline_grace(left)
+                .unwrap_or_default()
         });
+        let cut = left.map(|left| tokio::time::Instant::now() + left + deadline_grace(left));
+        // How long a stop or a deadline gives the runs under the callee to
+        // go, from the moment it fires (ADR-0092).
+        let grace = deadline_grace(left.unwrap_or_default());
         let pricer = self.pricer.clone();
         let stops = self.stops.clone();
         let routes = self.routes.clone();
@@ -2309,9 +2389,14 @@ impl BrokerCalls {
             // only knew this callee by its spec can now name this one
             // call precisely (AGE-762), which two parallel calls to the
             // same spec need to be stoppable one at a time.
+            // Stoppable before anything is yielded, so a cancel above it
+            // that comes now finds it (ADR-0092).
+            let (mut stopped, _stoppable) =
+                stoppable(&stops, &caller, &agent, running.participant(), running.task_id());
             yield Ok(CallEvent::Progress(WireProgress::Admitted(running.participant().to_string())));
-            let (mut stopped, _stoppable) = stoppable(&stops, &caller, &agent, running.participant());
             let mut stopped_by_user = false;
+            let mut cut_off = false;
+            let mut reaped = None;
             let reporting = reports_to.map(|(to, chain)| Reporting {
                 to,
                 chain,
@@ -2342,6 +2427,7 @@ impl BrokerCalls {
                     biased;
                     _ = sleep_until_cut(cut) => {
                         warn!(agent = %agent, "A called task ran past its deadline; stopping it");
+                        cut_off = true;
                         end = Some((
                             TaskState::Failed,
                             Some("deadline: the call ran past its deadline and was stopped".to_string()),
@@ -2349,8 +2435,9 @@ impl BrokerCalls {
                         ));
                         break;
                     }
-                    Ok(()) = &mut stopped => {
+                    Ok(stop) = &mut stopped => {
                         stopped_by_user = true;
+                        reaped = stop.reaped;
                         break;
                     }
                     update = running.updates.recv() => match update {
@@ -2438,12 +2525,35 @@ impl BrokerCalls {
                 }
             }
 
+            if stopped_by_user || cut_off {
+                // The subtree goes first, deepest runs first, before this
+                // call reports its end (ADR-0092).
+                stop_subtree(
+                    &stops,
+                    &registry,
+                    running.participant(),
+                    running.task_id(),
+                    tokio::time::Instant::now() + grace,
+                )
+                .await;
+            }
             if stopped_by_user {
-                // The subtree goes now, not when the caller lets go of the
-                // stream: the worker is reaped, its connection closes, and
-                // every call it made is dropped with it.
+                // Then the callee itself, now, not when the caller lets go
+                // of the stream: the worker is reaped, its connection
+                // closes, and every call it made is dropped with it. A
+                // spawned worker is waited for, so a stop above this one
+                // knows this level is gone.
                 locked(&tasks).end(running.task_id(), TaskState::Canceled, (clock)());
+                let node = running.participant().to_string();
                 drop(running);
+                if !submits {
+                    registry
+                        .wait_gone(&node, tokio::time::Instant::now() + grace)
+                        .await;
+                }
+                if let Some(reaped) = reaped.take() {
+                    let _ = reaped.send(());
+                }
                 report(SwarmItem::Ended { state: TaskState::Canceled.to_string() });
                 edge.write(EdgeKind::Task, "cancelled".to_string());
                 yield Ok(CallEvent::Result(CallResult::Invoked(InvokeAgentOutcome {
@@ -2535,10 +2645,21 @@ impl BrokerCalls {
                 }
             }
             locked(&tasks).end(running.task_id(), state, (clock)());
+            let node = running.participant().to_string();
             // The worker is reaped before the handle's next call may start,
             // and the handle is idle from then: a tuple drops its fields in
             // order.
             let _reap_then_release = (running, _owned, held, ticket);
+            if cut_off {
+                // A callee stopped by its deadline is gone before its
+                // caller hears so, like one the user stopped (ADR-0092).
+                drop(_reap_then_release);
+                if !submits {
+                    registry
+                        .wait_gone(&node, tokio::time::Instant::now() + grace)
+                        .await;
+                }
+            }
             edge.end(state);
             let mut result = outcome(state, response, message, metadata, messages());
             if let CallResult::Invoked(invoked) = &mut result {
@@ -2881,6 +3002,10 @@ mod tests;
 #[cfg(all(test, unix))]
 #[path = "swarm_forwarding_tests.rs"]
 mod swarm_forwarding_tests;
+
+#[cfg(all(test, unix))]
+#[path = "task_tree_tests.rs"]
+mod task_tree_tests;
 
 #[cfg(all(test, unix))]
 #[path = "root_approval_tests.rs"]

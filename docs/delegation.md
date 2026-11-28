@@ -58,6 +58,22 @@ the rules in one place.
 - The broker stops a callee still running past its deadline plus
   `deadline_grace` and returns a failed result.
 
+## The task tree
+
+- The runs of one root form a tree (ADR-0092): every task records the run
+  its call was made from (`TaskEntry.parent`), and has exactly one caller.
+  Work from two branches that must come together (two coding teams into one
+  reviewer) goes through their common caller, never through a shared task.
+- A stop (the user's, `BrokerCalls::cancel`) or a deadline on a task stops
+  its subtree first, bottom-up: `TaskTable::cancel_subtree` marks it so
+  nothing in it can start another run, the deepest level is stopped and
+  waited for until its workers are gone, then the level above. Only then
+  does the task's own call report `cancelled_by_user` or its deadline
+  failure. The whole cascade is bounded by the call's `deadline_grace`.
+- A caller that hangs up (drops its call) cannot wait: the same stops go out
+  in the same order without waiting, and the rest goes with each worker's
+  connection.
+
 ## Approvals and questions
 
 - `human.approve` (a shell or write approval) is answered only by the root. The

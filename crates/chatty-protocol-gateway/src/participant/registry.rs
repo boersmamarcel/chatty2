@@ -217,6 +217,10 @@ impl Drop for RunGuard {
 pub struct ParticipantRegistry {
     inner: Arc<Mutex<Inner>>,
     next_task: Arc<AtomicU64>,
+    /// Woken whenever a connection goes ([`deregister`](Self::deregister),
+    /// [`abandon`](Self::abandon)): what a cancel waits on to know a
+    /// stopped worker is gone ([`wait_gone`](Self::wait_gone)).
+    gone: Arc<tokio::sync::Notify>,
 }
 
 impl ParticipantRegistry {
@@ -321,7 +325,8 @@ impl ParticipantRegistry {
         let runs = inner
             .runs
             .served_by(node.id())
-            .filter(|(_, entry)| !entry.released)
+            // A run being cancelled calls nothing more (ADR-0092).
+            .filter(|(_, entry)| !entry.released && !entry.cancelling)
             .filter_map(|(run, entry)| {
                 Some(OpenRun {
                     name: inner.run_names.get(&run)?.clone(),
@@ -432,6 +437,7 @@ impl ParticipantRegistry {
         inner.permits.remove(node.name.as_str());
         drop(inner);
         self.ended(node.id, node.name.as_str());
+        self.gone.notify_waiters();
         debug!(node = %node.name, "A node's connection closed before it said hello");
     }
 
@@ -465,6 +471,7 @@ impl ParticipantRegistry {
             participant
         };
         self.ended(participant.node, name);
+        self.gone.notify_waiters();
 
         let open = participant.tasks.len();
         for (task_id, task) in participant.tasks {
@@ -646,10 +653,9 @@ impl ParticipantRegistry {
             .and_then(|caller| inner.directory.by_name(caller))
             .map(Node::id);
         if let Some(from) = call.from_run {
-            let still_open = inner
-                .runs
-                .get(from)
-                .is_some_and(|entry| !entry.released && Some(entry.callee) == caller);
+            let still_open = inner.runs.get(from).is_some_and(|entry| {
+                !entry.released && !entry.cancelling && Some(entry.callee) == caller
+            });
             if !still_open {
                 warn!(participant = %name, run = %from, "Refusing a task: the run its call came from has closed");
                 return None;
@@ -681,7 +687,20 @@ impl ParticipantRegistry {
     /// Used when a caller hangs up mid-task. No reply is expected: the
     /// participant's own terminal status, if it sends one, lands on a task
     /// that is already gone and is dropped by [`on_frame`](Self::on_frame).
+    ///
+    /// The runs under the task are stopped too, deepest first (ADR-0092):
+    /// a caller that hangs up cannot wait for them, so this only sends each
+    /// its stop, in that order, and marks the subtree so none of it starts
+    /// anything more. A stop the broker itself makes — the user's, or a
+    /// deadline's — waits for each level instead
+    /// ([`BrokerCalls`](super::calls::BrokerCalls)).
     pub fn cancel_task(&self, name: &str, task_id: &str) {
+        let below = self.begin_cancel(name, task_id);
+        if !below.is_empty()
+            && let Some(calls) = self.calls()
+        {
+            calls.stop_now(&below);
+        }
         let mut inner = self.lock();
         let Some(participant) = inner.participants.get_mut(name) else {
             return;
@@ -710,6 +729,51 @@ impl ParticipantRegistry {
             }
             inner.close_run(task.run);
             debug!(participant = %name, task = %task_id, "Task cancelled");
+        }
+    }
+
+    /// Start cancelling the task `task_id` that `name` serves, and every run
+    /// under it (ADR-0092): none of them may start another run from now on.
+    /// The task ids of the runs under it come back deepest level first,
+    /// which is the order to stop them in. Empty for a task that is not
+    /// open, or has nothing under it.
+    pub(crate) fn begin_cancel(&self, name: &str, task_id: &str) -> Vec<Vec<String>> {
+        let mut inner = self.lock();
+        let Some(run) = inner
+            .participants
+            .get(name)
+            .and_then(|participant| participant.tasks.get(task_id))
+            .map(|task| task.run)
+        else {
+            return Vec::new();
+        };
+        let levels = inner.runs.cancel_subtree(run);
+        levels
+            .into_iter()
+            .map(|level| {
+                level
+                    .into_iter()
+                    .filter_map(|run| inner.run_names.get(&run).cloned())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|level| !level.is_empty())
+            .collect()
+    }
+
+    /// Wait until nothing is registered as `name` any more — its worker
+    /// was reaped and its connection closed — or until `until`. `true`
+    /// when it is gone.
+    pub(crate) async fn wait_gone(&self, name: &str, until: tokio::time::Instant) -> bool {
+        loop {
+            let notified = self.gone.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.is_registered(name) {
+                return true;
+            }
+            if tokio::time::timeout_at(until, notified).await.is_err() {
+                return !self.is_registered(name);
+            }
         }
     }
 
@@ -894,6 +958,35 @@ impl ParticipantRegistry {
 
 #[cfg(test)]
 impl ParticipantRegistry {
+    /// Every open run as `(node serving it, node serving its parent run)`,
+    /// in the order the runs opened: the task tree (ADR-0092).
+    pub(crate) fn run_tree(&self) -> Vec<(String, Option<String>)> {
+        let inner = self.lock();
+        let name = |id: NodeId| {
+            inner
+                .directory
+                .get(id)
+                .map(|node| node.name().as_str().to_string())
+                .unwrap_or_default()
+        };
+        let mut runs: Vec<_> = inner
+            .participants
+            .values()
+            .flat_map(|participant| participant.tasks.values().map(|task| task.run))
+            .collect();
+        runs.sort();
+        runs.into_iter()
+            .filter_map(|run| {
+                let entry = inner.runs.get(run)?;
+                let parent = entry
+                    .parent
+                    .and_then(|parent| inner.runs.get(parent))
+                    .map(|parent| name(parent.callee));
+                Some((name(entry.callee), parent))
+            })
+            .collect()
+    }
+
     /// Admit a node as `spec` owned by the node named `owner`, or by the
     /// root when `None`, as a spawn does, and return its name.
     pub(crate) fn admit_under(&self, spec: &str, owner: Option<&str>) -> String {
