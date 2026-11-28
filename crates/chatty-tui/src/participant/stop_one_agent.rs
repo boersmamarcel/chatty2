@@ -99,7 +99,8 @@ fn task_rows(kit: &SwarmKit) -> Vec<(String, String, String)> {
 }
 
 /// root → lead → { stuck → leaf, then helper }. Stopping `stuck` while its
-/// leaf is busy takes both away; the lead reads `cancelled_by_user`, calls
+/// leaf is busy takes both away, the leaf first (ADR-0092); the lead reads
+/// `cancelled_by_user`, calls
 /// its other child, which finishes normally, and the root's call ends as
 /// if nothing happened.
 #[tokio::test]
@@ -205,10 +206,18 @@ async fn stop_one_node_cancels_its_subtree_only() {
             && outcome == "cancelled"),
         "the stopped call has a cancelled row: {rows:?}"
     );
+    // The stopped node's own call was stopped first, bottom-up, before
+    // the stopped call itself ended (ADR-0092): its row says `cancelled`,
+    // as a stopped call's does, and comes before the stopped call's.
+    let leaf_row = rows
+        .iter()
+        .position(|(from, to, outcome)| *from == stuck && *to == leaf && outcome == "cancelled");
+    let stuck_row = rows.iter().position(|(from, to, outcome)| {
+        from.starts_with(LEAD) && *to == stuck && outcome == "cancelled"
+    });
     assert!(
-        rows.iter()
-            .any(|(from, to, outcome)| *from == stuck && *to == leaf && outcome == "canceled"),
-        "the stopped node's own call went with it: {rows:?}"
+        leaf_row.is_some() && leaf_row < stuck_row,
+        "the stopped node's own call was stopped before it: {rows:?}"
     );
     assert!(
         rows.iter().any(|(from, to, outcome)| from.starts_with(LEAD)
