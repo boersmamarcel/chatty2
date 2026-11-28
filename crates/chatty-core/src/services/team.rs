@@ -77,6 +77,21 @@ pub const PRESETS: &[TeamPreset] = &[
         ],
     },
     TeamPreset {
+        id: "video",
+        team_json: include_str!("../../teams/video/team.json"),
+        skill: None,
+        schemas: &[
+            (
+                "schemas/recording.json",
+                include_str!("../../teams/video/schemas/recording.json"),
+            ),
+            (
+                "schemas/check.json",
+                include_str!("../../teams/video/schemas/check.json"),
+            ),
+        ],
+    },
+    TeamPreset {
         id: "analyst-swarm",
         team_json: include_str!("../../teams/analyst-swarm/team.json"),
         skill: None,
@@ -1137,6 +1152,143 @@ mod tests {
                 "{name} is the lead's alone"
             );
         }
+    }
+
+    const VIDEO_MEMBERS: [&str; 4] = [
+        "video-recorder",
+        "motion-designer",
+        "video-editor",
+        "video-checker",
+    ];
+
+    /// The video preset is experimental (listed nowhere); its lead writes
+    /// the shot list and delegates to its four members, edits nothing with a
+    /// shell, and has the checker as its verifier. The recorder, designer
+    /// and editor run a shell (Playwright, Remotion, ffmpeg) but commit
+    /// nothing; the checker writes nothing and looks at frames itself.
+    #[test]
+    fn the_video_preset_is_a_lead_and_four_members() {
+        let team = load_team("video", None, None).expect("the preset loads");
+        assert_eq!(team.source, TeamSource::Preset);
+        assert!(
+            team.file.experimental,
+            "listed nowhere until it has shipped a video"
+        );
+        assert!(!listed_presets().any(|preset| preset.id == "video"));
+        assert_eq!(team.file.leader, "video-lead");
+        assert_eq!(team.file.agents, VIDEO_MEMBERS);
+        assert_eq!(team.file.report.as_deref(), Some("video-report.md"));
+        assert_eq!(
+            team.file.verifier.as_ref().map(|v| v.role.as_str()),
+            Some("video-checker")
+        );
+        assert_eq!(team.leader.swarm.delegates_to, VIDEO_MEMBERS);
+        let preamble = team.leader.agent.preamble.as_deref().unwrap_or_default();
+        assert!(!preamble.contains(TODAY_TOKEN), "today is filled in");
+        for must in [
+            "video/shotlist.json",
+            "numbers.json",
+            "evidence",
+            "coming",
+            "once, always",
+            "Never more than two checks",
+        ] {
+            assert!(preamble.contains(must), "{must}: {preamble}");
+        }
+        assert_eq!(
+            team.handoffs.keys().collect::<Vec<_>>(),
+            ["video-checker", "video-recorder"]
+        );
+
+        let member = |name: &str| {
+            team.agents
+                .iter()
+                .find(|spec| spec.agent.name == name)
+                .unwrap_or_else(|| panic!("{name} is on the roster"))
+        };
+        let allows = |name: &str, tool: &str| {
+            let spec = member(name);
+            let profile = tool_profile(spec.tools.profile.as_deref().unwrap()).unwrap();
+            profile.allows(tool)
+                && !spec
+                    .tools
+                    .disable
+                    .iter()
+                    .any(|group| tool_group_of(tool) == Some(group.as_str()))
+        };
+        let lead_allows = |tool: &str| {
+            let profile = tool_profile(team.leader.tools.profile.as_deref().unwrap()).unwrap();
+            profile.allows(tool)
+                && !team
+                    .leader
+                    .tools
+                    .disable
+                    .iter()
+                    .any(|group| tool_group_of(tool) == Some(group.as_str()))
+        };
+        assert!(lead_allows("write_file"), "the lead writes the shot list");
+        for tool in ["shell_execute", "execute_code", "git_commit"] {
+            assert!(!lead_allows(tool), "the lead has no {tool}");
+        }
+        for name in ["video-recorder", "motion-designer", "video-editor"] {
+            assert!(
+                allows(name, "shell_execute") && allows(name, "write_file"),
+                "{name} runs its tools and writes its output"
+            );
+            assert!(!allows(name, "git_commit"), "{name} commits nothing");
+        }
+        assert!(
+            allows("video-checker", "shell_execute"),
+            "ffmpeg for frames"
+        );
+        assert!(allows("video-checker", "view_image"), "it looks at frames");
+        assert!(!allows("video-checker", "write_file"), "it writes nothing");
+        assert_eq!(member("video-checker").agent.think, Some(false));
+        for name in VIDEO_MEMBERS {
+            let spec = member(name);
+            assert!(
+                spec.swarm.delegates_to.is_empty(),
+                "{name} delegates to no one"
+            );
+            assert_eq!(
+                spec.swarm.callers,
+                Some(vec!["video-lead".to_string()]),
+                "{name} is the lead's alone"
+            );
+        }
+    }
+
+    /// The video checker's verdict schema: a licence note alone is a PASS,
+    /// a problem needs its time, shot and kind, and an unknown kind fails.
+    #[test]
+    fn video_check_schema_takes_licence_notes_and_typed_problems() {
+        use crate::services::handoff::{HandoffOutcome, check};
+        let team = load_team("video", None, None).expect("the preset loads");
+        let contract = &team.handoffs["video-checker"];
+        let answer = |json: &str| format!("PASS\n\n```json\n{json}\n```");
+        let pass = answer(
+            r#"{"verdict":"PASS","length_seconds":212.4,"frames_checked":110,"problems":[],
+               "licence_notes":["stock/office.mp4: unknown, to buy"]}"#,
+        );
+        assert!(matches!(check(contract, &pass), HandoffOutcome::Valid(_)));
+        let bad_kind = answer(
+            r#"{"verdict":"FAIL","length_seconds":212.4,"frames_checked":110,
+               "problems":[{"at":"1:02","shot":"s04","kind":"vibes","detail":"x"}],
+               "licence_notes":[]}"#,
+        );
+        assert!(!matches!(
+            check(contract, &bad_kind),
+            HandoffOutcome::Valid(_)
+        ));
+        let no_time = answer(
+            r#"{"verdict":"FAIL","length_seconds":212.4,"frames_checked":110,
+               "problems":[{"at":"later","shot":"s04","kind":"number","detail":"x"}],
+               "licence_notes":[]}"#,
+        );
+        assert!(!matches!(
+            check(contract, &no_time),
+            HandoffOutcome::Valid(_)
+        ));
     }
 
     /// The group a `tools.disable` entry names for `tool`, for the preset

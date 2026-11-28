@@ -1,0 +1,38 @@
+{
+  "title": "The recorder's clips",
+  "type": "object",
+  "required": ["clips", "failed"],
+  "properties": {
+    "clips": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "One entry per scene recorded: the clip, its event log and its length.",
+      "items": {
+        "type": "object",
+        "required": ["scene", "video", "events", "seconds"],
+        "properties": {
+          "scene": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "video": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "events": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "seconds": { "type": "number", "minimum": 0, "maximum": 900 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "failed": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "Each scene that could not be recorded, and why.",
+      "items": {
+        "type": "object",
+        "required": ["scene", "reason"],
+        "properties": {
+          "scene": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 400 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

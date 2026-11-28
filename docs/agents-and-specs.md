@@ -1087,7 +1087,7 @@ record. A host that tracks a lease's outcome itself can write the record before
 starting the leader, or build the text with
 `chatty_core::services::resume_brief::{snapshot_workspace, render_resume_brief}`.
 
-Four presets ship, all **experimental**: teams are supported, and a team becomes a
+Five presets ship, all **experimental**: teams are supported, and a team becomes a
 documented default only after a benchmark shows it beats a single agent (PL-S8). Their
 specs name no models. `deep-research` (AGE-910) answers an open question from the web
 with a cited report: `deep-research-lead` (`coder+coordinator` without shell, git or
@@ -1128,6 +1128,24 @@ minutes per delegation. `typesetter` (AGE-946) assembles the approved texts
 it is handed into one Typst document and compiles it with `compile_typst`, fixing compile
 errors until it compiles; it is the only preset whose profile has that tool, and it needs a
 build with the `math-render` feature.
+
+`video` turns a script into a checked product video. `video-lead` (`coder+coordinator`
+without shell, git or code execution) writes `video/shotlist.json`: one entry per shot,
+typed `real` (a recorded scene), `stylized` (a clean version of the product screen) or
+`stock`, with the numbers it shows as `numbers.json` keys and, for a stylized shot, the
+evidence it is backed by. The lead's rule is the honest-demo rule: a stylized shot shows
+nothing its evidence does not, a planned feature says "coming", and no number is typed in.
+`video-recorder` (`coder` without git) runs Playwright scene scripts against a demo and
+hands back clips with an event log per scene (`schemas/recording.json`); `motion-designer`
+(`coder` without git) builds Remotion compositions: camera moves that follow the event
+log's element boxes, stylized scenes and number cards; `video-editor` (`coder` without
+git) cuts the shots, stock, the presenter's voice-over and music with captions and
+encodes with ffmpeg. `video-checker` (`reviewer`, thinking off; the team's `verifier`)
+extracts frames, looks at them with `view_image` and returns `PASS`/`FAIL` with typed
+problems (`schemas/check.json`: secret, number, caption, length, evidence, claim, look).
+Unknown licences are notes and never fail a video. The lead fixes once and checks at most
+twice; its report is `video-report.md`. The members need Node, Chromium and ffmpeg where
+they run.
 
 **The coding team (AGE-957)** is four specs, with no
 `team.json`: `/agent coding-lead` or `--agent coding-lead` runs it. It is the first
