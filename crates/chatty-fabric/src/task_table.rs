@@ -8,6 +8,12 @@
 //! call its callee makes runs under that chain plus the next callee, which
 //! is how the broker refuses a cycle or a too-deep call without asking the
 //! caller where it is.
+//!
+//! The runs of one root form a tree (ADR-0092): every run records the run
+//! it was started from, and has exactly one. A cancel or a deadline on a
+//! run goes to its whole subtree, deepest runs first:
+//! [`TaskTable::cancel_subtree`] marks the subtree so none of it can start
+//! another run, and hands the broker the runs to stop, level by level.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -50,6 +56,10 @@ pub struct TaskEntry {
     /// it closes as soon as its last child does.
     #[serde(default)]
     pub released: bool,
+    /// This run, or a run above it, is being cancelled
+    /// ([`TaskTable::cancel_subtree`]): no run may start from it.
+    #[serde(default)]
+    pub cancelling: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -58,6 +68,8 @@ pub enum TaskTableError {
     UnknownRun(RunId),
     #[error("{0} still has {1} outstanding child run(s)")]
     ChildrenOutstanding(RunId, u32),
+    #[error("{0} is being cancelled: no run may start from it")]
+    Cancelling(RunId),
 }
 
 /// Every run in flight in one root process.
@@ -73,7 +85,8 @@ impl TaskTable {
     }
 
     /// Open a run from `caller` to `callee`. A `parent` run gains an
-    /// outstanding child until this run closes.
+    /// outstanding child until this run closes. A parent being cancelled
+    /// starts nothing more.
     pub fn open(
         &mut self,
         caller: Option<NodeId>,
@@ -82,10 +95,14 @@ impl TaskTable {
         chain: CallChain,
     ) -> Result<RunId, TaskTableError> {
         if let Some(parent) = parent {
-            self.runs
+            let entry = self
+                .runs
                 .get_mut(&parent)
-                .ok_or(TaskTableError::UnknownRun(parent))?
-                .outstanding_children += 1;
+                .ok_or(TaskTableError::UnknownRun(parent))?;
+            if entry.cancelling {
+                return Err(TaskTableError::Cancelling(parent));
+            }
+            entry.outstanding_children += 1;
         }
         let id = RunId(self.next_id);
         self.next_id += 1;
@@ -98,6 +115,7 @@ impl TaskTable {
                 chain,
                 outstanding_children: 0,
                 released: false,
+                cancelling: false,
             },
         );
         Ok(id)
@@ -147,6 +165,57 @@ impl TaskTable {
         if entry.released && entry.outstanding_children == 0 {
             let _ = self.close(parent);
         }
+    }
+
+    /// The open runs started from `run`, in the order they were opened.
+    pub fn children(&self, run: RunId) -> impl Iterator<Item = RunId> + '_ {
+        self.runs
+            .iter()
+            .filter(move |(_, entry)| entry.parent == Some(run))
+            .map(|(id, _)| *id)
+    }
+
+    /// The open runs under `run`, by level: its children first, then their
+    /// children, and so on. `run` itself is not in it.
+    pub fn descendants(&self, run: RunId) -> Vec<Vec<RunId>> {
+        let mut levels = Vec::new();
+        let mut level: Vec<RunId> = self.children(run).collect();
+        while !level.is_empty() {
+            let next = level.iter().flat_map(|id| self.children(*id)).collect();
+            levels.push(std::mem::replace(&mut level, next));
+        }
+        levels
+    }
+
+    /// The runs above `run`, nearest first, up to its root run.
+    pub fn ancestors(&self, run: RunId) -> Vec<RunId> {
+        let mut ancestors = Vec::new();
+        let mut at = self.runs.get(&run).and_then(|entry| entry.parent);
+        while let Some(id) = at {
+            ancestors.push(id);
+            at = self.runs.get(&id).and_then(|entry| entry.parent);
+        }
+        ancestors
+    }
+
+    /// Start cancelling `run` and everything under it (ADR-0092): every run
+    /// in the subtree is marked, so none of them can start another run, and
+    /// the runs under `run` come back deepest level first — the order the
+    /// broker stops them in, each level before the one above it. An unknown
+    /// run has nothing under it.
+    pub fn cancel_subtree(&mut self, run: RunId) -> Vec<Vec<RunId>> {
+        let Some(entry) = self.runs.get_mut(&run) else {
+            return Vec::new();
+        };
+        entry.cancelling = true;
+        let mut levels = self.descendants(run);
+        for id in levels.iter().flatten() {
+            if let Some(entry) = self.runs.get_mut(id) {
+                entry.cancelling = true;
+            }
+        }
+        levels.reverse();
+        levels
     }
 
     /// Runs `node` is serving as callee.
@@ -236,5 +305,105 @@ mod tests {
         table.release(y);
         assert!(table.is_empty(), "the last child closed mid, then top");
         table.release(top);
+    }
+
+    /// ADR-0092, T1 "task tree": every run records its parent, and the
+    /// tree of a known shape is found again from any run in it. The shape
+    /// is the diamond of the test plan's T2.7 at depth 3: a research run
+    /// with two coding runs, each with a coder, then a reviewer run.
+    #[test]
+    fn the_runs_of_a_root_form_a_tree() {
+        let mut dir = Directory::new();
+        let s = ConversationScope::new("c");
+        let research = dir.admit("research", None, s.clone()).unwrap().id();
+        let coding_a = dir.admit("coding", Some(research), s.clone()).unwrap().id();
+        let coding_b = dir.admit("coding", Some(research), s.clone()).unwrap().id();
+        let coder_a = dir.admit("coder", Some(coding_a), s.clone()).unwrap().id();
+        let coder_b = dir.admit("coder", Some(coding_b), s.clone()).unwrap().id();
+        let reviewer = dir.admit("reviewer", Some(research), s).unwrap().id();
+
+        let mut table = TaskTable::new();
+        let top = table.open(None, research, None, chain()).unwrap();
+        let a = table
+            .open(Some(research), coding_a, Some(top), chain())
+            .unwrap();
+        let b = table
+            .open(Some(research), coding_b, Some(top), chain())
+            .unwrap();
+        let a1 = table
+            .open(Some(coding_a), coder_a, Some(a), chain())
+            .unwrap();
+        let b1 = table
+            .open(Some(coding_b), coder_b, Some(b), chain())
+            .unwrap();
+        let r = table
+            .open(Some(research), reviewer, Some(top), chain())
+            .unwrap();
+
+        assert_eq!(table.get(top).unwrap().parent, None);
+        for (run, parent) in [(a, top), (b, top), (r, top), (a1, a), (b1, b)] {
+            assert_eq!(table.get(run).unwrap().parent, Some(parent), "{run}");
+        }
+        assert_eq!(table.children(top).collect::<Vec<_>>(), [a, b, r]);
+        assert_eq!(table.children(a).collect::<Vec<_>>(), [a1]);
+        assert_eq!(table.children(a1).count(), 0);
+        assert_eq!(table.descendants(top), [vec![a, b, r], vec![a1, b1]]);
+        assert_eq!(table.descendants(b), [vec![b1]]);
+        assert!(table.descendants(r).is_empty());
+        assert_eq!(table.ancestors(b1), [b, top]);
+        assert!(table.ancestors(top).is_empty());
+
+        // A closed run leaves the tree; its siblings stay.
+        table.release(r);
+        assert_eq!(table.descendants(top), [vec![a, b], vec![a1, b1]]);
+    }
+
+    /// ADR-0092: a cancel marks the whole subtree, so nothing in it can
+    /// start another run, and hands the runs under it back deepest level
+    /// first. Runs outside the subtree are untouched.
+    #[test]
+    fn a_cancel_marks_the_subtree_and_stops_it_bottom_up() {
+        let mut dir = Directory::new();
+        let s = ConversationScope::new("c");
+        let n: Vec<_> = (0..5)
+            .map(|i| dir.admit(&format!("n{i}"), None, s.clone()).unwrap().id())
+            .collect();
+
+        let mut table = TaskTable::new();
+        let top = table.open(None, n[0], None, chain()).unwrap();
+        let mid = table.open(Some(n[0]), n[1], Some(top), chain()).unwrap();
+        let leaf = table.open(Some(n[1]), n[2], Some(mid), chain()).unwrap();
+        let other = table.open(Some(n[0]), n[3], Some(top), chain()).unwrap();
+        let elsewhere = table.open(None, n[4], None, chain()).unwrap();
+
+        assert_eq!(table.cancel_subtree(mid), [vec![leaf]]);
+        assert!(table.get(mid).unwrap().cancelling);
+        assert!(table.get(leaf).unwrap().cancelling);
+        assert!(!table.get(top).unwrap().cancelling, "the caller carries on");
+        assert!(!table.get(other).unwrap().cancelling);
+        for parent in [mid, leaf] {
+            assert_eq!(
+                table.open(Some(n[2]), n[2], Some(parent), chain()),
+                Err(TaskTableError::Cancelling(parent)),
+            );
+        }
+        let beside = table.open(Some(n[3]), n[4], Some(other), chain()).unwrap();
+
+        let levels = table.cancel_subtree(top);
+        assert_eq!(
+            levels,
+            [vec![leaf, beside], vec![mid, other]],
+            "deepest first"
+        );
+        assert!(table.get(beside).unwrap().cancelling);
+        assert!(!table.get(elsewhere).unwrap().cancelling, "another root");
+        assert!(table.cancel_subtree(RunId(999)).is_empty());
+
+        // The subtree closes bottom-up as each stopped call ends.
+        table.release(top);
+        for run in levels.concat() {
+            table.release(run);
+        }
+        assert_eq!(table.len(), 1, "only the other root's run is left");
     }
 }
