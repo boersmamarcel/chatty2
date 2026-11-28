@@ -1,0 +1,35 @@
+{
+  "title": "The video checker's verdict",
+  "type": "object",
+  "required": ["verdict", "length_seconds", "frames_checked", "problems", "licence_notes"],
+  "properties": {
+    "verdict": {
+      "enum": ["PASS", "FAIL"],
+      "description": "PASS when no problem was found. Licence notes never fail a video."
+    },
+    "length_seconds": { "type": "number", "minimum": 0, "maximum": 3600 },
+    "frames_checked": { "type": "integer", "minimum": 0, "maximum": 2000 },
+    "problems": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "object",
+        "required": ["at", "shot", "kind", "detail"],
+        "properties": {
+          "at": { "type": "string", "pattern": "^[0-9]{1,2}:[0-9]{2}(\\.[0-9])?$", "description": "m:ss in the output video" },
+          "shot": { "type": "string", "maxLength": 80 },
+          "kind": { "enum": ["secret", "number", "caption", "length", "evidence", "claim", "look"] },
+          "detail": { "type": "string", "minLength": 1, "maxLength": 400 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "licence_notes": {
+      "type": "array",
+      "maxItems": 40,
+      "description": "Stock or music files whose licence is unknown or not yet bought; a note, not a problem.",
+      "items": { "type": "string", "minLength": 1, "maxLength": 300 }
+    }
+  },
+  "additionalProperties": false
+}

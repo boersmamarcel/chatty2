@@ -1,0 +1,21 @@
+{
+  "name": "Video",
+  "experimental": true,
+  "leader": "video-lead",
+  "agents": [
+    "video-recorder",
+    "motion-designer",
+    "video-editor",
+    "video-checker"
+  ],
+  "max_agent_turns": 40,
+  "report": "video-report.md",
+  "handoffs": {
+    "video-recorder": "schemas/recording.json",
+    "video-checker": "schemas/check.json"
+  },
+  "verifier": {
+    "role": "video-checker",
+    "verdicts": ["PASS"]
+  }
+}
