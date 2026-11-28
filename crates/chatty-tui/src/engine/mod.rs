@@ -1391,10 +1391,22 @@ impl ChatEngine {
         // sees; the model gets the paste in full (AGE-341). A delegation's
         // text is already just `/agent <name> <prompt>`, with nothing to
         // expand.
+        let expanded = self.pastes.expand(&message);
+        let mut input = TurnInput::text(expanded.clone());
+        // A small text file the typed text `@`-mentions goes along as its
+        // own `<file_context>` part, as in the desktop app (AGE-2192).
+        if kind == TurnKind::Human && delegation.is_none() {
+            let cwd = self.current_working_directory();
+            input.contents.extend(
+                chatty_core::at_mention::mention_blocks(&expanded, Path::new(&cwd), &[])
+                    .into_iter()
+                    .map(|block| rig_core::message::UserContent::text(block.block)),
+            );
+        }
         Some(TurnInput {
             kind,
             delegation,
-            ..TurnInput::text(self.pastes.expand(&message))
+            ..input
         })
     }
 

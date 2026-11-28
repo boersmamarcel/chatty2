@@ -272,6 +272,9 @@ async fn run_loop(
                 if run_clock_advanced(engine, &mut shown_run_second) {
                     dirty = true;
                 }
+                if input_state.take_at_files_reload() {
+                    dirty = true;
+                }
             }
         }
     }
@@ -695,13 +698,9 @@ fn handle_key_event(
         _ => {
             input_state.textarea.input(key);
             input_state.sync_paste_ranges();
-            // If the input contains an @ query and we have no files yet, load them.
-            // NOTE: we check has_at_query() (not is_at_menu_open()) because the menu
-            // cannot be open when the file cache is empty — they depend on each other.
-            if input_state.has_at_query() && input_state.at_menu_files.is_empty() {
-                let cwd = engine.current_working_directory();
-                input_state.ensure_at_files_loaded(std::path::Path::new(&cwd));
-            }
+            // Re-index the folder each time an @ query opens the picker.
+            let cwd = engine.current_working_directory();
+            input_state.refresh_at_files(std::path::Path::new(&cwd));
             KeyAction::None
         }
     }

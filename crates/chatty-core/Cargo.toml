@@ -38,6 +38,10 @@ reqwest = { workspace = true, features = ["multipart"] }
 # Decode a capped text body in its declared charset, as reqwest's `text()`
 # does (AGE-1094). Already in Cargo.lock through reqwest.
 encoding_rs = "0.8"
+# The `@` file picker: walk the working folder as git sees it, and rank
+# paths fuzzily (AGE-2192). `ignore` is already in Cargo.lock.
+ignore = "0.4"
+nucleo-matcher = "0.3"
 glob.workspace = true
 similar.workspace = true
 # Typed handoffs (TD-2, AGE-693): a team names a JSON Schema per role and a

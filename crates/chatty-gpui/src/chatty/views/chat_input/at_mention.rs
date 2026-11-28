@@ -4,10 +4,11 @@
 //!
 //! - Pure helpers (no UI context required) are re-exported from
 //!   `chatty_core::at_mention`, which is shared with the TUI (AGE-172):
-//!   `load_files_for_dir`, `at_query_from`, `at_menu_items_for`,
-//!   `apply_at_to_input`.
+//!   `AtFiles`, `load_files_for_dir`, `at_query_from`,
+//!   `apply_at_to_input` (and `at_menu_items_for` for the tests).
 //! - `ChatInputState` methods that manage the picker's open/closed
-//!   state, selection index, and file cache.
+//!   state, selection index, and file index (reloaded off the UI thread
+//!   each time the picker opens, AGE-2192).
 //! - `render_at_menu` — the popover element shown above the input.
 //!
 //! Helpers are `pub` (re-exported by `chat_input/mod.rs`) because the
@@ -18,9 +19,9 @@ use gpui::*;
 use gpui_component::ActiveTheme;
 use gpui_component::scroll::ScrollableElement;
 
-pub use chatty_core::at_mention::{
-    apply_at_to_input, at_menu_items_for, at_query_from, load_files_for_dir,
-};
+#[cfg(test)]
+pub use chatty_core::at_mention::at_menu_items_for;
+pub use chatty_core::at_mention::{AtFiles, apply_at_to_input, at_query_from, load_files_for_dir};
 
 use super::ChatInputState;
 
@@ -45,7 +46,7 @@ impl ChatInputState {
 
     /// Return filtered file items for `text` using the cached file list.
     pub fn at_menu_items_for_text<'a>(&'a self, text: &str) -> Vec<&'a String> {
-        at_menu_items_for(text, &self.at_menu_files)
+        self.at_menu_files.items_for(text)
     }
 
     /// Current highlighted index in the `@` picker.
@@ -92,37 +93,40 @@ impl ChatInputState {
             .scroll_to_item(self.at_menu_selected);
     }
 
-    /// Load files from `dir` if the cache is currently empty.
-    pub fn ensure_at_files_loaded(&mut self, dir: &std::path::Path) {
-        if self.at_menu_files.is_empty() {
-            self.at_menu_files = load_files_for_dir(dir);
-        }
-    }
-
-    /// If the `@` query is active (`input_text` ends with `@<word>`) and the
-    /// file cache is empty, load files from the per-chat working directory
-    /// (falling back to `global_dir`).  Returns `true` when the cache was
-    /// populated for the first time (so the caller can trigger a re-render).
+    /// When `input_text` opens the `@` picker (an `@` query appears),
+    /// re-index the per-chat working directory (falling back to
+    /// `global_dir`) in the background, so files made since the last time
+    /// show up. The previous index serves until the new one is in; the
+    /// view re-renders when it is.
     pub fn refresh_at_files_if_needed(
         &mut self,
         input_text: &str,
         global_dir: Option<std::path::PathBuf>,
-    ) -> bool {
-        if at_query_from(input_text).is_none() || !self.at_menu_files.is_empty() {
-            return false;
+        cx: &mut Context<Self>,
+    ) {
+        let open = at_query_from(input_text).is_some();
+        let opened = open && !self.at_menu_was_open;
+        self.at_menu_was_open = open;
+        if !opened {
+            return;
         }
-        let dir = self.working_dir.clone().or(global_dir);
-        if let Some(dir) = dir {
-            self.ensure_at_files_loaded(&dir);
-            return !self.at_menu_files.is_empty();
-        }
-        false
+        let Some(dir) = self.working_dir.clone().or(global_dir) else {
+            return;
+        };
+        let walk = cx.background_spawn(async move { load_files_for_dir(&dir) });
+        self.at_menu_load = Some(cx.spawn(async move |this, cx| {
+            let files = walk.await;
+            let _ = this.update(cx, |state, cx| {
+                state.at_menu_files = AtFiles::new(files);
+                cx.notify();
+            });
+        }));
     }
 
     /// Return the number of `@` mention items matching the current `input_text`.
     /// Used by the keystroke interceptor without needing direct field access.
     pub fn at_items_count_for_input(&self, input_text: &str) -> usize {
-        at_menu_items_for(input_text, &self.at_menu_files).len()
+        self.at_menu_files.items_for(input_text).len()
     }
 
     /// Apply the currently highlighted `@` mention.
@@ -131,7 +135,7 @@ impl ChatInputState {
     /// `@<selected_filename> ` via `pending_at_insert`.
     pub fn apply_at_mention(&mut self, cx: &mut Context<Self>) {
         let input_text = self.input.read(cx).text().to_string();
-        let items = at_menu_items_for(&input_text, &self.at_menu_files);
+        let items = self.at_menu_files.items_for(&input_text);
         if items.is_empty() {
             return;
         }
@@ -155,6 +159,16 @@ impl ChatInputState {
 // ---------------------------------------------------------------------------
 // @ mention menu renderer
 // ---------------------------------------------------------------------------
+
+/// An index entry as the picker shows it: the name (a folder keeps its `/`)
+/// and, dimmed after it, the folder it is in (empty at the top).
+pub fn split_entry(entry: &str) -> (String, String) {
+    let trimmed = entry.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(at) => (entry[at + 1..].to_string(), entry[..at].to_string()),
+        None => (entry.to_string(), String::new()),
+    }
+}
 
 /// Renders the `@` file mention picker above the input.
 pub(super) fn render_at_menu(
@@ -186,7 +200,7 @@ pub(super) fn render_at_menu(
                 .overflow_y_scroll()
                 .children(items.iter().enumerate().map(|(idx, filename)| {
                     let state_for_click = state.clone();
-                    let filename_owned = filename.clone();
+                    let (name, folder) = split_entry(filename);
                     let is_selected = idx == selected.min(items.len().saturating_sub(1));
 
                     div()
@@ -197,7 +211,8 @@ pub(super) fn render_at_menu(
                         .cursor_pointer()
                         .flex()
                         .flex_row()
-                        .gap_3()
+                        .items_baseline()
+                        .gap_2()
                         .when(is_selected, |d| d.bg(theme_secondary))
                         .hover(|style| style.bg(theme_secondary))
                         .on_mouse_move({
@@ -222,11 +237,22 @@ pub(super) fn render_at_menu(
                         })
                         .child(
                             div()
+                                .flex_none()
                                 .text_sm()
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0x10b981))
-                                .child(filename_owned),
+                                .child(name),
                         )
+                        .when(!folder.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(rgb(0x9ca3af))
+                                    .child(folder),
+                            )
+                        })
                 })),
         )
         .vertical_scrollbar(scroll_handle)
@@ -239,4 +265,22 @@ pub(super) fn render_at_menu(
                 .text_color(rgb(0x9ca3af))
                 .child("↑↓ navigate  ·  Enter to insert  ·  Esc to dismiss"),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_entry;
+
+    #[test]
+    fn split_entry_shows_the_name_then_its_folder() {
+        assert_eq!(
+            split_entry("README.md"),
+            ("README.md".into(), String::new())
+        );
+        assert_eq!(
+            split_entry("src/ui/app.rs"),
+            ("app.rs".into(), "src/ui".into())
+        );
+        assert_eq!(split_entry("src/ui/"), ("ui/".into(), "src".into()));
+    }
 }

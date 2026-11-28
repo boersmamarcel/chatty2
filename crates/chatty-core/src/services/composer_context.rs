@@ -103,6 +103,16 @@ impl ContextBlock {
         }
     }
 
+    /// A file `@`-mentioned in the typed text (AGE-2192): the same block as
+    /// a dragged file, but only for a text file; `None` for a folder, a
+    /// binary or an unreadable file, which stay a path in the text.
+    pub fn for_mention(path: &Path, shown: &str, counter: &TokenCounter) -> Option<Self> {
+        if !path.is_file() || !matches!(read_text(path), Ok(Some(_))) {
+            return None;
+        }
+        Some(Self::for_path(path, shown, counter))
+    }
+
     fn folder(path: &Path, shown: &str) -> Self {
         let mut names: Vec<String> = std::fs::read_dir(path)
             .map(|entries| {
