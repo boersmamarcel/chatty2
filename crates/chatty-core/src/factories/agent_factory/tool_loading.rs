@@ -53,7 +53,6 @@ pub const CORE_TOOLS: &[&str] = &[
     "search_code",
     "glob_search",
     "write_todos",
-    "update_todo",
     "verify_completion",
     "read_skill",
     LoadToolsTool::NAME_STR,

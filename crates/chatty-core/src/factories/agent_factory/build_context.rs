@@ -751,12 +751,13 @@ cap_usd = 2.5
             let (agent, _daemon, _workspace) = agent_of(&spec).await;
             let plan = agent.task_controller();
             plan.write_todos(
-                "Ship".into(),
-                vec![("t1".into(), "Plan".into(), "Plan it".into())],
+                Some("Ship".into()),
+                vec![
+                    crate::services::TodoEntry::pending("t1", "Plan", "Plan it")
+                        .with_status(AgentTodoStatus::Done),
+                ],
             )
             .unwrap();
-            plan.update_todo("t1".into(), AgentTodoStatus::Done, None, None)
-                .unwrap();
             plan.verify_completion(true, "done".into(), vec!["t1: ok".into()], None)
                 .map(|_| ())
         }

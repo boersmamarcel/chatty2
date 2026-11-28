@@ -46,12 +46,7 @@ impl ListToolsTool {
         native_tools.extend(vec![
             ToolInfo {
                 name: "write_todos".to_string(),
-                description: "Write the ordered todo plan for a task that needs 3 or more distinct tool calls, at the start or once a task turns out bigger; skip it for anything smaller.".to_string(),
-                source: "native".to_string(),
-            },
-            ToolInfo {
-                name: "update_todo".to_string(),
-                description: "Change the status of one todo in the plan written by write_todos: in_progress before work, done after, blocked with a reason and reflection when a step fails.".to_string(),
+                description: "Write or update the whole todo list for a task that needs 3 or more distinct tool calls, at the start or once a task turns out bigger; skip it for anything smaller.".to_string(),
                 source: "native".to_string(),
             },
             ToolInfo {
@@ -537,7 +532,7 @@ impl Tool for ListToolsTool {
         "List all available tools including:\n\
                          - fetch: Fetch web URLs and return readable text content\n\
                          - shell_execute: Execute shell/terminal commands in a persistent session\n\
-                         - Agent todo tools: write_todos, update_todo, verify_completion for multi-step task tracking\n\
+                         - Agent todo tools: write_todos, verify_completion for multi-step task tracking\n\
                          - Filesystem tools: read_file, final_answer, write_file, list_directory, optional doc_retriever, etc.\n\
                          - Git tools: git_status, git_diff, git_log, git_add, git_create_branch, git_switch_branch, git_commit, git_merge\n\
                          - add_attachment: Display images or PDFs inline in chat responses\n\
@@ -707,7 +702,6 @@ mod tests {
         assert!(names.contains(&"list_tools".to_string()));
         assert!(names.contains(&"read_skill".to_string()));
         assert!(names.contains(&"write_todos".to_string()));
-        assert!(names.contains(&"update_todo".to_string()));
         assert!(names.contains(&"verify_completion".to_string()));
     }
 
@@ -719,7 +713,7 @@ mod tests {
             .await
             .unwrap();
         let names = tool_names(&output);
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 5);
         assert!(names.contains(&"list_tools".to_string()));
         assert!(names.contains(&"read_skill".to_string()));
         assert!(names.contains(&"calculate".to_string()));
@@ -740,8 +734,8 @@ mod tests {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
         assert!(!names.contains(&"doc_retriever".to_string()));
-        // 6 always-present + 4 fs_read
-        assert_eq!(names.len(), 10);
+        // 5 always-present + 4 fs_read
+        assert_eq!(names.len(), 9);
     }
 
     #[tokio::test]
@@ -771,8 +765,8 @@ mod tests {
         for expected in &["shell_execute", "shell_set_env", "shell_cd", "shell_status"] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
-        // 6 always-present + 4 shell
-        assert_eq!(names.len(), 10);
+        // 5 always-present + 4 shell
+        assert_eq!(names.len(), 9);
     }
 
     #[tokio::test]
@@ -786,7 +780,6 @@ mod tests {
         let expected = vec![
             "list_tools",
             "write_todos",
-            "update_todo",
             "verify_completion",
             "read_skill",
             "calculate",

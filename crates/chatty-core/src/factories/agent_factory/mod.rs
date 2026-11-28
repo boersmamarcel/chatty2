@@ -45,7 +45,7 @@ use crate::tools::{
     MoveFileTool, PublishModuleTool, ReadBinaryTool, ReadFileTool, ReadSkillTool, RememberTool,
     SaveSkillTool, SearchCodeTool, SearchMemoryTool, SearchWebTool, SendMessageTool, ShellCdTool,
     ShellExecuteTool, ShellSetEnvTool, ShellStatusTool, TerminalReadTool, TerminalRunTool,
-    UpdateTodoTool, VerifyCompletionTool, ViewImageTool, WriteFileTool, WriteTodosTool,
+    VerifyCompletionTool, ViewImageTool, WriteFileTool, WriteTodosTool,
 };
 #[cfg(feature = "duckdb")]
 use crate::tools::{DescribeDataTool, FileStructureTool, ProfileDataTool, QueryDataTool};
@@ -1422,7 +1422,6 @@ impl AgentClient {
                         .is_some_and(|profile| profile.name() == tool_profile::COORDINATOR.name()),
             );
         let write_todos_tool = WriteTodosTool::new(agent_task_controller.clone());
-        let update_todo_tool = UpdateTodoTool::new(agent_task_controller.clone());
         let verify_completion_tool = VerifyCompletionTool::new(agent_task_controller.clone());
 
         // Ask-the-user tool: only offered when a frontend is listening for the
@@ -1673,7 +1672,6 @@ impl AgentClient {
             tool_profile: tool_profile,
             list_tools: list_tools,
             write_todos_tool: write_todos_tool,
-            update_todo_tool: update_todo_tool,
             verify_completion_tool: verify_completion_tool,
             fs_read: fs_read_tools,
             doc_retriever: doc_retriever_tool,
@@ -1733,6 +1731,15 @@ impl AgentClient {
             },
         );
 
+        // The mid-turn todo reminder (AGE-2189) is for an agent that is
+        // offered `write_todos` from the start, by its profile and loader.
+        agent_task_controller.set_offers_plan(
+            tool_profile.is_none_or(|profile| {
+                profile.allows(<WriteTodosTool as rig_agent::tool::Tool>::NAME)
+            }) && tool_loader.as_ref().is_none_or(|loader| {
+                loader.starts_active(<WriteTodosTool as rig_agent::tool::Tool>::NAME)
+            }),
+        );
         let mut agent = provider_builder::build_provider_agent(
             model_config,
             provider_config,

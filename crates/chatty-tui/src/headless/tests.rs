@@ -2603,11 +2603,11 @@ mod runner {
             {
                 controller
                     .write_todos(
-                        "fix".to_string(),
-                        vec![(
-                            "t1".to_string(),
-                            "Fix it".to_string(),
-                            "Apply the fix".to_string(),
+                        Some("fix".to_string()),
+                        vec![chatty_core::services::TodoEntry::pending(
+                            "t1",
+                            "Fix it",
+                            "Apply the fix",
                         )],
                     )
                     .expect("the plan is accepted");

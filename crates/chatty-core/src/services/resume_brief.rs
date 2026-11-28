@@ -11,7 +11,7 @@
 //!    uncommitted, and the local branches not merged into the base branch,
 //!    each with its commits ahead and the subject of its tip.
 //! 2. **Last session**: how it ended, from its [`SessionRecord`].
-//! 3. **Open todos** the previous leader left (`write_todos` / `update_todo`).
+//! 3. **Open todos** the previous leader left (`write_todos`; older runs also `update_todo`).
 //! 4. **Its final answer**, quoted and capped: model text, labelled as such.
 //! 5. **The instruction**: finish or merge open work first, do not redo
 //!    phases whose artifacts exist, end on the base branch or list the open

@@ -1858,16 +1858,11 @@ mod tests {
         let verify = || {
             controller
                 .write_todos(
-                    "Ship".into(),
-                    vec![("t1".into(), "Plan".into(), "Plan it".into())],
-                )
-                .ok();
-            controller
-                .update_todo(
-                    "t1".into(),
-                    crate::services::AgentTodoStatus::Done,
-                    None,
-                    None,
+                    Some("Ship".into()),
+                    vec![
+                        crate::services::TodoEntry::pending("t1", "Plan", "Plan it")
+                            .with_status(crate::services::AgentTodoStatus::Done),
+                    ],
                 )
                 .unwrap();
             controller.verify_completion(true, "done".into(), vec!["t1: ok".into()], None)

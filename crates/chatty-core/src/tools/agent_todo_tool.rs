@@ -1,22 +1,36 @@
 use rig_agent::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
-use crate::services::{AgentTaskController, AgentTaskResponse, AgentTodoStatus};
+use crate::services::{AgentTaskController, AgentTaskResponse, AgentTodoStatus, TodoEntry};
 use crate::tools::ToolError;
+
+fn pending() -> AgentTodoStatus {
+    AgentTodoStatus::Pending
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct TodoInput {
     pub id: String,
     pub title: String,
+    #[serde(default)]
     pub description: String,
+    #[serde(default = "pending")]
+    pub status: AgentTodoStatus,
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WriteTodosArgs {
-    pub goal: String,
+    #[serde(default)]
+    pub goal: Option<String>,
     pub todos: Vec<TodoInput>,
 }
 
+/// The agent's todo list: one tool that writes it and updates it, the whole
+/// list on every call (AGE-2189, after Claude Code's TodoWrite and Codex's
+/// `update_plan`). It replaced `write_todos` + `update_todo`, where a
+/// 2-todo plan cost five calls.
 #[derive(Clone, Debug)]
 pub struct WriteTodosTool {
     controller: AgentTaskController,
@@ -35,13 +49,15 @@ impl Tool for WriteTodosTool {
     type Output = AgentTaskResponse;
 
     fn description(&self) -> String {
-        "Write the ordered todo plan for a task that needs 3 or more distinct tool calls across several files or steps. \
+        "Write or update the todo list for a task that needs 3 or more distinct tool calls across several files or steps. \
+         Every call sends the whole list with each todo's current status and replaces the previous list, so one call can tick off several todos, add a step or drop one. \
          Call it when the size is clear: at the start for a task that is plainly multi-step, or partway through once a task turns out bigger than it looked. \
+         Update it when statuses change, not after every tool call. \
          Skip this tool when the task needs fewer than 3 distinct tool calls or can be answered in one response. \
          Never call it for: reading or listing one file, a single edit or rename, or answering a question from information already in the conversation. \
          No plan: 'what does parse_config do?' (read one file, answer); 'fix the typo in the README' (one edit); 'rename foo to bar in two files' (two edits, nothing to track); 'summarise the report above' (already in the conversation). \
          Plan: 'add a dark-mode setting, wire it into the settings page and run the tests' (several files plus a test run); 'fix the 9 failing tests' (one todo per failure, so none is forgotten); a search that found the same change in 8 files (one todo per file). \
-         At most one call per invocation, with a goal and up to 12 concrete todos; revise individual todos with update_todo. \
+         Up to 12 todos. A blocked todo needs a blocked_reason; retry it differently before moving on. \
          A plan of 1 or 2 todos needs no verify_completion once every todo is done."
             .to_string()
     }
@@ -52,17 +68,17 @@ impl Tool for WriteTodosTool {
             "properties": {
                 "goal": {
                     "type": "string",
-                    "description": "One sentence describing the desired end state, not the process."
+                    "description": "One sentence describing the desired end state. Required on the first call; later calls may leave it out."
                 },
                 "todos": {
                     "type": "array",
-                    "description": "Flat ordered list of concrete, independently verifiable steps.",
+                    "description": "The whole ordered list as it stands now, every todo with its current status.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "id": {
                                 "type": "string",
-                                "description": "Stable short id such as t1 or inspect-inputs."
+                                "description": "Stable short id such as t1, kept the same across calls."
                             },
                             "title": {
                                 "type": "string",
@@ -70,14 +86,23 @@ impl Tool for WriteTodosTool {
                             },
                             "description": {
                                 "type": "string",
-                                "description": "Concrete verifiable output for this todo."
+                                "description": "Optional: the concrete output that makes this todo done."
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "done", "blocked"],
+                                "description": "Current status; pending when left out."
+                            },
+                            "blocked_reason": {
+                                "type": "string",
+                                "description": "Required when status is blocked: what stopped it and what you will try next."
                             }
                         },
-                        "required": ["id", "title", "description"]
+                        "required": ["id", "title"]
                     }
                 }
             },
-            "required": ["goal", "todos"]
+            "required": ["todos"]
         })
     }
 
@@ -95,87 +120,16 @@ impl Tool for WriteTodosTool {
         let todos = args
             .todos
             .into_iter()
-            .map(|todo| (todo.id, todo.title, todo.description))
+            .map(|todo| TodoEntry {
+                id: todo.id,
+                title: todo.title,
+                description: todo.description,
+                status: todo.status,
+                blocked_reason: todo.blocked_reason,
+            })
             .collect();
         self.controller
             .write_todos(args.goal, todos)
-            .map_err(|error| ToolError::OperationFailed(error.to_string()))
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-pub struct UpdateTodoArgs {
-    pub id: String,
-    pub status: AgentTodoStatus,
-    #[serde(default)]
-    pub blocked_reason: Option<String>,
-    #[serde(default)]
-    pub reflection: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct UpdateTodoTool {
-    controller: AgentTaskController,
-}
-
-impl UpdateTodoTool {
-    pub fn new(controller: AgentTaskController) -> Self {
-        Self { controller }
-    }
-}
-
-impl Tool for UpdateTodoTool {
-    const NAME: &'static str = "update_todo";
-    type Error = ToolError;
-    type Args = UpdateTodoArgs;
-    type Output = AgentTaskResponse;
-
-    fn description(&self) -> String {
-        "Change the status of one todo in the plan written by write_todos. \
-         Mark a todo in_progress before working on it and done when finished; mark it blocked, with blocked_reason and reflection, when it cannot be completed, then retry it with a different approach. \
-         Only one todo may be in progress at a time. Nothing to do when no plan was written."
-            .to_string()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "Todo id from write_todos."
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["pending", "in_progress", "done", "blocked"],
-                    "description": "New todo status."
-                },
-                "blocked_reason": {
-                    "type": "string",
-                    "description": "Required when status is blocked; explain what prevented completion."
-                },
-                "reflection": {
-                    "type": "string",
-                    "description": "Required when status is blocked; explain the wrong assumption and next different approach."
-                }
-            },
-            "required": ["id", "status"]
-        })
-    }
-
-    /// Keep the real failure text in front of the user and the model:
-    /// rig's default `map_error` redacts it to "the tool failed" (AGE-187).
-    fn map_error(&self, error: Self::Error) -> ToolExecutionError {
-        crate::tools::map_tool_error(Self::NAME, error)
-    }
-
-    async fn call(
-        &self,
-        _context: &mut ToolContext,
-        args: Self::Args,
-    ) -> Result<Self::Output, Self::Error> {
-        self.controller
-            .update_todo(args.id, args.status, args.blocked_reason, args.reflection)
             .map_err(|error| ToolError::OperationFailed(error.to_string()))
     }
 }
@@ -208,7 +162,7 @@ impl Tool for VerifyCompletionTool {
 
     fn description(&self) -> String {
         "Check a plan written by write_todos against evidence before writing the final reply: one concrete evidence line per todo. \
-         If goal_achieved is false, done todos are reopened so work continues. Only for a plan of 3 or more todos; skip it otherwise."
+         If goal_achieved is false, done todos are reopened: send the list again with write_todos as work continues. Only for a plan of 3 or more todos; skip it otherwise."
             .to_string()
     }
 
@@ -291,18 +245,40 @@ mod tests {
         assert!(description.contains("A plan of 1 or 2 todos needs no verify_completion"));
     }
 
-    /// The lifecycle rules live in the descriptions now, not in the preamble:
-    /// nothing in them implies a plan is mandatory.
+    /// AGE-2189: one tool for the whole list; nothing points at the removed
+    /// `update_todo`.
     #[test]
-    fn lifecycle_rules_live_in_the_descriptions() {
-        let controller = AgentTaskController::new();
-        let update = UpdateTodoTool::new(controller.clone()).description();
-        assert!(update.contains("in_progress before working on it"));
-        assert!(update.contains("blocked_reason and reflection"));
-        assert!(update.contains("Nothing to do when no plan was written"));
+    fn write_todos_description_says_the_whole_list_comes_every_call() {
+        let description = WriteTodosTool::new(AgentTaskController::new()).description();
+        assert!(description.contains("Every call sends the whole list"));
+        assert!(description.contains("one call can tick off several todos"));
+        assert!(!description.contains("update_todo"));
+    }
 
-        let verify = VerifyCompletionTool::new(controller).description();
+    /// The arguments a model sends: status and description may be left out.
+    #[test]
+    fn a_first_list_needs_only_ids_and_titles() {
+        let args: WriteTodosArgs = serde_json::from_value(serde_json::json!({
+            "goal": "Ship",
+            "todos": [{"id": "t1", "title": "Read"}, {"id": "t2", "title": "Edit", "status": "in_progress"}]
+        }))
+        .unwrap();
+        assert_eq!(args.todos[0].status, AgentTodoStatus::Pending);
+        assert_eq!(args.todos[1].status, AgentTodoStatus::InProgress);
+        assert!(args.todos[0].description.is_empty());
+
+        let update: WriteTodosArgs = serde_json::from_value(serde_json::json!({
+            "todos": [{"id": "t1", "title": "Read", "status": "done"}]
+        }))
+        .unwrap();
+        assert!(update.goal.is_none());
+    }
+
+    #[test]
+    fn verify_completion_is_for_plans_of_three_or_more() {
+        let verify = VerifyCompletionTool::new(AgentTaskController::new()).description();
         assert!(verify.contains("before writing the final reply"));
         assert!(verify.contains("Only for a plan of 3 or more todos; skip it otherwise"));
+        assert!(verify.contains("send the list again"));
     }
 }

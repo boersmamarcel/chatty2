@@ -17,6 +17,7 @@ use crate::factories::agent_factory::RequestRecorder;
 use crate::models::clarification_store::{ClarificationNotification, ClarifyingQuestion};
 use crate::models::execution_approval_store::{ApprovalNotification, ApprovalResolution};
 use crate::models::token_usage::{ApiCallUsage, ModelRef};
+use crate::services::agent_task_controller::TodoReminder;
 use crate::services::budget_stop::{BUDGET_STOP, StopOnBudgetExhausted, endpoint_refusal};
 use crate::services::cut_off_tool_call::{ArgumentTail, CutOffCalls, MAX_CUT_OFF_RECOVERIES};
 use crate::services::round_limit::RoundLimit;
@@ -442,6 +443,7 @@ fn classify_streaming_error(err: &PromptError) -> StreamErrorKind {
 
 /// Start one rig run of `agent` on `history` and `prompt` under `budget`,
 /// with the hooks every run of `stream_prompt` carries.
+#[allow(clippy::too_many_arguments)]
 fn start_run(
     agent: &rig_agent::agent::Agent,
     concurrency: usize,
@@ -450,6 +452,7 @@ fn start_run(
     budget: TurnBudget,
     rounds: RoundLimit,
     cut_offs: &CutOffCalls,
+    todos: &TodoReminder,
 ) -> rig_agent::agent::StreamingResult {
     // A delegation whose worker never started ends the run (AGE-822), and
     // so does one that came back with a spent budget (AGE-903). A tool call
@@ -463,6 +466,9 @@ fn start_run(
         // A `[swarm.rounds]` cap (AGE-910); a no-op without one.
         .add_hook(rounds)
         .add_hook(cut_offs.clone())
+        // The mid-turn todo reminder (AGE-2189); quiet for an agent that
+        // is not offered `write_todos`.
+        .add_hook(todos.clone())
         .stream()
 }
 
@@ -829,6 +835,7 @@ pub async fn stream_prompt(
     let round_limit = agent.round_limit().clone();
     let concurrency = tool_concurrency(agent);
     let cut_offs = CutOffCalls::default();
+    let todo_reminder = TodoReminder(agent.task_controller());
     let mut agent_stream = start_run(
         &rig_agent,
         concurrency,
@@ -837,6 +844,7 @@ pub async fn stream_prompt(
         turn_budget,
         round_limit.clone(),
         &cut_offs,
+        &todo_reminder,
     );
 
     // A caller that does not wire a channel is treated the same as one whose
@@ -927,7 +935,7 @@ pub async fn stream_prompt(
                                     history.push(call);
                                     let budget = turn_budget.continued(calls);
                                     agent_stream =
-                                        start_run(&rig_agent, concurrency, history, result, budget, round_limit.clone(), &cut_offs);
+                                        start_run(&rig_agent, concurrency, history, result, budget, round_limit.clone(), &cut_offs, &todo_reminder);
                                     continue;
                                 }
                                 cut_unanswered = true;
@@ -957,7 +965,7 @@ pub async fn stream_prompt(
                                         earlier_runs = history.get(history_len..).unwrap_or_default().to_vec();
                                         let budget = turn_budget.continued(calls);
                                         agent_stream =
-                                            start_run(&rig_agent, concurrency, history, prompt, budget, round_limit.clone(), &cut_offs);
+                                            start_run(&rig_agent, concurrency, history, prompt, budget, round_limit.clone(), &cut_offs, &todo_reminder);
                                         continue;
                                     }
                                     // Not about this request's images: keep

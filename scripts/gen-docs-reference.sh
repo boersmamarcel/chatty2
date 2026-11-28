@@ -24,7 +24,6 @@ python3 << 'PY' >> "$OUT/tools-catalog.md"
 tools = [
     ("list_tools", "meta", "list_tools_tool.rs", "Always available"),
     ("write_todos", "agent", "agent_todo_tool.rs", "Always available"),
-    ("update_todo", "agent", "agent_todo_tool.rs", "Always available"),
     ("verify_completion", "agent", "agent_todo_tool.rs", "Always available"),
     ("read_skill", "memory", "read_skill_tool.rs", "Always available"),
     ("calculate", "math", "calculate_tool.rs", "Always available"),
